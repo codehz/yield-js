@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 24;
+pub const BYTECODE_VERSION: u32 = 25;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -235,6 +235,11 @@ pub enum Instr {
     ArrayAppend {
         array: Slot,
         src: Slot,
+    },
+    /// Grows an array's `length` by one without creating an element property,
+    /// forming a sparse hole.
+    ArrayHole {
+        array: Slot,
     },
     GetMember {
         dst: Slot,
@@ -859,6 +864,9 @@ impl Build {
                 Instr::ArrayAppend { array, src } => {
                     check_slot(*array, "ArrayAppend.array")?;
                     check_slot(*src, "ArrayAppend.src")?;
+                }
+                Instr::ArrayHole { array } => {
+                    check_slot(*array, "ArrayHole.array")?;
                 }
                 Instr::GetMember { dst, object, key } => {
                     check_slot(*dst, "GetMember.dst")?;

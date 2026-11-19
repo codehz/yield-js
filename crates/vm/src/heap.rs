@@ -485,6 +485,18 @@ impl ArrayObject {
         Ok(())
     }
 
+    /// Grows `length` by one without creating an element property, forming a
+    /// sparse hole.
+    pub(crate) fn append_hole(&mut self) -> Result<(), VmError> {
+        if self.length >= u32::MAX as usize || !self.length_writable || !self.extensible {
+            return Err(VmError::InvalidState(
+                "cannot append to array literal".to_owned(),
+            ));
+        }
+        self.length += 1;
+        Ok(())
+    }
+
     /// Delete in descending index order. A fixed element blocks further
     /// deletions, but neither prior deletions nor the writable change roll back.
     fn set_length(&mut self, length: usize, writable: bool) -> bool {

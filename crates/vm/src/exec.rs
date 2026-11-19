@@ -270,6 +270,19 @@ impl Vm {
                 self.append_array(frame.read_ref(array)?, frame.read_ref(src)?)?;
                 Ok(Step::Next)
             }
+            Instr::ArrayHole { array } => {
+                let id = object_id(
+                    frame.read_ref(array)?,
+                    "array append target must be an object",
+                )?;
+                let Object::Array(array) = self.heap.get_mut(id)? else {
+                    return Err(VmError::InvalidState(
+                        "array append target must be an array".to_owned(),
+                    ));
+                };
+                array.append_hole()?;
+                Ok(Step::Next)
+            }
             Instr::GetMember { dst, object, key } => {
                 let invocation =
                     self.read_member(host, frame.read_ref(object)?, frame.read_ref(key)?)?;

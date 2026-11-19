@@ -54,6 +54,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::NewObject { .. }
         | Instr::NewArray { .. }
         | Instr::ArrayAppend { .. }
+        | Instr::ArrayHole { .. }
         | Instr::GetForInIterator { .. }
         | Instr::ForInNext { .. }
         | Instr::IteratorClose {
@@ -144,6 +145,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::ArrayAppend { array, src } => {
             uses.extend([array.index, src.index]);
+        }
+        Instr::ArrayHole { array } => {
+            uses.insert(array.index);
         }
         Instr::CopyDataProperties { target, source } => {
             uses.extend([target.index, source.index]);
@@ -305,6 +309,9 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::ArrayAppend { array, src } => Instr::ArrayAppend {
             array: remap(array),
             src: remap(src),
+        },
+        Instr::ArrayHole { array } => Instr::ArrayHole {
+            array: remap(array),
         },
         Instr::GetMember { dst, object, key } => Instr::GetMember {
             dst: remap(dst),

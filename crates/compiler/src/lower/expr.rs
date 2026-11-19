@@ -1168,8 +1168,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for element in &array.elements {
             match element {
                 ArrayExpressionElement::Elision(_) => {
-                    let value = self.emit_undefined()?;
-                    self.append_array_element(dst, value);
+                    self.emit(Instr::ArrayHole {
+                        array: self.slot(dst),
+                    });
                 }
                 ArrayExpressionElement::SpreadElement(spread) => {
                     self.emit_spread(dst, &spread.argument)?;
