@@ -798,6 +798,11 @@ impl Vm {
                 Object::Native(_) => {
                     return self.throw_type_error("native handles do not expose script properties");
                 }
+                target
+                    if !target.is_extensible() && target.own_property(key.borrowed()).is_none() =>
+                {
+                    return self.throw_type_error("Cannot add property to a non-extensible object");
+                }
                 _ => self.heap.set_own(id, key, value)?,
             },
         }

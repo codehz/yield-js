@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use crate::error::VmError;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
-    ITERATOR_SYMBOL, Object, PlainObject, PromiseState, Property, ReactionJob, Resolution,
-    TO_PRIMITIVE_SYMBOL,
+    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseState, Property, ReactionJob,
+    Resolution, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
 use crate::ops;
@@ -115,8 +115,12 @@ pub(crate) enum BuiltinCall {
     ObjectConstructor,
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
-    ObjectDefineProperty,
+    DefineProperty { reflect: bool },
     ObjectDefineProperties,
+    PreventExtensions { reflect: bool },
+    IsExtensible { reflect: bool },
+    SetIntegrityLevel(IntegrityLevel),
+    TestIntegrityLevel(IntegrityLevel),
 }
 
 enum Dispatch<'a> {
@@ -165,6 +169,12 @@ impl Vm {
             "getOwnPropertyDescriptor",
             "defineProperty",
             "defineProperties",
+            "preventExtensions",
+            "isExtensible",
+            "seal",
+            "isSealed",
+            "freeze",
+            "isFrozen",
         ] {
             let method = self.heap.alloc_builtin("Object", Some(name));
             self.heap
@@ -314,7 +324,13 @@ impl Vm {
             )
             .expect("Symbol constructor stores the toPrimitive symbol");
         let reflect = self.heap.alloc_plain();
-        for name in ["ownKeys", "deleteProperty"] {
+        for name in [
+            "ownKeys",
+            "deleteProperty",
+            "defineProperty",
+            "preventExtensions",
+            "isExtensible",
+        ] {
             let method = self.heap.alloc_builtin("Reflect", Some(name));
             self.heap
                 .define_data(reflect, name, Value::Object(method), Attributes::METHOD)
@@ -507,8 +523,47 @@ impl Vm {
             BuiltinCall::ObjectGetOwnPropertyDescriptor => {
                 self.get_own_property_descriptor(host, &args)
             }
-            BuiltinCall::ObjectDefineProperty => self.object_define_property(host, &args),
+            BuiltinCall::DefineProperty { reflect } => {
+                self.define_property_builtin(host, &args, reflect)
+            }
             BuiltinCall::ObjectDefineProperties => self.object_define_properties(host, &args),
+            BuiltinCall::PreventExtensions { reflect } => {
+                let target = args.first().unwrap_or(&Value::Undefined);
+                if let Value::Object(id) = target {
+                    self.heap.get_mut(*id)?.prevent_extensions();
+                } else if reflect {
+                    return self.throw_type_error("Reflect.preventExtensions requires an object");
+                }
+                Ok(Invocation::Value(if reflect {
+                    Value::Bool(true)
+                } else {
+                    target.clone()
+                }))
+            }
+            BuiltinCall::IsExtensible { reflect } => {
+                let extensible = match args.first() {
+                    Some(Value::Object(id)) => self.heap.get(*id)?.is_extensible(),
+                    _ if reflect => {
+                        return self.throw_type_error("Reflect.isExtensible requires an object");
+                    }
+                    _ => false,
+                };
+                Ok(Invocation::Value(Value::Bool(extensible)))
+            }
+            BuiltinCall::SetIntegrityLevel(level) => {
+                let target = args.first().unwrap_or(&Value::Undefined);
+                if let Value::Object(id) = target {
+                    self.heap.get_mut(*id)?.set_integrity_level(level);
+                }
+                Ok(Invocation::Value(target.clone()))
+            }
+            BuiltinCall::TestIntegrityLevel(level) => {
+                let satisfies = match args.first() {
+                    Some(Value::Object(id)) => self.heap.get(*id)?.test_integrity_level(level),
+                    _ => true,
+                };
+                Ok(Invocation::Value(Value::Bool(satisfies)))
+            }
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -970,13 +1025,18 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(result)))
     }
 
-    fn object_define_property(
+    fn define_property_builtin(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
+        reflect: bool,
     ) -> Result<Invocation, VmError> {
         let Some(Value::Object(target)) = args.first() else {
-            return self.throw_type_error("Object.defineProperty requires an object target");
+            return self.throw_type_error(if reflect {
+                "Reflect.defineProperty requires an object target"
+            } else {
+                "Object.defineProperty requires an object target"
+            });
         };
         let key = match self.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
             Ok(key) => key,
@@ -987,6 +1047,14 @@ impl Vm {
                 Ok(update) => update,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
+        if reflect {
+            return Ok(
+                match self.try_apply_property_update(*target, key, update)? {
+                    Ok(applied) => Invocation::Value(Value::Bool(applied)),
+                    Err(error) => Invocation::Thrown(error),
+                },
+            );
+        }
         self.apply_property_update(*target, key, update)
     }
 
@@ -1106,8 +1174,21 @@ impl Vm {
         &mut self,
         target: ObjectId,
         key: PropertyKey,
-        mut update: DescriptorUpdate,
+        update: DescriptorUpdate,
     ) -> Result<Invocation, VmError> {
+        match self.try_apply_property_update(target, key, update)? {
+            Ok(true) => Ok(Invocation::Value(Value::Object(target))),
+            Ok(false) => self.throw_type_error("Cannot define property"),
+            Err(error) => Ok(Invocation::Thrown(error)),
+        }
+    }
+
+    fn try_apply_property_update(
+        &mut self,
+        target: ObjectId,
+        key: PropertyKey,
+        mut update: DescriptorUpdate,
+    ) -> Result<Result<bool, Value>, VmError> {
         if key.as_string() == Some("length")
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value
@@ -1115,7 +1196,11 @@ impl Vm {
             let length = match ops::to_number(value) {
                 Ok(length) => length,
                 Err(_) if matches!(value, Value::String(_)) => f64::NAN,
-                Err(_) => return self.throw_type_error("cannot convert array length to a number"),
+                Err(_) => {
+                    return Ok(Err(
+                        self.type_error("cannot convert array length to a number")?
+                    ));
+                }
             };
             if !(0.0..=u32::MAX as f64).contains(&length) || length.fract() != 0.0 {
                 let error = self.alloc_error(
@@ -1132,15 +1217,11 @@ impl Vm {
                     Value::String("RangeError".to_owned()),
                     Attributes::METHOD,
                 )?;
-                return Ok(Invocation::Thrown(error));
+                return Ok(Err(error));
             }
             *value = Value::Number((length as u32) as f64);
         }
-        if self.heap.apply_descriptor(target, key, update)? {
-            Ok(Invocation::Value(Value::Object(target)))
-        } else {
-            self.throw_type_error("Cannot define property")
-        }
+        Ok(Ok(self.heap.apply_descriptor(target, key, update)?))
     }
 
     fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
@@ -1695,8 +1776,28 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Object", Some("getOwnPropertyDescriptor")) => {
             Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
         }
-        ("Object", Some("defineProperty")) => Some(BuiltinCall::ObjectDefineProperty),
+        (owner @ ("Object" | "Reflect"), Some("defineProperty")) => {
+            Some(BuiltinCall::DefineProperty {
+                reflect: owner == "Reflect",
+            })
+        }
         ("Object", Some("defineProperties")) => Some(BuiltinCall::ObjectDefineProperties),
+        (owner @ ("Object" | "Reflect"), Some("preventExtensions")) => {
+            Some(BuiltinCall::PreventExtensions {
+                reflect: owner == "Reflect",
+            })
+        }
+        (owner @ ("Object" | "Reflect"), Some("isExtensible")) => Some(BuiltinCall::IsExtensible {
+            reflect: owner == "Reflect",
+        }),
+        ("Object", Some("seal")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Sealed)),
+        ("Object", Some("freeze")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Frozen)),
+        ("Object", Some("isSealed")) => {
+            Some(BuiltinCall::TestIntegrityLevel(IntegrityLevel::Sealed))
+        }
+        ("Object", Some("isFrozen")) => {
+            Some(BuiltinCall::TestIntegrityLevel(IntegrityLevel::Frozen))
+        }
         ("Array", Some("join")) => Some(BuiltinCall::ArrayJoin),
         ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),

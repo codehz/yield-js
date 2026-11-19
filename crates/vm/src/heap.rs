@@ -106,6 +106,7 @@ pub struct PromiseObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Promise instances share one identity.
     pub prototype: Option<ObjectId>,
+    extensible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -316,7 +317,14 @@ impl DescriptorUpdate {
         self.value.is_some() || self.writable.is_some()
     }
 
-    fn complete(self, current: Option<OwnProperty<'_>>) -> Option<(Property, Attributes)> {
+    fn complete(
+        self,
+        extensible: bool,
+        current: Option<OwnProperty<'_>>,
+    ) -> Option<(Property, Attributes)> {
+        if current.is_none() && !extensible {
+            return None;
+        }
         let length;
         let (old, attrs) = match current {
             Some(OwnProperty::Stored(property, attrs)) => (Some(property), attrs),
@@ -415,6 +423,7 @@ pub struct PlainObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype.
     pub prototype: Option<ObjectId>,
+    extensible: bool,
 }
 
 impl PlainObject {
@@ -423,6 +432,7 @@ impl PlainObject {
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype,
+            extensible: true,
         }
     }
 }
@@ -436,6 +446,7 @@ pub struct ArrayObject {
     pub props: PropertyTable<String, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
+    extensible: bool,
 }
 
 impl ArrayObject {
@@ -462,7 +473,7 @@ impl ArrayObject {
     }
 
     pub(crate) fn append(&mut self, value: Value) -> Result<(), VmError> {
-        if self.length >= u32::MAX as usize || !self.length_writable {
+        if self.length >= u32::MAX as usize || !self.length_writable || !self.extensible {
             return Err(VmError::InvalidState(
                 "cannot append to array literal".to_owned(),
             ));
@@ -502,6 +513,7 @@ pub struct FunctionObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
+    extensible: bool,
 }
 
 /// One invocation environment. Bindings are addressed by compile-time IDs, so
@@ -523,6 +535,7 @@ pub struct BuiltinStatic {
     pub props: PropertyTable<String, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
+    extensible: bool,
 }
 
 /// One-shot `resolve` or `reject` passed to an executor or a thenable `then`.
@@ -570,6 +583,29 @@ pub enum Object {
     Environment(EnvironmentObject),
     BuiltinStatic(BuiltinStatic),
     Resolution(Resolution),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum IntegrityLevel {
+    Sealed,
+    Frozen,
+}
+
+impl IntegrityLevel {
+    fn freeze_data(self, property: &Property) -> bool {
+        matches!(self, Self::Frozen) && matches!(property, Property::Data(_))
+    }
+
+    fn restrict(self, property: &Property, attributes: &mut Attributes) {
+        attributes.configurable = false;
+        if self.freeze_data(property) {
+            attributes.writable = false;
+        }
+    }
+
+    fn allows(self, property: &Property, attributes: Attributes) -> bool {
+        !attributes.configurable && !(attributes.writable && self.freeze_data(property))
+    }
 }
 
 /// Why an object id must be an environment. The role selects the restore error.
@@ -624,6 +660,79 @@ impl Object {
             Self::Environment(environment) => Some(environment),
             _ => None,
         }
+    }
+
+    fn extensible_mut(&mut self) -> Option<&mut bool> {
+        Some(match self {
+            Self::Plain(o)
+            | Self::ArrayIterator { object: o, .. }
+            | Self::StringIterator { object: o, .. }
+            | Self::Bound(BoundObject { object: o, .. })
+            | Self::Resolution(Resolution { object: o, .. }) => &mut o.extensible,
+            Self::Array(o) => &mut o.extensible,
+            Self::Function(o) => &mut o.extensible,
+            Self::Promise(o) => &mut o.extensible,
+            Self::BuiltinStatic(o) => &mut o.extensible,
+            Self::Native(_) | Self::Environment(_) => return None,
+        })
+    }
+
+    pub(crate) fn is_extensible(&self) -> bool {
+        match self {
+            Self::Plain(o)
+            | Self::ArrayIterator { object: o, .. }
+            | Self::StringIterator { object: o, .. }
+            | Self::Bound(BoundObject { object: o, .. })
+            | Self::Resolution(Resolution { object: o, .. }) => o.extensible,
+            Self::Array(o) => o.extensible,
+            Self::Function(o) => o.extensible,
+            Self::Promise(o) => o.extensible,
+            Self::BuiltinStatic(o) => o.extensible,
+            // Opaque native handles have no script property storage.
+            Self::Native(_) | Self::Environment(_) => false,
+        }
+    }
+
+    pub(crate) fn prevent_extensions(&mut self) {
+        if let Some(extensible) = self.extensible_mut() {
+            *extensible = false;
+        }
+    }
+
+    pub(crate) fn set_integrity_level(&mut self, level: IntegrityLevel) {
+        self.prevent_extensions();
+        if let Some((props, symbols)) = self.tables_mut() {
+            for entry in props.0.values_mut().chain(symbols.0.values_mut()) {
+                level.restrict(&entry.value, &mut entry.attributes);
+            }
+        }
+        if let Self::Array(array) = self {
+            for (property, attributes) in array.elements.values_mut() {
+                level.restrict(property, attributes);
+            }
+            if matches!(level, IntegrityLevel::Frozen) {
+                array.length_writable = false;
+            }
+        }
+    }
+
+    pub(crate) fn test_integrity_level(&self, level: IntegrityLevel) -> bool {
+        if self.is_extensible() {
+            return false;
+        }
+        if let Self::Array(array) = self
+            && (matches!(level, IntegrityLevel::Frozen) && array.length_writable
+                || !array.elements.values().all(|(p, a)| level.allows(p, *a)))
+        {
+            return false;
+        }
+        self.tables().is_none_or(|(props, symbols)| {
+            props
+                .0
+                .values()
+                .chain(symbols.0.values())
+                .all(|entry| level.allows(&entry.value, entry.attributes))
+        })
     }
 
     fn tables(&self) -> Option<PropertyTables<'_>> {
@@ -990,6 +1099,7 @@ impl Heap {
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.promise_prototype,
+            extensible: true,
         }))
     }
 
@@ -1037,6 +1147,7 @@ impl Heap {
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.array_prototype,
+            extensible: true,
         }))
     }
 
@@ -1047,6 +1158,7 @@ impl Heap {
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.function_prototype,
+            extensible: true,
         }))
     }
 
@@ -1057,6 +1169,7 @@ impl Heap {
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.function_prototype,
+            extensible: true,
         }))
     }
 
@@ -1292,7 +1405,9 @@ impl Heap {
         {
             return Ok(false);
         }
-        let Some((property, attrs)) = update.complete(object.own_property(key.borrowed())) else {
+        let Some((property, attrs)) =
+            update.complete(object.is_extensible(), object.own_property(key.borrowed()))
+        else {
             return Ok(false);
         };
         if key.as_string() == Some("length")
@@ -1307,6 +1422,7 @@ impl Heap {
         Ok(true)
     }
 
+    /// Storage only: script callers validate assignment or descriptors first.
     fn write_own_property(
         &mut self,
         id: ObjectId,
@@ -1352,6 +1468,11 @@ impl Heap {
                 ));
             }
         };
+        if !plain.extensible {
+            return Err(VmError::InvalidState(
+                "literal definition requires an extensible object".to_owned(),
+            ));
+        }
         let attributes = match property {
             Property::Data(_) => Attributes::ORDINARY,
             Property::Accessor { .. } => Attributes::ACCESSOR,

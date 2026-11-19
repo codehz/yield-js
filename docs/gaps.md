@@ -57,7 +57,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length`、越界写索引或删除索引可以形成真正的洞 |
 | 迭代关闭 | `for…of` 提前退出会 `IteratorClose`；继续同一循环或自然耗尽不调用 `return`。数组展开只在 `next` 抛错时关闭，自然耗尽不关闭 |
-| 原型与描述符 | 查找、继承访问器、`in`、`hasOwnProperty`、`Object.keys`、`Reflect.ownKeys`、`Object.getOwnPropertyDescriptor`、`Object.defineProperty` / `defineProperties` 和自有属性删除已有。定义可读取继承描述符，遵守只读和不可配置限制。批量定义先转换全部可枚举自有键，再按序应用，失败不回滚。仍没有原型查询和修改、`Object.create` / `assign` / `is`、冻结、密封、扩展检查。宿主原生句柄不开放属性定义。键转换沿用第 1 节的子集语义 |
+| 原型与描述符 | 仍没有原型查询和修改、`Object.create` / `assign` / `is`、`Object.getOwnPropertyDescriptors`。宿主原生句柄固定不可扩展，不开放属性定义。键转换沿用第 1 节的子集语义；数组 `length` 的描述符值仍使用简化数字转换。 |
 | 错误对象 | `Error` / `TypeError` 可调用或 `new`，含 `name`、`message` 和简化 `stack`。没有 `RangeError`、`ReferenceError`、`SyntaxError`、`AggregateError` 等其它标准错误类型 |
 | 未声明名字 | 除 `typeof` 折叠为 `"undefined"` 外，读取或赋值都是编译错误，不是运行时 `ReferenceError`。没有 `globalThis`，不能做 `globalThis.MessageChannel` 这种探测 |
 
@@ -71,8 +71,8 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 | 内建 | 已有 | 仍缺 |
 | --- | --- | --- |
-| `Object` | `keys`、`getOwnPropertyDescriptor`、`defineProperty`、`defineProperties`；原型上的 `hasOwnProperty` / `toString` / `valueOf`；调用或构造只接受对象或空值 | `create`、`assign`、`is`、`getPrototypeOf`、`setPrototypeOf`、`freeze` / `seal` / `preventExtensions` 及对应检查、`getOwnPropertyDescriptors` |
-| `Reflect` | `ownKeys`、`deleteProperty` | design 点名的 `get`、`set`、`has`、`getOwnPropertyDescriptor`，以及其余 Reflect 操作 |
+| `Object` | `keys`、`getOwnPropertyDescriptor`、`defineProperty`、`defineProperties`；`preventExtensions` / `seal` / `freeze` 及对应检查；原型上的 `hasOwnProperty` / `toString` / `valueOf`；调用或构造只接受对象或空值 | `create`、`assign`、`is`、`getPrototypeOf`、`setPrototypeOf`、`getOwnPropertyDescriptors` |
+| `Reflect` | `ownKeys`、`deleteProperty`、`defineProperty`、`preventExtensions`、`isExtensible` | design 点名的 `get`、`set`、`has`、`getOwnPropertyDescriptor`，以及其余 Reflect 操作 |
 | `Function` | 共享内部原型上的 `toString`；虚拟的 `call` / `apply` / `bind` | `Function` 全局、函数的 `name` / `length` |
 | `Array` | 数组对象、`length`、稀疏索引、共享的 `values` / `[Symbol.iterator]` / `join` / `toString` | `Array` 全局及其静态方法；`push` / `pop` / `map` / `filter` 等；借用 `join` 时 array-like 的 `length` 转换仍简化 |
 | `String` | 字符串原始值上的 `[Symbol.iterator]` | `String` 全局及 design 要求的常用访问、转换、搜索、切片 |
@@ -86,7 +86,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
 2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构和 Promise 组合子尚未接入。
-3. **属性模型还不能做原型变更和扩展性控制**。自有属性删除已实现；`for…in` 和对象展开仍需实现各自的枚举语义，`Proxy` 不变量还依赖不可扩展目标和描述符检查。
+3. **属性模型还不能做原型变更**。`for…in` 和对象展开仍需实现各自的枚举语义；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
@@ -97,7 +97,7 @@ flowchart LR
   I[已有同步迭代] --> D[解构]
   I --> P[组合子接受任意可迭代]
   E[自有键顺序与描述符] --> N[for-in / 对象展开]
-  K[原型变更 / 扩展性控制] --> R[Proxy 与其余 Reflect]
+  K[原型变更] --> R[Proxy 与其余 Reflect]
 ```
 
 ## 7. 明确不做（不要当缺口实现）

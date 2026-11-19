@@ -13,8 +13,9 @@
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。`for…in` 仍不支持。
 - `Reflect.ownKeys(obj)` 返回全部自有键：数组索引键按数值升序，其余字符串键及 Symbol 键分别按创建顺序。`Object.keys(value)` 复用该顺序，仅返回可枚举的自有字符串键；字符串原始值按 UTF-16 索引枚举。两者都不遍历原型链或调用 getter。
-- `Object.defineProperty(obj, key, descriptor)` 定义或重定义自有数据或访问器属性，遵守不可配置和只读限制。`Object.defineProperties(obj, descriptors)` 按自有键顺序转换描述符映射中可枚举的字符串键和 Symbol 键，全部转换成功后才开始定义；若定义中途失败，已定义的属性不会回滚。`Object.getOwnPropertyDescriptor` 查询属性而不调用其 getter。描述符可跨快照恢复。数组索引支持描述符和稀疏存储；`length` 不可枚举，缩短时不会删除不可配置的元素。原始值包装对象和其余 `Reflect` 操作尚未实现。
+- `Object.defineProperty(obj, key, descriptor)` 定义或重定义自有数据或访问器属性，遵守不可扩展、不可配置和只读限制；`Reflect.defineProperty` 对定义被拒绝返回 `false`，参数转换异常仍会抛出。`Object.defineProperties(obj, descriptors)` 按自有键顺序转换描述符映射中可枚举的字符串键和 Symbol 键，全部转换成功后才开始定义；若定义中途失败，已定义的属性不会回滚。`Object.getOwnPropertyDescriptor` 查询属性而不调用其 getter。描述符可跨快照恢复。数组索引支持描述符和稀疏存储；`length` 不可枚举，缩短时不会删除不可配置的元素。原始值包装对象尚未实现。
 - `delete` 支持成员、计算键和可选链；只移除可配置的自有属性，不调用被删除属性的 getter，也不修改原型。不可配置键在严格模式下抛 `TypeError`，`Reflect.deleteProperty` 则返回 `false`。删除数组索引留下空洞，不改变 `length`；删除后重新添加的非索引键排在同类键末尾。删除结果和属性顺序可跨快照恢复。
+- `Object.preventExtensions` / `isExtensible`、`seal` / `isSealed`、`freeze` / `isFrozen` 控制及查询对象的扩展性和自有描述符。密封使自有属性不可配置；冻结还使自有数据属性（含数组 `length`）不可写，但保留访问器的 getter/setter，不递归处理属性值。不可扩展对象不能新增字符串键、Symbol 键或数组索引，但仍可调用继承的 setter；可写的数组 `length` 可以增长而不创建索引。`Reflect.preventExtensions` 返回布尔值，与 `Reflect.isExtensible` 一样要求对象参数。宿主原生句柄始终不可扩展。扩展性和描述符限制均跨快照恢复。
 - 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Array` 全局名。数组字面量展开和实参展开复用该迭代协议，已求值的元素或实参可跨 `await` 保存。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
