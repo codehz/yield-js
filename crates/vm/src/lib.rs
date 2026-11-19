@@ -15,6 +15,7 @@ mod ops;
 mod resolve;
 mod runtime;
 pub mod snapshot;
+mod string;
 pub mod value;
 mod vm;
 

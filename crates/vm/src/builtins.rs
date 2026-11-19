@@ -19,6 +19,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
+use crate::string::{StringMethod, StringStatic};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
@@ -28,6 +29,8 @@ pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_ARRAY: &str = "array";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
+pub(crate) const ROOT_STRING: &str = "string";
+pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
@@ -48,6 +51,8 @@ pub(crate) struct BuiltinRoots {
     pub object_prototype: ObjectId,
     pub array: ObjectId,
     pub array_prototype: ObjectId,
+    pub string: ObjectId,
+    pub string_prototype: ObjectId,
     pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
     pub string_iterator: ObjectId,
@@ -70,6 +75,8 @@ impl BuiltinRoots {
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
             (ROOT_ARRAY.to_owned(), self.array),
             (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
+            (ROOT_STRING.to_owned(), self.string),
+            (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
             (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
             (
                 ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
@@ -110,6 +117,9 @@ pub(crate) enum BuiltinCall {
     ArrayOperation(String),
     ArrayValues,
     ArrayIteratorNext,
+    StringConstructor,
+    StringMethod(StringMethod),
+    StringStatic(StringStatic),
     StringIterator,
     StringIteratorNext,
     ArrayJoin,
@@ -147,7 +157,80 @@ enum Dispatch<'a> {
 const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
 const PROMISE_METHODS: [&str; 3] = ["then", "catch", "finally"];
 
+const STRING_METHODS: &[(&str, StringMethod)] = &[
+    ("charAt", StringMethod::CharAt),
+    ("charCodeAt", StringMethod::CharCodeAt),
+    ("codePointAt", StringMethod::CodePointAt),
+    ("at", StringMethod::At),
+    ("indexOf", StringMethod::IndexOf),
+    ("lastIndexOf", StringMethod::LastIndexOf),
+    ("includes", StringMethod::Includes),
+    ("startsWith", StringMethod::StartsWith),
+    ("endsWith", StringMethod::EndsWith),
+    ("slice", StringMethod::Slice),
+    ("substring", StringMethod::Substring),
+    ("toUpperCase", StringMethod::ToUpperCase),
+    ("toLowerCase", StringMethod::ToLowerCase),
+    ("trim", StringMethod::Trim),
+    ("trimStart", StringMethod::TrimStart),
+    ("trimEnd", StringMethod::TrimEnd),
+    ("split", StringMethod::Split),
+    ("concat", StringMethod::Concat),
+    ("repeat", StringMethod::Repeat),
+    ("padStart", StringMethod::PadStart),
+    ("padEnd", StringMethod::PadEnd),
+    ("replace", StringMethod::Replace),
+    ("toString", StringMethod::ToString),
+    ("valueOf", StringMethod::ValueOf),
+];
+const STRING_STATICS: &[(&str, StringStatic)] = &[
+    ("fromCharCode", StringStatic::FromCharCode),
+    ("fromCodePoint", StringStatic::FromCodePoint),
+    ("raw", StringStatic::Raw),
+];
+
 impl Vm {
+    fn init_string_constructor(&mut self, prototype: ObjectId, iterator: ObjectId) -> ObjectId {
+        let constructor = self.heap.alloc_builtin("String", None);
+        self.heap
+            .define_data(
+                constructor,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FIXED,
+            )
+            .expect("String stores its prototype");
+        self.heap
+            .define_data(
+                prototype,
+                "constructor",
+                Value::Object(constructor),
+                Attributes::METHOD,
+            )
+            .expect("String.prototype stores its constructor");
+        self.heap
+            .define_data(
+                prototype,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                Value::Object(iterator),
+                Attributes::METHOD,
+            )
+            .expect("String.prototype stores Symbol.iterator");
+        for name in STRING_METHODS.iter().map(|(name, _)| *name) {
+            let method = self.heap.alloc_builtin("String", Some(name));
+            self.heap
+                .define_data(prototype, name, Value::Object(method), Attributes::METHOD)
+                .expect("String.prototype stores methods");
+        }
+        for name in STRING_STATICS.iter().map(|(name, _)| *name) {
+            let method = self.heap.alloc_builtin("String", Some(name));
+            self.heap
+                .define_data(constructor, name, Value::Object(method), Attributes::METHOD)
+                .expect("String stores statics");
+        }
+        constructor
+    }
+
     pub(crate) fn init_builtins(&mut self) {
         let object_prototype = self.heap.alloc_plain();
         self.heap.object_prototype = Some(object_prototype);
@@ -232,6 +315,8 @@ impl Vm {
         let values = Value::Object(self.heap.alloc_builtin("Array", Some("values")));
         let string_iterator_prototype = self.heap.alloc_plain();
         let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
+        let string_prototype = self.heap.alloc_plain();
+        let string = self.init_string_constructor(string_prototype, string_iterator);
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -385,6 +470,8 @@ impl Vm {
             object_prototype,
             array,
             array_prototype,
+            string,
+            string_prototype,
             function_prototype,
             array_iterator_prototype,
             string_iterator,
@@ -418,6 +505,7 @@ impl Vm {
             7 => Ok(Value::Number(f64::NAN)),
             8 => Ok(Value::Number(f64::INFINITY)),
             9 => Ok(Value::Object(self.builtins.array)),
+            10 => Ok(Value::Object(self.builtins.string)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -528,6 +616,9 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => self.construct_object(&args),
             Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => self.construct_array(args),
+            Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
+                self.call_string(host, &args, true)
+            }
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 self.construct_error(host, &name, args)
             }
@@ -677,6 +768,11 @@ impl Vm {
             BuiltinCall::ArrayConstructor => self.construct_array(args),
             BuiltinCall::ArrayOperation(name) => self.array_operation(host, &name, receiver, args),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
+            BuiltinCall::StringConstructor => self.call_string(host, &args, false),
+            BuiltinCall::StringMethod(method) => {
+                self.call_string_method(host, method, receiver, &args)
+            }
+            BuiltinCall::StringStatic(method) => self.call_string_static(host, method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
@@ -2111,7 +2207,18 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             Some(BuiltinCall::ArrayOperation(name.to_owned()))
         }
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
+        ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
+        ("String", Some(name)) => STRING_METHODS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, method)| BuiltinCall::StringMethod(*method))
+            .or_else(|| {
+                STRING_STATICS
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, method)| BuiltinCall::StringStatic(*method))
+            }),
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
         ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
-    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_STRING_ITERATOR,
-    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
-    is_callable_object,
+    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_STRING,
+    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
+    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -20,8 +20,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// The builtin root table includes the Array constructor.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 19;
+// The builtin root table includes the String constructor.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -529,6 +529,9 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     }
     let array = builtin_root(ROOT_ARRAY, "Array")?;
     require_fixed_prototype(heap, array, array_prototype, "Array")?;
+    let string_prototype = plain_root(ROOT_STRING_PROTOTYPE)?;
+    let string = builtin_root(ROOT_STRING, "String")?;
+    require_fixed_prototype(heap, string, string_prototype, "String")?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
     let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
@@ -541,6 +544,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
     let mut prototypes = BTreeSet::from([object_prototype]);
     for (name, id) in [
+        (ROOT_STRING_PROTOTYPE, string_prototype),
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
         (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
@@ -559,6 +563,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         object_prototype,
         array,
         array_prototype,
+        string,
+        string_prototype,
         array_iterator_prototype,
         string_iterator,
         string_iterator_prototype,

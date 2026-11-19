@@ -813,13 +813,39 @@ impl Vm {
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
-        // The string iterator is exposed without implementing primitive boxing.
-        if matches!(object, Value::String(_))
-            && matches!(key, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))
-        {
-            return Ok(Invocation::Value(Value::Object(
-                self.builtins.string_iterator,
-            )));
+        // Primitive strings resolve length, UTF-16 indices, and String.prototype
+        // without implementing primitive boxing.
+        if let Value::String(text) = object {
+            if matches!(key, PropertyKeyRef::Symbol(_)) {
+                return self.read_property_with_receiver(
+                    host,
+                    self.builtins.string_prototype,
+                    object,
+                    key,
+                );
+            }
+            if let PropertyKeyRef::String("length") = key {
+                return Ok(Invocation::Value(Value::Number(
+                    text.encode_utf16().count() as f64,
+                )));
+            }
+            if let PropertyKeyRef::String(name) = key
+                && let Some(index) = ops::canonical_index(name)
+            {
+                let Some(unit) = text.encode_utf16().nth(index) else {
+                    return Ok(Invocation::Value(Value::Undefined));
+                };
+                let Some(ch) = char::from_u32(u32::from(unit)) else {
+                    return self.throw_type_error("string index cannot represent a lone surrogate");
+                };
+                return Ok(Invocation::Value(Value::String(ch.to_string())));
+            }
+            return self.read_property_with_receiver(
+                host,
+                self.builtins.string_prototype,
+                object,
+                key,
+            );
         }
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
