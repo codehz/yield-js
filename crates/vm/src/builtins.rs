@@ -385,15 +385,17 @@ impl Vm {
         self.heap.get(*id).is_ok_and(is_callable_object)
     }
 
-    pub(crate) fn builtin_id(&self, builtin: u32) -> Result<ObjectId, VmError> {
+    pub(crate) fn builtin_value(&self, builtin: u32) -> Result<Value, VmError> {
         match builtin {
-            0 => Ok(self.builtins.promise),
-            1 => Ok(self.builtins.queue_microtask),
-            2 => Ok(self.builtins.error),
-            3 => Ok(self.builtins.typeerror),
-            4 => Ok(self.builtins.symbol),
-            5 => Ok(self.builtins.reflect),
-            6 => Ok(self.builtins.object),
+            0 => Ok(Value::Object(self.builtins.promise)),
+            1 => Ok(Value::Object(self.builtins.queue_microtask)),
+            2 => Ok(Value::Object(self.builtins.error)),
+            3 => Ok(Value::Object(self.builtins.typeerror)),
+            4 => Ok(Value::Object(self.builtins.symbol)),
+            5 => Ok(Value::Object(self.builtins.reflect)),
+            6 => Ok(Value::Object(self.builtins.object)),
+            7 => Ok(Value::Number(f64::NAN)),
+            8 => Ok(Value::Number(f64::INFINITY)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),

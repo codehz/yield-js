@@ -30,7 +30,7 @@
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - `Promise.resolve(p)` 与 `await p` 先读取真正 Promise 的 `constructor`，等于内建 `Promise` 时复用原 Promise，不读取 `then`。`constructor` getter 抛错会在调用点或 `await` 处同步进入脚本异常路径；成功准备的 `await` 始终经微任务恢复，即使输入已结算或不是 thenable。
 - Promise 决议（包括执行器的 `resolve` 和 async 返回值）不检查输入的 `constructor`，而是同步读取一次 `then`，包括真正 Promise 上覆写的 `then`；在微任务中以输入对象为接收者调用。`then` getter 或调用抛错进入拒绝路径，非可调用的 `then` 保留输入身份，直接自决议拒绝为 `TypeError`。
-- 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
+- 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）、`Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`），以及原始数值全局 `NaN` 与 `Infinity`（作为运行期 `Value::Number` 提供，支持一元负号得到 `-Infinity`；不是编译期常量，也不进入快照根）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - Promise 组合子接受任意同步可迭代值（包括字符串、自定义迭代器和覆写迭代器的数组）。每取一个元素就调用 VM 的决议流程，再推进迭代；迭代协议异常拒绝返回的 Promise，不从调用点同步抛出。等待中的组合子可跨快照恢复，不重跑迭代或改变结果中的输入顺序。
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。
 - `Error` / `TypeError` 的消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。

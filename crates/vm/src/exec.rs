@@ -370,8 +370,8 @@ impl Vm {
                 }
             }
             Instr::GetBuiltin { dst, builtin } => {
-                let id = self.builtin_id(builtin)?;
-                frame.write(dst, Value::Object(id))?;
+                let value = self.builtin_value(builtin)?;
+                frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::SetMember { object, key, src } => {
