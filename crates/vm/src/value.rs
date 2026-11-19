@@ -56,7 +56,7 @@ pub enum PropertyKey {
     Symbol(SymbolId),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PropertyKeyRef<'a> {
     String(&'a str),
     Symbol(SymbolId),
