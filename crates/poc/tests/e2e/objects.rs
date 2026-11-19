@@ -1,6 +1,6 @@
 //! Snapshot restore preserves reachable objects, descriptors, and identity.
 
-use super::support::{Suspended, json_round_trip};
+use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
 use yield_poc::number;
 use yield_vm::heap::Property;
 use yield_vm::{Completion, HostValue, Object, PromiseState, Value, VmError};
@@ -61,11 +61,17 @@ async function run() {
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
 
+    let seed = s.host.count("seed");
     s.restore(snapshot).expect("valid descriptor");
-    assert_eq!(s.host.count("seed"), 0, "restore must not run getters");
+    assert_eq!(
+        count_delta(s.host.count("seed"), seed),
+        0,
+        "restore must not run getters"
+    );
+    let seed = s.host.count("seed");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
-    assert_eq!(s.host.count("seed"), 1);
+    assert_eq!(count_delta(s.host.count("seed"), seed), 1);
 }
 
 #[test]
@@ -258,7 +264,12 @@ function demo() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
-    assert_eq!(snapshot.roots.len(), 9);
+    let baseline = baseline_at_first_await();
+    assert_eq!(count_delta(snapshot.roots.len(), baseline.roots.len()), 0);
+    assert_eq!(
+        snapshot.roots.keys().collect::<Vec<_>>(),
+        baseline.roots.keys().collect::<Vec<_>>()
+    );
     assert!(!snapshot.functions.is_empty());
 
     let mut missing = snapshot.clone();

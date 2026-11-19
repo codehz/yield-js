@@ -68,3 +68,58 @@ pub(super) fn json_round_trip(snapshot: &Snapshot) -> Snapshot {
     let json = snapshot.to_json().expect("encode snapshot JSON");
     Snapshot::from_json(&json).expect("decode snapshot JSON")
 }
+
+/// `subject - baseline`, panicking instead of wrapping when the subject is smaller.
+#[track_caller]
+pub(super) fn count_delta(subject: usize, baseline: usize) -> usize {
+    subject
+        .checked_sub(baseline)
+        .unwrap_or_else(|| panic!("subject {subject} is smaller than baseline {baseline}"))
+}
+
+/// Subject values that are not accounted for by `baseline`, in subject order.
+/// Each baseline value consumes the first `==` match.
+#[track_caller]
+pub(super) fn values_beyond(subject: &[Value], baseline: &[Value]) -> Vec<Value> {
+    let mut remaining = subject.to_vec();
+    for expected in baseline {
+        let index = remaining
+            .iter()
+            .position(|value| value == expected)
+            .unwrap_or_else(|| {
+                panic!("baseline value {expected:?} missing from subject {subject:?}")
+            });
+        remaining.remove(index);
+    }
+    remaining
+}
+
+/// Always-on VM state at the first await of a script with no live locals.
+#[track_caller]
+pub(super) fn baseline_at_first_await() -> Snapshot {
+    Suspended::start(
+        r#"
+async function run() {
+  await wait("a");
+}
+"#,
+        vec![],
+    )
+    .snapshot()
+}
+
+/// Always-on VM state at the second await of a script with no live locals.
+#[track_caller]
+pub(super) fn baseline_at_second_await() -> Snapshot {
+    let mut suspended = Suspended::start(
+        r#"
+async function run() {
+  await wait("a");
+  await wait("b");
+}
+"#,
+        vec![],
+    );
+    suspended.complete("wait:a", Completion::Fulfilled(HostValue::Number(0.0)));
+    suspended.snapshot()
+}

@@ -1,6 +1,6 @@
 //! The loader and snapshot APIs reject invalid inputs and state.
 
-use super::support::{RUN, Suspended};
+use super::support::{RUN, Suspended, count_delta};
 use yield_poc::{TestHost, build};
 use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
@@ -21,12 +21,17 @@ async function run() {
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
 
+    let set_label = s.host.count("setLabel");
     s.host.reject_native = true;
     let error = s
         .restore(snapshot.clone())
         .expect_err("missing native wrapper binding");
     assert!(matches!(error, VmError::MissingNative(_)));
-    assert_eq!(s.host.count("setLabel"), 1, "restore must not run script");
+    assert_eq!(
+        count_delta(s.host.count("setLabel"), set_label),
+        0,
+        "restore must not run script"
+    );
     s.host.reject_native = false;
 
     s.host.reject_restore_operation = true;
@@ -246,7 +251,16 @@ fn symbol_snapshot_tampering_is_rejected() {
     );
 
     let mut iterator_registry = snapshot.clone();
-    iterator_registry.symbol_registry.insert("fake".into(), 0);
+    let iterator = *snapshot
+        .symbols
+        .iter()
+        .find_map(|(id, description)| {
+            (description.as_deref() == Some("Symbol.iterator")).then_some(id)
+        })
+        .expect("iterator symbol");
+    iterator_registry
+        .symbol_registry
+        .insert("fake".into(), iterator);
     let error = s
         .restore(iterator_registry)
         .expect_err("registry points at iterator");

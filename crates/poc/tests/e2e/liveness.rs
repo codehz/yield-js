@@ -1,6 +1,6 @@
 //! Snapshots retain live values across suspension edges and omit dead objects.
 
-use super::support::{Suspended, json_round_trip};
+use super::support::{Suspended, baseline_at_first_await, json_round_trip, values_beyond};
 use yield_poc::number;
 use yield_vm::heap::Property;
 use yield_vm::{Completion, HostValue, Object, PromiseState, Value};
@@ -48,14 +48,16 @@ async function run() {
     );
     assert!(!has_environment(&snapshot));
     assert!(snapshot.continuations[0].env.is_none());
-    let saved_objects: Vec<_> = snapshot.continuations[0]
-        .values
-        .iter()
-        .filter_map(|value| match value {
-            Value::Object(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
+    let saved_objects: Vec<_> = values_beyond(
+        &snapshot.continuations[0].values,
+        &baseline_at_first_await().continuations[0].values,
+    )
+    .into_iter()
+    .filter_map(|value| match value {
+        Value::Object(id) => Some(id),
+        _ => None,
+    })
+    .collect();
     assert_eq!(
         saved_objects.len(),
         1,
@@ -141,7 +143,12 @@ async function run() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = json_round_trip(&s.snapshot());
-    assert!(snapshot.symbols.contains_key(&0), "iterator is always kept");
+    assert!(
+        snapshot
+            .symbols
+            .values()
+            .any(|description| description.as_deref() == Some("Symbol.iterator"))
+    );
     assert!(
         snapshot
             .symbols

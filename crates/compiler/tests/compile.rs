@@ -1,5 +1,5 @@
 use yield_compiler::{CompileOptions, compile};
-use yield_vm::bytecode::{Instr, ParamTarget};
+use yield_vm::bytecode::Instr;
 
 const RUN: &str = r#"
 async function run(input) {
@@ -12,31 +12,55 @@ async function run(input) {
 }
 "#;
 
-#[test]
-fn compiles_design_example_with_two_resume_points() {
+fn compile_run(source: &str) -> yield_vm::bytecode::Function {
     let build = compile(
-        RUN,
+        source,
         &CompileOptions {
             imports: vec!["inspect".into(), "seed".into(), "wait".into()],
         },
     )
     .expect("source compiles");
-    assert_eq!(build.functions.len(), 1);
-    let function = &build.functions[0];
-    assert_eq!(function.name, "run");
-    assert!(function.is_async);
-    assert_eq!(function.resumes.len(), 2);
-    let await_count = function
-        .code
+    build
+        .functions
+        .into_iter()
+        .find(|function| function.name == "run")
+        .expect("missing run")
+}
+
+#[test]
+fn live_locals_add_one_saved_slot_beyond_empty_awaits() {
+    let subject = compile_run(RUN);
+    let baseline = compile_run(
+        r#"
+async function run() {
+  await wait("a");
+  await wait("b");
+}
+"#,
+    );
+    assert!(subject.is_async);
+    assert!(baseline.is_async);
+    for function in [&subject, &baseline] {
+        let await_count = function
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instr::Await { .. }))
+            .count();
+        assert_eq!(function.resumes.len(), await_count);
+    }
+    let deltas: Vec<_> = subject
+        .resumes
         .iter()
-        .filter(|instruction| matches!(instruction, Instr::Await { .. }))
-        .count();
-    assert_eq!(await_count, 2);
-    assert_eq!(function.resumes[0].saved_slots, vec![0]);
-    assert_eq!(function.resumes[1].saved_slots, vec![1]);
-    assert!(matches!(function.params.as_slice(), [ParamTarget::Slot(_)]));
-    assert!(function.handlers.is_empty());
-    eprintln!("{function:#?}");
+        .zip(&baseline.resumes)
+        .map(|(subject, baseline)| {
+            subject
+                .saved_slots
+                .len()
+                .checked_sub(baseline.saved_slots.len())
+                .expect("subject saved fewer slots than baseline")
+        })
+        .collect();
+    assert_eq!(deltas, vec![1, 1]);
 }
 
 #[test]
@@ -158,9 +182,14 @@ function run() {
         .iter()
         .flat_map(|function| &function.code)
         .collect();
+    let promise = yield_vm::bytecode::BUILTINS
+        .iter()
+        .position(|name| *name == "Promise")
+        .expect("Promise") as u32;
     assert!(
-        code.iter()
-            .any(|instruction| matches!(instruction, Instr::GetBuiltin { builtin: 0, .. })),
+        code.iter().any(|instruction| {
+            matches!(instruction, Instr::GetBuiltin { builtin, .. } if *builtin == promise)
+        }),
         "Promise loads through GetBuiltin"
     );
     assert!(

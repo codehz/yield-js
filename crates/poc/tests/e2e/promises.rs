@@ -1,6 +1,6 @@
 //! Promise reactions and combination state survive suspension and restore.
 
-use super::support::{RUN, Suspended};
+use super::support::{RUN, Suspended, baseline_at_first_await, count_delta};
 use yield_poc::{TestHost, build};
 use yield_vm::{Completion, HostValue, Object, PromiseState, Value, Vm, VmError};
 
@@ -106,7 +106,13 @@ async function run() {
     let mut s = Suspended::start(source, vec![]);
     s.complete("wait:a", Completion::Fulfilled(HostValue::Number(2.0)));
     let snapshot = s.snapshot();
-    assert_eq!(snapshot.combines.len(), 1);
+    assert_eq!(
+        count_delta(
+            snapshot.combines.len(),
+            baseline_at_first_await().combines.len()
+        ),
+        1
+    );
     s.restore(snapshot).expect("restore");
     s.complete("wait:b", Completion::Fulfilled(HostValue::Number(3.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
