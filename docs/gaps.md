@@ -13,7 +13,7 @@
 | `RegExp` | 字面量与 `RegExp` 内建都没有。字面量落到泛化拒绝 `expression form outside the PoC subset` |
 | `NaN` / `Infinity` 全局 | 不是内建。裸引用是 `unknown binding`；`typeof NaN` / `typeof Infinity` 在编译期折叠成 `"undefined"` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
-| `ToPrimitive` | 运算、计算属性键及非标签模板使用相应 hint，优先检查 `[Symbol.toPrimitive]`，也支持 `valueOf` / `toString` 回退。函数有意使用通用字符串而非源码；部分内建参数（如 `Error` 消息）仍走简化转换 |
+| 数字和字符串转换 | 数字转字符串仍用 Rust 的有限数字格式，不完全符合 JS 的指数表示规则；超长非十进制字符串转数字未保证只舍入一次。函数转字符串有意使用通用文本而非源码 |
 | 原始值属性 | 除读取字符串的 `[Symbol.iterator]` 外，原始值成员读写仍抛可捕获的 `property access on a non-object` / `property write on a non-object`。`Object()` 拒绝装箱。`Object.keys("ab")` 会按 UTF-16 码元枚举索引，但不能用下标读出字符 |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
@@ -52,7 +52,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length`、越界写索引或删除索引可以形成真正的洞 |
-| 原型与描述符 | `Object.getPrototypeOf` 不对原始值装箱。`Object.assign` 按顺序复制来源可枚举自有属性（含 Symbol），并执行 getter/setter；`Object.is` 使用 SameValue。仍缺 `Object.getOwnPropertyDescriptors`。宿主原生句柄固定不可扩展，不开放属性定义。键转换沿用第 1 节的子集语义；数组 `length` 的描述符值仍使用简化数字转换。 |
+| 原型与描述符 | `Object.getPrototypeOf` 不对原始值装箱。宿主原生句柄固定不可扩展，不开放属性定义。 |
 | 错误对象 | `Error` / `TypeError` 可调用或 `new`，含 `name`、`message` 和简化 `stack`。没有 `RangeError`、`ReferenceError`、`SyntaxError`、`AggregateError` 等其它标准错误类型 |
 | 未声明名字 | 除 `typeof` 折叠为 `"undefined"` 外，读取或赋值都是编译错误，不是运行时 `ReferenceError`。没有 `globalThis`，不能做 `globalThis.MessageChannel` 这种探测 |
 
@@ -73,7 +73,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | `Object` | `keys`、`assign`、`is`、`create`、`getPrototypeOf` / `setPrototypeOf`、`getOwnPropertyDescriptor` / `getOwnPropertyDescriptors`、`defineProperty`、`defineProperties`；`preventExtensions` / `seal` / `freeze` 及对应检查；原型上的 `hasOwnProperty` / `toString` / `valueOf`；调用或构造只接受对象或空值 | — |
 | `Reflect` | `get`、`set`、`has`、`getOwnPropertyDescriptor`、`ownKeys`、`deleteProperty`、`defineProperty`、`preventExtensions`、`isExtensible`、`getPrototypeOf` / `setPrototypeOf` | `apply`、`construct` |
 | `Function` | 共享内部原型上的 `toString`；虚拟的 `call` / `apply` / `bind` | `Function` 全局、函数的 `name` / `length` |
-| `Array` | 数组对象、`length`、稀疏索引、共享的 `values` / `[Symbol.iterator]` / `join` / `toString` | `Array` 全局及其静态方法；`push` / `pop` / `map` / `filter` 等；借用 `join` 时 array-like 的 `length` 转换仍简化 |
+| `Array` | 数组对象、`length`、稀疏索引、共享的 `values` / `[Symbol.iterator]` / `join` / `toString` | `Array` 全局及其静态方法；`push` / `pop` / `map` / `filter` 等；借用 `join` 时接收者须是对象 |
 | `String` | 字符串原始值上的 `[Symbol.iterator]` | `String` 全局及 design 要求的常用访问、转换、搜索、切片 |
 | `Number` / `Math` / `JSON` / `RegExp` | 无全局，也无方法 | 对应的转换、数学运算、JSON 和正则 |
 | `Map` / `Set` / `WeakMap` | 无 | 集合、插入顺序、`WeakMap` 的弱键可达性都未做。快照格式也还没有这些边 |
@@ -83,7 +83,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ## 5. 结构性缺口
 
-1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
+1. **原始值装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **属性操作尚未覆盖代理。** 对象展开和 rest 已复用自有键顺序；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
 3. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 

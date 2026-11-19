@@ -194,7 +194,11 @@ fn to_number_lossy(value: &Value) -> f64 {
 }
 
 fn parse_js_number(value: &str) -> Result<f64, VmError> {
-    let trimmed = value.trim();
+    let trimmed = value.trim_matches(|ch| {
+        matches!(ch, '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
+            | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+            | '\u{205f}' | '\u{3000}' | '\u{feff}')
+    });
     if trimmed.is_empty() {
         return Ok(0.0);
     }
@@ -233,6 +237,13 @@ fn parse_js_number(value: &str) -> Result<f64, VmError> {
         }
         return Ok(number);
     }
+    // Rust's parser also accepts aliases such as `inf`; JS does not.
+    if !trimmed
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'.' | b'+' | b'-' | b'e' | b'E'))
+    {
+        return Ok(f64::NAN);
+    }
     Ok(trimmed.parse().unwrap_or(f64::NAN))
 }
 
@@ -241,13 +252,14 @@ fn to_int32(value: &Value) -> Result<i32, VmError> {
 }
 
 fn to_int32_lossy(value: &Value) -> i32 {
-    let number = to_number_lossy(value);
+    number_to_uint32(to_number_lossy(value)) as i32
+}
+
+pub(crate) fn number_to_uint32(number: f64) -> u32 {
     if !number.is_finite() || number == 0.0 {
         return 0;
     }
-    let integer = number.trunc().rem_euclid(4_294_967_296.0);
-    let unsigned = integer as u32;
-    unsigned as i32
+    number.trunc().rem_euclid(4_294_967_296.0) as u32
 }
 
 fn to_uint32(value: &Value) -> Result<u32, VmError> {

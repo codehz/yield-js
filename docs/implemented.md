@@ -33,6 +33,7 @@
 - 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - Promise 组合子接受任意同步可迭代值（包括字符串、自定义迭代器和覆写迭代器的数组）。每取一个元素就调用 VM 的决议流程，再推进迭代；迭代协议异常拒绝返回的 Promise，不从调用点同步抛出。等待中的组合子可跨快照恢复，不重跑迭代或改变结果中的输入顺序。
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。
+- `Error` / `TypeError` 的消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。

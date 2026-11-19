@@ -1,6 +1,7 @@
 //! Interpreter. A step either continues, leaves the frame, or throws.
 //! Handlers run in one place; call sites do not each reimplement catch.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use crate::bytecode::{
@@ -602,20 +603,40 @@ impl Vm {
         host: &mut dyn Host,
         value: &Value,
     ) -> Result<Invocation, VmError> {
-        let primitive;
-        let value = if matches!(value, Value::Object(_)) {
-            primitive = match self.primitive_from_object(host, value, Hint::String)? {
-                Invocation::Value(value) => value,
-                thrown @ Invocation::Thrown(_) => return Ok(thrown),
-            };
-            &primitive
-        } else {
-            value
+        Ok(match self.coerce_string(host, value)? {
+            Ok(string) => Invocation::Value(Value::String(string)),
+            Err(error) => Invocation::Thrown(error),
+        })
+    }
+
+    pub(crate) fn coerce_string(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Result<String, Value>, VmError> {
+        let value = match self.coerce_primitive(host, value, Hint::String)? {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
         };
-        if matches!(value, Value::Symbol(_)) {
-            return self.throw_type_error(ops::SYMBOL_TO_STRING);
+        if matches!(value.as_ref(), Value::Symbol(_)) {
+            return Ok(Err(self.type_error(ops::SYMBOL_TO_STRING)?));
         }
-        Ok(Invocation::Value(Value::String(ops::to_js_string(value))))
+        Ok(Ok(ops::to_js_string(&value)))
+    }
+
+    pub(crate) fn coerce_number(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Result<f64, Value>, VmError> {
+        let value = match self.coerce_primitive(host, value, Hint::Number)? {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        if matches!(value.as_ref(), Value::Symbol(_)) {
+            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+        }
+        Ok(Ok(ops::to_number(&value)?))
     }
 
     pub(crate) fn coerce_property_key(
@@ -623,20 +644,29 @@ impl Vm {
         host: &mut dyn Host,
         value: &Value,
     ) -> Result<Result<PropertyKey, Value>, VmError> {
-        let primitive;
-        let value = if matches!(value, Value::Object(_)) {
-            primitive = match self.primitive_from_object(host, value, Hint::String)? {
-                Invocation::Value(value) => value,
-                Invocation::Thrown(error) => return Ok(Err(error)),
-            };
-            &primitive
-        } else {
-            value
+        let value = match self.coerce_primitive(host, value, Hint::String)? {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
         };
-        Ok(Ok(match value {
+        Ok(Ok(match value.as_ref() {
             Value::Symbol(id) => PropertyKey::Symbol(*id),
-            _ => PropertyKey::String(ops::to_js_string(value)),
+            _ => PropertyKey::String(ops::to_js_string(&value)),
         }))
+    }
+
+    fn coerce_primitive<'a>(
+        &mut self,
+        host: &mut dyn Host,
+        value: &'a Value,
+        hint: Hint,
+    ) -> Result<Result<Cow<'a, Value>, Value>, VmError> {
+        if !matches!(value, Value::Object(_)) {
+            return Ok(Ok(Cow::Borrowed(value)));
+        }
+        Ok(match self.primitive_from_object(host, value, hint)? {
+            Invocation::Value(value) => Ok(Cow::Owned(value)),
+            Invocation::Thrown(error) => Err(error),
+        })
     }
 
     fn primitive_from_object(
@@ -986,7 +1016,7 @@ impl Vm {
                     value: Some(value),
                     ..DescriptorUpdate::default()
                 };
-                return match self.try_apply_property_update(id, key, update)? {
+                return match self.try_apply_property_update(host, id, key, update)? {
                     Ok(true) => Ok(success),
                     Ok(false) => reject(self, "Cannot define property"),
                     Err(error) => Ok(Invocation::Thrown(error)),

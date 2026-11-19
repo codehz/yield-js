@@ -504,7 +504,7 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => self.construct_object(&args),
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
-                self.construct_error(&name, args)
+                self.construct_error(host, &name, args)
             }
             Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
                 self.throw_type_error("Symbol is not a constructor")
@@ -606,7 +606,7 @@ impl Vm {
                 };
                 Ok(Invocation::Value(Value::Bool(satisfies)))
             }
-            BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
+            BuiltinCall::ErrorConstructor { name } => self.construct_error(host, &name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
             }
@@ -724,9 +724,9 @@ impl Vm {
                 self.set_property(host, *target, receiver, key, value, false)
             }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
-            BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
+            BuiltinCall::SymbolConstructor => self.symbol_constructor(host, args),
             BuiltinCall::SymbolFor => {
-                self.symbol_static(receiver, |vm, args| vm.symbol_for(args), args)
+                self.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args)
             }
             BuiltinCall::SymbolKeyFor => {
                 self.symbol_static(receiver, |vm, args| vm.symbol_key_for(args), args)
@@ -796,17 +796,18 @@ impl Vm {
             return self.throw_type_error("Array.prototype.join called on null or undefined");
         };
         let length = match self.read_property(host, receiver, PropertyKeyRef::String("length"))? {
-            Invocation::Value(Value::Number(n)) if n.is_finite() && n > 0.0 => n.floor() as usize,
-            Invocation::Value(Value::String(s)) => s.parse::<usize>().unwrap_or(0),
-            Invocation::Value(_) => 0,
+            Invocation::Value(value) => value,
             thrown => return Ok(thrown),
+        };
+        let length = match self.coerce_number(host, &length)? {
+            Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as u64,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let separator = match args.first() {
             None | Some(Value::Undefined) => ",".to_owned(),
-            Some(value) => match self.string_value(host, value)? {
-                Invocation::Value(Value::String(s)) => s,
-                Invocation::Value(_) => unreachable!(),
-                thrown => return Ok(thrown),
+            Some(value) => match self.coerce_string(host, value)? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
             },
         };
         let array = matches!(self.heap.get(*id)?, Object::Array(_));
@@ -823,7 +824,7 @@ impl Vm {
                     output.push_str(&separator);
                 }
                 let item = if array {
-                    self.read_array_index(host, *id, index)?
+                    self.read_array_index(host, *id, index as usize)?
                 } else {
                     self.read_property(host, receiver, PropertyKeyRef::String(&index.to_string()))?
                 };
@@ -834,10 +835,9 @@ impl Vm {
                 if matches!(value, Value::Undefined | Value::Null) {
                     continue;
                 }
-                match self.string_value(host, &value)? {
-                    Invocation::Value(Value::String(value)) => output.push_str(&value),
-                    Invocation::Value(_) => unreachable!(),
-                    thrown => return Ok(thrown),
+                match self.coerce_string(host, &value)? {
+                    Ok(value) => output.push_str(&value),
+                    Err(error) => return Ok(Invocation::Thrown(error)),
                 }
             }
             Ok(Invocation::Value(Value::String(output)))
@@ -1252,13 +1252,13 @@ impl Vm {
             };
         if reflect {
             return Ok(
-                match self.try_apply_property_update(*target, key, update)? {
+                match self.try_apply_property_update(host, *target, key, update)? {
                     Ok(applied) => Invocation::Value(Value::Bool(applied)),
                     Err(error) => Invocation::Thrown(error),
                 },
             );
         }
-        self.apply_property_update(*target, key, update)
+        self.apply_property_update(host, *target, key, update)
     }
     fn object_assign(
         &mut self,
@@ -1337,7 +1337,7 @@ impl Vm {
         // Conversion errors precede all definitions; application errors keep earlier writes.
         for (key, update) in updates {
             if let thrown @ Invocation::Thrown(_) =
-                self.apply_property_update(target, key, update)?
+                self.apply_property_update(host, target, key, update)?
             {
                 return Ok(thrown);
             }
@@ -1406,13 +1406,14 @@ impl Vm {
         Ok(Ok(update))
     }
 
-    pub(crate) fn apply_property_update(
+    fn apply_property_update(
         &mut self,
+        host: &mut dyn Host,
         target: ObjectId,
         key: PropertyKey,
         update: DescriptorUpdate,
     ) -> Result<Invocation, VmError> {
-        match self.try_apply_property_update(target, key, update)? {
+        match self.try_apply_property_update(host, target, key, update)? {
             Ok(true) => Ok(Invocation::Value(Value::Object(target))),
             Ok(false) => self.throw_type_error("Cannot define property"),
             Err(error) => Ok(Invocation::Thrown(error)),
@@ -1421,6 +1422,7 @@ impl Vm {
 
     pub(crate) fn try_apply_property_update(
         &mut self,
+        host: &mut dyn Host,
         target: ObjectId,
         key: PropertyKey,
         mut update: DescriptorUpdate,
@@ -1429,16 +1431,17 @@ impl Vm {
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value
         {
-            let length = match ops::to_number(value) {
-                Ok(length) => length,
-                Err(_) if matches!(value, Value::String(_)) => f64::NAN,
-                Err(_) => {
-                    return Ok(Err(
-                        self.type_error("cannot convert array length to a number")?
-                    ));
-                }
+            // ArraySetLength performs ToUint32 and then a separate ToNumber.
+            // Each may call script and observe changes made by the previous one.
+            let length = match self.coerce_number(host, value)? {
+                Ok(number) => ops::number_to_uint32(number),
+                Err(error) => return Ok(Err(error)),
             };
-            if !(0.0..=u32::MAX as f64).contains(&length) || length.fract() != 0.0 {
+            let number = match self.coerce_number(host, value)? {
+                Ok(number) => number,
+                Err(error) => return Ok(Err(error)),
+            };
+            if f64::from(length) != number {
                 let error = self.alloc_error(
                     self.builtins.error_prototype,
                     "RangeError",
@@ -1455,12 +1458,17 @@ impl Vm {
                 )?;
                 return Ok(Err(error));
             }
-            *value = Value::Number((length as u32) as f64);
+            *value = Value::Number(f64::from(length));
         }
         Ok(Ok(self.heap.apply_descriptor(target, key, update)?))
     }
 
-    fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
+    fn construct_error(
+        &mut self,
+        host: &mut dyn Host,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let prototype = match name {
             "Error" => self.builtins.error_prototype,
             "TypeError" => self.builtins.typeerror_prototype,
@@ -1471,8 +1479,11 @@ impl Vm {
             }
         };
         let message = match args.first() {
-            Some(value) if *value != Value::Undefined => Some(ops::to_js_string(value)),
-            _ => None,
+            None | Some(Value::Undefined) => None,
+            Some(value) => match self.coerce_string(host, value)? {
+                Ok(message) => Some(message),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
         };
         self.alloc_error(prototype, name, message)
             .map(Invocation::Value)
@@ -1531,25 +1542,26 @@ impl Vm {
     }
 
     /// `Symbol(desc)`: every call produces a fresh identity.
-    fn symbol_constructor(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    fn symbol_constructor(
+        &mut self,
+        host: &mut dyn Host,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let description = match args.first() {
             None | Some(Value::Undefined) => None,
-            Some(Value::Symbol(_)) => {
-                return self.throw_type_error(ops::SYMBOL_TO_STRING);
-            }
-            Some(value) => Some(ops::to_js_string(value)),
+            Some(value) => match self.coerce_string(host, value)? {
+                Ok(description) => Some(description),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
         };
         let id = self.heap.alloc_symbol(description)?;
         Ok(Invocation::Value(Value::Symbol(id)))
     }
 
-    fn symbol_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
-        let key = match args.first() {
-            None | Some(Value::Undefined) => "undefined".to_owned(),
-            Some(Value::Symbol(_)) => {
-                return self.throw_type_error(ops::SYMBOL_TO_STRING);
-            }
-            Some(value) => ops::to_js_string(value),
+    fn symbol_for(&mut self, host: &mut dyn Host, args: Vec<Value>) -> Result<Invocation, VmError> {
+        let key = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let id = self.heap.intern_symbol(key)?;
         Ok(Invocation::Value(Value::Symbol(id)))
