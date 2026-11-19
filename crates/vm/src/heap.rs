@@ -3,8 +3,8 @@
 //! restore consume that combined list instead of re-matching object kinds.
 //!
 //! Plain objects store own data or accessor properties. Only a missing key
-//! walks the prototype chain; environments are not script objects. Plain and
-//! array literals share `Object.prototype`; there is no `Array.prototype` yet.
+//! walks the prototype chain; environments are not script objects.
+//! Array iterators share plain-object properties but keep their cursor internal.
 //! Bound functions have no own properties or internal prototype.
 
 use std::collections::btree_map::Entry;
@@ -242,6 +242,11 @@ pub enum Object {
     Native(NativeObject),
     Plain(PlainObject),
     Array(ArrayObject),
+    ArrayIterator {
+        object: PlainObject,
+        array: Option<ObjectId>,
+        next_index: usize,
+    },
     Function(FunctionObject),
     Bound(BoundObject),
     Environment(EnvironmentObject),
@@ -336,14 +341,12 @@ impl Object {
                 }
             }
             Self::Native(_) => {}
-            Self::Plain(plain) => {
-                if let Some(id) = plain.prototype {
-                    out.push(OwnedEdge::Prototype(id));
+            Self::Plain(plain) => push_plain(out, plain),
+            Self::ArrayIterator { object, array, .. } => {
+                push_plain(out, object);
+                if let Some(id) = array {
+                    out.push(OwnedEdge::Object(*id));
                 }
-                for property in plain.props.values() {
-                    push_property(out, property);
-                }
-                push_symbol_properties(out, &plain.symbol_props);
             }
             Self::Array(array) => {
                 for value in &array.elements {
@@ -382,6 +385,16 @@ impl Object {
             }
         }
     }
+}
+
+fn push_plain(out: &mut Vec<OwnedEdge>, plain: &PlainObject) {
+    if let Some(id) = plain.prototype {
+        out.push(OwnedEdge::Prototype(id));
+    }
+    for property in plain.props.values() {
+        push_property(out, property);
+    }
+    push_symbol_properties(out, &plain.symbol_props);
 }
 
 fn push_script(
@@ -485,6 +498,7 @@ pub(crate) struct Heap {
     /// `then` call, which is not a snapshot root.
     pub(crate) resolutions: BTreeSet<ObjectId>,
     pub(crate) object_prototype: Option<ObjectId>,
+    pub(crate) array_prototype: Option<ObjectId>,
     /// Shared internal prototype of every Promise allocated by this heap.
     pub(crate) promise_prototype: Option<ObjectId>,
 }
@@ -500,6 +514,7 @@ impl Heap {
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
+            array_prototype: None,
             promise_prototype: None,
         }
     }
@@ -609,7 +624,7 @@ impl Heap {
             elements,
             props: BTreeMap::new(),
             symbol_props: BTreeMap::new(),
-            prototype: self.object_prototype,
+            prototype: self.array_prototype,
         }))
     }
 
@@ -762,7 +777,7 @@ impl Heap {
             }
             remaining -= 1;
             let (own, prototype) = match object {
-                Object::Plain(plain) => (
+                Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => (
                     lookup_tables(&plain.props, &plain.symbol_props, key).cloned(),
                     plain.prototype,
                 ),
@@ -801,7 +816,9 @@ impl Heap {
 
     pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
         Ok(match self.get(id)? {
-            Object::Plain(plain) => lookup_tables(&plain.props, &plain.symbol_props, key).is_some(),
+            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
+                lookup_tables(&plain.props, &plain.symbol_props, key).is_some()
+            }
             Object::Array(array) => key.as_string() == Some("length") || array.own(key).is_some(),
             Object::Function(function) => {
                 lookup_tables(&function.props, &function.symbol_props, key).is_some()
@@ -837,7 +854,7 @@ impl Heap {
         value: Value,
     ) -> Result<(), VmError> {
         match self.get_mut(id)? {
-            Object::Plain(plain) => {
+            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
                 insert_table(
                     &mut plain.props,
                     &mut plain.symbol_props,
@@ -877,10 +894,13 @@ impl Heap {
         key: PropertyKey,
         property: Property,
     ) -> Result<(), VmError> {
-        let Object::Plain(plain) = self.get_mut(id)? else {
-            return Err(VmError::InvalidState(
-                "property definition requires a plain object".to_owned(),
-            ));
+        let plain = match self.get_mut(id)? {
+            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => plain,
+            _ => {
+                return Err(VmError::InvalidState(
+                    "property definition requires a plain object".to_owned(),
+                ));
+            }
         };
         match key {
             PropertyKey::String(key) => define_in_table(plain.props.entry(key.clone()), property),

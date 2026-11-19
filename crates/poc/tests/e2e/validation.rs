@@ -280,6 +280,54 @@ fn symbol_snapshot_tampering_is_rejected() {
 }
 
 #[test]
+fn array_iterator_snapshot_tampering_is_rejected() {
+    let source = include_str!("../cases/objects/array_iterator_restore.js");
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+
+    let iterator = snapshot
+        .objects
+        .iter()
+        .position(|record| matches!(record.object, Object::ArrayIterator { array: Some(_), .. }))
+        .expect("live array iterator");
+    for target in [
+        snapshot.roots["object.prototype"],
+        yield_vm::value::ObjectId::MAX,
+    ] {
+        let mut invalid_source = snapshot.clone();
+        let Object::ArrayIterator { array, .. } = &mut invalid_source.objects[iterator].object
+        else {
+            unreachable!();
+        };
+        *array = Some(target);
+        let error = s
+            .restore(invalid_source)
+            .expect_err("invalid iterator source");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("array iterator"))
+        );
+    }
+
+    let mut missing_root = snapshot.clone();
+    assert!(
+        missing_root
+            .roots
+            .remove("arrayIterator.prototype")
+            .is_some()
+    );
+    let error = s
+        .restore(missing_root)
+        .expect_err("missing iterator prototype root");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("builtin root")));
+
+    let mut old_format = snapshot;
+    old_format.format_version = 8;
+    let error = s.restore(old_format).expect_err("format version 8");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("format")));
+    assert_eq!(s.host.count("wait"), 1, "restore must not run the script");
+}
+
+#[test]
 fn symbols_never_reach_the_host_call() {
     let source = r#"
 async function run() {

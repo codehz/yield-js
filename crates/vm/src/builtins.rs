@@ -13,19 +13,21 @@ use std::collections::BTreeMap;
 
 use crate::error::VmError;
 use crate::heap::{
-    BoundObject, BuiltinStatic, CombineKind, CombineState, Object, PromiseState, ReactionJob,
-    Resolution,
+    BoundObject, BuiltinStatic, CombineKind, CombineState, ITERATOR_SYMBOL, Object, PlainObject,
+    PromiseState, ReactionJob, Resolution,
 };
 use crate::host::Host;
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::value::{ObjectId, Value};
+use crate::value::{ObjectId, PropertyKey, Value};
 use crate::vm::Vm;
 
 pub(crate) const ROOT_PROMISE: &str = "promise";
 pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
+pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
+pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
@@ -38,6 +40,8 @@ pub(crate) struct BuiltinRoots {
     pub promise_prototype: ObjectId,
     pub queue_microtask: ObjectId,
     pub object_prototype: ObjectId,
+    pub array_prototype: ObjectId,
+    pub array_iterator_prototype: ObjectId,
     pub error_prototype: ObjectId,
     pub typeerror_prototype: ObjectId,
     pub error: ObjectId,
@@ -52,6 +56,11 @@ impl BuiltinRoots {
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
+            (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
+            (
+                ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
+                self.array_iterator_prototype,
+            ),
             (ROOT_ERROR_PROTOTYPE.to_owned(), self.error_prototype),
             (
                 ROOT_TYPEERROR_PROTOTYPE.to_owned(),
@@ -76,6 +85,9 @@ pub(crate) enum BuiltinCall {
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
+    ArrayValues,
+    ArrayIteratorNext,
+    IteratorIdentity,
 }
 
 enum Dispatch<'a> {
@@ -99,6 +111,33 @@ impl Vm {
         self.heap
             .set_own_string(object_prototype, "hasOwnProperty", Value::Object(has_own))
             .expect("Object.prototype stores methods");
+
+        let array_prototype = self.heap.alloc_plain();
+        let array_iterator_prototype = self.heap.alloc_plain();
+        self.heap.array_prototype = Some(array_prototype);
+        let values = Value::Object(self.heap.alloc_builtin("Array", Some("values")));
+        let next = Value::Object(self.heap.alloc_builtin("ArrayIterator", Some("next")));
+        let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
+        self.heap
+            .set_own_string(array_prototype, "values", values.clone())
+            .expect("Array.prototype stores values");
+        self.heap
+            .set_own(
+                array_prototype,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                values,
+            )
+            .expect("Array.prototype stores Symbol.iterator");
+        self.heap
+            .set_own_string(array_iterator_prototype, "next", next)
+            .expect("Array iterator prototype stores next");
+        self.heap
+            .set_own(
+                array_iterator_prototype,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                identity,
+            )
+            .expect("Array iterator prototype stores Symbol.iterator");
 
         let prototype = self.heap.alloc_plain();
         let promise = self.heap.alloc_builtin("Promise", None);
@@ -146,17 +185,15 @@ impl Vm {
                 .expect("Symbol constructor stores statics");
         }
         self.heap
-            .set_own_string(
-                symbol,
-                "iterator",
-                Value::Symbol(crate::heap::ITERATOR_SYMBOL),
-            )
+            .set_own_string(symbol, "iterator", Value::Symbol(ITERATOR_SYMBOL))
             .expect("Symbol constructor stores the iterator symbol");
         self.builtins = BuiltinRoots {
             promise,
             promise_prototype: prototype,
             queue_microtask: queue,
             object_prototype,
+            array_prototype,
+            array_iterator_prototype,
             error_prototype,
             typeerror_prototype,
             error,
@@ -342,6 +379,9 @@ impl Vm {
                     "unknown Object method {name}"
                 ))),
             },
+            BuiltinCall::ArrayValues => self.array_values(receiver),
+            BuiltinCall::ArrayIteratorNext => self.array_iterator_next(receiver),
+            BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
             BuiltinCall::SymbolFor => {
@@ -377,6 +417,74 @@ impl Vm {
                 Ok(Invocation::Value(Value::Undefined))
             }
         }
+    }
+
+    fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let id = match *receiver {
+            Value::Object(id) if matches!(self.heap.get(id)?, Object::Array(_)) => id,
+            _ => {
+                return Ok(Invocation::Thrown(type_error(
+                    "Array.values requires an array",
+                )));
+            }
+        };
+        let iterator = self.heap.alloc(Object::ArrayIterator {
+            object: PlainObject {
+                props: BTreeMap::new(),
+                symbol_props: BTreeMap::new(),
+                prototype: Some(self.builtins.array_iterator_prototype),
+            },
+            array: Some(id),
+            next_index: 0,
+        });
+        Ok(Invocation::Value(Value::Object(iterator)))
+    }
+
+    fn array_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let invalid_receiver = || {
+            Ok(Invocation::Thrown(type_error(
+                "ArrayIterator.next requires an array iterator",
+            )))
+        };
+        let Value::Object(id) = *receiver else {
+            return invalid_receiver();
+        };
+        let Object::ArrayIterator {
+            array, next_index, ..
+        } = self.heap.get(id)?
+        else {
+            return invalid_receiver();
+        };
+        let value = if let Some(source) = *array {
+            let Object::Array(source) = self.heap.get(source)? else {
+                return Err(VmError::InvalidState(
+                    "array iterator source is not an array".to_owned(),
+                ));
+            };
+            source.elements.get(*next_index).cloned()
+        } else {
+            None
+        };
+        if array.is_some() {
+            let Object::ArrayIterator {
+                array, next_index, ..
+            } = self.heap.get_mut(id)?
+            else {
+                unreachable!();
+            };
+            if value.is_some() {
+                *next_index += 1;
+            } else {
+                *array = None;
+            }
+        }
+        let done = value.is_none();
+        let result = self.heap.alloc_plain();
+        self.heap
+            .set_own_string(result, "value", value.unwrap_or(Value::Undefined))?;
+        self.heap
+            .set_own_string(result, "done", Value::Bool(done))?;
+        Ok(Invocation::Value(Value::Object(result)))
     }
 
     fn call_function_method(
@@ -948,6 +1056,9 @@ fn static_call(function: &BuiltinStatic) -> Result<BuiltinCall, Value> {
         ("Object", Some(name @ "hasOwnProperty")) => Ok(BuiltinCall::ObjectMethod {
             name: name.to_owned(),
         }),
+        ("Array", Some("values")) => Ok(BuiltinCall::ArrayValues),
+        ("ArrayIterator", Some("next")) => Ok(BuiltinCall::ArrayIteratorNext),
+        ("Iterator", Some("identity")) => Ok(BuiltinCall::IteratorIdentity),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Ok(BuiltinCall::Static(member.to_owned()))
         }

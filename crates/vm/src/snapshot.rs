@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
-    BuiltinRoots, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
-    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_SYMBOL, ROOT_TYPEERROR,
-    ROOT_TYPEERROR_PROTOTYPE,
+    BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
+    ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
+    ROOT_QUEUE_MICROTASK, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
@@ -18,7 +18,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -425,9 +425,9 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 9 {
+    if roots.len() != 11 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 9",
+            "snapshot has {} builtin roots, expected 11",
             roots.len()
         )));
     }
@@ -484,11 +484,35 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         }
         Ok(id)
     };
+    let object_prototype = plain_root(ROOT_OBJECT_PROTOTYPE)?;
+    let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
+    let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
+    if array_prototype == array_iterator_prototype
+        || array_prototype == object_prototype
+        || array_iterator_prototype == object_prototype
+    {
+        return Err(VmError::InvalidSnapshot(
+            "array, array iterator, and object prototype roots must be distinct".to_owned(),
+        ));
+    }
+    for (name, id) in [
+        (ROOT_ARRAY_PROTOTYPE, array_prototype),
+        (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
+    ] {
+        if !matches!(heap.get(id)?, Object::Plain(plain) if plain.prototype == Some(object_prototype))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{name} must inherit from object.prototype"
+            )));
+        }
+    }
     Ok(BuiltinRoots {
         promise,
         promise_prototype: prototype,
         queue_microtask: queue,
-        object_prototype: plain_root(ROOT_OBJECT_PROTOTYPE)?,
+        object_prototype,
+        array_prototype,
+        array_iterator_prototype,
         error_prototype: plain_root(ROOT_ERROR_PROTOTYPE)?,
         typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
         error: builtin_root(ROOT_ERROR, "Error")?,
@@ -556,6 +580,15 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
                 bound.target
             )));
         }
+        if let Object::ArrayIterator {
+            array: Some(array), ..
+        } = heap.get(id)?
+            && !matches!(heap.get(*array), Ok(Object::Array(_)))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "array iterator {id} references missing or non-array source {array}"
+            )));
+        }
         heap.write_edges(id, &mut edges)?;
         for edge in edges.drain(..) {
             match edge {
@@ -618,8 +651,9 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
 
 fn validate_accessors(build: &Build, heap: &Heap) -> Result<(), VmError> {
     for id in heap.ids() {
-        let Object::Plain(plain) = heap.get(id)? else {
-            continue;
+        let plain = match heap.get(id)? {
+            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => plain,
+            _ => continue,
         };
         for (key, property) in plain
             .props

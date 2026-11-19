@@ -380,6 +380,7 @@ impl Vm {
     ) -> Self {
         heap.promise_prototype = Some(builtins.promise_prototype);
         heap.object_prototype = Some(builtins.object_prototype);
+        heap.array_prototype = Some(builtins.array_prototype);
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
         Self {

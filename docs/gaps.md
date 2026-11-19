@@ -9,7 +9,7 @@
 
 | 特性 | 目标（design.md） | 现状 | 缺口性质 |
 | --- | --- | --- | --- |
-| `Symbol` | 支持，含 `Symbol.for/keyFor`、`Symbol.iterator`，快照保留注册表与身份 | 已支持：`Symbol()`/`Symbol.for/keyFor`/`Symbol.iterator`，`PropertyKey::Symbol` 分表存储，快照 v8 保留描述、注册表与高水位（iterator 与注册项恒为根）；Symbol 不可跨宿主边界，不能 `new` | 已落地 |
+| `Symbol` | 支持，含 `Symbol.for/keyFor`、`Symbol.iterator`，快照保留注册表与身份 | 已支持：`Symbol()`/`Symbol.for/keyFor`/`Symbol.iterator`，`PropertyKey::Symbol` 分表存储，快照保留描述、注册表与高水位（iterator 与注册项恒为根）；Symbol 不可跨宿主边界，不能 `new` | 已落地 |
 | 正则字面量 | `RegExp` 支持 | 字面量与 `RegExp` 内建均无（落到 fallback 表达式拒绝） | 内建 + 字面量编译 |
 | `BigInt` | （设计未列） | 无；`Build::validate` 拒绝非有限数，`1n` 直接走"表达式形式超出子集"拒绝 | 未列入首版契约 |
 | 数字语义 | 标准 | f64 直接编码，无 -0/-NaN 规范化问题，但无 `Number` 包装 | 部分覆盖 |
@@ -61,8 +61,8 @@
 
 1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **`for…in`/`for…of` 无迭代器协议**：`Symbol.iterator` 值已存在（保留 id 0），但无可调用迭代协议、无 for…of。
-4. **解构与 rest/spread 共享同一条路径**：数组/对象解构、实参展开、`Function.prototype.apply` 都缺"把迭代或枚举编译成循环"的下限（无迭代协议、无 `Object.keys` 运行时；`Symbol.iterator` 值已可用作属性键）。
+3. **`for…in`/`for…of` 仍拒绝**：数组已能通过 `values()` 或 `[Symbol.iterator]()` 创建实时值迭代器；快照 v9 保存源数组引用及游标。编译器仍不消费迭代协议，提前退出时的 `IteratorClose` 未实现。
+4. **解构与 rest/spread 仍拒绝**：数组解构与展开尚未接入迭代协议；对象解构与展开也未实现。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 
