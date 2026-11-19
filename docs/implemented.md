@@ -11,6 +11,7 @@
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this`、预置参数及脚本定义的自有属性可跨 `await` 快照恢复；绑定函数不支持 `new`，不自动创建 `prototype` 属性。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
+- 对象字面量支持展开：按自有键顺序复制可枚举的字符串键和 Symbol 键，每次复制前重查描述符。来源 getter 以来源对象为 `this`，异常可捕获；结果总是自有数据属性，不调用目标 setter。跳过空值和无可枚举键的原始值；字符串按 UTF-16 索引复制可表示的码元（单独的代理码元仍不支持）。字面量在展开表达式中挂起时，已构建的属性可跨快照恢复。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。
 - `for…in` 支持简单声明、已有绑定或成员作为目标。按每层自有键顺序枚举对象及其原型的可枚举字符串键，不读取属性值；尚存在的不可枚举自有键会遮蔽继承的同名键。进入每层时记录键，访问前重查描述符，跳过已删除的键；不会枚举进入该层后新增的键。字符串原始值按 UTF-16 码元给出索引，其他非空原始值没有自有键；因包装原型未实现，原始值的原型枚举从 `Object.prototype` 开始。`null` 和 `undefined` 不迭代。枚举位置和访问记录跨 `await` 及快照恢复，不走 `Symbol.iterator` 或 `IteratorClose`。
 - `Object.create(proto, descriptors?)` 用对象或 `null` 作为原型，复用 `Object.defineProperties` 的描述符转换。`Object` / `Reflect` 的 `getPrototypeOf` / `setPrototypeOf` 查询或修改内部原型，不调用 getter。成环、改变不可扩展对象的原型，或把 `Object.prototype` 的原型改为非 `null` 时，`Object` 抛出可捕获的 `TypeError`，`Reflect` 返回 `false`；把原型设为其当前值仍成功。`Reflect` 要求对象目标；`Object.getPrototypeOf` 暂不装箱，`Object.setPrototypeOf` 验证新原型后原样返回 `null` / `undefined` 之外的原始值。宿主原生句柄的原型固定为 `null`。

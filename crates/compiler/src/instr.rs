@@ -35,7 +35,10 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Unary { op, .. } => {
             matches!(*op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
         }
-        Instr::ToString { .. } | Instr::ToPropertyKey { .. } | Instr::DefineProperty { .. } => true,
+        Instr::ToString { .. }
+        | Instr::ToPropertyKey { .. }
+        | Instr::DefineProperty { .. }
+        | Instr::CopyDataProperties { .. } => true,
         Instr::Const { .. }
         | Instr::Undefined { .. }
         | Instr::Move { .. }
@@ -126,6 +129,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::ArrayAppend { array, src } => {
             uses.extend([array.index, src.index]);
+        }
+        Instr::CopyDataProperties { target, source } => {
+            uses.extend([target.index, source.index]);
         }
         Instr::GetMember { dst, object, key }
         | Instr::HasProperty { dst, object, key }
@@ -328,6 +334,10 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             key: remap(key),
             src: remap(src),
             kind,
+        },
+        Instr::CopyDataProperties { target, source } => Instr::CopyDataProperties {
+            target: remap(target),
+            source: remap(source),
         },
         Instr::GetBinding { dst, binding } => Instr::GetBinding {
             dst: remap(dst),

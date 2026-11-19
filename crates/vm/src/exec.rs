@@ -373,6 +373,13 @@ impl Vm {
                 self.define_property(frame.read_ref(object)?, key, frame.read(src)?, kind)?;
                 Ok(Step::Next)
             }
+            Instr::CopyDataProperties { target, source } => {
+                let target = object_id(frame.read_ref(target)?, "spread target must be an object")?;
+                match self.copy_data_properties(host, target, frame.read_ref(source)?)? {
+                    Invocation::Value(_) => Ok(Step::Next),
+                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
+                }
+            }
             Instr::GetBinding { dst, binding } => {
                 let env = frame
                     .env
@@ -837,6 +844,53 @@ impl Vm {
                 }
                 _ => self.heap.set_own(id, key, value)?,
             },
+        }
+        Ok(Invocation::Value(Value::Undefined))
+    }
+
+    fn copy_data_properties(
+        &mut self,
+        host: &mut dyn Host,
+        target: ObjectId,
+        source: &Value,
+    ) -> Result<Invocation, VmError> {
+        match source {
+            Value::Object(id) => {
+                // Capture the order once; an earlier getter may delete a later key
+                // or change its enumerability before it is visited.
+                let keys: Vec<_> = self.heap.get(*id)?.own_keys(false).collect();
+                for key in keys {
+                    let Some(property) = self.heap.get(*id)?.own_property(key.borrowed()) else {
+                        continue;
+                    };
+                    if !property.attributes().enumerable {
+                        continue;
+                    }
+                    let property = property.into_owned();
+                    match self.read_property_value(host, source, property)? {
+                        Invocation::Value(value) => {
+                            self.heap
+                                .define_property(target, key, Property::Data(value))?;
+                        }
+                        thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                    }
+                }
+            }
+            Value::String(text) => {
+                for (index, unit) in text.encode_utf16().enumerate() {
+                    let Some(ch) = char::from_u32(u32::from(unit)) else {
+                        return self
+                            .throw_type_error("object spread cannot represent a lone surrogate");
+                    };
+                    self.heap.define_property(
+                        target,
+                        PropertyKey::String(index.to_string()),
+                        Property::Data(Value::String(ch.to_string())),
+                    )?;
+                }
+            }
+            // Nullish values and the remaining primitive wrappers have no keys to copy.
+            _ => {}
         }
         Ok(Invocation::Value(Value::Undefined))
     }

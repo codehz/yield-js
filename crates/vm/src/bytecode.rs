@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 18;
+pub const BYTECODE_VERSION: u32 = 19;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -198,6 +198,11 @@ pub enum Instr {
     },
     NewObject {
         dst: Slot,
+    },
+    /// Copies enumerable own properties from source onto target.
+    CopyDataProperties {
+        target: Slot,
+        source: Slot,
     },
     NewArray {
         dst: Slot,
@@ -774,6 +779,10 @@ impl Build {
                     }
                 }
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
+                Instr::CopyDataProperties { target, source } => {
+                    check_slot(*target, "CopyDataProperties.target")?;
+                    check_slot(*source, "CopyDataProperties.source")?;
+                }
                 Instr::NewArray { dst, elements } => {
                     check_slot(*dst, "NewArray.dst")?;
                     for element in elements {

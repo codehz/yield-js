@@ -1065,11 +1065,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         });
         for property in &object.properties {
             let ObjectPropertyKind::ObjectProperty(property) = property else {
-                return Err(unsupported(
-                    self.source_text(),
-                    property.span(),
-                    "object spread",
-                ));
+                let ObjectPropertyKind::SpreadProperty(spread) = property else {
+                    unreachable!()
+                };
+                let source = self.compile_expression(&spread.argument)?;
+                self.emit(Instr::CopyDataProperties {
+                    target: self.slot(dst),
+                    source: self.slot(source),
+                });
+                continue;
             };
             let key = if property.computed {
                 let key = property.key.as_expression().ok_or_else(|| {

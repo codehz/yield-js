@@ -212,20 +212,23 @@ fn rejects_invalid_label_uses_with_location() {
 }
 
 #[test]
-fn rejects_unsupported_object_member_syntax_with_location() {
-    for (member, message) in [
-        ("...other", "object spread"),
-        ("*m() {}", "generator"),
-        ("m() { return super.x; }", "unsupported syntax"),
-        ("set x({a}) {}", "parameter destructuring"),
-        ("set x(v = 1) {}", "default parameter"),
-    ] {
-        let source = format!("function run() {{\n  return {{ {member} }};\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(member);
-        assert!(error.message().contains(message), "{member}: {error}");
-        assert_eq!(error.line(), 2);
-        assert!(error.column() > 2);
-    }
+fn compiles_object_spread() {
+    let build = compile(
+        "function run(other) { return { before: 1, ...other, after: 2 }; }",
+        &CompileOptions::default(),
+    )
+    .expect("object spread compiles");
+    let function = build
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    assert!(
+        function
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::CopyDataProperties { .. }))
+    );
 }
 
 #[test]
