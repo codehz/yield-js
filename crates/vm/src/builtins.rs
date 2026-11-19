@@ -39,6 +39,18 @@ pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
 pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
+pub(crate) const ROOT_RANGEERROR: &str = "rangeerror";
+pub(crate) const ROOT_RANGEERROR_PROTOTYPE: &str = "rangeerror.prototype";
+pub(crate) const ROOT_REFERENCEERROR: &str = "referenceerror";
+pub(crate) const ROOT_REFERENCEERROR_PROTOTYPE: &str = "referenceerror.prototype";
+pub(crate) const ROOT_SYNTAXERROR: &str = "syntaxerror";
+pub(crate) const ROOT_SYNTAXERROR_PROTOTYPE: &str = "syntaxerror.prototype";
+pub(crate) const ROOT_EVALERROR: &str = "evalerror";
+pub(crate) const ROOT_EVALERROR_PROTOTYPE: &str = "evalerror.prototype";
+pub(crate) const ROOT_URIERROR: &str = "urierror";
+pub(crate) const ROOT_URIERROR_PROTOTYPE: &str = "urierror.prototype";
+pub(crate) const ROOT_AGGREGATEERROR: &str = "aggregateerror";
+pub(crate) const ROOT_AGGREGATEERROR_PROTOTYPE: &str = "aggregateerror.prototype";
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
 pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
@@ -61,6 +73,18 @@ pub(crate) struct BuiltinRoots {
     pub typeerror_prototype: ObjectId,
     pub error: ObjectId,
     pub typeerror: ObjectId,
+    pub rangeerror_prototype: ObjectId,
+    pub referenceerror_prototype: ObjectId,
+    pub syntaxerror_prototype: ObjectId,
+    pub evalerror_prototype: ObjectId,
+    pub urierror_prototype: ObjectId,
+    pub aggregateerror_prototype: ObjectId,
+    pub rangeerror: ObjectId,
+    pub referenceerror: ObjectId,
+    pub syntaxerror: ObjectId,
+    pub evalerror: ObjectId,
+    pub urierror: ObjectId,
+    pub aggregateerror: ObjectId,
     pub symbol: ObjectId,
     pub reflect: ObjectId,
     pub object: ObjectId,
@@ -94,6 +118,33 @@ impl BuiltinRoots {
             ),
             (ROOT_ERROR.to_owned(), self.error),
             (ROOT_TYPEERROR.to_owned(), self.typeerror),
+            (ROOT_RANGEERROR.to_owned(), self.rangeerror),
+            (
+                ROOT_RANGEERROR_PROTOTYPE.to_owned(),
+                self.rangeerror_prototype,
+            ),
+            (ROOT_REFERENCEERROR.to_owned(), self.referenceerror),
+            (
+                ROOT_REFERENCEERROR_PROTOTYPE.to_owned(),
+                self.referenceerror_prototype,
+            ),
+            (ROOT_SYNTAXERROR.to_owned(), self.syntaxerror),
+            (
+                ROOT_SYNTAXERROR_PROTOTYPE.to_owned(),
+                self.syntaxerror_prototype,
+            ),
+            (ROOT_EVALERROR.to_owned(), self.evalerror),
+            (
+                ROOT_EVALERROR_PROTOTYPE.to_owned(),
+                self.evalerror_prototype,
+            ),
+            (ROOT_URIERROR.to_owned(), self.urierror),
+            (ROOT_URIERROR_PROTOTYPE.to_owned(), self.urierror_prototype),
+            (ROOT_AGGREGATEERROR.to_owned(), self.aggregateerror),
+            (
+                ROOT_AGGREGATEERROR_PROTOTYPE.to_owned(),
+                self.aggregateerror_prototype,
+            ),
             (ROOT_SYMBOL.to_owned(), self.symbol),
             (ROOT_REFLECT.to_owned(), self.reflect),
             (ROOT_OBJECT.to_owned(), self.object),
@@ -387,31 +438,43 @@ impl Vm {
 
         let error_prototype = self.heap.alloc_plain();
         let typeerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        for (id, name) in [
-            (error_prototype, "Error"),
-            (typeerror_prototype, "TypeError"),
-        ] {
+        let rangeerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let referenceerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let syntaxerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let evalerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let urierror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let aggregateerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        let constructors = [
+            ("Error", error_prototype),
+            ("TypeError", typeerror_prototype),
+            ("RangeError", rangeerror_prototype),
+            ("ReferenceError", referenceerror_prototype),
+            ("SyntaxError", syntaxerror_prototype),
+            ("EvalError", evalerror_prototype),
+            ("URIError", urierror_prototype),
+            ("AggregateError", aggregateerror_prototype),
+        ];
+        let mut error_constructors = BTreeMap::new();
+        for (name, prototype) in constructors {
             self.heap
                 .define_data(
-                    id,
+                    prototype,
                     "name",
                     Value::String(name.to_owned()),
                     Attributes::METHOD,
                 )
                 .expect("Error prototype stores name");
-        }
-        self.heap
-            .define_data(
-                error_prototype,
-                "message",
-                Value::String(String::new()),
-                Attributes::METHOD,
-            )
-            .expect("Error.prototype stores message");
-        let error = self.heap.alloc_builtin("Error", None);
-        let typeerror = self.heap.alloc_builtin("TypeError", None);
-        for (constructor, prototype) in [(error, error_prototype), (typeerror, typeerror_prototype)]
-        {
+            if name == "Error" {
+                self.heap
+                    .define_data(
+                        prototype,
+                        "message",
+                        Value::String(String::new()),
+                        Attributes::METHOD,
+                    )
+                    .expect("Error.prototype stores message");
+            }
+            let constructor = self.heap.alloc_builtin(name, None);
             self.heap
                 .define_data(
                     constructor,
@@ -420,7 +483,24 @@ impl Vm {
                     Attributes::FIXED,
                 )
                 .expect("error constructor stores its prototype");
+            self.heap
+                .define_data(
+                    prototype,
+                    "constructor",
+                    Value::Object(constructor),
+                    Attributes::METHOD,
+                )
+                .expect("Error prototype stores its constructor");
+            error_constructors.insert(name, constructor);
         }
+        let error = error_constructors["Error"];
+        let typeerror = error_constructors["TypeError"];
+        let rangeerror = error_constructors["RangeError"];
+        let referenceerror = error_constructors["ReferenceError"];
+        let syntaxerror = error_constructors["SyntaxError"];
+        let evalerror = error_constructors["EvalError"];
+        let urierror = error_constructors["URIError"];
+        let aggregateerror = error_constructors["AggregateError"];
         let symbol = self.heap.alloc_builtin("Symbol", None);
         for name in ["for", "keyFor"] {
             let id = self.heap.alloc_builtin("Symbol", Some(name));
@@ -480,6 +560,18 @@ impl Vm {
             typeerror_prototype,
             error,
             typeerror,
+            rangeerror_prototype,
+            referenceerror_prototype,
+            syntaxerror_prototype,
+            evalerror_prototype,
+            urierror_prototype,
+            aggregateerror_prototype,
+            rangeerror,
+            referenceerror,
+            syntaxerror,
+            evalerror,
+            urierror,
+            aggregateerror,
             symbol,
             reflect,
             object,
@@ -506,6 +598,12 @@ impl Vm {
             8 => Ok(Value::Number(f64::INFINITY)),
             9 => Ok(Value::Object(self.builtins.array)),
             10 => Ok(Value::Object(self.builtins.string)),
+            11 => Ok(Value::Object(self.builtins.rangeerror)),
+            12 => Ok(Value::Object(self.builtins.referenceerror)),
+            13 => Ok(Value::Object(self.builtins.syntaxerror)),
+            14 => Ok(Value::Object(self.builtins.evalerror)),
+            15 => Ok(Value::Object(self.builtins.urierror)),
+            16 => Ok(Value::Object(self.builtins.aggregateerror)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -1153,6 +1251,17 @@ impl Vm {
     pub(crate) fn throw_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
         self.type_error(message).map(Invocation::Thrown)
     }
+    pub(crate) fn make_range_error(&mut self, message: &str) -> Result<Value, VmError> {
+        self.alloc_error(
+            self.builtins.rangeerror_prototype,
+            "RangeError",
+            Some(message.to_owned()),
+        )
+    }
+
+    pub(crate) fn throw_range_error(&mut self, message: &str) -> Result<Invocation, VmError> {
+        self.make_range_error(message).map(Invocation::Thrown)
+    }
 
     fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
         match args.first() {
@@ -1565,21 +1674,7 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             };
             if f64::from(length) != number {
-                let error = self.alloc_error(
-                    self.builtins.error_prototype,
-                    "RangeError",
-                    Some("Invalid array length".to_owned()),
-                )?;
-                let Value::Object(id) = error else {
-                    unreachable!()
-                };
-                self.heap.define_data(
-                    id,
-                    "name",
-                    Value::String("RangeError".to_owned()),
-                    Attributes::METHOD,
-                )?;
-                return Ok(Err(error));
+                return Ok(Err(self.make_range_error("Invalid array length")?));
             }
             *value = Value::Number(f64::from(length));
         }
@@ -1595,24 +1690,55 @@ impl Vm {
         let prototype = match name {
             "Error" => self.builtins.error_prototype,
             "TypeError" => self.builtins.typeerror_prototype,
+            "RangeError" => self.builtins.rangeerror_prototype,
+            "ReferenceError" => self.builtins.referenceerror_prototype,
+            "SyntaxError" => self.builtins.syntaxerror_prototype,
+            "EvalError" => self.builtins.evalerror_prototype,
+            "URIError" => self.builtins.urierror_prototype,
+            "AggregateError" => self.builtins.aggregateerror_prototype,
             _ => {
                 return Err(VmError::InvalidState(format!(
                     "unknown Error constructor {name}"
                 )));
             }
         };
-        let message = match args.first() {
+        let (errors, message_arg) = if name == "AggregateError" {
+            let iterable = args.first().unwrap_or(&Value::Undefined);
+            let mut errors = Vec::new();
+            if !matches!(iterable, Value::Undefined) {
+                let (iterator, next) = match self.get_iterator(host, iterable)? {
+                    Ok(iterator) => iterator,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                loop {
+                    match self.iterator_step(host, &iterator, &next)? {
+                        Ok(Some(value)) => errors.push(value),
+                        Ok(None) => break,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                }
+            }
+            (Some(errors), args.get(1))
+        } else {
+            (None, args.first())
+        };
+        let message = match message_arg {
             None | Some(Value::Undefined) => None,
             Some(value) => match self.coerce_string(host, value)? {
                 Ok(message) => Some(message),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             },
         };
-        self.alloc_error(prototype, name, message)
-            .map(Invocation::Value)
+        let error = self.alloc_error(prototype, name, message)?;
+        if let (Some(errors), Value::Object(id)) = (errors, &error) {
+            let errors = self.heap.alloc_array(errors);
+            self.heap
+                .define_data(*id, "errors", Value::Object(errors), Attributes::METHOD)?;
+        }
+        Ok(Invocation::Value(error))
     }
 
-    fn alloc_error(
+    pub(crate) fn alloc_error(
         &mut self,
         prototype: ObjectId,
         name: &str,
@@ -1626,6 +1752,20 @@ impl Vm {
         }
         self.heap
             .define_data(id, "stack", Value::String(stack), Attributes::METHOD)?;
+        Ok(Value::Object(id))
+    }
+    fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
+        let error = self.alloc_error(
+            self.builtins.aggregateerror_prototype,
+            "AggregateError",
+            Some("All promises were rejected".to_owned()),
+        )?;
+        let Value::Object(id) = error else {
+            unreachable!()
+        };
+        let errors = self.heap.alloc_array(errors);
+        self.heap
+            .define_data(id, "errors", Value::Object(errors), Attributes::METHOD)?;
         Ok(Value::Object(id))
     }
 
@@ -1871,7 +2011,8 @@ impl Vm {
                 }
                 CombineKind::Race => {}
                 CombineKind::Any => {
-                    self.settle(result, Settlement::Rejected(aggregate_error()))?;
+                    let error = self.alloc_aggregate_error(Vec::new())?;
+                    self.settle(result, Settlement::Rejected(error))?;
                 }
             }
         } else {
@@ -2098,12 +2239,11 @@ impl Vm {
                     return Ok(());
                 }
                 Settlement::Rejected(reason) => {
-                    if state.first.is_none() {
-                        state.first = Some(reason);
-                    }
+                    state.results[index] = reason;
                     if state.remaining == 0 && pending {
                         self.heap.combines.remove(&result);
-                        self.settle(result, Settlement::Rejected(aggregate_error()))?;
+                        let error = self.alloc_aggregate_error(state.results)?;
+                        self.settle(result, Settlement::Rejected(error))?;
                         return Ok(());
                     }
                 }
@@ -2138,7 +2278,11 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
     match (function.name.as_str(), function.member.as_deref()) {
         ("Promise", None) => Some(BuiltinCall::Constructor),
         ("queueMicrotask", None) => Some(BuiltinCall::QueueMicrotask),
-        (name @ ("Error" | "TypeError"), None) => Some(BuiltinCall::ErrorConstructor {
+        (
+            name @ ("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
+            | "EvalError" | "URIError" | "AggregateError"),
+            None,
+        ) => Some(BuiltinCall::ErrorConstructor {
             name: name.to_owned(),
         }),
         ("Function", Some(name @ ("call" | "apply" | "bind" | "toString"))) => {
@@ -2239,10 +2383,6 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
         _ => None,
     }
-}
-
-fn aggregate_error() -> Value {
-    Value::String("AggregateError: All promises were rejected".to_owned())
 }
 
 fn settlement_value(settlement: &Settlement) -> Value {

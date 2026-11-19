@@ -11,8 +11,8 @@ export function run() {
   let source = {[Symbol.iterator]() { return [4, 5].values(); }};
   if (Array.from(source).join() !== "4,5") return false;
   let count = 0;
-  try { Array(-1); } catch (e) { if (e instanceof TypeError) count++; }
-  try { new Array(1.5); } catch (e) { if (e instanceof TypeError) count++; }
+  try { Array(-1); } catch (e) { if (e instanceof RangeError) count++; }
+  try { new Array(1.5); } catch (e) { if (e instanceof RangeError) count++; }
   try { Array.from(null); } catch (e) { if (e instanceof TypeError) count++; }
   try { Array.from([], null); } catch (e) { if (e instanceof TypeError) count++; }
   return count === 4;

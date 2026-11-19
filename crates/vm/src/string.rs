@@ -1,7 +1,6 @@
 //! UTF-16 string operations. String results containing a lone surrogate are rejected.
 
 use crate::error::VmError;
-use crate::heap::Attributes;
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::Value;
@@ -714,22 +713,11 @@ impl Vm {
     }
 
     fn alloc_range_error(&mut self, message: &str) -> Result<Value, VmError> {
-        let id = self
-            .heap
-            .alloc_plain_with(Some(self.builtins.error_prototype));
-        self.heap.define_data(
-            id,
-            "name",
-            Value::String("RangeError".to_owned()),
-            Attributes::METHOD,
-        )?;
-        self.heap.define_data(
-            id,
-            "message",
-            Value::String(message.to_owned()),
-            Attributes::METHOD,
-        )?;
-        Ok(Value::Object(id))
+        self.alloc_error(
+            self.builtins.rangeerror_prototype,
+            "RangeError",
+            Some(message.to_owned()),
+        )
     }
 }
 

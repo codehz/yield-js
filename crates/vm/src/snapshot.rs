@@ -3,11 +3,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
-    BuiltinRoots, ROOT_ARRAY, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
-    ROOT_ERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
-    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_STRING,
-    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
-    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, is_callable_object,
+    BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
+    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE,
+    ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT,
+    ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK,
+    ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE,
+    ROOT_REFLECT, ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE,
+    ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE,
+    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE,
+    is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -20,8 +24,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// The builtin root table includes the String constructor.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 20;
+// Builtin roots include the String and standard Error constructors.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 21;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -542,6 +546,75 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         ));
     }
     let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
+    let error_prototype = plain_root(ROOT_ERROR_PROTOTYPE)?;
+    let typeerror_prototype = plain_root(ROOT_TYPEERROR_PROTOTYPE)?;
+    let rangeerror_prototype = plain_root(ROOT_RANGEERROR_PROTOTYPE)?;
+    let referenceerror_prototype = plain_root(ROOT_REFERENCEERROR_PROTOTYPE)?;
+    let syntaxerror_prototype = plain_root(ROOT_SYNTAXERROR_PROTOTYPE)?;
+    let evalerror_prototype = plain_root(ROOT_EVALERROR_PROTOTYPE)?;
+    let urierror_prototype = plain_root(ROOT_URIERROR_PROTOTYPE)?;
+    let aggregateerror_prototype = plain_root(ROOT_AGGREGATEERROR_PROTOTYPE)?;
+    let error_types = [
+        (ROOT_TYPEERROR, "TypeError", typeerror_prototype),
+        (ROOT_RANGEERROR, "RangeError", rangeerror_prototype),
+        (
+            ROOT_REFERENCEERROR,
+            "ReferenceError",
+            referenceerror_prototype,
+        ),
+        (ROOT_SYNTAXERROR, "SyntaxError", syntaxerror_prototype),
+        (ROOT_EVALERROR, "EvalError", evalerror_prototype),
+        (ROOT_URIERROR, "URIError", urierror_prototype),
+        (
+            ROOT_AGGREGATEERROR,
+            "AggregateError",
+            aggregateerror_prototype,
+        ),
+    ];
+    let mut error_prototypes = BTreeSet::from([error_prototype]);
+    for (root, name, prototype) in error_types {
+        if !error_prototypes.insert(prototype)
+            || !matches!(heap.get(prototype)?, Object::Plain(plain) if plain.prototype == Some(error_prototype))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{root} prototype has invalid identity or inheritance"
+            )));
+        }
+        let constructor = builtin_root(root, name)?;
+        require_fixed_prototype(heap, constructor, prototype, name)?;
+        if !heap
+            .get(prototype)?
+            .own_property(PropertyKeyRef::String("constructor"))
+            .is_some_and(|property| {
+                property.attributes() == Attributes::METHOD
+                    && property.into_owned() == Property::Data(Value::Object(constructor))
+            })
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{root} prototype constructor is invalid"
+            )));
+        }
+    }
+    let error = builtin_root(ROOT_ERROR, "Error")?;
+    if !heap
+        .get(error_prototype)?
+        .own_property(PropertyKeyRef::String("constructor"))
+        .is_some_and(|property| {
+            property.attributes() == Attributes::METHOD
+                && property.into_owned() == Property::Data(Value::Object(error))
+        })
+    {
+        return Err(VmError::InvalidSnapshot(
+            "Error prototype constructor is invalid".to_owned(),
+        ));
+    }
+    require_fixed_prototype(heap, error, error_prototype, "Error")?;
+    let rangeerror = builtin_root(ROOT_RANGEERROR, "RangeError")?;
+    let referenceerror = builtin_root(ROOT_REFERENCEERROR, "ReferenceError")?;
+    let syntaxerror = builtin_root(ROOT_SYNTAXERROR, "SyntaxError")?;
+    let evalerror = builtin_root(ROOT_EVALERROR, "EvalError")?;
+    let urierror = builtin_root(ROOT_URIERROR, "URIError")?;
+    let aggregateerror = builtin_root(ROOT_AGGREGATEERROR, "AggregateError")?;
     let mut prototypes = BTreeSet::from([object_prototype]);
     for (name, id) in [
         (ROOT_STRING_PROTOTYPE, string_prototype),
@@ -569,10 +642,22 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         string_iterator,
         string_iterator_prototype,
         function_prototype,
-        error_prototype: plain_root(ROOT_ERROR_PROTOTYPE)?,
-        typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
-        error: builtin_root(ROOT_ERROR, "Error")?,
+        error_prototype,
+        typeerror_prototype,
+        rangeerror_prototype,
+        referenceerror_prototype,
+        syntaxerror_prototype,
+        evalerror_prototype,
+        urierror_prototype,
+        aggregateerror_prototype,
+        error,
         typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
+        rangeerror,
+        referenceerror,
+        syntaxerror,
+        evalerror,
+        urierror,
+        aggregateerror,
         symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
         reflect: plain_root(ROOT_REFLECT)?,
         object,

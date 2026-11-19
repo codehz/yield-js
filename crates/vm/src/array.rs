@@ -111,7 +111,7 @@ impl Vm {
     pub(crate) fn construct_array(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let id = if let [Value::Number(length)] = args.as_slice() {
             if !(0.0..=MAX_LENGTH as f64).contains(length) || length.fract() != 0.0 {
-                return self.throw_type_error("invalid array length");
+                return self.throw_range_error("invalid array length");
             }
             self.sparse_array(*length as usize)?
         } else {
@@ -205,7 +205,7 @@ impl Vm {
             while let Some(mut value) = script!(self.iterator_step(host, &iter, &next)) {
                 if values.len() == MAX_LENGTH {
                     self.close_iterator(host, &iter)?;
-                    return Ok(Err(self.type_error("invalid array length")?));
+                    return Ok(Err(self.make_range_error("invalid array length")?));
                 }
                 if mapping {
                     value = match self.invoke(
@@ -232,7 +232,7 @@ impl Vm {
             )));
             let length = script!(self.coerce_number(host, &length)).trunc().max(0.0);
             if length > MAX_LENGTH as f64 {
-                return Ok(Err(self.type_error("invalid array length")?));
+                return Ok(Err(self.make_range_error("invalid array length")?));
             }
             for index in 0..length as usize {
                 let mut value = script!(completion(self.read_property(
@@ -346,7 +346,7 @@ impl ArrayAccess<'_> {
             .checked_add(inserts.len())
             .filter(|len| *len <= MAX_LENGTH)
         else {
-            return Ok(Err(self.vm.type_error("invalid array length")?));
+            return Ok(Err(self.vm.make_range_error("invalid array length")?));
         };
         let value = match name {
             "pop" | "shift" if count != 0 => script!(self.get(self.id, start)),
@@ -529,7 +529,7 @@ impl ArrayAccess<'_> {
                         unreachable!()
                     };
                     if len > MAX_LENGTH - output {
-                        return Ok(Err(self.vm.type_error("invalid array length")?));
+                        return Ok(Err(self.vm.make_range_error("invalid array length")?));
                     }
                     for index in 0..len {
                         if self.present(id, index)? {
@@ -585,7 +585,7 @@ impl ArrayAccess<'_> {
                 stack.push((id, 0..len, depth - 1.0));
             } else {
                 if *output == MAX_LENGTH {
-                    return Ok(Err(self.vm.type_error("invalid array length")?));
+                    return Ok(Err(self.vm.make_range_error("invalid array length")?));
                 }
                 self.define(result, *output, value)?;
                 *output += 1;

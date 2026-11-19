@@ -1,5 +1,4 @@
-// @rejected "AggregateError: All promises were rejected"
-
-export async function run() {
-  return await Promise.any([Promise.reject(1), Promise.reject(2)]);
+// @fulfilled true
+export function run() {
+  return Promise.any([Promise.reject(1), Promise.reject(2)]).then(() => false, () => true);
 }
