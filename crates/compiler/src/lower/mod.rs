@@ -165,7 +165,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn compile(&mut self) -> Result<LoweredFunction, CompileError> {
         let source = self.source;
         self.install_this_binding(source);
-        self.compile_parameters(source)?;
+        let length = self.compile_parameters(source)?;
         match source {
             FunctionSource::Script(statements) => {
                 self.hoist_script(statements)?;
@@ -227,6 +227,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_async: self.is_async,
             is_arrow: self.is_arrow,
             is_method: self.is_method,
+            length,
             param_bindings: self.param_bindings.clone(),
             rest_binding: self.rest_binding,
             this_binding: self.this_binding,
@@ -248,7 +249,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.this_binding = Some(binding);
     }
 
-    fn compile_parameters(&mut self, source: FunctionSource<'ast>) -> Result<(), CompileError> {
+    fn compile_parameters(&mut self, source: FunctionSource<'ast>) -> Result<u16, CompileError> {
         match source {
             FunctionSource::Function(function) | FunctionSource::Method(function) => {
                 if function.generator {
@@ -257,14 +258,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.compile_parameter_list(&function.params)
             }
             FunctionSource::Arrow(arrow) => self.compile_parameter_list(&arrow.params),
-            FunctionSource::Script(_) => Ok(()),
+            FunctionSource::Script(_) => Ok(0),
         }
     }
 
     fn compile_parameter_list(
         &mut self,
         params: &'ast FormalParameters<'ast>,
-    ) -> Result<(), CompileError> {
+    ) -> Result<u16, CompileError> {
+        let length = params
+            .items
+            .iter()
+            .take_while(|parameter| parameter.initializer.is_none())
+            .count();
+        let length = u16::try_from(length).map_err(|_| {
+            CompileError::new(self.source_text(), params.span, "too many parameters")
+        })?;
         let needs_prologue = params.rest.is_some()
             || params.items.iter().any(|parameter| {
                 parameter.initializer.is_some()
@@ -331,7 +340,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.compile_binding_pattern(&rest.rest.argument, value)?;
             }
         }
-        Ok(())
+        Ok(length)
     }
 
     fn emit_implicit_return(&mut self) -> Result<(), CompileError> {
@@ -449,7 +458,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn enqueue_function(
         &mut self,
         source: FunctionSource<'ast>,
-        hint: &str,
+        hint: impl std::fmt::Display,
         span: Span,
     ) -> Result<u32, CompileError> {
         let func_id = self.session.alloc_func_id(span)?;

@@ -775,8 +775,8 @@ impl Vm {
         }
     }
 
-    fn constructor(&self, value: &Value) -> Result<Option<Constructor>, VmError> {
-        Ok(match self.classify(value)? {
+    fn constructor(&self, dispatch: Option<Dispatch<'_>>) -> Result<Option<Constructor>, VmError> {
+        Ok(match dispatch {
             Some(Dispatch::Script { func_id, env })
                 if func_id != self.build.script
                     && self.build.functions[self.function_index(func_id)?].is_constructable() =>
@@ -797,6 +797,14 @@ impl Vm {
         })
     }
 
+    fn is_constructor(&self, value: &Value) -> Result<bool, VmError> {
+        let dispatch = match self.classify(value)? {
+            Some(Dispatch::Bound(bound)) => self.classify(&Value::Object(bound.target))?,
+            dispatch => dispatch,
+        };
+        Ok(self.constructor(dispatch)?.is_some())
+    }
+
     pub(crate) fn construct_with(
         &mut self,
         host: &mut dyn Host,
@@ -804,7 +812,19 @@ impl Vm {
         args: Vec<Value>,
         new_target: &Value,
     ) -> Result<Invocation, VmError> {
-        let Some(constructor) = self.constructor(callee)? else {
+        let dispatch = self.classify(callee)?;
+        if let Some(Dispatch::Bound(bound)) = dispatch {
+            let target = Value::Object(bound.target);
+            let args = bound.args.iter().cloned().chain(args).collect();
+            // Direct construction uses the target's prototype, not the wrapper's.
+            let new_target = if ops::strict_equal(callee, new_target) {
+                &target
+            } else {
+                new_target
+            };
+            return self.construct_with(host, &target, args, new_target);
+        }
+        let Some(constructor) = self.constructor(dispatch)? else {
             return match self.classify(callee)? {
                 Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
                     self.call_string(host, &args, true)
@@ -818,8 +838,8 @@ impl Vm {
                 _ => self.throw_type_error("value is not a constructor"),
             };
         };
-        let prototype = if !ops::strict_equal(callee, new_target)
-            || matches!(constructor, Constructor::Script { .. })
+        let distinct_new_target = !ops::strict_equal(callee, new_target);
+        let prototype = if distinct_new_target || matches!(constructor, Constructor::Script { .. })
         {
             match self.read_property(host, new_target, PropertyKeyRef::String("prototype"))? {
                 Invocation::Value(Value::Object(id)) => Some(id),
@@ -831,7 +851,8 @@ impl Vm {
         };
         let result = match constructor {
             Constructor::Script { func_id, env } => {
-                let instance = Value::Object(self.heap.alloc_plain_with(prototype));
+                let prototype = prototype.unwrap_or(self.builtins.object_prototype);
+                let instance = Value::Object(self.heap.alloc_plain_with(Some(prototype)));
                 return match self.call_function(host, func_id, Some(env), args, &instance)? {
                     Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
                         Ok(Invocation::Value(instance))
@@ -875,8 +896,11 @@ impl Vm {
         let target = args.first().unwrap_or(&Value::Undefined);
         let new_target = args.get(2).unwrap_or(target);
         let list = if construct {
-            if self.constructor(target)?.is_none() || self.constructor(new_target)?.is_none() {
+            if !self.is_constructor(target)? {
                 return self.throw_type_error("value is not a constructor");
+            }
+            if args.get(2).is_some() && !self.is_constructor(new_target)? {
+                return self.throw_type_error("newTarget is not a constructor");
             }
             args.get(1)
         } else {
@@ -1925,6 +1949,9 @@ impl Vm {
         key: PropertyKey,
         mut update: DescriptorUpdate,
     ) -> Result<Result<bool, Value>, VmError> {
+        if self.has_own_function_metadata(target, key.borrowed())? {
+            return Ok(Ok(false));
+        }
         if key.as_string() == Some("length")
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value

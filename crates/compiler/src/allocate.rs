@@ -93,6 +93,7 @@ pub(crate) fn allocate(
         is_async: lowered.is_async,
         is_arrow: lowered.is_arrow,
         is_method: lowered.is_method,
+        length: lowered.length,
         params,
         rest_param,
         this_param,

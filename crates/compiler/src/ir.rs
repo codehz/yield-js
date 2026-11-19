@@ -32,6 +32,7 @@ pub(crate) struct LoweredFunction {
     pub(crate) is_async: bool,
     pub(crate) is_arrow: bool,
     pub(crate) is_method: bool,
+    pub(crate) length: u16,
     pub(crate) param_bindings: Vec<BindingId>,
     pub(crate) rest_binding: Option<BindingId>,
     /// Implicit receiver. Not a source parameter and not a JavaScript argument.

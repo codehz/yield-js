@@ -1143,8 +1143,21 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         &format!("{hint} requires {arity} simple parameters"),
                     ));
                 }
-                let id =
-                    self.enqueue_function(FunctionSource::Method(function), hint, function.span)?;
+                let name = property
+                    .key
+                    .static_name()
+                    .and_then(|name| name.into_cow_str());
+                let (prefix, name) = match (kind, name.as_deref()) {
+                    (PropertyDefinition::Data, Some(name)) => ("", name),
+                    (PropertyDefinition::Get, Some(name)) => ("get ", name),
+                    (PropertyDefinition::Set, Some(name)) => ("set ", name),
+                    (_, None) => ("", hint),
+                };
+                let id = self.enqueue_function(
+                    FunctionSource::Method(function),
+                    format_args!("{prefix}{name}"),
+                    function.span,
+                )?;
                 self.emit_function_value(id)?
             } else {
                 self.compile_expression(&property.value)?

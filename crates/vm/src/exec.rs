@@ -887,6 +887,12 @@ impl Vm {
         receiver: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
+        if let Some(owner) = self.function_metadata_owner(target, key)? {
+            let PropertyKeyRef::String(key) = key else {
+                unreachable!("function metadata keys are strings");
+            };
+            return Ok(Invocation::Value(self.function_metadata(owner, key)?));
+        }
         if let Some(property) = self
             .heap
             .find_property(target, key)?
@@ -1012,6 +1018,7 @@ impl Vm {
         key: PropertyKeyRef<'_>,
     ) -> Result<bool, VmError> {
         Ok(self.heap.has_property(target, key)?
+            || self.function_metadata_owner(target, key)?.is_some()
             || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key)))
     }
 
@@ -1037,6 +1044,7 @@ impl Vm {
             }
         };
         let deleted = match (target, key) {
+            (Value::Object(id), key) if self.has_own_function_metadata(*id, key)? => false,
             (Value::Object(id), key) => self.heap.delete_own(*id, key)?,
             // ToObject on a string would expose fixed UTF-16 indices and length.
             (Value::String(string), PropertyKeyRef::String(key)) => {
@@ -1048,6 +1056,70 @@ impl Vm {
             _ => true,
         };
         Ok(Invocation::Value(Value::Bool(deleted)))
+    }
+
+    pub(crate) fn has_own_function_metadata(
+        &self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<bool, VmError> {
+        Ok(matches!(key, PropertyKeyRef::String("name" | "length"))
+            && (id == self.builtins.function_prototype || is_callable_object(self.heap.get(id)?)))
+    }
+
+    // Find virtual metadata at its position in the prototype chain. A real
+    // own property on an earlier object still takes precedence.
+    fn function_metadata_owner(
+        &self,
+        mut id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Option<ObjectId>, VmError> {
+        if !matches!(key, PropertyKeyRef::String("name" | "length")) {
+            return Ok(None);
+        }
+        loop {
+            if self.has_own_function_metadata(id, key)? {
+                return Ok(Some(id));
+            }
+            let object = self.heap.get(id)?;
+            if object.own_property(key).is_some() {
+                return Ok(None);
+            }
+            let Some(parent) = object.prototype() else {
+                return Ok(None);
+            };
+            id = parent;
+        }
+    }
+
+    fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
+        let (object, bound_args, prefix) = match self.heap.get(id)? {
+            Object::Bound(bound) => (self.heap.get(bound.target)?, bound.args.len(), "bound "),
+            object => (object, 0, ""),
+        };
+        let (name, length) = match object {
+            Object::Function(function) => {
+                let function = self.build.function(function.func_id).ok_or_else(|| {
+                    VmError::InvalidState("function metadata without bytecode".into())
+                })?;
+                // The compiler appends the function ID to nested bytecode names.
+                let name = match function.name.rsplit_once('@') {
+                    Some((name, id)) if id.parse::<u32>() == Ok(function.func_id) => name,
+                    _ => &function.name,
+                };
+                (name, function.length)
+            }
+            Object::BuiltinStatic(function) => {
+                (function.member.as_deref().unwrap_or(&function.name), 0)
+            }
+            _ => ("", 0), // The shared prototype and Promise resolving functions.
+        };
+        Ok(if key == "name" {
+            Value::String([prefix, name].concat())
+        } else {
+            let bound_args = u16::try_from(bound_args).unwrap_or(u16::MAX);
+            Value::Number(f64::from(length.saturating_sub(bound_args)))
+        })
     }
 
     fn has_virtual_function_method(&self, id: ObjectId, key: &str) -> bool {
@@ -1091,6 +1163,12 @@ impl Vm {
 
         // Lookup starts at the target. A setter sees the receiver as `this`;
         // a data write goes to the receiver, not to the descriptor's owner.
+        if self
+            .function_metadata_owner(target, key.borrowed())?
+            .is_some()
+        {
+            return reject(self, "Cannot assign to read only function metadata");
+        }
         let property = self.heap.find_property(target, key.borrowed())?;
         match property.as_ref().and_then(OwnProperty::setter) {
             Some(Some(set)) => {
@@ -1116,6 +1194,9 @@ impl Vm {
                 "Cannot write a data property on a non-object receiver",
             );
         };
+        if id != target && self.has_own_function_metadata(id, key.borrowed())? {
+            return reject(self, "Cannot overwrite receiver function metadata");
+        }
         let object = self.heap.get(id)?;
         // With the same extensible target and receiver, the lookup above
         // already rules out an incompatible own property.

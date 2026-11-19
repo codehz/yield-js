@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 25;
+pub const BYTECODE_VERSION: u32 = 26;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -399,6 +399,8 @@ pub struct Function {
     pub is_async: bool,
     pub is_arrow: bool,
     pub is_method: bool,
+    /// Number of positional parameters before the first default, excluding rest.
+    pub length: u16,
     /// Positional parameter destinations in source order.
     pub params: Vec<ParamTarget>,
     /// Destination for a fresh array of arguments beyond the positional parameters.
@@ -714,6 +716,11 @@ impl Build {
 
         if function.params.len() > u16::MAX as usize {
             return Err(format!("{location}: too many parameters"));
+        }
+        if usize::from(function.length) > function.params.len() {
+            return Err(format!(
+                "{location}: length exceeds positional parameter count"
+            ));
         }
         if function.is_arrow && function.arguments_param.is_some() {
             return Err(format!("{location}: arrow cannot have an arguments target"));

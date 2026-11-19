@@ -28,6 +28,68 @@ fn compile_run(source: &str) -> yield_vm::bytecode::Function {
 }
 
 #[test]
+fn function_length_stops_at_top_level_default_or_rest() {
+    let build = compile(
+        r#"
+function run({ x = 1 }, [y], z = 2, last, ...tail) {
+  return [(a, ...rest) => a, (...rest) => rest, (a = 1, b) => b];
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    assert_eq!(run.length, 2);
+    assert_eq!(run.params.len(), 4);
+    assert!(run.rest_param.is_some());
+    let lengths: Vec<_> = build
+        .functions
+        .iter()
+        .filter(|function| function.is_arrow)
+        .map(|function| function.length)
+        .collect();
+    assert_eq!(lengths, [1, 0, 0]);
+}
+
+#[test]
+fn object_methods_use_statically_known_key_hints() {
+    let build = compile(
+        r#"
+function run(key) {
+  return {
+    plain(a, b = 1) {},
+    ["literal"](a, ...rest) {},
+    get value() {},
+    set value(v) {},
+    [key]() {},
+  };
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let methods: Vec<_> = build
+        .functions
+        .iter()
+        .filter(|function| function.is_method)
+        .map(|function| {
+            let (hint, _) = function.name.rsplit_once('@').expect("missing function ID");
+            (hint, function.length)
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("plain", 1),
+            ("literal", 1),
+            ("get value", 0),
+            ("set value", 1),
+            ("method", 0),
+        ]
+    );
+}
+
+#[test]
 fn live_locals_add_one_saved_slot_beyond_empty_awaits() {
     let subject = compile_run(RUN);
     let baseline = compile_run(
