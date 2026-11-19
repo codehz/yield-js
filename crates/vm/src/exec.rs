@@ -673,15 +673,25 @@ impl Vm {
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
         };
+        self.read_property_with_receiver(host, id, object, key)
+    }
+
+    pub(crate) fn read_property_with_receiver(
+        &mut self,
+        host: &mut dyn Host,
+        target: ObjectId,
+        receiver: &Value,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Invocation, VmError> {
         if let Some(property) = self
             .heap
-            .find_property(id, key)?
+            .find_property(target, key)?
             .map(OwnProperty::into_owned)
         {
-            return self.read_property_value(host, object, property);
+            return self.read_property_value(host, receiver, property);
         }
         match key {
-            PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key) => {
+            PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key) => {
                 let method = self.heap.alloc_builtin("Function", Some(key));
                 Ok(Invocation::Value(Value::Object(method)))
             }
@@ -734,10 +744,18 @@ impl Vm {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let key = key.borrowed();
-        let present = self.heap.has_property(id, key)?
-            || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key));
-        Ok(Invocation::Value(Value::Bool(present)))
+        Ok(Invocation::Value(Value::Bool(
+            self.has_property_key(id, key.borrowed())?,
+        )))
+    }
+
+    pub(crate) fn has_property_key(
+        &self,
+        target: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<bool, VmError> {
+        Ok(self.heap.has_property(target, key)?
+            || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key)))
     }
 
     pub(crate) fn delete_property(
@@ -793,59 +811,96 @@ impl Vm {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let property = self.heap.find_property(id, key.borrowed())?;
+        self.set_property(host, id, object, key, value, true)
+    }
+
+    pub(crate) fn set_property(
+        &mut self,
+        host: &mut dyn Host,
+        target: ObjectId,
+        receiver: &Value,
+        key: PropertyKey,
+        value: Value,
+        strict: bool,
+    ) -> Result<Invocation, VmError> {
+        let success = Invocation::Value(Value::Bool(true));
+        let reject = |vm: &mut Self, message: &str| {
+            if strict {
+                vm.throw_type_error(message)
+            } else {
+                Ok(Invocation::Value(Value::Bool(false)))
+            }
+        };
+
+        // Lookup starts at the target. A setter sees the receiver as `this`;
+        // a data write goes to the receiver, not to the descriptor's owner.
+        let property = self.heap.find_property(target, key.borrowed())?;
         match property.as_ref().and_then(OwnProperty::setter) {
             Some(Some(set)) => {
-                if let Invocation::Thrown(error) =
-                    self.invoke(host, &Value::Object(set), vec![value], object)?
-                {
-                    return Ok(Invocation::Thrown(error));
-                }
-            }
-            Some(None) => return self.throw_type_error("Cannot set property without a setter"),
-            None if property.is_some_and(|property| !property.attributes().writable) => {
-                let message = match &key {
-                    PropertyKey::String(key) => {
-                        format!("Cannot assign to read only property '{key}'")
-                    }
-                    PropertyKey::Symbol(_) => {
-                        "Cannot assign to read only symbol property".to_owned()
-                    }
+                return match self.invoke(host, &Value::Object(set), vec![value], receiver)? {
+                    Invocation::Value(_) => Ok(success),
+                    thrown @ Invocation::Thrown(_) => Ok(thrown),
                 };
-                return self.throw_type_error(&message);
             }
-            None => match self.heap.get(id)? {
-                Object::Array(_) if key.as_string() == Some("length") => {
-                    return self.apply_property_update(
-                        id,
-                        key,
-                        DescriptorUpdate {
-                            value: Some(value),
-                            ..DescriptorUpdate::default()
-                        },
-                    );
+            Some(None) => return reject(self, "Cannot set property without a setter"),
+            None if property.is_some_and(|property| !property.attributes().writable) => {
+                if strict && let PropertyKey::String(key) = &key {
+                    return self
+                        .throw_type_error(&format!("Cannot assign to read only property '{key}'"));
                 }
-                Object::Array(array)
-                    if !array.length_writable
-                        && key
-                            .as_string()
-                            .and_then(ops::array_index)
-                            .is_some_and(|index| index >= array.length) =>
-                {
-                    return self.throw_type_error("Cannot extend array with read only length");
-                }
-                Object::Native(_) => {
-                    return self.throw_type_error("native handles do not expose script properties");
-                }
-                target
-                    if !target.is_extensible() && target.own_property(key.borrowed()).is_none() =>
-                {
-                    return self.throw_type_error("Cannot add property to a non-extensible object");
-                }
-                _ => self.heap.set_own(id, key, value)?,
-            },
+                return reject(self, "Cannot assign to read only symbol property");
+            }
+            None => {}
         }
-        Ok(Invocation::Value(Value::Undefined))
+
+        let Value::Object(id) = *receiver else {
+            return reject(
+                self,
+                "Cannot write a data property on a non-object receiver",
+            );
+        };
+        let object = self.heap.get(id)?;
+        // With the same extensible target and receiver, the lookup above
+        // already rules out an incompatible own property.
+        if id != target || !object.is_extensible() {
+            match object.own_property(key.borrowed()) {
+                Some(property)
+                    if property.setter().is_some() || !property.attributes().writable =>
+                {
+                    return reject(self, "Cannot overwrite receiver property");
+                }
+                None if matches!(object, Object::Native(_)) => {
+                    return reject(self, "native handles do not expose script properties");
+                }
+                None if !object.is_extensible() => {
+                    return reject(self, "Cannot add property to a non-extensible object");
+                }
+                _ => {}
+            }
+        }
+        if let Object::Array(array) = object {
+            if key.as_string() == Some("length") {
+                let update = DescriptorUpdate {
+                    value: Some(value),
+                    ..DescriptorUpdate::default()
+                };
+                return match self.try_apply_property_update(id, key, update)? {
+                    Ok(true) => Ok(success),
+                    Ok(false) => reject(self, "Cannot define property"),
+                    Err(error) => Ok(Invocation::Thrown(error)),
+                };
+            }
+            if !array.length_writable
+                && key
+                    .as_string()
+                    .and_then(ops::array_index)
+                    .is_some_and(|index| index >= array.length)
+            {
+                return reject(self, "Cannot extend array with read only length");
+            }
+        }
+        self.heap.set_own(id, key, value)?;
+        Ok(success)
     }
 
     fn copy_data_properties(

@@ -485,7 +485,7 @@ impl Build {
             bytecode_version: self.bytecode_version,
             // Reject artifacts from older builtin semantics even when their
             // instruction stream and snapshot record layout are unchanged.
-            execution_revision: 1,
+            execution_revision: 2,
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,

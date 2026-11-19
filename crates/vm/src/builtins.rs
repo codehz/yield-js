@@ -112,6 +112,10 @@ pub(crate) enum BuiltinCall {
     IteratorIdentity,
     ReflectOwnKeys,
     ReflectDeleteProperty,
+    ReflectGet,
+    ReflectSet,
+    ReflectHas,
+    ReflectGetOwnPropertyDescriptor,
     ObjectConstructor,
     ObjectCreate,
     GetPrototypeOf { reflect: bool },
@@ -338,6 +342,10 @@ impl Vm {
             "isExtensible",
             "getPrototypeOf",
             "setPrototypeOf",
+            "get",
+            "set",
+            "has",
+            "getOwnPropertyDescriptor",
         ] {
             let method = self.heap.alloc_builtin("Reflect", Some(name));
             self.heap
@@ -534,6 +542,9 @@ impl Vm {
             BuiltinCall::ObjectGetOwnPropertyDescriptor => {
                 self.get_own_property_descriptor(host, &args)
             }
+            BuiltinCall::ReflectGetOwnPropertyDescriptor => {
+                self.get_own_property_descriptor(host, &args)
+            }
             BuiltinCall::DefineProperty { reflect } => {
                 self.define_property_builtin(host, &args, reflect)
             }
@@ -652,6 +663,51 @@ impl Vm {
                     return self.throw_type_error("Reflect.deleteProperty requires an object");
                 };
                 self.delete_property(host, target, args.get(1).unwrap_or(&Value::Undefined))
+            }
+            BuiltinCall::ReflectGet => {
+                let Some(Value::Object(target)) = args.first() else {
+                    return self.throw_type_error("Reflect.get requires an object");
+                };
+                let key = match self
+                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
+                {
+                    Ok(key) => key,
+                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+                };
+                self.read_property_with_receiver(
+                    host,
+                    *target,
+                    args.get(2).unwrap_or(&args[0]),
+                    key.borrowed(),
+                )
+            }
+            BuiltinCall::ReflectHas => {
+                let Some(Value::Object(target)) = args.first() else {
+                    return self.throw_type_error("Reflect.has requires an object");
+                };
+                let key = match self
+                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
+                {
+                    Ok(key) => key,
+                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+                };
+                Ok(Invocation::Value(Value::Bool(
+                    self.has_property_key(*target, key.borrowed())?,
+                )))
+            }
+            BuiltinCall::ReflectSet => {
+                let Some(Value::Object(target)) = args.first() else {
+                    return self.throw_type_error("Reflect.set requires an object");
+                };
+                let key = match self
+                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
+                {
+                    Ok(key) => key,
+                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+                };
+                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+                let receiver = args.get(3).unwrap_or(&args[0]);
+                self.set_property(host, *target, receiver, key, value, false)
             }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
@@ -1262,7 +1318,7 @@ impl Vm {
         }
     }
 
-    fn try_apply_property_update(
+    pub(crate) fn try_apply_property_update(
         &mut self,
         target: ObjectId,
         key: PropertyKey,
@@ -1861,8 +1917,12 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                 reflect: owner == "Reflect",
             })
         }
-        ("Object", Some("getOwnPropertyDescriptor")) => {
-            Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
+        (owner @ ("Object" | "Reflect"), Some("getOwnPropertyDescriptor")) => {
+            Some(if owner == "Reflect" {
+                BuiltinCall::ReflectGetOwnPropertyDescriptor
+            } else {
+                BuiltinCall::ObjectGetOwnPropertyDescriptor
+            })
         }
         (owner @ ("Object" | "Reflect"), Some("defineProperty")) => {
             Some(BuiltinCall::DefineProperty {
@@ -1895,6 +1955,9 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
         ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
         ("Reflect", Some("deleteProperty")) => Some(BuiltinCall::ReflectDeleteProperty),
+        ("Reflect", Some("get")) => Some(BuiltinCall::ReflectGet),
+        ("Reflect", Some("set")) => Some(BuiltinCall::ReflectSet),
+        ("Reflect", Some("has")) => Some(BuiltinCall::ReflectHas),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
         }
