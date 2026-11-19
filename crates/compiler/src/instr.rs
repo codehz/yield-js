@@ -17,6 +17,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             | Instr::CallFunction { .. }
             | Instr::CallValue { .. }
             | Instr::Construct { .. }
+            | Instr::GetMember { .. }
             | Instr::SetMember { .. }
     )
 }
@@ -87,7 +88,10 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(key.index);
             defs.insert(dst.index);
         }
-        Instr::SetMember { object, key, src } => {
+        Instr::SetMember { object, key, src }
+        | Instr::DefineProperty {
+            object, key, src, ..
+        } => {
             uses.insert(object.index);
             uses.insert(key.index);
             uses.insert(src.index);
@@ -181,6 +185,17 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             object: remap(object),
             key: remap(key),
             src: remap(src),
+        },
+        Instr::DefineProperty {
+            object,
+            key,
+            src,
+            kind,
+        } => Instr::DefineProperty {
+            object: remap(object),
+            key: remap(key),
+            src: remap(src),
+            kind,
         },
         Instr::GetBinding { dst, binding } => Instr::GetBinding {
             dst: remap(dst),

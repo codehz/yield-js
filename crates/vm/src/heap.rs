@@ -2,18 +2,17 @@
 //! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
 //! restore consume that combined list instead of re-matching object kinds.
 //!
-//! Script objects store own string data properties and an internal prototype.
-//! `Some(undefined)` is an own hit; only a missing key walks the chain. Writes
-//! always land on the receiver. Environments are not script objects and cannot
-//! be prototypes. Ordinary literals have no internal prototype: this slice does
-//! not expose `Object.prototype`.
+//! Plain objects store own data or accessor properties. Only a missing key
+//! walks the prototype chain; environments are not script objects. Literals
+//! have no internal prototype: this slice does not expose `Object.prototype`.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::VmError;
-use crate::ops::{array_index, property_key};
+use crate::ops::array_index;
 use crate::value::{BindingId, ContinuationId, NativeKey, ObjectId, Value};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,8 +103,17 @@ pub struct NativeObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Property {
+    Data(Value),
+    Accessor {
+        get: Option<ObjectId>,
+        set: Option<ObjectId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlainObject {
-    pub props: BTreeMap<String, Value>,
+    pub props: BTreeMap<String, Property>,
     /// Internal prototype. Literals use `None`.
     pub prototype: Option<ObjectId>,
 }
@@ -304,7 +312,19 @@ impl Object {
                 }
             }
             Self::Native(_) => {}
-            Self::Plain(plain) => push_script(out, &plain.props, plain.prototype),
+            Self::Plain(plain) => {
+                if let Some(id) = plain.prototype {
+                    out.push(OwnedEdge::Prototype(id));
+                }
+                for property in plain.props.values() {
+                    match property {
+                        Property::Data(value) => push_value(out, value),
+                        Property::Accessor { get, set } => {
+                            out.extend([*get, *set].into_iter().flatten().map(OwnedEdge::Object));
+                        }
+                    }
+                }
+            }
             Self::Array(array) => {
                 for value in &array.elements {
                     push_value(out, value);
@@ -601,13 +621,11 @@ impl Heap {
         self.alloc(Object::Native(NativeObject { key }))
     }
 
-    pub(crate) fn get_member(&self, object: &Value, key: &Value) -> Result<Value, VmError> {
-        let key = property_key(key)?;
-        let id = object_id(object, "property access on a non-object")?;
-        self.get_property(id, &key)
-    }
-
-    pub(crate) fn get_property(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
+    pub(crate) fn lookup_property(
+        &self,
+        id: ObjectId,
+        key: &str,
+    ) -> Result<Option<Property>, VmError> {
         let mut current = id;
         let mut previous = None;
         let mut remaining = self.objects.len();
@@ -620,7 +638,9 @@ impl Heap {
             })?;
             if matches!(object, Object::Environment(_)) {
                 return Err(VmError::InvalidState(match previous {
-                    Some(parent) => format!("object {parent} prototype {current} is an environment"),
+                    Some(parent) => {
+                        format!("object {parent} prototype {current} is an environment")
+                    }
                     None => format!("object {id} is an environment and cannot be a prototype"),
                 }));
             }
@@ -632,44 +652,38 @@ impl Heap {
             remaining -= 1;
             let (own, prototype) = match object {
                 Object::Plain(plain) => (plain.props.get(key).cloned(), plain.prototype),
-                Object::Array(array) => (array.own(key), array.prototype),
-                Object::Function(function) => (function.props.get(key).cloned(), function.prototype),
-                Object::Promise(promise) => (promise.props.get(key).cloned(), promise.prototype),
-                Object::BuiltinStatic(builtin) => (builtin.props.get(key).cloned(), builtin.prototype),
+                Object::Array(array) => (array.own(key).map(Property::Data), array.prototype),
+                Object::Function(function) => (
+                    function.props.get(key).cloned().map(Property::Data),
+                    function.prototype,
+                ),
+                Object::Promise(promise) => (
+                    promise.props.get(key).cloned().map(Property::Data),
+                    promise.prototype,
+                ),
+                Object::BuiltinStatic(builtin) => (
+                    builtin.props.get(key).cloned().map(Property::Data),
+                    builtin.prototype,
+                ),
                 Object::Native(_) | Object::Resolution(_) => (None, None),
                 Object::Environment(_) => unreachable!(),
             };
             if let Some(value) = own {
-                return Ok(value);
+                return Ok(Some(value));
             }
             let Some(next) = prototype else {
-                return Ok(Value::Undefined);
+                return Ok(None);
             };
             previous = Some(current);
             current = next;
         }
     }
 
-    pub(crate) fn set_member(
-        &mut self,
-        object: &Value,
-        key: &Value,
-        value: Value,
-    ) -> Result<(), VmError> {
-        let key = property_key(key)?;
-        let id = object_id(object, "property write on a non-object")?;
-        self.set_own_key(id, &key, value)
-    }
-
     /// Writes an own data property. Does not walk the chain or apply readonly checks.
     pub(crate) fn set_own(&mut self, id: ObjectId, key: &str, value: Value) -> Result<(), VmError> {
-        self.set_own_key(id, key, value)
-    }
-
-    fn set_own_key(&mut self, id: ObjectId, key: &str, value: Value) -> Result<(), VmError> {
         match self.get_mut(id)? {
             Object::Plain(plain) => {
-                plain.props.insert(key.to_owned(), value);
+                plain.props.insert(key.to_owned(), Property::Data(value));
                 Ok(())
             }
             Object::Function(function) => {
@@ -689,6 +703,37 @@ impl Heap {
                 "object {id} does not expose script properties"
             ))),
         }
+    }
+
+    pub(crate) fn define_property(
+        &mut self,
+        id: ObjectId,
+        key: String,
+        mut property: Property,
+    ) -> Result<(), VmError> {
+        let Object::Plain(plain) = self.get_mut(id)? else {
+            return Err(VmError::InvalidState(
+                "property definition requires a plain object".to_owned(),
+            ));
+        };
+        match plain.props.entry(key) {
+            Entry::Occupied(mut own) => {
+                if let Property::Accessor { get, set } = &mut property
+                    && let Property::Accessor {
+                        get: old_get,
+                        set: old_set,
+                    } = own.get()
+                {
+                    *get = get.or(*old_get);
+                    *set = set.or(*old_set);
+                }
+                own.insert(property);
+            }
+            Entry::Vacant(own) => {
+                own.insert(property);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn get_binding(&self, env: ObjectId, binding: BindingId) -> Result<Value, VmError> {
@@ -748,7 +793,7 @@ impl Heap {
     }
 }
 
-fn object_id(value: &Value, what: &str) -> Result<ObjectId, VmError> {
+pub(crate) fn object_id(value: &Value, what: &str) -> Result<ObjectId, VmError> {
     match value {
         Value::Object(id) => Ok(*id),
         _ => Err(VmError::InvalidState(what.to_owned())),

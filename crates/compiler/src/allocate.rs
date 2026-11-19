@@ -98,6 +98,7 @@ pub(crate) fn allocate(
         name: lowered.name,
         is_async: lowered.is_async,
         is_arrow: lowered.is_arrow,
+        is_method: lowered.is_method,
         params,
         this_param,
         transient_slots: layout.transient_count,

@@ -58,20 +58,21 @@ pub(crate) fn lower_all<'ast>(
 #[derive(Clone, Copy)]
 enum FunctionSource<'ast> {
     Function(&'ast Function<'ast>),
+    Method(&'ast Function<'ast>),
     Arrow(&'ast ArrowFunctionExpression<'ast>),
 }
 
 impl FunctionSource<'_> {
     fn span(self) -> Span {
         match self {
-            Self::Function(function) => function.span,
+            Self::Function(function) | Self::Method(function) => function.span,
             Self::Arrow(arrow) => arrow.span,
         }
     }
 
     fn is_async(self) -> bool {
         match self {
-            Self::Function(function) => function.r#async,
+            Self::Function(function) | Self::Method(function) => function.r#async,
             Self::Arrow(arrow) => arrow.r#async,
         }
     }
@@ -97,6 +98,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     span: Span,
     is_async: bool,
     is_arrow: bool,
+    is_method: bool,
     env: Env,
     emit: Emitter<'src>,
     control: Control,
@@ -132,6 +134,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             span,
             is_async,
             is_arrow: task.source.is_arrow(),
+            is_method: matches!(task.source, FunctionSource::Method(_)),
             env: Env::new(task.outer_scopes),
             emit: Emitter::new(source_text, span),
             control: Control::new(),
@@ -146,7 +149,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.compile_parameters(source)?;
         self.install_this_binding(source);
         match source {
-            FunctionSource::Function(function) => {
+            FunctionSource::Function(function) | FunctionSource::Method(function) => {
                 let body = function.body.as_ref().ok_or_else(|| {
                     unsupported(
                         self.source_text(),
@@ -197,6 +200,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             name: self.name.clone(),
             is_async: self.is_async,
             is_arrow: self.is_arrow,
+            is_method: self.is_method,
             param_bindings: self.param_bindings.clone(),
             this_binding: self.this_binding,
             promoted: BTreeMap::new(),
@@ -218,7 +222,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn compile_parameters(&mut self, source: FunctionSource<'ast>) -> Result<(), CompileError> {
         match source {
-            FunctionSource::Function(function) => {
+            FunctionSource::Function(function) | FunctionSource::Method(function) => {
                 if function.generator {
                     return Err(unsupported(self.source_text(), function.span, "generator"));
                 }
@@ -623,7 +627,7 @@ fn as_binding_kind(
 pub(super) const THIS_BINDING: &str = "\0this";
 
 fn function_uses_this(source: FunctionSource<'_>) -> bool {
-    let FunctionSource::Function(function) = source else {
+    let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
         return false;
     };
     let Some(body) = &function.body else {

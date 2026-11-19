@@ -7,7 +7,7 @@ use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use yield_vm::BindingId;
-use yield_vm::bytecode::{BinaryOp, Constant, Instr, Slot, UnaryOp};
+use yield_vm::bytecode::{BinaryOp, Constant, Instr, PropertyDefinition, Slot, UnaryOp};
 
 use super::{FunctionSource, Lowerer, THIS_BINDING};
 use crate::emit::Reg;
@@ -791,23 +791,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "object spread",
                 ));
             };
-            if property.method || property.kind != PropertyKind::Init {
-                return Err(unsupported(
-                    self.source_text(),
-                    property.span,
-                    "object method/getter/setter",
-                ));
-            }
-            let key = if let Some(name) = property.key.static_name() {
-                let name = name.into_cow_str().ok_or_else(|| {
-                    unsupported(
-                        self.source_text(),
-                        property.key.span(),
-                        "property key with a lone surrogate",
-                    )
-                })?;
-                self.emit_constant(Constant::String(name.into_owned()))?
-            } else if property.computed {
+            let key = if property.computed {
                 let key = property.key.as_expression().ok_or_else(|| {
                     unsupported(
                         self.source_text(),
@@ -816,6 +800,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     )
                 })?;
                 self.compile_expression(key)?
+            } else if let Some(name) = property.key.static_name() {
+                let name = name.into_cow_str().ok_or_else(|| {
+                    unsupported(
+                        self.source_text(),
+                        property.key.span(),
+                        "property key with a lone surrogate",
+                    )
+                })?;
+                self.emit_constant(Constant::String(name.into_owned()))?
             } else {
                 return Err(unsupported(
                     self.source_text(),
@@ -823,11 +816,44 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "unsupported property key",
                 ));
             };
-            let value = self.compile_expression(&property.value)?;
-            self.emit(Instr::SetMember {
+            let kind = match property.kind {
+                PropertyKind::Init => PropertyDefinition::Data,
+                PropertyKind::Get => PropertyDefinition::Get,
+                PropertyKind::Set => PropertyDefinition::Set,
+            };
+            let value = if property.method || property.kind != PropertyKind::Init {
+                let Expression::FunctionExpression(function) = &property.value else {
+                    return Err(unsupported(
+                        self.source_text(),
+                        property.span,
+                        "object member without a function",
+                    ));
+                };
+                let (hint, arity) = match kind {
+                    PropertyDefinition::Data => ("method", None),
+                    PropertyDefinition::Get => ("getter", Some(0)),
+                    PropertyDefinition::Set => ("setter", Some(1)),
+                };
+                if let Some(arity) = arity
+                    && (function.params.items.len() != arity || function.params.rest.is_some())
+                {
+                    return Err(unsupported(
+                        self.source_text(),
+                        function.params.span,
+                        &format!("{hint} requires {arity} simple parameters"),
+                    ));
+                }
+                let id =
+                    self.enqueue_function(FunctionSource::Method(function), hint, function.span)?;
+                self.emit_function_value(id)?
+            } else {
+                self.compile_expression(&property.value)?
+            };
+            self.emit(Instr::DefineProperty {
                 object: self.slot(dst),
                 key: self.slot(key),
                 src: self.slot(value),
+                kind,
             });
         }
         Ok(dst)

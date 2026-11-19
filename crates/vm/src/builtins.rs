@@ -133,10 +133,7 @@ impl Vm {
     ) -> Result<ObjectId, VmError> {
         let id = self.heap.alloc_function(func_id, env);
         let index = self.function_index(func_id)?;
-        let constructable = {
-            let function = &self.build.functions[index];
-            !function.is_async && !function.is_arrow
-        };
+        let constructable = self.build.functions[index].is_constructable();
         if constructable {
             let prototype = self.heap.alloc_plain();
             self.heap
@@ -177,16 +174,15 @@ impl Vm {
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
                 let index = self.function_index(func_id)?;
-                let constructable = {
-                    let function = &self.build.functions[index];
-                    !function.is_async && !function.is_arrow
-                };
+                let constructable = self.build.functions[index].is_constructable();
                 if !constructable {
                     return Ok(Invocation::Thrown(type_error("value is not a constructor")));
                 }
-                let prototype_value = self
-                    .heap
-                    .get_member(callee, &Value::String("prototype".to_owned()))?;
+                let prototype_value =
+                    match self.read_member(host, callee, &Value::String("prototype".to_owned()))? {
+                        Invocation::Value(value) => value,
+                        thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                    };
                 let prototype = match prototype_value {
                     Value::Object(id) if self.heap.is_environment(id) != Some(true) => Some(id),
                     _ => None,
@@ -684,15 +680,10 @@ impl Vm {
         payload: (&str, Value),
     ) -> Result<Value, VmError> {
         let id = self.heap.alloc_plain();
-        let object = Value::Object(id);
-        self.heap.set_member(
-            &object,
-            &Value::String("status".to_owned()),
-            Value::String(status.to_owned()),
-        )?;
         self.heap
-            .set_member(&object, &Value::String(payload.0.to_owned()), payload.1)?;
-        Ok(object)
+            .set_own(id, "status", Value::String(status.to_owned()))?;
+        self.heap.set_own(id, payload.0, payload.1)?;
+        Ok(Value::Object(id))
     }
 }
 

@@ -3,15 +3,17 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins::{BuiltinRoots, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK};
-use crate::bytecode::{BYTECODE_VERSION, Build};
+use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
-use crate::heap::{CombineState, EnvRole, Heap, Object, OwnedEdge, PromiseState, ReactionJob};
+use crate::heap::{
+    CombineState, EnvRole, Heap, Object, OwnedEdge, PromiseState, Property, ReactionJob,
+};
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -182,6 +184,7 @@ impl Vm {
         }
         heap.combines = snapshot.combines.clone();
         check_heap_edges(&heap, host)?;
+        validate_accessors(&build, &heap)?;
         require_value_objects(&heap, snapshot.globals.values())?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         for continuation in continuations.values() {
@@ -338,15 +341,18 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let promise = required_root(roots, ROOT_PROMISE)?;
     let prototype = required_root(roots, ROOT_PROMISE_PROTOTYPE)?;
     let queue = required_root(roots, ROOT_QUEUE_MICROTASK)?;
-    match heap.get(promise)? {
+    let constructor = match heap.get(promise)? {
         Object::BuiltinStatic(function)
-            if function.name == "Promise" && function.member.is_none() => {}
+            if function.name == "Promise" && function.member.is_none() =>
+        {
+            function
+        }
         _ => {
             return Err(VmError::InvalidSnapshot(
                 "promise root is not the Promise constructor".to_owned(),
             ));
         }
-    }
+    };
     if !matches!(heap.get(prototype)?, Object::Plain(_)) {
         return Err(VmError::InvalidSnapshot(
             "promise.prototype root is not a plain object".to_owned(),
@@ -361,11 +367,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             ));
         }
     }
-    let prototype_value = heap.get_member(
-        &Value::Object(promise),
-        &Value::String("prototype".to_owned()),
-    )?;
-    if prototype_value != Value::Object(prototype) {
+    if constructor.props.get("prototype") != Some(&Value::Object(prototype)) {
         return Err(VmError::InvalidSnapshot(
             "Promise.prototype does not match the prototype root".to_owned(),
         ));
@@ -476,6 +478,37 @@ fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
             current = next;
         }
         completed.extend(std::mem::take(&mut path));
+    }
+    Ok(())
+}
+
+fn validate_accessors(build: &Build, heap: &Heap) -> Result<(), VmError> {
+    for id in heap.ids() {
+        let Object::Plain(plain) = heap.get(id)? else {
+            continue;
+        };
+        for (key, property) in &plain.props {
+            let Property::Accessor { get, set } = property else {
+                continue;
+            };
+            if get.is_none() && set.is_none() {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "object {id} has empty accessor {key}"
+                )));
+            }
+            for target in [*get, *set].into_iter().flatten() {
+                let valid = heap
+                    .get(target)?
+                    .as_function()
+                    .and_then(|function| build.function(function.func_id))
+                    .is_some_and(Function::is_accessor_method);
+                if !valid {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "object {id} accessor {key} has invalid target {target}"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }

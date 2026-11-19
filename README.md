@@ -40,7 +40,7 @@ cargo run -p yield-poc
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
 - 未跨函数共享的绑定在帧槽中；闭包共享的绑定仍在堆环境，快照保留环境、闭包与对象身份。没有共享绑定且不创建闭包的调用不分配环境。
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
-- 对象/数组字面量、计算属性键、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先。
+- 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
@@ -57,7 +57,7 @@ cargo run -p yield-poc
 
 - 顶层 `function` 声明；嵌套函数声明（提升）；函数表达式；箭头函数；`async` 函数；`await`。
 - `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
-- 字面量、对象/数组字面量（Init 属性、静态/计算键、数组空洞按 `undefined`）、成员读写。
+- 字面量、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
 - `if`、`while`、`do...while`、`for`、`break`、`continue`、`return`、`throw`、`try/catch/finally`。
@@ -66,7 +66,7 @@ cargo run -p yield-poc
 
 ## 已知未覆盖
 
-- 对象方法/getter/setter、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
+- `super`、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - 类、模板字符串、generator、async generator、顶层 `await`。
 - `for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。

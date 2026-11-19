@@ -49,6 +49,71 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
+fn rejects_unsupported_object_member_syntax_with_location() {
+    for (member, message) in [
+        ("...other", "object spread"),
+        ("*m() {}", "generator"),
+        ("m() { return super.x; }", "unsupported syntax"),
+        ("set x({a}) {}", "parameter destructuring"),
+        ("set x(v = 1) {}", "default parameter"),
+    ] {
+        let source = format!("function run() {{\n  return {{ {member} }};\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(member);
+        assert!(error.message().contains(message), "{member}: {error}");
+        assert_eq!(error.line(), 2);
+        assert!(error.column() > 2);
+    }
+}
+
+#[test]
+fn rejects_malformed_property_definition_and_method_metadata() {
+    let build = compile(
+        "function run() { return { m() {} }; }",
+        &CompileOptions::default(),
+    )
+    .expect("method");
+    for (operand, message) in ["object", "key", "src"].into_iter().enumerate() {
+        let mut corrupt = build.clone();
+        let (object, key, src) = corrupt.functions[0]
+            .code
+            .iter_mut()
+            .find_map(|instr| {
+                let Instr::DefineProperty {
+                    object, key, src, ..
+                } = instr
+                else {
+                    return None;
+                };
+                Some((object, key, src))
+            })
+            .expect("property definition");
+        *[object, key, src][operand] = yield_vm::bytecode::Slot::transient(u16::MAX);
+        corrupt.finalize();
+        let error = corrupt
+            .validate()
+            .expect_err("out-of-range definition operand");
+        assert!(
+            error.contains(&format!("DefineProperty.{message}")),
+            "{error}"
+        );
+    }
+    let mut corrupt = build;
+    corrupt
+        .functions
+        .iter_mut()
+        .find(|function| function.is_method)
+        .expect("method")
+        .is_arrow = true;
+    corrupt.finalize();
+    assert!(
+        corrupt
+            .validate()
+            .expect_err("arrow method")
+            .contains("both a method and an arrow")
+    );
+}
+
+#[test]
 fn lowers_promise_member_call_and_constructor() {
     let source = r#"
 function run() {

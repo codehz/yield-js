@@ -1,6 +1,6 @@
 use yield_poc::{TestHost, build, number};
 use yield_vm::bytecode::{Instr, Slot};
-use yield_vm::heap::EnvironmentObject;
+use yield_vm::heap::{EnvironmentObject, Property};
 use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{Completion, HostValue, Object, PromiseState, Value, Vm, VmError};
 
@@ -123,7 +123,7 @@ async function run() {
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("build id")));
 
     let mut mismatched = snapshot.clone();
-    mismatched.bytecode_version += 1;
+    mismatched.bytecode_version = 5;
     let error =
         Vm::restore(mismatched, build.clone(), &mut host).expect_err("bytecode version mismatch");
     assert!(
@@ -131,9 +131,85 @@ async function run() {
     );
 
     let mut mismatched = snapshot;
-    mismatched.format_version += 1;
+    mismatched.format_version = 5;
     let error = Vm::restore(mismatched, build, &mut host).expect_err("snapshot format mismatch");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("format")));
+}
+
+#[test]
+fn accessor_only_closures_survive_restore_and_bad_descriptors_are_rejected() {
+    let build = build(
+        r#"
+function make() {
+  let hidden = 2;
+  return {
+    get x() { seed(); return hidden; },
+    set x(v) { hidden += v; }
+  };
+}
+async function run() {
+  const o = make();
+  await wait("a");
+  o.x = 5;
+  return o.x;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("VM");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
+    let (index, get, set) = snapshot
+        .objects
+        .iter()
+        .enumerate()
+        .find_map(|(index, record)| {
+            let Object::Plain(plain) = &record.object else {
+                return None;
+            };
+            let Property::Accessor {
+                get: Some(get),
+                set: Some(set),
+            } = plain.props.get("x")?
+            else {
+                return None;
+            };
+            Some((index, *get, *set))
+        })
+        .expect("accessor pair");
+
+    for (get, set, message) in [
+        (Some(u32::MAX), Some(set), "missing object"),
+        (
+            Some(get),
+            Some(snapshot.objects[index].id),
+            "invalid target",
+        ),
+        (None, None, "empty accessor"),
+    ] {
+        let mut corrupt = snapshot.clone();
+        let Object::Plain(plain) = &mut corrupt.objects[index].object else {
+            unreachable!()
+        };
+        *plain.props.get_mut("x").expect("accessor") = Property::Accessor { get, set };
+        let error = Vm::restore(corrupt, build.clone(), &mut host).expect_err("bad descriptor");
+        assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
+    }
+
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("valid descriptor");
+    assert_eq!(host.count("seed"), 0, "restore must not run getters");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("resume");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(7.0))
+    );
+    assert_eq!(host.count("seed"), 1);
 }
 
 #[test]
@@ -159,7 +235,7 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
     let mut host = TestHost::default();
 
     let mut corrupt = build("function run() { return 1; }");
-    corrupt.bytecode_version += 1;
+    corrupt.bytecode_version = 5;
     let error = Vm::new(corrupt, &host).expect_err("bytecode version");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("bytecode version"))
@@ -371,7 +447,7 @@ async function run() {
         .iter()
         .find_map(|record| match &record.object {
             Object::Plain(plain) => match plain.props.get("prototype") {
-                Some(Value::Object(peer)) => Some((record.id, *peer)),
+                Some(Property::Data(Value::Object(peer))) => Some((record.id, *peer)),
                 _ => None,
             },
             _ => None,
@@ -684,7 +760,7 @@ fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<String> {
                 return None;
             };
             match plain.props.get("tag") {
-                Some(Value::String(tag)) => Some(tag.clone()),
+                Some(Property::Data(Value::String(tag))) => Some(tag.clone()),
                 _ => None,
             }
         })
@@ -739,7 +815,7 @@ async function run() {
     );
     assert!(snapshot.objects.iter().any(|record| {
         record.id == saved_objects[0]
-            && matches!(&record.object, Object::Plain(plain) if plain.props.get("n") == Some(&Value::Number(7.0)))
+            && matches!(&record.object, Object::Plain(plain) if plain.props.get("n") == Some(&Property::Data(Value::Number(7.0))))
     }));
 
     let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");

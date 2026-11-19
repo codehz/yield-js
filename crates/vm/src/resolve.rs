@@ -18,6 +18,13 @@ pub(crate) enum AwaitPrepared {
     Plain(Value),
 }
 
+enum ResolutionInput {
+    Promise(ObjectId),
+    Plain(Value),
+    Thenable { receiver: Value, then: Value },
+    Thrown(Value),
+}
+
 impl Vm {
     pub(crate) fn resolve_promise(
         &mut self,
@@ -28,73 +35,81 @@ impl Vm {
         if !self.is_open(result)? {
             return Ok(());
         }
-        if let Value::Object(id) = value {
-            if self.heap.get(id)?.as_promise().is_some() {
+        let input = self.classify_resolution(host, value)?;
+        self.resolve_input(host, result, input)
+    }
+
+    fn classify_resolution(
+        &mut self,
+        host: &mut dyn Host,
+        value: Value,
+    ) -> Result<ResolutionInput, VmError> {
+        let Value::Object(id) = value else {
+            return Ok(ResolutionInput::Plain(value));
+        };
+        match self.heap.get(id)? {
+            Object::Promise(_) => return Ok(ResolutionInput::Promise(id)),
+            Object::Environment(_) | Object::Native(_) => return Ok(ResolutionInput::Plain(value)),
+            _ => {}
+        }
+        Ok(
+            match self.read_member(host, &value, &Value::String("then".to_owned()))? {
+                Invocation::Value(then) if self.is_callable(&then) => ResolutionInput::Thenable {
+                    receiver: value,
+                    then,
+                },
+                Invocation::Value(_) => ResolutionInput::Plain(value),
+                Invocation::Thrown(error) => ResolutionInput::Thrown(error),
+            },
+        )
+    }
+
+    fn resolve_input(
+        &mut self,
+        host: &mut dyn Host,
+        result: ObjectId,
+        input: ResolutionInput,
+    ) -> Result<(), VmError> {
+        match input {
+            ResolutionInput::Promise(id) => {
                 if id == result {
                     return Ok(());
                 }
                 let source = Settlement::from_state(&self.heap.promise(id)?.state);
-                {
-                    let promise = self.heap.promise_mut(result)?;
-                    promise.locked = true;
-                    promise.adopting = Some(id);
-                }
+                let promise = self.heap.promise_mut(result)?;
+                promise.locked = true;
+                promise.adopting = Some(id);
                 match source {
-                    Some(settlement) => {
-                        self.microtasks
-                            .push_back(Microtask::Adopt { result, settlement });
-                    }
-                    None => {
-                        self.heap
-                            .promise_mut(id)?
-                            .reactions
-                            .push(ReactionJob::Adopt { result });
-                    }
+                    Some(settlement) => self
+                        .microtasks
+                        .push_back(Microtask::Adopt { result, settlement }),
+                    None => self
+                        .heap
+                        .promise_mut(id)?
+                        .reactions
+                        .push(ReactionJob::Adopt { result }),
                 }
-                return Ok(());
+                Ok(())
             }
-            if let Some(then_fn) = self.thenable_then(id)? {
+            ResolutionInput::Thenable { receiver, then } => {
                 let (resolve_id, reject_id) = self.alloc_capability_pair(result)?;
                 let invocation = self.invoke(
                     host,
-                    &then_fn,
+                    &then,
                     vec![Value::Object(resolve_id), Value::Object(reject_id)],
-                    &Value::Object(id),
+                    &receiver,
                 )?;
                 if let Invocation::Thrown(error) = invocation {
                     self.capability_call(host, reject_id, error)?;
                 }
-                return Ok(());
+                Ok(())
+            }
+            ResolutionInput::Thrown(error) => self.reject_if_open(result, error),
+            ResolutionInput::Plain(value) => {
+                self.heap.promise_mut(result)?.locked = true;
+                self.settle(result, Settlement::Fulfilled(value))
             }
         }
-        self.heap.promise_mut(result)?.locked = true;
-        self.settle(result, Settlement::Fulfilled(value))
-    }
-
-    pub(crate) fn thenable_then(&self, id: ObjectId) -> Result<Option<Value>, VmError> {
-        if matches!(
-            self.heap.get(id)?,
-            Object::Environment(_) | Object::Native(_)
-        ) {
-            return Ok(None);
-        }
-        let then = self
-            .heap
-            .get_member(&Value::Object(id), &Value::String("then".to_owned()))?;
-        if matches!(then, Value::Undefined) {
-            return Ok(None);
-        }
-        Ok(Some(then).filter(|value| self.is_callable(value)))
-    }
-
-    pub(crate) fn is_assimilable(&self, value: &Value) -> Result<bool, VmError> {
-        let Value::Object(id) = value else {
-            return Ok(false);
-        };
-        if self.heap.get(*id)?.as_promise().is_some() {
-            return Ok(true);
-        }
-        Ok(self.thenable_then(*id)?.is_some())
     }
 
     pub(crate) fn prepare_await(
@@ -102,20 +117,18 @@ impl Vm {
         host: &mut dyn Host,
         input: Value,
     ) -> Result<AwaitPrepared, VmError> {
-        let Value::Object(id) = input else {
-            return Ok(AwaitPrepared::Plain(input));
-        };
-        if self.heap.get(id)?.as_promise().is_some() {
-            return Ok(AwaitPrepared::Promise(id));
+        match self.classify_resolution(host, input)? {
+            ResolutionInput::Plain(Value::Object(_)) => Err(VmError::InvalidState(
+                "await only supports VM promises and plain values in this PoC".to_owned(),
+            )),
+            ResolutionInput::Plain(value) => Ok(AwaitPrepared::Plain(value)),
+            ResolutionInput::Promise(id) => Ok(AwaitPrepared::Promise(id)),
+            input => {
+                let promise = self.heap.alloc_promise();
+                self.resolve_input(host, promise, input)?;
+                Ok(AwaitPrepared::Promise(promise))
+            }
         }
-        if self.thenable_then(id)?.is_some() {
-            let promise = self.heap.alloc_promise();
-            self.resolve_promise(host, promise, Value::Object(id))?;
-            return Ok(AwaitPrepared::Promise(promise));
-        }
-        Err(VmError::InvalidState(
-            "await only supports VM promises and plain values in this PoC".to_owned(),
-        ))
     }
 
     pub(crate) fn run_finalize(
@@ -130,24 +143,24 @@ impl Vm {
         }
         match self.invoke(host, &on_finally, Vec::new(), &Value::Undefined)? {
             Invocation::Thrown(error) => self.reject_if_open(result, error),
-            Invocation::Value(value) => {
-                if self.is_assimilable(&value)? {
+            Invocation::Value(value) => match self.classify_resolution(host, value)? {
+                ResolutionInput::Plain(_) => self.apply_saved(host, result, &settlement.to_state()),
+                ResolutionInput::Thrown(error) => {
+                    self.resolve_input(host, result, ResolutionInput::Thrown(error))
+                }
+                input => {
                     if !matches!(self.heap.promise(result)?.state, PromiseState::Pending) {
                         return Ok(());
                     }
-                    {
-                        let promise = self.heap.promise_mut(result)?;
-                        promise.locked = true;
-                        promise.finally_settlement = Some(settlement.to_state());
-                    }
                     let tail = self.heap.alloc_promise();
-                    self.heap.promise_mut(result)?.adopting = Some(tail);
+                    let promise = self.heap.promise_mut(result)?;
+                    promise.locked = true;
+                    promise.finally_settlement = Some(settlement.to_state());
+                    promise.adopting = Some(tail);
                     self.react(tail, ReactionJob::Adopt { result })?;
-                    self.resolve_promise(host, tail, value)
-                } else {
-                    self.apply_saved(host, result, &settlement.to_state())
+                    self.resolve_input(host, tail, input)
                 }
-            }
+            },
         }
     }
 

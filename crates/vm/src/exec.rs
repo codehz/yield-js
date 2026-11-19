@@ -2,9 +2,12 @@
 //! Handlers run in one place; call sites do not each reimplement catch.
 
 use crate::builtins::type_error;
-use crate::bytecode::{ExceptionHandler, Instr, Slot, SlotKind, UnaryOp};
+use crate::bytecode::{
+    ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind, UnaryOp,
+};
 use crate::error::VmError;
 use crate::frame::Frame;
+use crate::heap::{Property, object_id};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -177,9 +180,8 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetMember { dst, object, key } => {
-                let value = self.read_member(&frame.read(object)?, &frame.read(key)?)?;
-                frame.write(dst, value)?;
-                Ok(Step::Next)
+                let invocation = self.read_member(host, &frame.read(object)?, &frame.read(key)?)?;
+                store_invocation(frame, dst, invocation)
             }
             Instr::GetBuiltin { dst, builtin } => {
                 let id = self.builtin_id(builtin)?;
@@ -192,17 +194,28 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::SetMember { object, key, src } => {
-                let object_value = frame.read(object)?;
-                let key_value = frame.read(key)?;
-                if let Value::String(name) = &key_value
-                    && self.prototype_write_rejected(&object_value, name)
-                {
-                    return Ok(Step::Throw(type_error(
-                        "Cannot assign to read only property 'prototype'",
-                    )));
+                match self.write_member(
+                    host,
+                    &frame.read(object)?,
+                    &frame.read(key)?,
+                    frame.read(src)?,
+                )? {
+                    Invocation::Value(_) => Ok(Step::Next),
+                    Invocation::Thrown(value) => Ok(Step::Throw(value)),
                 }
-                self.heap
-                    .set_member(&object_value, &key_value, frame.read(src)?)?;
+            }
+            Instr::DefineProperty {
+                object,
+                key,
+                src,
+                kind,
+            } => {
+                self.define_property(
+                    &frame.read(object)?,
+                    &frame.read(key)?,
+                    frame.read(src)?,
+                    kind,
+                )?;
                 Ok(Step::Next)
             }
             Instr::GetBinding { dst, binding } => {
@@ -264,8 +277,86 @@ impl Vm {
         store_invocation(frame, dst, invocation)
     }
 
-    fn read_member(&mut self, object: &Value, key: &Value) -> Result<Value, VmError> {
-        self.heap.get_member(object, key)
+    pub(crate) fn read_member(
+        &mut self,
+        host: &mut dyn Host,
+        object: &Value,
+        key: &Value,
+    ) -> Result<Invocation, VmError> {
+        let key = ops::property_key(key)?;
+        let id = object_id(object, "property access on a non-object")?;
+        match self.heap.lookup_property(id, &key)? {
+            Some(Property::Data(value)) => Ok(Invocation::Value(value)),
+            Some(Property::Accessor { get: Some(get), .. }) => {
+                self.invoke(host, &Value::Object(get), Vec::new(), object)
+            }
+            _ => Ok(Invocation::Value(Value::Undefined)),
+        }
+    }
+
+    fn write_member(
+        &mut self,
+        host: &mut dyn Host,
+        object: &Value,
+        key: &Value,
+        value: Value,
+    ) -> Result<Invocation, VmError> {
+        let key = ops::property_key(key)?;
+        let id = object_id(object, "property write on a non-object")?;
+        if self.prototype_write_rejected(object, &key) {
+            return Ok(Invocation::Thrown(type_error(
+                "Cannot assign to read only property 'prototype'",
+            )));
+        }
+        match self.heap.lookup_property(id, &key)? {
+            Some(Property::Accessor { set: Some(set), .. }) => {
+                if let Invocation::Thrown(error) =
+                    self.invoke(host, &Value::Object(set), vec![value], object)?
+                {
+                    return Ok(Invocation::Thrown(error));
+                }
+            }
+            Some(Property::Accessor { set: None, .. }) => {
+                return Ok(Invocation::Thrown(type_error(
+                    "Cannot set property without a setter",
+                )));
+            }
+            _ => self.heap.set_own(id, &key, value)?,
+        }
+        Ok(Invocation::Value(Value::Undefined))
+    }
+
+    fn define_property(
+        &mut self,
+        object: &Value,
+        key: &Value,
+        value: Value,
+        kind: PropertyDefinition,
+    ) -> Result<(), VmError> {
+        let key = ops::property_key(key)?;
+        let id = object_id(object, "property definition on a non-object")?;
+        let property = match kind {
+            PropertyDefinition::Data => Property::Data(value),
+            PropertyDefinition::Get | PropertyDefinition::Set => {
+                let target = object_id(&value, "accessor definition requires a script method")?;
+                if !self
+                    .heap
+                    .get(target)?
+                    .as_function()
+                    .and_then(|function| self.build.function(function.func_id))
+                    .is_some_and(Function::is_accessor_method)
+                {
+                    return Err(VmError::InvalidState(
+                        "accessor definition requires a synchronous script method".to_owned(),
+                    ));
+                }
+                Property::Accessor {
+                    get: (kind == PropertyDefinition::Get).then_some(target),
+                    set: (kind == PropertyDefinition::Set).then_some(target),
+                }
+            }
+        };
+        self.heap.define_property(id, key, property)
     }
 
     fn make_closure(

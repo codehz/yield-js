@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 5;
+pub const BYTECODE_VERSION: u32 = 6;
 
 /// VM-provided callable names, in builtin-index order.
 ///
@@ -99,6 +99,14 @@ pub enum UnaryOp {
     Void,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PropertyDefinition {
+    Data,
+    Get,
+    Set,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "instruction", rename_all = "snake_case")]
 pub enum Instr {
@@ -169,6 +177,12 @@ pub enum Instr {
         object: Slot,
         key: Slot,
         src: Slot,
+    },
+    DefineProperty {
+        object: Slot,
+        key: Slot,
+        src: Slot,
+        kind: PropertyDefinition,
     },
     GetBinding {
         dst: Slot,
@@ -251,6 +265,7 @@ pub struct Function {
     pub name: String,
     pub is_async: bool,
     pub is_arrow: bool,
+    pub is_method: bool,
     /// Parameter destinations in source order. Does not include [`Self::this_param`].
     pub params: Vec<ParamTarget>,
     /// Receiver binding when this function, or an arrow nested in it, uses `this`.
@@ -264,6 +279,14 @@ pub struct Function {
 }
 
 impl Function {
+    pub fn is_constructable(&self) -> bool {
+        !self.is_async && !self.is_arrow && !self.is_method
+    }
+
+    pub(crate) fn is_accessor_method(&self) -> bool {
+        self.is_method && !self.is_async && !self.is_arrow
+    }
+
     /// Whether this function allocates an invocation environment.
     ///
     /// Derived from validated code. A bytecode flag would be forgeable and is
@@ -391,6 +414,12 @@ impl Build {
         let mut func_ids = std::collections::BTreeSet::new();
         let mut func_names = std::collections::BTreeSet::new();
         for function in &self.functions {
+            if function.is_method && function.is_arrow {
+                return Err(format!(
+                    "function {} cannot be both a method and an arrow",
+                    function.func_id
+                ));
+            }
             if !func_ids.insert(function.func_id) {
                 return Err(format!("duplicate func_id {}", function.func_id));
             }
@@ -591,6 +620,13 @@ impl Build {
                     check_slot(*object, "SetMember.object")?;
                     check_slot(*key, "SetMember.key")?;
                     check_slot(*src, "SetMember.src")?;
+                }
+                Instr::DefineProperty {
+                    object, key, src, ..
+                } => {
+                    check_slot(*object, "DefineProperty.object")?;
+                    check_slot(*key, "DefineProperty.key")?;
+                    check_slot(*src, "DefineProperty.src")?;
                 }
                 Instr::GetBinding { dst, .. } => check_slot(*dst, "GetBinding.dst")?,
                 Instr::SetBinding { src, .. } => check_slot(*src, "SetBinding.src")?,
