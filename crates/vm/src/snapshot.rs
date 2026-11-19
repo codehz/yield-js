@@ -19,13 +19,14 @@ use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
     OwnedEdge, PromiseState, Property, ReactionJob, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
+use crate::heap::{CollectionIteration, CollectionKind};
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Math is a builtin root and its PRNG state is persisted.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 25;
+// Ordered collection records, live iterators, and collection builtin roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 26;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -536,6 +537,14 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let json = plain_root(ROOT_JSON)?;
     let object = builtin_root(ROOT_OBJECT, "Object")?;
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
+    let map = builtin_root("map", "Map")?;
+    let map_prototype = plain_root("map.prototype")?;
+    let map_iterator_prototype = plain_root("mapIterator.prototype")?;
+    require_fixed_prototype(heap, map, map_prototype, "Map")?;
+    let set = builtin_root("set", "Set")?;
+    let set_prototype = plain_root("set.prototype")?;
+    let set_iterator_prototype = plain_root("setIterator.prototype")?;
+    require_fixed_prototype(heap, set, set_prototype, "Set")?;
     let array_prototype = required_root(roots, ROOT_ARRAY_PROTOTYPE)?;
     if !matches!(heap.get(array_prototype)?, Object::Array(_)) {
         return Err(VmError::InvalidSnapshot(
@@ -661,6 +670,12 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         }
     }
     Ok(BuiltinRoots {
+        map,
+        map_prototype,
+        map_iterator_prototype,
+        set,
+        set_prototype,
+        set_iterator_prototype,
         promise,
         promise_prototype: prototype,
         queue_microtask: queue,
@@ -800,6 +815,36 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
                 "bound target {} is missing or not a function",
                 bound.target
             )));
+        }
+        if let Object::CollectionIterator {
+            kind,
+            iteration,
+            target,
+            next_index,
+            ..
+        } = heap.get(id)?
+        {
+            let length = match (kind, target) {
+                (_, None) => Some(0),
+                (CollectionKind::Map, Some(target)) => match heap.get(*target) {
+                    Ok(Object::Map { entries, .. }) => Some(entries.len()),
+                    _ => None,
+                },
+                (CollectionKind::Set, Some(target)) => match heap.get(*target) {
+                    Ok(Object::Set { elements, .. }) => Some(elements.len()),
+                    _ => None,
+                },
+            };
+            if length.is_none_or(|length| *next_index > length)
+                || matches!(
+                    (kind, iteration),
+                    (CollectionKind::Set, CollectionIteration::Keys)
+                )
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "collection iterator {id} has an invalid target, kind, or position"
+                )));
+            }
         }
         if let Object::ArrayIterator {
             array: Some(array), ..

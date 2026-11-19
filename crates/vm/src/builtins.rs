@@ -10,7 +10,9 @@
 
 use std::collections::BTreeMap;
 
+use crate::collections::CollectionMethod;
 use crate::error::VmError;
+use crate::heap::CollectionKind;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
     ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseState, Property, ReactionJob,
@@ -100,11 +102,29 @@ pub(crate) struct BuiltinRoots {
     pub object: ObjectId,
     pub math: ObjectId,
     pub json: ObjectId,
+    pub map: ObjectId,
+    pub map_prototype: ObjectId,
+    pub map_iterator_prototype: ObjectId,
+    pub set: ObjectId,
+    pub set_prototype: ObjectId,
+    pub set_iterator_prototype: ObjectId,
 }
 
 impl BuiltinRoots {
     pub(crate) fn to_map(self) -> BTreeMap<String, ObjectId> {
         BTreeMap::from([
+            ("map".to_owned(), self.map),
+            ("map.prototype".to_owned(), self.map_prototype),
+            (
+                "mapIterator.prototype".to_owned(),
+                self.map_iterator_prototype,
+            ),
+            ("set".to_owned(), self.set),
+            ("set.prototype".to_owned(), self.set_prototype),
+            (
+                "setIterator.prototype".to_owned(),
+                self.set_iterator_prototype,
+            ),
             (ROOT_PROMISE.to_owned(), self.promise),
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
@@ -182,6 +202,9 @@ pub(crate) enum BuiltinCall {
     SymbolFor,
     SymbolKeyFor,
     ArrayConstructor,
+    CollectionConstructor(CollectionKind),
+    CollectionMethod(CollectionKind, CollectionMethod),
+    CollectionNext(CollectionKind),
     ArrayOperation(String),
     ArrayValues,
     ArrayIteratorNext,
@@ -234,6 +257,7 @@ enum Constructor {
     Promise,
     Object,
     Array,
+    Collection(CollectionKind),
     Error { name: String },
 }
 
@@ -592,7 +616,17 @@ impl Vm {
                 .define_data(reflect, name, Value::Object(method), Attributes::METHOD)
                 .expect("Reflect stores methods");
         }
+        let (map, map_prototype, map_iterator_prototype) =
+            self.init_collection(CollectionKind::Map, &identity);
+        let (set, set_prototype, set_iterator_prototype) =
+            self.init_collection(CollectionKind::Set, &identity);
         self.builtins = BuiltinRoots {
+            map,
+            map_prototype,
+            map_iterator_prototype,
+            set,
+            set_prototype,
+            set_iterator_prototype,
             promise,
             promise_prototype: prototype,
             queue_microtask: queue,
@@ -661,6 +695,8 @@ impl Vm {
             17 => Ok(Value::Object(self.builtins.number)),
             18 => Ok(Value::Object(self.builtins.math)),
             19 => Ok(Value::Object(self.builtins.json)),
+            20 => Ok(Value::Object(self.builtins.map)),
+            21 => Ok(Value::Object(self.builtins.set)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -737,6 +773,9 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
             Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => Some(Constructor::Array),
+            Some(Dispatch::Builtin(BuiltinCall::CollectionConstructor(kind))) => {
+                Some(Constructor::Collection(kind))
+            }
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 Some(Constructor::Error { name })
             }
@@ -799,6 +838,9 @@ impl Vm {
                 return self.construct_object(&args);
             }
             Constructor::Array => self.construct_array(args)?,
+            Constructor::Collection(kind) => {
+                return self.construct_collection(host, kind, &args, prototype);
+            }
             Constructor::Error { name } => self.construct_error(host, &name, args)?,
         };
         if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
@@ -1011,6 +1053,13 @@ impl Vm {
             BuiltinCall::ArrayConstructor => self.construct_array(args),
             BuiltinCall::ArrayOperation(name) => self.array_operation(host, &name, receiver, args),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
+            BuiltinCall::CollectionConstructor(_) => {
+                self.throw_type_error("Map and Set require new")
+            }
+            BuiltinCall::CollectionMethod(kind, method) => {
+                self.collection_method(host, kind, method, receiver, &args)
+            }
+            BuiltinCall::CollectionNext(kind) => self.collection_next(kind, receiver),
             BuiltinCall::StringConstructor => self.call_string(host, &args, false),
             BuiltinCall::StringMethod(method) => {
                 self.call_string_method(host, method, receiver, &args)
@@ -1376,7 +1425,11 @@ impl Vm {
         self.iterator_result(Value::String(code_point.to_string()), false)
     }
 
-    fn iterator_result(&mut self, value: Value, done: bool) -> Result<Invocation, VmError> {
+    pub(crate) fn iterator_result(
+        &mut self,
+        value: Value,
+        done: bool,
+    ) -> Result<Invocation, VmError> {
         let result = self.heap.alloc_plain();
         self.heap.set_own_string(result, "value", value)?;
         self.heap
@@ -2545,6 +2598,19 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         }
         ("Object", Some("isFrozen")) => {
             Some(BuiltinCall::TestIntegrityLevel(IntegrityLevel::Frozen))
+        }
+        ("Map", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Map)),
+        ("Set", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Set)),
+        ("MapIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Map)),
+        ("SetIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Set)),
+        (name @ ("Map" | "Set"), Some(member)) => {
+            let kind = if name == "Map" {
+                CollectionKind::Map
+            } else {
+                CollectionKind::Set
+            };
+            CollectionMethod::lookup(kind, member)
+                .map(|method| BuiltinCall::CollectionMethod(kind, method))
         }
         ("Array", Some("join")) => Some(BuiltinCall::ArrayJoin),
         ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),

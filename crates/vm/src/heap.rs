@@ -561,6 +561,21 @@ pub struct BoundObject {
     pub object: PlainObject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionKind {
+    Map,
+    Set,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionIteration {
+    Keys,
+    Values,
+    Entries,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -568,6 +583,22 @@ pub enum Object {
     Native(NativeObject),
     Plain(PlainObject),
     Array(ArrayObject),
+    // Deleted slots remain empty so live cursors never shift.
+    Map {
+        object: PlainObject,
+        entries: Vec<Option<(Value, Value)>>,
+    },
+    Set {
+        object: PlainObject,
+        elements: Vec<Option<Value>>,
+    },
+    CollectionIterator {
+        object: PlainObject,
+        kind: CollectionKind,
+        iteration: CollectionIteration,
+        target: Option<ObjectId>,
+        next_index: usize,
+    },
     ArrayIterator {
         object: PlainObject,
         array: Option<ObjectId>,
@@ -674,6 +705,9 @@ impl Object {
     fn extensible_mut(&mut self) -> Option<&mut bool> {
         Some(match self {
             Self::Plain(o)
+            | Self::Map { object: o, .. }
+            | Self::Set { object: o, .. }
+            | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
@@ -689,6 +723,9 @@ impl Object {
     pub(crate) fn is_extensible(&self) -> bool {
         match self {
             Self::Plain(o)
+            | Self::Map { object: o, .. }
+            | Self::Set { object: o, .. }
+            | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
@@ -747,6 +784,9 @@ impl Object {
     fn tables(&self) -> Option<PropertyTables<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Map { object: o, .. }
+            | Self::Set { object: o, .. }
+            | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
@@ -762,6 +802,9 @@ impl Object {
     fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Map { object: o, .. }
+            | Self::Set { object: o, .. }
+            | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
@@ -851,6 +894,9 @@ impl Object {
     pub(crate) fn prototype(&self) -> Option<ObjectId> {
         match self {
             Self::Plain(plain)
+            | Self::Map { object: plain, .. }
+            | Self::Set { object: plain, .. }
+            | Self::CollectionIterator { object: plain, .. }
             | Self::ArrayIterator { object: plain, .. }
             | Self::StringIterator { object: plain, .. } => plain.prototype,
             Self::Array(array) => array.prototype,
@@ -866,6 +912,9 @@ impl Object {
     fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Map { object: o, .. }
+            | Self::Set { object: o, .. }
+            | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
@@ -921,6 +970,22 @@ impl Object {
             | Self::Plain(_)
             | Self::BuiltinStatic(_)
             | Self::StringIterator { .. } => {}
+            Self::Map { entries, .. } => {
+                for (key, value) in entries.iter().flatten() {
+                    push_value(out, key);
+                    push_value(out, value);
+                }
+            }
+            Self::Set { elements, .. } => {
+                for value in elements.iter().flatten() {
+                    push_value(out, value);
+                }
+            }
+            Self::CollectionIterator { target, .. } => {
+                if let Some(id) = target {
+                    out.push(OwnedEdge::Object(*id));
+                }
+            }
             Self::ArrayIterator { array, .. } => {
                 if let Some(id) = array {
                     out.push(OwnedEdge::Object(*id));
@@ -1610,6 +1675,9 @@ impl Heap {
     ) -> Result<(), VmError> {
         let plain = match self.get_mut(id)? {
             Object::Plain(plain)
+            | Object::Map { object: plain, .. }
+            | Object::Set { object: plain, .. }
+            | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
             | Object::StringIterator { object: plain, .. } => plain,
             _ => {

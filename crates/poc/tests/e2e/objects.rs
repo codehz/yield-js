@@ -438,3 +438,47 @@ fn restore_rejects_array_index_past_length() {
         matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
     );
 }
+
+#[test]
+fn restore_rejects_corrupt_collection_records() {
+    let mut s = Suspended::start(
+        "export async function run() { const m = new Map([[{}, Symbol()]]); const i = m.keys(); const s = new Set([{}]); await wait('a'); return i.next().done || s.size; }",
+        vec![],
+    );
+    let snapshot = s.snapshot();
+    for (fault, message) in [
+        (0, "missing object"),
+        (1, "missing symbol"),
+        (2, "missing object"),
+        (3, "invalid target"),
+        (4, "invalid target"),
+        (5, "invalid target"),
+    ] {
+        let mut corrupt = snapshot.clone();
+        let set_id = corrupt
+            .objects
+            .iter()
+            .find(|record| matches!(record.object, Object::Set { .. }))
+            .unwrap()
+            .id;
+        let changed = corrupt.objects.iter_mut().any(|record| {
+            match (fault, &mut record.object) {
+                (0, Object::Map { entries, .. }) => {
+                    entries[0].as_mut().unwrap().0 = Value::Object(u32::MAX)
+                }
+                (1, Object::Map { entries, .. }) => {
+                    entries[0].as_mut().unwrap().1 = Value::Symbol(u32::MAX)
+                }
+                (2, Object::Set { elements, .. }) => elements[0] = Some(Value::Object(u32::MAX)),
+                (3, Object::CollectionIterator { target, .. }) => *target = Some(set_id),
+                (4, Object::CollectionIterator { target, .. }) => *target = Some(u32::MAX),
+                (5, Object::CollectionIterator { next_index, .. }) => *next_index = usize::MAX,
+                _ => return false,
+            }
+            true
+        });
+        assert!(changed);
+        let error = s.restore(corrupt).expect_err("corrupt collection record");
+        assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
+    }
+}

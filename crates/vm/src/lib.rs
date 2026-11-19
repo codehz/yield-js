@@ -6,6 +6,7 @@
 mod array;
 mod builtins;
 pub mod bytecode;
+mod collections;
 pub mod error;
 mod exec;
 mod frame;
