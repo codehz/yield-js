@@ -1,9 +1,9 @@
 //! Exception and abrupt-completion lowering.
 //!
 //! `finally` does not use the VM's native exception stack. A pending
-//! `return` or `throw` is an explicit completion (kind + payload) routed to
-//! the finalizer, then dispatched after the finalizer body. `await` records
-//! both resume entries before slot allocation fills `saved_slots`.
+//! `return`, `throw`, `break`, or `continue` is an explicit completion
+//! (kind + payload) routed to the finalizer and dispatched after its body.
+//! `await` records both resume entries before slot allocation fills `saved_slots`.
 
 use oxc::ast::ast::*;
 use yield_vm::bytecode::{ExceptionHandler, Instr};
@@ -18,6 +18,7 @@ pub(super) enum Completion {
     Normal,
     Return,
     Throw,
+    Jump(usize),
 }
 
 impl Completion {
@@ -26,13 +27,17 @@ impl Completion {
             Self::Normal => 0.0,
             Self::Return => 1.0,
             Self::Throw => 2.0,
+            Self::Jump(index) => 3.0 + index as f64,
         }
     }
 }
 
-pub(super) enum BreakTarget {
-    Loop,
-    Switch,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum JumpTarget {
+    LoopBreak(usize),
+    SwitchBreak(usize),
+    LabelBreak(usize),
+    LoopContinue(usize),
 }
 
 pub(super) struct Loop {
@@ -54,6 +59,7 @@ struct Finalizer {
     payload: Reg,
     entry: Option<usize>,
     entry_jumps: Vec<usize>,
+    jump_routes: Vec<(JumpTarget, usize)>,
 }
 
 /// One active statement label. `loop_index` is the position in `loops` the
@@ -93,14 +99,16 @@ impl<'ast> Control<'ast> {
         self.finalizers.is_empty()
     }
 
-    pub(super) fn finalizer_depth(&self) -> usize {
+    fn finalizer_depth(&self) -> usize {
         self.finalizers.len()
     }
 
-    pub(super) fn innermost_continue(&self) -> Option<(Option<usize>, usize)> {
-        self.loops
-            .last()
-            .map(|loop_context| (loop_context.continue_target, loop_context.finalizer_depth))
+    pub(super) fn innermost_continue(&self) -> Option<(JumpTarget, usize)> {
+        let index = self.loops.len().checked_sub(1)?;
+        Some((
+            JumpTarget::LoopContinue(index),
+            self.loops[index].finalizer_depth,
+        ))
     }
 
     pub(super) fn push_loop(&mut self, continue_target: Option<usize>) {
@@ -133,45 +141,20 @@ impl<'ast> Control<'ast> {
         self.switches.pop().expect("switch stack")
     }
 
-    pub(super) fn push_switch_break(&mut self, jump: usize) {
-        self.switches
-            .last_mut()
-            .expect("switch stack checked above")
-            .break_jumps
-            .push(jump);
-    }
-
     /// Innermost breakable: the top of whichever stack has the larger
-    /// sequence number. Returns that frame's finalizer depth.
-    pub(super) fn innermost_break(&self) -> Option<(BreakTarget, usize)> {
-        let top_loop = self.loops.last().map(|l| (l.seq, l.finalizer_depth));
-        let top_switch = self.switches.last().map(|s| (s.seq, s.finalizer_depth));
-        match (top_loop, top_switch) {
-            (Some((loop_seq, depth)), Some((switch_seq, _))) if loop_seq > switch_seq => {
-                Some((BreakTarget::Loop, depth))
-            }
-            (Some(_), Some((_, depth))) | (None, Some((_, depth))) => {
-                Some((BreakTarget::Switch, depth))
-            }
-            (Some((_, depth)), None) => Some((BreakTarget::Loop, depth)),
-            (None, None) => None,
+    /// sequence number. Returns its indexed target and finalizer depth.
+    pub(super) fn innermost_break(&self) -> Option<(JumpTarget, usize)> {
+        match (self.loops.last(), self.switches.last()) {
+            (l, Some(s)) if l.is_none_or(|l| l.seq < s.seq) => Some((
+                JumpTarget::SwitchBreak(self.switches.len() - 1),
+                s.finalizer_depth,
+            )),
+            (Some(l), _) => Some((
+                JumpTarget::LoopBreak(self.loops.len() - 1),
+                l.finalizer_depth,
+            )),
+            (None, _) => None,
         }
-    }
-
-    pub(super) fn push_break(&mut self, jump: usize) {
-        self.loops
-            .last_mut()
-            .expect("loop stack checked above")
-            .break_jumps
-            .push(jump);
-    }
-
-    pub(super) fn push_continue(&mut self, jump: usize) {
-        self.loops
-            .last_mut()
-            .expect("loop stack checked above")
-            .continue_jumps
-            .push(jump);
     }
 
     pub(super) fn loops_len(&self) -> usize {
@@ -211,15 +194,7 @@ impl<'ast> Control<'ast> {
         self.labels[index].loop_index
     }
 
-    pub(super) fn push_label_break(&mut self, index: usize, jump: usize) {
-        self.labels[index].break_jumps.push(jump);
-    }
-
-    pub(super) fn loop_continue_target(&self, index: usize) -> Option<usize> {
-        self.loops[index].continue_target
-    }
-
-    pub(super) fn push_continue_to(&mut self, index: usize, jump: usize) {
+    fn push_continue_to(&mut self, index: usize, jump: usize) {
         self.loops[index].continue_jumps.push(jump);
     }
 
@@ -237,6 +212,59 @@ impl<'ast> Control<'ast> {
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
+    pub(super) fn emit_control_jump(
+        &mut self,
+        target: JumpTarget,
+        depth: usize,
+    ) -> Result<(), CompileError> {
+        let current_depth = self.control.finalizer_depth();
+        debug_assert!(depth <= current_depth);
+        if depth < current_depth {
+            // The target encloses this finalizer and stays on its stack
+            // until the last finalizer it crosses has dispatched the jump.
+            let routes = &mut self
+                .control
+                .finalizers
+                .last_mut()
+                .expect("finalizer")
+                .jump_routes;
+            let route = (target, depth);
+            let index = routes
+                .iter()
+                .position(|entry| *entry == route)
+                .unwrap_or_else(|| {
+                    let index = routes.len();
+                    routes.push(route);
+                    index
+                });
+            self.route_completion(Completion::Jump(index), None)?;
+            return Ok(());
+        }
+        match target {
+            JumpTarget::LoopBreak(index) => {
+                let jump = self.jump();
+                self.control.loops[index].break_jumps.push(jump);
+            }
+            JumpTarget::SwitchBreak(index) => {
+                let jump = self.jump();
+                self.control.switches[index].break_jumps.push(jump);
+            }
+            JumpTarget::LabelBreak(index) => {
+                let jump = self.jump();
+                self.control.labels[index].break_jumps.push(jump);
+            }
+            JumpTarget::LoopContinue(index) => {
+                if let Some(pc) = self.control.loops[index].continue_target {
+                    self.jump_to(pc);
+                } else {
+                    let jump = self.jump();
+                    self.control.push_continue_to(index, jump);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn emit_await(&mut self, input: Reg) -> Result<Reg, CompileError> {
         let result = self.alloc_reg()?;
         let resume = self.control.awaits.len() as u32;
@@ -285,6 +313,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 payload,
                 entry: None,
                 entry_jumps: Vec::new(),
+                jump_routes: Vec::new(),
             });
         }
 
@@ -337,7 +366,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         if has_finalizer {
-            // Stop routing returns from the finalizer to itself.
+            // Abrupt completions in the finalizer must not re-enter it.
             let mut context = self.control.finalizers.pop().expect("finalizer stack");
             let throw_stub = self.pc();
             self.emit(Instr::Move {
@@ -465,8 +494,21 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         });
         let not_return = self.branch_false(is_return);
         self.emit_pending_return(context.payload)?;
-        let throw_pc = self.pc();
-        self.patch_jump(not_return, throw_pc)?;
+        self.patch_jump(not_return, self.pc())?;
+
+        for (index, &(target, depth)) in context.jump_routes.iter().enumerate() {
+            let jumping = self.emit_number(Completion::Jump(index).value())?;
+            let is_jump = self.alloc_reg()?;
+            self.emit(Instr::Binary {
+                dst: self.slot(is_jump),
+                op: yield_vm::bytecode::BinaryOp::StrictEq,
+                lhs: self.slot(context.kind),
+                rhs: self.slot(jumping),
+            });
+            let not_jump = self.branch_false(is_jump);
+            self.emit_control_jump(target, depth)?;
+            self.patch_jump(not_jump, self.pc())?;
+        }
         self.emit(Instr::Throw {
             src: self.slot(context.payload),
         });

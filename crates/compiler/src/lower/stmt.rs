@@ -5,6 +5,7 @@ use oxc::ast::ast::*;
 use oxc::span::GetSpan;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
+use super::control::JumpTarget;
 use super::{FunctionSource, Lowerer};
 use crate::error::{CompileError, unsupported};
 
@@ -260,16 +261,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ));
             };
             let depth = self.control.label_finalizer_depth(index);
-            if self.control.finalizer_depth() > depth {
-                return Err(unsupported(
-                    self.source_text(),
-                    statement.span,
-                    "break across finally",
-                ));
-            }
-            let jump = self.jump();
-            self.control.push_label_break(index, jump);
-            return Ok(());
+            return self.emit_control_jump(JumpTarget::LabelBreak(index), depth);
         }
         let Some((target, depth)) = self.control.innermost_break() else {
             return Err(CompileError::new(
@@ -278,19 +270,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "break outside loop",
             ));
         };
-        if self.control.finalizer_depth() > depth {
-            return Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "break across finally",
-            ));
-        }
-        let jump = self.jump();
-        match target {
-            super::control::BreakTarget::Loop => self.control.push_break(jump),
-            super::control::BreakTarget::Switch => self.control.push_switch_break(jump),
-        }
-        Ok(())
+        self.emit_control_jump(target, depth)
     }
 
     /// Non-labelled `switch` lowering: strict-equality test chain in source
@@ -399,42 +379,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ));
             };
             let depth = self.control.label_finalizer_depth(index);
-            if self.control.finalizer_depth() > depth {
-                return Err(unsupported(
-                    self.source_text(),
-                    statement.span,
-                    "continue across finally",
-                ));
-            }
-            if let Some(target) = self.control.loop_continue_target(loop_index) {
-                self.jump_to(target);
-            } else {
-                let jump = self.jump();
-                self.control.push_continue_to(loop_index, jump);
-            }
-            return Ok(());
+            return self.emit_control_jump(JumpTarget::LoopContinue(loop_index), depth);
         }
-        let Some((continue_target, loop_depth)) = self.control.innermost_continue() else {
+        let Some((target, depth)) = self.control.innermost_continue() else {
             return Err(CompileError::new(
                 self.source_text(),
                 statement.span,
                 "continue outside loop",
             ));
         };
-        if self.control.finalizer_depth() > loop_depth {
-            return Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "continue across finally",
-            ));
-        }
-        if let Some(target) = continue_target {
-            self.jump_to(target);
-        } else {
-            let jump = self.jump();
-            self.control.push_continue(jump);
-        }
-        Ok(())
+        self.emit_control_jump(target, depth)
     }
 
     fn patch_loop(

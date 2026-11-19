@@ -39,7 +39,6 @@
 - **`for…in` / `for…of`**（同步 for…of 在设计目标内，当前无实现）
 - **`with`、`debugger`**
 - **`class` 声明**（整个类语法拒绝）
-- **`break`/`continue` 穿越 `finally`**（"break across finally" / "continue across finally"）：finalizer 语义下显式拒绝，不是缺 `Instr`，而是缺跨 finalizer 的 break/continue 重写
 - **`switch` 重复 default**（编译期拒绝，正确但属于实现限制的下游）
 
 ### 2.4 顶层
@@ -75,7 +74,6 @@ flowchart LR
   C --> D[标准内建 Object/Array/String/Math/JSON]
   A --> E[Proxy/Reflect]
   F[类语法 + default/rest/解构] --> B
-  G[break/continue 跨 finally] --> H[异常/控制流重写完善]
 ```
 
 ## 6. 已知非缺口（明确不做，勿当缺口实现）

@@ -63,7 +63,7 @@ cargo run -p yield-poc
 - 字面量、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
-- `if`、`while`、`do...while`、`for`、`break`、`continue`、`return`、`throw`、`try/catch/finally`。
+- `if`、`while`、`do...while`、`for`、`switch`、语句标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。`break` / `continue`（含带标签的跳转）可穿越 `finally`。
 
 不支持或尚未精确实现的语法在编译期报告 `unsupported syntax: ...` 与源码行列。
 
@@ -71,7 +71,7 @@ cargo run -p yield-poc
 
 - `super`、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - 类、模板字符串、generator、async generator、顶层 `await`。
-- `for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
+- `for...in`、`for...of`。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
 - VM 内部抛出的错误仍是字符串。`Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。Symbol 不能 `new`、不能跨宿主边界，参与强制数值/字符串转换时抛可捕获的 `TypeError`。没有 `Date`、`RegExp`、`JSON` 和 `Math`。

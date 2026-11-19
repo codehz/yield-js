@@ -64,22 +64,6 @@ fn rejects_delete_of_property_with_location() {
 }
 
 #[test]
-fn rejects_labelled_jump_across_finally() {
-    for keyword in ["break", "continue"] {
-        let source = format!(
-            "function run(){{ outer: while(true){{ try {{\n    {keyword} outer;\n}} finally {{}} }} }}"
-        );
-        let error = compile(&source, &CompileOptions::default()).expect_err(keyword);
-        assert!(
-            error.message().contains("across finally"),
-            "{keyword}: {error}"
-        );
-        assert_eq!(error.line(), 2, "{keyword}");
-        assert_eq!(error.column(), 5, "{keyword}");
-    }
-}
-
-#[test]
 fn rejects_invalid_label_uses_with_location() {
     let cases = [
         "function run() { break missing; }",
