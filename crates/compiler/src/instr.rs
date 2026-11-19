@@ -15,9 +15,7 @@ use crate::emit::Reg;
 /// rejection path has its own resume entry, so neither counts. Exhaustive so a
 /// new opcode forces an explicit classification.
 ///
-/// Arithmetic and relational operators coerce operands, and a Symbol operand
-/// throws a catchable `TypeError` there. Equality and `typeof`/`!`/`void`
-/// never coerce, so those instructions stay non-throwing.
+/// Coercion may invoke script (including for loose equality).
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
     match instruction {
         Instr::Throw { .. }
@@ -32,13 +30,11 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::SetMember { .. } => true,
-        Instr::Binary { op, .. } => !matches!(
-            *op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
-        ),
+        Instr::Binary { op, .. } => !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe),
         Instr::Unary { op, .. } => {
             matches!(*op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
         }
+        Instr::ToString { .. } | Instr::ToPropertyKey { .. } | Instr::DefineProperty { .. } => true,
         Instr::Const { .. }
         | Instr::Undefined { .. }
         | Instr::Move { .. }
@@ -52,7 +48,6 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::GetBuiltin { .. }
-        | Instr::DefineProperty { .. }
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
         | Instr::DeclareBinding { .. }
@@ -81,6 +76,15 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::Unary { dst, src, .. } => {
             uses.insert(src.index);
+            defs.insert(dst.index);
+        }
+        Instr::ToString { dst, src } => {
+            uses.insert(src.index);
+            defs.insert(dst.index);
+        }
+        Instr::ToPropertyKey { dst, src, object } => {
+            uses.insert(src.index);
+            uses.extend(object.map(|slot| slot.index));
             defs.insert(dst.index);
         }
         Instr::CallImport { dst, args, .. } => {
@@ -199,6 +203,15 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             op,
             src: remap(src),
+        },
+        Instr::ToString { dst, src } => Instr::ToString {
+            dst: remap(dst),
+            src: remap(src),
+        },
+        Instr::ToPropertyKey { dst, src, object } => Instr::ToPropertyKey {
+            dst: remap(dst),
+            src: remap(src),
+            object: object.map(remap),
         },
         Instr::CallImport { dst, import, args } => Instr::CallImport {
             dst: remap(dst),

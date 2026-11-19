@@ -2,7 +2,7 @@
 
 use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
-use crate::value::{PropertyKey, Value};
+use crate::value::Value;
 
 pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
     matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
@@ -107,14 +107,6 @@ pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
         UnaryOp::BitNot => Value::Number((!to_int32_lossy(&value)) as f64),
         UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
         UnaryOp::Void => Value::Undefined,
-    }
-}
-
-pub(crate) fn property_key(value: &Value) -> Result<PropertyKey, VmError> {
-    match value {
-        Value::Symbol(id) => Ok(PropertyKey::Symbol(*id)),
-        Value::Number(number) if *number == 0.0 => Ok("0".into()),
-        _ => Ok(PropertyKey::String(to_js_string(value))),
     }
 }
 
@@ -271,6 +263,8 @@ pub(crate) fn to_js_string(value: &Value) -> String {
                 "Infinity".to_owned()
             } else if *value == f64::NEG_INFINITY {
                 "-Infinity".to_owned()
+            } else if *value == 0.0 {
+                "0".to_owned()
             } else {
                 value.to_string()
             }

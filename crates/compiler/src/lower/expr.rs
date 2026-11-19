@@ -164,8 +164,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let mut acc = self.emit_constant(Constant::String(first_text.to_owned()))?;
         for (index, expression) in template.expressions.iter().enumerate() {
             let value = self.compile_expression(expression)?;
+            let value = self.emit_to_string(value)?;
             acc = self.emit_string_add(acc, value)?;
-            // Text after expression i is quasi i + 1; skip appending it when
             // empty so the accumulator stays a plain value.
             let tail = &template.quasis[index + 1];
             let tail_text = self.template_element_text(tail)?;
@@ -189,6 +189,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             .as_ref()
             .and_then(|cooked| cooked.as_str())
             .ok_or_else(|| unsupported(self.source_text(), element.span, "invalid template escape"))
+    }
+
+    fn emit_to_string(&mut self, src: Reg) -> Result<Reg, CompileError> {
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::ToString {
+            dst: self.slot(dst),
+            src: self.slot(src),
+        });
+        Ok(dst)
+    }
+
+    fn emit_to_property_key(&mut self, src: Reg, object: Option<Reg>) -> Result<Reg, CompileError> {
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::ToPropertyKey {
+            dst: self.slot(dst),
+            src: self.slot(src),
+            object: object.map(|reg| self.slot(reg)),
+        });
+        Ok(dst)
     }
 
     fn emit_string_add(&mut self, lhs: Reg, rhs: Reg) -> Result<Reg, CompileError> {
@@ -773,6 +792,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         if let Some(member) = expression.left.as_member_expression() {
             let (object, key) = self.compile_member_parts(member)?;
+            let key = if member.is_computed() && expression.operator != AssignmentOperator::Assign {
+                self.emit_to_property_key(key, Some(object))?
+            } else {
+                key
+            };
             if let Some(op) = logical_assignment_operator(expression.operator) {
                 let result = self.alloc_reg()?;
                 self.emit(Instr::GetMember {
@@ -858,6 +882,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Target::Binding(binding)
         } else if let Some(member) = expression.argument.as_member_expression() {
             let (object, key) = self.compile_member_parts(member)?;
+            let key = if member.is_computed() {
+                self.emit_to_property_key(key, Some(object))?
+            } else {
+                key
+            };
             Target::Member(object, key)
         } else {
             return Err(unsupported(
@@ -984,7 +1013,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         "unsupported computed property key",
                     )
                 })?;
-                self.compile_expression(key)?
+                let key = self.compile_expression(key)?;
+                self.emit_to_property_key(key, None)?
             } else if let Some(name) = property.key.static_name() {
                 let name = name.into_cow_str().ok_or_else(|| {
                     unsupported(

@@ -54,7 +54,7 @@ cargo run -p yield-poc
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
-- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
+- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
 - 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、顶层环境和宿主入口绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
 - 快照要求微任务队列已排空。
 
@@ -65,7 +65,8 @@ cargo run -p yield-poc
 - 严格模式脚本顶层支持子集内的声明和语句，不要求存在函数声明；只有直接位于脚本顶层的函数声明可作为宿主入口。支持函数声明提升、函数表达式、箭头函数、`async` 函数与函数内的 `await`。
 - `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
 - 字面量、非标签模板、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`、数组展开）、成员读写。
-- 数字字符串转换支持无效输入产生 `NaN`，并识别 `0x` / `0b` / `0o` 前缀。普通对象参与数值转换时按 `valueOf`、`toString` 顺序调用可调用方法；转换抛出的脚本异常可被 `try`/`catch` 捕获。数组转换、字符串 hint、属性键和模板插值仍不完整。
+- 对象转换优先调用 `[Symbol.toPrimitive]`，并传入 `default`、`number` 或 `string`。默认/数值转换先尝试 `valueOf`，属性键和非标签模板插值则先尝试 `toString`。转换异常可由 `try`/`catch` 捕获。属性键保留 Symbol 身份，模板不能隐式字符串化 Symbol；复合赋值复用转换后的键，可跨 `await` 快照恢复。
+- 数组默认字符串化通过 `join` 读取实时元素。函数继承共享的 `toString`，有意返回固定通用文本 `function () { [native code] }`，不保留也不返回源码。数字字符串支持无效输入产生 `NaN`，并识别 `0x` / `0b` / `0o` 前缀。
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
 - 可选链 `?.` 支持静态成员、计算成员和调用；遇到 `null` 或 `undefined` 时跳过链中剩余的求值，方法调用仍保留接收者。
 - `if`、`while`、`do...while`、`for`、`switch`、语句标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。`break` / `continue`（含带标签的跳转）可穿越 `finally`。

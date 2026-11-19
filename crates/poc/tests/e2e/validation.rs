@@ -275,6 +275,22 @@ fn symbol_snapshot_tampering_is_rejected() {
         .expect_err("registry points at iterator");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("iterator")));
 
+    let mut missing_to_primitive = snapshot.clone();
+    let to_primitive = *snapshot
+        .symbols
+        .iter()
+        .find_map(|(id, description)| {
+            (description.as_deref() == Some("Symbol.toPrimitive")).then_some(id)
+        })
+        .expect("well-known conversion symbol");
+    missing_to_primitive.symbols.remove(&to_primitive);
+    let error = s
+        .restore(missing_to_primitive)
+        .expect_err("deleted well-known symbol");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("Symbol.toPrimitive"))
+    );
+
     let mut lowered = snapshot.clone();
     lowered.next_symbol_id = symbol_id;
     let error = s.restore(lowered).expect_err("lowered high-water mark");

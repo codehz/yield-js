@@ -2,11 +2,14 @@
 //! Handlers run in one place; call sites do not each reimplement catch.
 
 use crate::bytecode::{
-    ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind, UnaryOp,
+    BinaryOp, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind, UnaryOp,
 };
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{DescriptorUpdate, ITERATOR_SYMBOL, Object, OwnProperty, Property, object_id};
+use crate::heap::{
+    DescriptorUpdate, ITERATOR_SYMBOL, Object, OwnProperty, Property, TO_PRIMITIVE_SYMBOL,
+    object_id,
+};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -20,6 +23,23 @@ enum Step {
     Suspend,
     Return(Value),
     Throw(Value),
+}
+
+#[derive(Clone, Copy)]
+enum Hint {
+    Default,
+    Number,
+    String,
+}
+
+impl Hint {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Number => "number",
+            Self::String => "string",
+        }
+    }
 }
 
 impl Vm {
@@ -133,21 +153,38 @@ impl Vm {
             Instr::Binary { dst, op, lhs, rhs } => {
                 let mut lhs = frame.read(lhs)?;
                 let mut rhs = frame.read(rhs)?;
-                let should_convert =
-                    !matches!(
-                        op,
-                        crate::bytecode::BinaryOp::StrictEq | crate::bytecode::BinaryOp::StrictNe
-                    ) && !(matches!(
-                        op,
-                        crate::bytecode::BinaryOp::Eq | crate::bytecode::BinaryOp::Ne
-                    ) && matches!((&lhs, &rhs), (Value::Object(_), Value::Object(_))));
-                if should_convert {
+                let hint = match op {
+                    BinaryOp::StrictEq | BinaryOp::StrictNe => None,
+                    BinaryOp::Eq | BinaryOp::Ne => match (&lhs, &rhs) {
+                        (
+                            Value::Object(_),
+                            Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Symbol(_),
+                        )
+                        | (
+                            Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Symbol(_),
+                            Value::Object(_),
+                        ) => Some(Hint::Default),
+                        _ => None,
+                    },
+                    BinaryOp::Add => Some(Hint::Default),
+                    _ => Some(Hint::Number),
+                };
+                if let Some(hint) = hint {
+                    // Arithmetic applies ToNumber to the left operand before the right.
+                    let numeric = matches!(hint, Hint::Number)
+                        && !matches!(
+                            op,
+                            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+                        );
                     for value in [&mut lhs, &mut rhs] {
                         if matches!(value, Value::Object(_)) {
-                            match self.primitive_from_object(host, value)? {
+                            match self.primitive_from_object(host, value, hint)? {
                                 Invocation::Value(primitive) => *value = primitive,
                                 Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                             }
+                        }
+                        if numeric && matches!(value, Value::Symbol(_)) {
+                            return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
                         }
                     }
                 }
@@ -163,16 +200,36 @@ impl Vm {
             }
             Instr::Unary { dst, op, src } => {
                 let mut value = frame.read(src)?;
-                if ops::unary_coerces(op) && matches!(value, Value::Symbol(_)) {
-                    return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
-                }
                 if ops::unary_coerces(op) && matches!(value, Value::Object(_)) {
-                    match self.primitive_from_object(host, &value)? {
+                    match self.primitive_from_object(host, &value, Hint::Number)? {
                         Invocation::Value(primitive) => value = primitive,
                         Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                     }
                 }
+                if ops::unary_coerces(op) && matches!(value, Value::Symbol(_)) {
+                    return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+                }
                 frame.write(dst, self.unary(op, value))?;
+                Ok(Step::Next)
+            }
+            Instr::ToString { dst, src } => {
+                let invocation = self.string_value(host, frame.read_ref(src)?)?;
+                store_invocation(frame, dst, invocation)
+            }
+            Instr::ToPropertyKey { dst, src, object } => {
+                if let Some(object) = object
+                    && !matches!(frame.read_ref(object)?, Value::Object(_))
+                {
+                    return Ok(Step::Throw(
+                        self.type_error("property access on a non-object")?,
+                    ));
+                }
+                let value = match self.coerce_property_key(host, frame.read_ref(src)?)? {
+                    Ok(PropertyKey::String(key)) => Value::String(key),
+                    Ok(PropertyKey::Symbol(id)) => Value::Symbol(id),
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
+                frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::CallImport { dst, import, args } => {
@@ -214,7 +271,7 @@ impl Vm {
             }
             Instr::HasProperty { dst, object, key } => {
                 let invocation =
-                    self.has_property(frame.read_ref(object)?, frame.read_ref(key)?)?;
+                    self.has_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::GetIterator {
@@ -298,12 +355,11 @@ impl Vm {
                 src,
                 kind,
             } => {
-                self.define_property(
-                    &frame.read(object)?,
-                    &frame.read(key)?,
-                    frame.read(src)?,
-                    kind,
-                )?;
+                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                    Ok(key) => key,
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
+                self.define_property(frame.read_ref(object)?, key, frame.read(src)?, kind)?;
                 Ok(Step::Next)
             }
             Instr::GetBinding { dst, binding } => {
@@ -411,12 +467,78 @@ impl Vm {
         let invocation = self.invoke(host, &method, Vec::new(), iterator)?;
         self.require_iterator_object(invocation, "iterator return must return an object")
     }
-    fn primitive_from_object(
+
+    pub(crate) fn string_value(
         &mut self,
         host: &mut dyn Host,
         value: &Value,
     ) -> Result<Invocation, VmError> {
-        for name in ["valueOf", "toString"] {
+        let primitive;
+        let value = if matches!(value, Value::Object(_)) {
+            primitive = match self.primitive_from_object(host, value, Hint::String)? {
+                Invocation::Value(value) => value,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            };
+            &primitive
+        } else {
+            value
+        };
+        if matches!(value, Value::Symbol(_)) {
+            return self.throw_type_error(ops::SYMBOL_TO_STRING);
+        }
+        Ok(Invocation::Value(Value::String(ops::to_js_string(value))))
+    }
+
+    pub(crate) fn coerce_property_key(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Result<PropertyKey, Value>, VmError> {
+        let primitive;
+        let value = if matches!(value, Value::Object(_)) {
+            primitive = match self.primitive_from_object(host, value, Hint::String)? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            };
+            &primitive
+        } else {
+            value
+        };
+        Ok(Ok(match value {
+            Value::Symbol(id) => PropertyKey::Symbol(*id),
+            _ => PropertyKey::String(ops::to_js_string(value)),
+        }))
+    }
+
+    fn primitive_from_object(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+        hint: Hint,
+    ) -> Result<Invocation, VmError> {
+        match self.read_property(host, value, PropertyKeyRef::Symbol(TO_PRIMITIVE_SYMBOL))? {
+            Invocation::Value(Value::Undefined | Value::Null) => {}
+            Invocation::Value(method) => {
+                let result = self.invoke(
+                    host,
+                    &method,
+                    vec![Value::String(hint.as_str().to_owned())],
+                    value,
+                )?;
+                return match result {
+                    Invocation::Value(Value::Object(_)) => {
+                        self.throw_type_error("Cannot convert object to primitive value")
+                    }
+                    result => Ok(result),
+                };
+            }
+            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        }
+        let methods = match hint {
+            Hint::String => ["toString", "valueOf"],
+            _ => ["valueOf", "toString"],
+        };
+        for name in methods {
             let method = match self.read_property(host, value, PropertyKeyRef::String(name))? {
                 Invocation::Value(method) => method,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -450,7 +572,22 @@ impl Vm {
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
-        let key = ops::property_key(key)?;
+        if !matches!(object, Value::Object(_)) {
+            return self.throw_type_error("property access on a non-object");
+        }
+        match key {
+            Value::String(key) => {
+                return self.read_property(host, object, PropertyKeyRef::String(key));
+            }
+            Value::Symbol(id) => {
+                return self.read_property(host, object, PropertyKeyRef::Symbol(*id));
+            }
+            _ => {}
+        }
+        let key = match self.coerce_property_key(host, key)? {
+            Ok(key) => key,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         self.read_property(host, object, key.borrowed())
     }
 
@@ -511,17 +648,20 @@ impl Vm {
         }
     }
 
-    fn has_property(&mut self, object: &Value, key: &Value) -> Result<Invocation, VmError> {
+    fn has_property(
+        &mut self,
+        host: &mut dyn Host,
+        object: &Value,
+        key: &Value,
+    ) -> Result<Invocation, VmError> {
         let Value::Object(id) = *object else {
             return self.throw_type_error("right-hand side of 'in' is not an object");
         };
-        let converted;
-        let key = if let Value::String(key) = key {
-            PropertyKeyRef::String(key)
-        } else {
-            converted = ops::property_key(key)?;
-            converted.borrowed()
+        let key = match self.coerce_property_key(host, key)? {
+            Ok(key) => key,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
+        let key = key.borrowed();
         let present = self.heap.has_property(id, key)?
             || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key));
         Ok(Invocation::Value(Value::Bool(present)))
@@ -538,9 +678,12 @@ impl Vm {
         key: &Value,
         value: Value,
     ) -> Result<Invocation, VmError> {
-        let key = ops::property_key(key)?;
         let Value::Object(id) = *object else {
             return self.throw_type_error("property write on a non-object");
+        };
+        let key = match self.coerce_property_key(host, key)? {
+            Ok(key) => key,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let property = self.heap.find_property(id, key.borrowed())?;
         match property.as_ref().and_then(OwnProperty::setter) {
@@ -595,11 +738,10 @@ impl Vm {
     fn define_property(
         &mut self,
         object: &Value,
-        key: &Value,
+        key: PropertyKey,
         value: Value,
         kind: PropertyDefinition,
     ) -> Result<(), VmError> {
-        let key = ops::property_key(key)?;
         let id = object_id(object, "property definition on a non-object")?;
         let property = match kind {
             PropertyDefinition::Data => Property::Data(value),

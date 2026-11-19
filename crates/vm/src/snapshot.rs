@@ -4,22 +4,22 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
-    ROOT_ERROR_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
-    ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
-    is_callable_object,
+    ROOT_ERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
+    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL,
+    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
-    OwnedEdge, PromiseState, Property, ReactionJob,
+    OwnedEdge, PromiseState, Property, ReactionJob, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 13;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 14;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -198,6 +198,7 @@ impl Vm {
         snapshot.symbol_registry = self.heap.symbol_registry.clone();
         let mut symbol_ids = tracer.symbols;
         symbol_ids.insert(ITERATOR_SYMBOL);
+        symbol_ids.insert(TO_PRIMITIVE_SYMBOL);
         symbol_ids.extend(self.heap.symbol_registry.values().copied());
         for id in symbol_ids {
             if let Some(description) = self.heap.symbols.get(&id) {
@@ -389,9 +390,8 @@ fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
     Ok(())
 }
 
-/// Symbol tables are self-consistent before any heap edge is checked: the
-/// iterator record is exact, registry entries are unique and describe
-/// themselves, and every id stays below the preserved high-water mark.
+/// Symbol tables validate exact reserved well-known records and registry integrity
+/// before any heap edge is checked; all ids stay below the high-water mark.
 fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
     if snapshot.next_symbol_id == 0 {
         return Err(VmError::InvalidSnapshot(
@@ -405,22 +405,39 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
                 snapshot.next_symbol_id
             )));
         }
-        if *id == ITERATOR_SYMBOL && description.as_deref() != Some(ITERATOR_DESCRIPTION) {
-            return Err(VmError::InvalidSnapshot(
-                "iterator symbol must be described as Symbol.iterator".to_owned(),
-            ));
+        let reserved = match *id {
+            ITERATOR_SYMBOL => Some(ITERATOR_DESCRIPTION),
+            TO_PRIMITIVE_SYMBOL => Some(TO_PRIMITIVE_DESCRIPTION),
+            _ => None,
+        };
+        if let Some(expected) = reserved
+            && description.as_deref() != Some(expected)
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "reserved symbol {id} has an invalid description"
+            )));
         }
     }
-    if !snapshot.symbols.contains_key(&ITERATOR_SYMBOL) {
-        return Err(VmError::InvalidSnapshot(
-            "snapshot is missing the Symbol.iterator record".to_owned(),
-        ));
+    for (id, description) in [
+        (ITERATOR_SYMBOL, ITERATOR_DESCRIPTION),
+        (TO_PRIMITIVE_SYMBOL, TO_PRIMITIVE_DESCRIPTION),
+    ] {
+        if snapshot.symbols.get(&id).and_then(Option::as_deref) != Some(description) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "snapshot is missing reserved symbol {description}"
+            )));
+        }
     }
     let mut registered = BTreeSet::new();
     for (key, id) in &snapshot.symbol_registry {
-        if *id == ITERATOR_SYMBOL {
+        if *id == ITERATOR_SYMBOL || *id == TO_PRIMITIVE_SYMBOL {
             return Err(VmError::InvalidSnapshot(format!(
-                "registry key {key:?} points at the iterator symbol"
+                "registry key {key:?} points at reserved symbol {}",
+                if *id == ITERATOR_SYMBOL {
+                    ITERATOR_DESCRIPTION
+                } else {
+                    TO_PRIMITIVE_DESCRIPTION
+                },
             )));
         }
         if !registered.insert(*id) {
@@ -441,9 +458,9 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 13 {
+    if roots.len() != 14 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 13",
+            "snapshot has {} builtin roots, expected 14",
             roots.len()
         )));
     }
@@ -498,17 +515,22 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
     let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
+    let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
     if array_prototype == array_iterator_prototype
         || array_prototype == object_prototype
         || array_iterator_prototype == object_prototype
+        || [array_prototype, array_iterator_prototype, object_prototype]
+            .contains(&function_prototype)
     {
         return Err(VmError::InvalidSnapshot(
-            "array, array iterator, and object prototype roots must be distinct".to_owned(),
+            "array, array iterator, function, and object prototype roots must be distinct"
+                .to_owned(),
         ));
     }
     for (name, id) in [
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
+        (ROOT_FUNCTION_PROTOTYPE, function_prototype),
     ] {
         if !matches!(heap.get(id)?, Object::Plain(plain) if plain.prototype == Some(object_prototype))
         {
@@ -524,6 +546,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         object_prototype,
         array_prototype,
         array_iterator_prototype,
+        function_prototype,
         error_prototype: plain_root(ROOT_ERROR_PROTOTYPE)?,
         typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
         error: builtin_root(ROOT_ERROR, "Error")?,

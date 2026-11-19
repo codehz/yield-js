@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 13;
+pub const BYTECODE_VERSION: u32 = 14;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -141,6 +141,18 @@ pub enum Instr {
         dst: Slot,
         op: UnaryOp,
         src: Slot,
+    },
+    /// Applies JavaScript ToString, including string-hint ToPrimitive.
+    ToString {
+        dst: Slot,
+        src: Slot,
+    },
+    /// Converts a computed key before its reference or definition is reused.
+    ToPropertyKey {
+        dst: Slot,
+        src: Slot,
+        /// For member read-modify-write, validate the base before converting.
+        object: Option<Slot>,
     },
     CallImport {
         dst: Slot,
@@ -633,6 +645,17 @@ impl Build {
                 Instr::Unary { dst, src, .. } => {
                     check_slot(*dst, "Unary.dst")?;
                     check_slot(*src, "Unary.src")?;
+                }
+                Instr::ToString { dst, src } => {
+                    check_slot(*dst, "ToString.dst")?;
+                    check_slot(*src, "ToString.src")?;
+                }
+                Instr::ToPropertyKey { dst, src, object } => {
+                    if let Some(object) = object {
+                        check_slot(*object, "ToPropertyKey.object")?;
+                    }
+                    check_slot(*dst, "ToPropertyKey.dst")?;
+                    check_slot(*src, "ToPropertyKey.src")?;
                 }
                 Instr::CallImport { dst, import, args } => {
                     check_slot(*dst, "CallImport.dst")?;

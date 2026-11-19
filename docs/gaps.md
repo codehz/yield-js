@@ -13,7 +13,7 @@
 | `RegExp` | 字面量与 `RegExp` 内建都没有。字面量落到泛化拒绝 `expression form outside the PoC subset` |
 | `NaN` / `Infinity` 全局 | 不是内建。裸引用是 `unknown binding`；`typeof NaN` / `typeof Infinity` 在编译期折叠成 `"undefined"` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
-| `ToPrimitive` | Ordinary object的数值转换按 `valueOf`、`toString` 顺序调用可调用方法；默认 `Object.prototype.valueOf` 返回对象，`toString` 返回 `"[object Object]"`，对象参与数值运算因而得到 `NaN`。方法抛出的脚本异常可由 `try`/`catch` 捕获。仍不完整：字符串 hint、数组/函数各自的原型转换语义、属性键转换及模板插值不调用对象方法；宽松相等与关系运算的所有边界语义尚未完整覆盖。数字字符串无效输入转换为 `NaN`，支持 `0x` / `0b` / `0o` 前缀。|
+| `ToPrimitive` | 运算、计算属性键及非标签模板使用相应 hint，优先检查 `[Symbol.toPrimitive]`，也支持 `valueOf` / `toString` 回退。函数有意使用通用字符串而非源码；部分内建参数（如 `Error` 消息）仍走简化转换 |
 | 原始值属性 | 对字符串、数字、布尔、`null`、`undefined` 做成员读写，抛可捕获的 `property access on a non-object` / `property write on a non-object`。`Object()` 拒绝装箱。`Object.keys("ab")` 会按 UTF-16 码元枚举索引，但不能用下标读出字符 |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
@@ -55,7 +55,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | Promise 自决议 | 用自身决议被忽略，不抛规范里的 `TypeError` |
 | Promise 组合子 | `all` / `allSettled` / `race` / `any` 已实现，但只接受数组，不走迭代协议。`Promise.any` 全拒绝时的拒绝值是字符串 `AggregateError: All promises were rejected`，不是 `AggregateError` 对象 |
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
-| 函数对象 | 可构造函数会安装 `.prototype`。函数对象内部原型是 `None`，不连到 `Object.prototype`，也没有 `name` / `length`。`call` / `apply` / `bind` 是按次分配的虚拟方法，不是共享的 `Function.prototype` 方法；每次读取都是新对象。`apply` 的参数表只接受数组、`null` 或 `undefined`，不接受其它 array-like。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局 |
+| 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length` 或越界写索引可以形成真正的洞 |
 | 字符串迭代 | `for…of` 与数组展开对非对象抛可捕获的 `value is not iterable`。字符串没有迭代器 |
 | 迭代关闭 | `for…of` 提前退出会 `IteratorClose`；继续同一循环或自然耗尽不调用 `return`。数组展开只在 `next` 抛错时关闭，自然耗尽不关闭 |
@@ -73,10 +73,10 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 | 内建 | 已有 | 仍缺 |
 | --- | --- | --- |
-| `Object` | `keys`、`getOwnPropertyDescriptor`、`defineProperty`、`defineProperties`；`Object.prototype.hasOwnProperty`；调用或构造只接受对象或空值 | `create`、`assign`、`is`、`getPrototypeOf`、`setPrototypeOf`、`freeze` / `seal` / `preventExtensions` 及对应检查、`getOwnPropertyDescriptors`、原型上的 `toString` / `valueOf` |
+| `Object` | `keys`、`getOwnPropertyDescriptor`、`defineProperty`、`defineProperties`；原型上的 `hasOwnProperty` / `toString` / `valueOf`；调用或构造只接受对象或空值 | `create`、`assign`、`is`、`getPrototypeOf`、`setPrototypeOf`、`freeze` / `seal` / `preventExtensions` 及对应检查、`getOwnPropertyDescriptors` |
 | `Reflect` | `ownKeys` | design 点名的 `get`、`set`、`has`、`deleteProperty`、`getOwnPropertyDescriptor`，以及其余 Reflect 操作 |
-| `Function` | 虚拟的 `call` / `apply` / `bind` | `Function` 全局、共享 `Function.prototype`、函数的 `name` / `length` |
-| `Array` | 数组对象、`length`、稀疏索引、共享的 `values` 与 `[Symbol.iterator]` | `Array` 全局，因而没有 `isArray` / `from` / `of`；没有 `push` / `pop` / `shift` / `unshift` / `splice` / `map` / `filter` / `reduce` / `forEach` / `some` / `every` / `flat` 等 |
+| `Function` | 共享内部原型上的 `toString`；虚拟的 `call` / `apply` / `bind` | `Function` 全局、函数的 `name` / `length` |
+| `Array` | 数组对象、`length`、稀疏索引、共享的 `values` / `[Symbol.iterator]` / `join` / `toString` | `Array` 全局及其静态方法；`push` / `pop` / `map` / `filter` 等；借用 `join` 时 array-like 的 `length` 转换仍简化 |
 | `String` / `Number` / `Math` / `JSON` / `RegExp` | 无全局，也无方法 | design 要求的访问、转换、搜索、切片、迭代，以及 `Math` / `JSON` / 正则 |
 | `Map` / `Set` / `WeakMap` | 无 | 集合、插入顺序、`WeakMap` 的弱键可达性都未做。快照格式也还没有这些边 |
 | `Proxy` | 无 | 普通对象/数组目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，以及不可扩展目标的不变量。快照不保存代理关系 |
@@ -85,7 +85,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ## 5. 结构性缺口
 
-1. **强制转换仍未完整**。普通对象数值转换现在调用 `valueOf` / `toString`；抛出的脚本异常可被 `try`/`catch` 捕获。默认普通对象的数值转换为 `NaN`。字符串 hint、数组/函数转换、属性键和模板插值仍不完整；数字字符串支持无效值转 `NaN` 与 `0x` / `0b` / `0o` 前缀。
+1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
 2. **迭代协议只接了两处**。同步 `for…of` 和数组展开会取 `[Symbol.iterator]` 并缓存 `next`，两者都能把迭代器放进持久槽跨 `await`。解构、实参展开、字符串、`for…in`、Promise 组合子都还没接上。
 3. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。

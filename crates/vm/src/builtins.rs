@@ -14,6 +14,7 @@ use crate::error::VmError;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
     ITERATOR_SYMBOL, Object, PlainObject, PromiseState, Property, ReactionJob, Resolution,
+    TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
 use crate::ops;
@@ -26,6 +27,7 @@ pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
+pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
@@ -42,6 +44,7 @@ pub(crate) struct BuiltinRoots {
     pub queue_microtask: ObjectId,
     pub object_prototype: ObjectId,
     pub array_prototype: ObjectId,
+    pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
     pub error_prototype: ObjectId,
     pub typeerror_prototype: ObjectId,
@@ -60,6 +63,7 @@ impl BuiltinRoots {
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
             (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
+            (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
             (
                 ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
                 self.array_iterator_prototype,
@@ -92,6 +96,8 @@ pub(crate) enum BuiltinCall {
     SymbolKeyFor,
     ArrayValues,
     ArrayIteratorNext,
+    ArrayJoin,
+    ArrayToString,
     IteratorIdentity,
     ReflectOwnKeys,
     ObjectConstructor,
@@ -114,6 +120,17 @@ impl Vm {
     pub(crate) fn init_builtins(&mut self) {
         let object_prototype = self.heap.alloc_plain();
         self.heap.object_prototype = Some(object_prototype);
+        let function_prototype = self.heap.alloc_plain();
+        self.heap.function_prototype = Some(function_prototype);
+        let to_string = Value::Object(self.heap.alloc_builtin("Function", Some("toString")));
+        self.heap
+            .define_data(
+                function_prototype,
+                "toString",
+                to_string,
+                Attributes::METHOD,
+            )
+            .expect("Function.prototype stores toString");
         let object = self.heap.alloc_builtin("Object", None);
         self.heap
             .define_data(
@@ -157,6 +174,14 @@ impl Vm {
         let array_prototype = self.heap.alloc_plain();
         let array_iterator_prototype = self.heap.alloc_plain();
         self.heap.array_prototype = Some(array_prototype);
+        let join = Value::Object(self.heap.alloc_builtin("Array", Some("join")));
+        let to_string = Value::Object(self.heap.alloc_builtin("Array", Some("toString")));
+        self.heap
+            .define_data(array_prototype, "join", join, Attributes::METHOD)
+            .expect("Array.prototype stores join");
+        self.heap
+            .define_data(array_prototype, "toString", to_string, Attributes::METHOD)
+            .expect("Array.prototype stores toString");
         let values = Value::Object(self.heap.alloc_builtin("Array", Some("values")));
         let next = Value::Object(self.heap.alloc_builtin("ArrayIterator", Some("next")));
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
@@ -261,6 +286,14 @@ impl Vm {
                 Attributes::FIXED,
             )
             .expect("Symbol constructor stores the iterator symbol");
+        self.heap
+            .define_data(
+                symbol,
+                "toPrimitive",
+                Value::Symbol(TO_PRIMITIVE_SYMBOL),
+                Attributes::FIXED,
+            )
+            .expect("Symbol constructor stores the toPrimitive symbol");
         let reflect = self.heap.alloc_plain();
         let own_keys = self.heap.alloc_builtin("Reflect", Some("ownKeys"));
         self.heap
@@ -277,6 +310,7 @@ impl Vm {
             queue_microtask: queue,
             object_prototype,
             array_prototype,
+            function_prototype,
             array_iterator_prototype,
             error_prototype,
             typeerror_prototype,
@@ -452,7 +486,9 @@ impl Vm {
             BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
             BuiltinCall::ObjectKeys => self.object_keys(&args),
-            BuiltinCall::ObjectGetOwnPropertyDescriptor => self.get_own_property_descriptor(&args),
+            BuiltinCall::ObjectGetOwnPropertyDescriptor => {
+                self.get_own_property_descriptor(host, &args)
+            }
             BuiltinCall::ObjectDefineProperty => self.object_define_property(host, &args),
             BuiltinCall::ObjectDefineProperties => self.object_define_properties(host, &args),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
@@ -467,7 +503,12 @@ impl Vm {
                             return self.throw_type_error("incompatible Object.prototype receiver");
                         }
                     };
-                    let key = ops::property_key(args.first().unwrap_or(&Value::Undefined))?;
+                    let key = match self
+                        .coerce_property_key(host, args.first().unwrap_or(&Value::Undefined))?
+                    {
+                        Ok(key) => key,
+                        Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+                    };
                     Ok(Invocation::Value(Value::Bool(self.heap.has_own(id, &key)?)))
                 }
                 "valueOf" => match *receiver {
@@ -476,13 +517,17 @@ impl Vm {
                     }
                     _ => self.throw_type_error("incompatible Object.prototype receiver"),
                 },
-                "toString" => match *receiver {
-                    Value::Object(id) if self.heap.is_environment(id) != Some(false) => {
+                "toString" => match receiver {
+                    Value::Object(id) if self.heap.is_environment(*id) == Some(true) => {
                         self.throw_type_error("incompatible Object.prototype receiver")
                     }
-                    _ => Ok(Invocation::Value(Value::String(ops::to_js_string(
-                        receiver,
+                    Value::Object(id) => Ok(Invocation::Value(Value::String(format!(
+                        "[object {}]",
+                        self.object_tag(*id)?
                     )))),
+                    _ => Ok(Invocation::Value(Value::String(
+                        "[object Undefined]".to_owned(),
+                    ))),
                 },
                 _ => Err(VmError::InvalidState(format!(
                     "unknown Object method {name}"
@@ -490,6 +535,8 @@ impl Vm {
             },
             BuiltinCall::ArrayValues => self.array_values(receiver),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
+            BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
+            BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::ReflectOwnKeys => {
                 let Some(Value::Object(id)) = args.first() else {
@@ -537,6 +584,100 @@ impl Vm {
                 Ok(Invocation::Value(Value::Undefined))
             }
         }
+    }
+
+    fn array_to_string(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let join = match self.read_property(host, receiver, PropertyKeyRef::String("join"))? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        if self.is_callable(&join) {
+            self.invoke(host, &join, Vec::new(), receiver)
+        } else {
+            let tag = match receiver {
+                Value::Object(id) => self.object_tag(*id)?,
+                _ => "Object",
+            };
+            Ok(Invocation::Value(Value::String(format!("[object {tag}]"))))
+        }
+    }
+
+    fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
+        Ok(match self.heap.get(id)? {
+            Object::Array(_) => "Array",
+            Object::Function(_)
+            | Object::BuiltinStatic(_)
+            | Object::Bound(_)
+            | Object::Resolution(_) => "Function",
+            Object::Promise(_) => "Promise",
+            _ => "Object",
+        })
+    }
+
+    fn array_join(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Value::Object(id) = receiver else {
+            return self.throw_type_error("Array.prototype.join called on null or undefined");
+        };
+        let length = match self.read_property(host, receiver, PropertyKeyRef::String("length"))? {
+            Invocation::Value(Value::Number(n)) if n.is_finite() && n > 0.0 => n.floor() as usize,
+            Invocation::Value(Value::String(s)) => s.parse::<usize>().unwrap_or(0),
+            Invocation::Value(_) => 0,
+            thrown => return Ok(thrown),
+        };
+        let separator = match args.first() {
+            None | Some(Value::Undefined) => ",".to_owned(),
+            Some(value) => match self.string_value(host, value)? {
+                Invocation::Value(Value::String(s)) => s,
+                Invocation::Value(_) => unreachable!(),
+                thrown => return Ok(thrown),
+            },
+        };
+        let array = matches!(self.heap.get(*id)?, Object::Array(_));
+        if array && self.active_array_joins.contains(id) {
+            return Ok(Invocation::Value(Value::String(String::new())));
+        }
+        if array {
+            self.active_array_joins.insert(*id);
+        }
+        let result = (|| {
+            let mut output = String::new();
+            for index in 0..length {
+                if index > 0 {
+                    output.push_str(&separator);
+                }
+                let item = if array {
+                    self.read_array_index(host, *id, index)?
+                } else {
+                    self.read_property(host, receiver, PropertyKeyRef::String(&index.to_string()))?
+                };
+                let value = match item {
+                    Invocation::Value(value) => value,
+                    thrown => return Ok(thrown),
+                };
+                if matches!(value, Value::Undefined | Value::Null) {
+                    continue;
+                }
+                match self.string_value(host, &value)? {
+                    Invocation::Value(Value::String(value)) => output.push_str(&value),
+                    Invocation::Value(_) => unreachable!(),
+                    thrown => return Ok(thrown),
+                }
+            }
+            Ok(Invocation::Value(Value::String(output)))
+        })();
+        if array {
+            self.active_array_joins.remove(id);
+        }
+        result
     }
 
     fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
@@ -614,6 +755,15 @@ impl Vm {
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        if name == "toString" {
+            return if self.is_callable(receiver) {
+                Ok(Invocation::Value(Value::String(
+                    "function () { [native code] }".to_owned(),
+                )))
+            } else {
+                self.throw_type_error("incompatible Function.prototype.toString receiver")
+            };
+        }
         let target = match *receiver {
             Value::Object(id) if self.heap.function(id).is_some() => id,
             _ => {
@@ -642,7 +792,7 @@ impl Vm {
                     target,
                     bound_this: this_arg,
                     args: args.collect(),
-                    object: PlainObject::new(None),
+                    object: PlainObject::new(self.heap.function_prototype),
                 }));
                 Ok(Invocation::Value(Value::Object(id)))
             }
@@ -700,12 +850,19 @@ impl Vm {
         )))
     }
 
-    fn get_own_property_descriptor(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+    fn get_own_property_descriptor(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
         let Some(Value::Object(target)) = args.first() else {
             return self
                 .throw_type_error("Object.getOwnPropertyDescriptor requires an object in this VM");
         };
-        let key = ops::property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+        let key = match self.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+        };
         let Some(property) = self.heap.get(*target)?.own_property(key.borrowed()) else {
             return Ok(Invocation::Value(Value::Undefined));
         };
@@ -746,7 +903,10 @@ impl Vm {
         let Some(Value::Object(target)) = args.first() else {
             return self.throw_type_error("Object.defineProperty requires an object target");
         };
-        let key = ops::property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+        let key = match self.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+        };
         let update =
             match self.read_property_descriptor(host, args.get(2).unwrap_or(&Value::Undefined))? {
                 Ok(update) => update,
@@ -1212,14 +1372,14 @@ impl Vm {
             pair: 0,
             resolve: true,
             called: false,
-            object: PlainObject::new(None),
+            object: PlainObject::new(self.heap.function_prototype),
         }));
         let reject_id = self.heap.alloc(Object::Resolution(Resolution {
             promise,
             pair: resolve_id,
             resolve: false,
             called: false,
-            object: PlainObject::new(None),
+            object: PlainObject::new(self.heap.function_prototype),
         }));
         match self.heap.get_mut(resolve_id)? {
             Object::Resolution(resolution) => resolution.pair = reject_id,
@@ -1445,7 +1605,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         (name @ ("Error" | "TypeError"), None) => Some(BuiltinCall::ErrorConstructor {
             name: name.to_owned(),
         }),
-        ("Function", Some(name @ ("call" | "apply" | "bind"))) => {
+        ("Function", Some(name @ ("call" | "apply" | "bind" | "toString"))) => {
             Some(BuiltinCall::FunctionMethod {
                 name: name.to_owned(),
             })
@@ -1462,6 +1622,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         }
         ("Object", Some("defineProperty")) => Some(BuiltinCall::ObjectDefineProperty),
         ("Object", Some("defineProperties")) => Some(BuiltinCall::ObjectDefineProperties),
+        ("Array", Some("join")) => Some(BuiltinCall::ArrayJoin),
+        ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),

@@ -17,10 +17,12 @@ use crate::value::{
     BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
 
-/// Reserved `Symbol.iterator`. Ordinary symbols allocate from 1 and are never
+/// Reserved well-known symbols. Ordinary symbols allocate from 2 and are never
 /// interned by description; only the registry interns by key.
 pub(crate) const ITERATOR_SYMBOL: SymbolId = 0;
 pub(crate) const ITERATOR_DESCRIPTION: &str = "Symbol.iterator";
+pub(crate) const TO_PRIMITIVE_SYMBOL: SymbolId = 1;
+pub(crate) const TO_PRIMITIVE_DESCRIPTION: &str = "Symbol.toPrimitive";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -828,6 +830,7 @@ pub(crate) struct Heap {
     pub(crate) resolutions: BTreeSet<ObjectId>,
     pub(crate) object_prototype: Option<ObjectId>,
     pub(crate) array_prototype: Option<ObjectId>,
+    pub(crate) function_prototype: Option<ObjectId>,
     /// Shared internal prototype of every Promise allocated by this heap.
     pub(crate) promise_prototype: Option<ObjectId>,
 }
@@ -837,13 +840,20 @@ impl Heap {
         Self {
             objects: BTreeMap::new(),
             next_id: 1,
-            symbols: BTreeMap::from([(ITERATOR_SYMBOL, Some(ITERATOR_DESCRIPTION.to_owned()))]),
+            symbols: BTreeMap::from([
+                (ITERATOR_SYMBOL, Some(ITERATOR_DESCRIPTION.to_owned())),
+                (
+                    TO_PRIMITIVE_SYMBOL,
+                    Some(TO_PRIMITIVE_DESCRIPTION.to_owned()),
+                ),
+            ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: 1,
+            next_symbol_id: 2,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
             array_prototype: None,
+            function_prototype: None,
             promise_prototype: None,
         }
     }
@@ -965,7 +975,7 @@ impl Heap {
             env,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
-            prototype: None,
+            prototype: self.function_prototype,
         }))
     }
 
@@ -975,7 +985,7 @@ impl Heap {
             member: member.map(str::to_owned),
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
-            prototype: None,
+            prototype: self.function_prototype,
         }))
     }
 

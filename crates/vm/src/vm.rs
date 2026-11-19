@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, VecDeque};
-
 use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
@@ -8,6 +6,7 @@ use crate::heap::{Heap, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
 use crate::runtime::{ExecOutcome, Invocation, Microtask, PendingOperation, Settlement};
 use crate::value::{ContinuationId, HostValue, ObjectId, Value};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Debug)]
 pub struct Vm {
@@ -18,6 +17,8 @@ pub struct Vm {
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<String, Value>,
     next_continuation_id: ContinuationId,
+    /// Synchronous join recursion guard; never live at a snapshot boundary.
+    pub(crate) active_array_joins: BTreeSet<ObjectId>,
     pub(crate) builtins: BuiltinRoots,
     /// Live environment of the script, present exactly when the script needs one.
     pub(crate) script_env: Option<ObjectId>,
@@ -43,6 +44,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
             next_continuation_id: 1,
+            active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
             script_env: None,
         }
@@ -424,6 +426,7 @@ impl Vm {
         heap.promise_prototype = Some(builtins.promise_prototype);
         heap.object_prototype = Some(builtins.object_prototype);
         heap.array_prototype = Some(builtins.array_prototype);
+        heap.function_prototype = Some(builtins.function_prototype);
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
         Self {
@@ -434,6 +437,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals,
             next_continuation_id,
+            active_array_joins: BTreeSet::new(),
             builtins,
             script_env,
         }
