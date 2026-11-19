@@ -6,7 +6,7 @@ use crate::bytecode::{
 };
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{ITERATOR_SYMBOL, Property, object_id};
+use crate::heap::{ITERATOR_SYMBOL, Object, Property, object_id};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -188,6 +188,10 @@ impl Vm {
                 frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
+            Instr::ArrayAppend { array, src } => {
+                self.append_array(frame.read_ref(array)?, frame.read_ref(src)?)?;
+                Ok(Step::Next)
+            }
             Instr::GetMember { dst, object, key } => {
                 let invocation = self.read_member(host, &frame.read(object)?, &frame.read(key)?)?;
                 store_invocation(frame, dst, invocation)
@@ -365,6 +369,17 @@ impl Vm {
             };
         let invocation = self.invoke(host, &method, Vec::new(), iterable)?;
         self.require_iterator_object(invocation, "Symbol.iterator must return an object")
+    }
+
+    fn append_array(&mut self, array: &Value, value: &Value) -> Result<(), VmError> {
+        let id = object_id(array, "array append target must be an object")?;
+        let Object::Array(array) = self.heap.get_mut(id)? else {
+            return Err(VmError::InvalidState(
+                "array append target must be an array".to_owned(),
+            ));
+        };
+        array.elements.push(value.clone());
+        Ok(())
     }
 
     fn close_iterator(

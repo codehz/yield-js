@@ -43,7 +43,7 @@ cargo run -p yield-poc
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this` 与预置参数可跨 `await` 快照恢复；绑定函数不支持 `new`，没有自有属性或原型。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。`for…in` 仍不支持。
-- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Object` / `Array` 全局名；解构与展开仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
+- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Object` / `Array` 全局名。数组字面量展开复用该迭代协议，部分结果可跨 `await` 保存；实参展开、对象展开和解构仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
@@ -61,7 +61,7 @@ cargo run -p yield-poc
 
 - 顶层 `function` 声明；嵌套函数声明（提升）；函数表达式；箭头函数；`async` 函数；`await`。
 - `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
-- 字面量、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`）、成员读写。
+- 字面量、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`、数组展开）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
 - 可选链 `?.` 支持静态成员、计算成员和调用；遇到 `null` 或 `undefined` 时跳过链中剩余的求值，方法调用仍保留接收者。
@@ -72,7 +72,7 @@ cargo run -p yield-poc
 
 ## 已知未覆盖
 
-- `super`、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
+- `super`、对象展开、实参展开；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - 类、模板字符串、generator、async generator、顶层 `await`。
 - `for…in`、`for await…of`、字符串迭代和 `for…of` 解构目标。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。

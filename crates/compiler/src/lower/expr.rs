@@ -1065,19 +1065,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_array(&mut self, array: &'ast ArrayExpression<'ast>) -> Result<Reg, CompileError> {
-        let mut elements = Vec::with_capacity(array.elements.len());
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::NewArray {
+            dst: self.slot(dst),
+            elements: Vec::new(),
+        });
         for element in &array.elements {
             match element {
                 ArrayExpressionElement::Elision(_) => {
                     let value = self.emit_undefined()?;
-                    elements.push(self.slot(value));
+                    self.append_array_element(dst, value);
                 }
-                ArrayExpressionElement::SpreadElement(_) => {
-                    return Err(unsupported(
-                        self.source_text(),
-                        element.span(),
-                        "array spread",
-                    ));
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    self.spread_array_element(dst, &spread.argument)?;
                 }
                 other => {
                     let expression = other.as_expression().ok_or_else(|| {
@@ -1088,16 +1088,50 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         )
                     })?;
                     let value = self.compile_expression(expression)?;
-                    elements.push(self.slot(value));
+                    self.append_array_element(dst, value);
                 }
             }
         }
-        let dst = self.alloc_reg()?;
-        self.emit(Instr::NewArray {
-            dst: self.slot(dst),
-            elements,
-        });
         Ok(dst)
+    }
+
+    fn append_array_element(&mut self, array: Reg, value: Reg) {
+        self.emit(Instr::ArrayAppend {
+            array: self.slot(array),
+            src: self.slot(value),
+        });
+    }
+
+    fn spread_array_element(
+        &mut self,
+        array: Reg,
+        iterable: &'ast Expression<'ast>,
+    ) -> Result<(), CompileError> {
+        let iterable = self.compile_expression(iterable)?;
+        let iterator = self.alloc_reg()?;
+        let next = self.alloc_reg()?;
+        self.emit(Instr::GetIterator {
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+            iterable: self.slot(iterable),
+        });
+        let step_pc = self.pc();
+        let done = self.alloc_reg()?;
+        let value = self.alloc_reg()?;
+        self.emit(Instr::IteratorNext {
+            done: self.slot(done),
+            value: self.slot(value),
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+        });
+        let has_value = self.branch_false(done);
+        let exhausted = self.jump();
+        self.patch_jump(has_value, self.pc())?;
+        self.append_array_element(array, value);
+        self.jump_to(step_pc);
+        let end = self.pc();
+        self.patch_jump(exhausted, end)?;
+        self.protect_iterator_reads(iterator, step_pc, end)
     }
 }
 

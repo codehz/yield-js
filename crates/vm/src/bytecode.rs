@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 9;
+pub const BYTECODE_VERSION: u32 = 10;
 
 /// VM-provided callable names, in builtin-index order.
 ///
@@ -167,6 +167,11 @@ pub enum Instr {
     NewArray {
         dst: Slot,
         elements: Vec<Slot>,
+    },
+    /// Appends one value to an array created by [`Instr::NewArray`].
+    ArrayAppend {
+        array: Slot,
+        src: Slot,
     },
     GetMember {
         dst: Slot,
@@ -634,6 +639,10 @@ impl Build {
                     for element in elements {
                         check_slot(*element, "NewArray.element")?;
                     }
+                }
+                Instr::ArrayAppend { array, src } => {
+                    check_slot(*array, "ArrayAppend.array")?;
+                    check_slot(*src, "ArrayAppend.src")?;
                 }
                 Instr::GetMember { dst, object, key } => {
                     check_slot(*dst, "GetMember.dst")?;

@@ -27,7 +27,7 @@
 ### 2.2 表达式
 - **`instanceof` 运算符**；`in` 已支持，沿原型链检查属性是否存在，不读取属性或调用 getter。键转换沿用成员访问的子集语义（Symbol 保留身份，对象键不走完整 `ToPrimitive`）；右操作数不是对象时抛出可捕获的 `TypeError`。
 - **`delete`**：仅当操作数为标识符/成员/可选链时拒绝；`delete` 属性删除无实现
-- **实参展开、数组展开、对象展开**（"spread argument" / "array spread" / "object spread"）
+- **实参展开、对象展开**（"spread argument" / "object spread"）。数组展开已支持：从左到右求值，复用同步迭代协议；`next` 异常时调用 `return` 且原异常优先，自然耗尽不调用。展开后的 `await` 会把已构造的部分数组写入持久槽。
 - **自增/自减**：目标仅限简单绑定或成员（"update target outside the PoC subset"），其余赋值目标拒绝（"assignment to non-identifier/non-member target"）。算术复合赋值与逻辑赋值（`||=`/`&&=`/`??=`）已支持
 - **私有字段**（"private field access"）
 - **标签模板**、**带类正则以外的模板特性**：非标签模板已支持；标签模板拒绝
@@ -62,15 +62,15 @@
 
 1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **迭代协议**：同步 `for…of` 使用 `[Symbol.iterator]`，缓存 `next`，并在循环提前退出时执行 `IteratorClose`。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照格式 v9 保存数组迭代器的源数组引用及游标。`for…in` 仍拒绝；数组仍为稠密存储，没有空洞语义。
-4. **解构与 rest/spread 仍拒绝**：数组解构与展开尚未接入迭代协议；对象解构与展开也未实现。
+3. **迭代协议**：同步 `for…of` 与数组展开使用 `[Symbol.iterator]`，缓存 `next`。`for…of` 在循环提前退出时执行 `IteratorClose`；数组展开仅在 `next` 读取异常时关闭，自然耗尽不关闭。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照格式 v9 保存数组迭代器的源数组引用及游标。`for…in` 仍拒绝；数组仍为稠密存储，没有空洞语义。字节码 v10 增加 `ArrayAppend`。
+4. **解构与其余 spread 仍拒绝**：数组解构尚未接入迭代协议；实参展开与对象展开也未实现。
 5. **属性存在性与描述符**：`in`（字节码 v9，快照格式不变）与成员读取共用原型链查找；存在性检查不复制属性值。属性标志和按标准顺序枚举仍是 `Object`、`Reflect` 与 Proxy 不变量的缺口。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 
 ```mermaid
 flowchart LR
-  A[Value 扩展: Symbol/function 识别] --> B[迭代协议 for-of/解构/spread]
+  A[Value 扩展: Symbol/function 识别] --> B[迭代协议 for-of/数组展开]
   B --> C[原型链 + 属性描述符]
   C --> D[标准内建 Object/Array/String/Math/JSON]
   A --> E[Proxy/Reflect]

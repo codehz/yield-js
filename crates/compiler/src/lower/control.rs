@@ -365,6 +365,32 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.dispatch_finally(&context)?;
         Ok(self.control.pop_loop())
     }
+    /// Closes `iterator` when a protected spread step throws. Natural exhaustion
+    /// does not call `return`.
+    pub(super) fn protect_iterator_reads(
+        &mut self,
+        iterator: Reg,
+        start: usize,
+        end: usize,
+    ) -> Result<(), CompileError> {
+        let exception = self.alloc_reg()?;
+        let skip = self.jump();
+        let throw_pc = self.pc();
+        self.emit(Instr::IteratorClose {
+            iterator: self.slot(iterator),
+            preserve_throw: true,
+        });
+        self.emit(Instr::Throw {
+            src: self.slot(exception),
+        });
+        self.control.push_handler(ExceptionHandler {
+            start_pc: start as u32,
+            end_pc: end as u32,
+            target_pc: throw_pc as u32,
+            dst: self.slot(exception),
+        });
+        self.patch_jump(skip, self.pc())
+    }
 
     pub(super) fn compile_try(
         &mut self,
