@@ -1,7 +1,6 @@
 //! Interpreter. A step either continues, leaves the frame, or throws.
 //! Handlers run in one place; call sites do not each reimplement catch.
 
-use crate::builtins::type_error;
 use crate::bytecode::{
     ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind, UnaryOp,
 };
@@ -9,7 +8,7 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{Property, object_id};
 use crate::host::{Host, HostReply};
-use crate::ops::{self, unary_op};
+use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, Value};
@@ -134,19 +133,20 @@ impl Vm {
             Instr::Binary { dst, op, lhs, rhs } => {
                 let value = match ops::binary_op(op, frame.read(lhs)?, frame.read(rhs)?) {
                     Ok(value) => value,
-                    Err(VmError::Thrown(value)) => return Ok(Step::Throw(value)),
-                    Err(error) => return Err(error),
+                    Err(BinaryError::TypeError(message)) => {
+                        return Ok(Step::Throw(self.type_error(message)?));
+                    }
+                    Err(BinaryError::Vm(error)) => return Err(error),
                 };
                 frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::Unary { dst, op, src } => {
-                let value = match self.unary(op, frame.read(src)?) {
-                    Ok(value) => value,
-                    Err(VmError::Thrown(value)) => return Ok(Step::Throw(value)),
-                    Err(error) => return Err(error),
-                };
-                frame.write(dst, value)?;
+                let value = frame.read(src)?;
+                if ops::unary_coerces(op) && matches!(value, Value::Symbol(_)) {
+                    return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+                }
+                frame.write(dst, self.unary(op, value))?;
                 Ok(Step::Next)
             }
             Instr::CallImport { dst, import, args } => {
@@ -322,9 +322,7 @@ impl Vm {
         if let PropertyKey::String(key) = &key
             && self.prototype_write_rejected(object, key)
         {
-            return Ok(Invocation::Thrown(type_error(
-                "Cannot assign to read only property 'prototype'",
-            )));
+            return self.throw_type_error("Cannot assign to read only property 'prototype'");
         }
         match self.heap.lookup_property(id, &key)? {
             Some(Property::Accessor { set: Some(set), .. }) => {
@@ -335,9 +333,7 @@ impl Vm {
                 }
             }
             Some(Property::Accessor { set: None, .. }) => {
-                return Ok(Invocation::Thrown(type_error(
-                    "Cannot set property without a setter",
-                )));
+                return self.throw_type_error("Cannot set property without a setter");
             }
             _ => self.heap.set_own(id, key, value)?,
         }
@@ -490,14 +486,11 @@ impl Vm {
         self.react(promise, crate::heap::ReactionJob::Await(continuation))
     }
 
-    fn unary(&self, operator: UnaryOp, value: Value) -> Result<Value, VmError> {
+    fn unary(&self, operator: UnaryOp, value: Value) -> Value {
         if matches!(operator, UnaryOp::TypeOf) && self.is_callable(&value) {
-            return Ok(Value::String("function".to_owned()));
+            return Value::String("function".to_owned());
         }
-        if ops::unary_coerces(operator) && matches!(value, Value::Symbol(_)) {
-            return Err(ops::symbol_conversion_error("a number"));
-        }
-        Ok(unary_op(operator, value))
+        unary_op(operator, value)
     }
 
     fn constant(&self, index: u32) -> Result<Value, VmError> {

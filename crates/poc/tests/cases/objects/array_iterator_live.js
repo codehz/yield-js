@@ -23,14 +23,16 @@ async function run() {
   try {
     next();
   } catch (error) {
-    badNext = error === "TypeError: ArrayIterator.next requires an array iterator";
+    badNext = typeof error === "object" && error.name === "TypeError" &&
+      error.message === "ArrayIterator.next requires an array iterator";
   }
   const borrowed = { values: a.values, length: 1, 0: 42 };
   let badValues = false;
   try {
     borrowed.values();
   } catch (error) {
-    badValues = error === "TypeError: Array.values requires an array";
+    badValues = typeof error === "object" && error.name === "TypeError" &&
+      error.message === "Array.values requires an array";
   }
 
   it.next = 42;

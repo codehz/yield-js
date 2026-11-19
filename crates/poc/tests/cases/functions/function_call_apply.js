@@ -8,7 +8,7 @@ async function run() {
   try {
     obj.calc.apply(other, { length: 0 });
   } catch (e) {
-    return ok && e === "TypeError: createListFromArrayLike";
+    return ok && typeof e === "object" && e.name === "TypeError" && e.message === "createListFromArrayLike";
   }
   return false;
 }

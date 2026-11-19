@@ -1,6 +1,15 @@
-// @rejected "TypeError: value is not a constructor"
+// @fulfilled true
 
 async function run() {
+  try {
+    await constructMethod();
+  } catch (e) {
+    return typeof e === "object" && e.name === "TypeError" && e.message === "value is not a constructor";
+  }
+  return false;
+}
+
+async function constructMethod() {
   const o = {
     m() {},
     C: function () { this.ok = true; }

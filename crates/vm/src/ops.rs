@@ -8,53 +8,60 @@ pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
     matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
 }
 
-pub(crate) fn symbol_conversion_error(what: &str) -> VmError {
-    VmError::Thrown(crate::builtins::type_error(&format!(
-        "Cannot convert a Symbol value to {what}"
-    )))
+pub(crate) const SYMBOL_TO_NUMBER: &str = "Cannot convert a Symbol value to a number";
+pub(crate) const SYMBOL_TO_STRING: &str = "Cannot convert a Symbol value to a string";
+const SYMBOL_TO_PRIMITIVE: &str = "Cannot convert a Symbol value to a string or a number";
+
+pub(crate) enum BinaryError {
+    TypeError(&'static str),
+    Vm(VmError),
+}
+
+impl From<VmError> for BinaryError {
+    fn from(error: VmError) -> Self {
+        Self::Vm(error)
+    }
 }
 
 /// Coercing operands must be rejected before the lossy helpers run; the error
 /// is a script `TypeError` so `try`/`catch` can capture it.
-fn check_no_symbol(operator_kind: &str, values: &[&Value]) -> Result<(), VmError> {
+fn check_no_symbol(message: &'static str, values: &[&Value]) -> Result<(), BinaryError> {
     if values.iter().any(|value| matches!(value, Value::Symbol(_))) {
-        return Err(symbol_conversion_error(operator_kind));
+        return Err(BinaryError::TypeError(message));
     }
     Ok(())
 }
 
-pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, VmError> {
+pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
     Ok(match operator {
         BinaryOp::Add => match (&lhs, &rhs) {
             (Value::String(_), _) | (_, Value::String(_)) => {
-                if matches!(lhs, Value::Symbol(_)) || matches!(rhs, Value::Symbol(_)) {
-                    return Err(symbol_conversion_error("a string"));
-                }
+                check_no_symbol(SYMBOL_TO_STRING, &[&lhs, &rhs])?;
                 Value::String(to_js_string(&lhs) + &to_js_string(&rhs))
             }
             (lhs, rhs) => {
-                check_no_symbol("a number", &[lhs, rhs])?;
+                check_no_symbol(SYMBOL_TO_NUMBER, &[lhs, rhs])?;
                 Value::Number(to_number(lhs)? + to_number(rhs)?)
             }
         },
         BinaryOp::Sub => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)? - to_number(&rhs)?)
         }
         BinaryOp::Mul => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)? * to_number(&rhs)?)
         }
         BinaryOp::Div => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)? / to_number(&rhs)?)
         }
         BinaryOp::Rem => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)? % to_number(&rhs)?)
         }
         BinaryOp::Exp => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)?.powf(to_number(&rhs)?))
         }
         BinaryOp::Lt => relational(&lhs, &rhs, |ordering| ordering.is_lt())?,
@@ -66,27 +73,27 @@ pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Va
         BinaryOp::StrictEq => Value::Bool(strict_equal(&lhs, &rhs)),
         BinaryOp::StrictNe => Value::Bool(!strict_equal(&lhs, &rhs)),
         BinaryOp::BitAnd => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)? & to_int32(&rhs)?) as f64)
         }
         BinaryOp::BitOr => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)? | to_int32(&rhs)?) as f64)
         }
         BinaryOp::BitXor => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64)
         }
         BinaryOp::Shl => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)?).wrapping_shl(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::Shr => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::UShr => {
-            check_no_symbol("a number", &[&lhs, &rhs])?;
+            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number((to_uint32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
     })
@@ -124,8 +131,8 @@ fn relational(
     lhs: &Value,
     rhs: &Value,
     predicate: impl Fn(std::cmp::Ordering) -> bool,
-) -> Result<Value, VmError> {
-    check_no_symbol("a string or a number", &[lhs, rhs])?;
+) -> Result<Value, BinaryError> {
+    check_no_symbol(SYMBOL_TO_PRIMITIVE, &[lhs, rhs])?;
     if let (Value::String(lhs), Value::String(rhs)) = (lhs, rhs) {
         return Ok(Value::Bool(predicate(lhs.cmp(rhs))));
     }

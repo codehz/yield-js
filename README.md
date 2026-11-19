@@ -47,7 +47,7 @@ cargo run -p yield-poc
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
 - 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例、共享原型与已物化的顶层函数对象进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
-- `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。
+- `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层函数表和脚本根出发。`Symbol.iterator` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
@@ -75,6 +75,6 @@ cargo run -p yield-poc
 - `for...in`、`for...of`。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
-- VM 内部抛出的错误仍是字符串。`Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。Symbol 不能 `new`、不能跨宿主边界，参与强制数值/字符串转换时抛可捕获的 `TypeError`。没有 `Date`、`RegExp`、`JSON` 和 `Math`。
+- `Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。Symbol 不能 `new`、不能跨宿主边界，参与强制数值/字符串转换时抛可捕获的 `TypeError` 对象。没有 `Date`、`RegExp`、`JSON` 和 `Math`。
 - 运行期 tracing GC（目前有对象表与快照可达性遍历，没有回收器）。
 - C ABI、Apple/Android 宿主适配器、React/Solid 验收。

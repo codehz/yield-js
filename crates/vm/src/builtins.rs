@@ -1,7 +1,7 @@
 //! VM builtins: promises, microtasks, and object model methods.
 //!
-//! Script-visible `Error` and `TypeError` are objects. Internal errors remain
-//! strings, including the `AggregateError` rejection from `Promise.any`.
+//! Script-visible `Error` and `TypeError` are objects, including VM-generated
+//! TypeErrors. The `AggregateError` rejection from `Promise.any` is a string.
 //! `Object.prototype` has no constructor because there is no `Object` global.
 //!
 //! `queueMicrotask` enqueues a VM microtask. It does not call the host, so
@@ -98,10 +98,6 @@ enum Dispatch<'a> {
 
 const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
 const PROMISE_METHODS: [&str; 3] = ["then", "catch", "finally"];
-
-pub(crate) fn type_error(message: &str) -> Value {
-    Value::String(format!("TypeError: {message}"))
-}
 
 impl Vm {
     pub(crate) fn init_builtins(&mut self) {
@@ -264,7 +260,7 @@ impl Vm {
         key == "prototype" && matches!(object, Value::Object(id) if *id == self.builtins.promise)
     }
 
-    /// `Err` is a script TypeError, not a broken VM.
+    /// Script errors are returned as `Invocation::Thrown`.
     pub(crate) fn invoke(
         &mut self,
         host: &mut dyn Host,
@@ -283,7 +279,7 @@ impl Vm {
                 let args = bound.args.iter().cloned().chain(args).collect();
                 self.invoke(host, &target, args, &bound_this)
             }
-            None => Ok(Invocation::Thrown(type_error("value is not a function"))),
+            None => self.throw_type_error("value is not a function"),
         }
     }
 
@@ -298,7 +294,7 @@ impl Vm {
                 let index = self.function_index(func_id)?;
                 let constructable = self.build.functions[index].is_constructable();
                 if !constructable {
-                    return Ok(Invocation::Thrown(type_error("value is not a constructor")));
+                    return self.throw_type_error("value is not a constructor");
                 }
                 let prototype_value =
                     match self.read_member(host, callee, &Value::String("prototype".to_owned()))? {
@@ -322,10 +318,10 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 self.construct_error(&name, args)
             }
-            Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => Ok(Invocation::Thrown(
-                type_error("Symbol is not a constructor"),
-            )),
-            _ => Ok(Invocation::Thrown(type_error("value is not a constructor"))),
+            Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
+                self.throw_type_error("Symbol is not a constructor")
+            }
+            _ => self.throw_type_error("value is not a constructor"),
         }
     }
 
@@ -340,7 +336,7 @@ impl Vm {
             }));
         }
         Ok(match self.heap.get(*id)? {
-            Object::BuiltinStatic(function) => static_call(function).ok().map(Dispatch::Builtin),
+            Object::BuiltinStatic(function) => static_call(function).map(Dispatch::Builtin),
             Object::Resolution(_) => Some(Dispatch::Builtin(BuiltinCall::Resolution { id: *id })),
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             _ => None,
@@ -355,9 +351,7 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         match call {
-            BuiltinCall::Constructor => Ok(Invocation::Thrown(type_error(
-                "Promise constructor requires new",
-            ))),
+            BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -367,9 +361,7 @@ impl Vm {
                     let id = match *receiver {
                         Value::Object(id) if self.heap.is_environment(id) == Some(false) => id,
                         _ => {
-                            return Ok(Invocation::Thrown(type_error(
-                                "incompatible Object.prototype receiver",
-                            )));
+                            return self.throw_type_error("incompatible Object.prototype receiver");
                         }
                     };
                     let key = ops::property_key(args.first().unwrap_or(&Value::Undefined))?;
@@ -392,22 +384,16 @@ impl Vm {
             }
             BuiltinCall::Static(name) => {
                 if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
-                    return Ok(Invocation::Thrown(type_error(
-                        "incompatible Promise receiver",
-                    )));
+                    return self.throw_type_error("incompatible Promise receiver");
                 }
                 self.call_promise_static(host, &name, args)
             }
             BuiltinCall::Method { name } => {
                 let Value::Object(id) = receiver else {
-                    return Ok(Invocation::Thrown(type_error(
-                        "incompatible Promise receiver",
-                    )));
+                    return self.throw_type_error("incompatible Promise receiver");
                 };
                 if self.heap.get(*id)?.as_promise().is_none() {
-                    return Ok(Invocation::Thrown(type_error(
-                        "incompatible Promise receiver",
-                    )));
+                    return self.throw_type_error("incompatible Promise receiver");
                 }
                 self.call_promise_method(*id, &name, args)
             }
@@ -423,9 +409,7 @@ impl Vm {
         let id = match *receiver {
             Value::Object(id) if matches!(self.heap.get(id)?, Object::Array(_)) => id,
             _ => {
-                return Ok(Invocation::Thrown(type_error(
-                    "Array.values requires an array",
-                )));
+                return self.throw_type_error("Array.values requires an array");
             }
         };
         let iterator = self.heap.alloc(Object::ArrayIterator {
@@ -441,19 +425,15 @@ impl Vm {
     }
 
     fn array_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let invalid_receiver = || {
-            Ok(Invocation::Thrown(type_error(
-                "ArrayIterator.next requires an array iterator",
-            )))
-        };
+        let invalid_receiver = "ArrayIterator.next requires an array iterator";
         let Value::Object(id) = *receiver else {
-            return invalid_receiver();
+            return self.throw_type_error(invalid_receiver);
         };
         let Object::ArrayIterator {
             array, next_index, ..
         } = self.heap.get(id)?
         else {
-            return invalid_receiver();
+            return self.throw_type_error(invalid_receiver);
         };
         let value = if let Some(source) = *array {
             let Object::Array(source) = self.heap.get(source)? else {
@@ -497,9 +477,7 @@ impl Vm {
         let target = match *receiver {
             Value::Object(id) if self.heap.function(id).is_some() => id,
             _ => {
-                return Ok(Invocation::Thrown(type_error(
-                    "incompatible Function receiver",
-                )));
+                return self.throw_type_error("incompatible Function receiver");
             }
         };
         let mut args = args.into_iter();
@@ -512,7 +490,7 @@ impl Vm {
                     Some(Value::Object(id)) if let Object::Array(array) = self.heap.get(id)? => {
                         array.elements.clone()
                     }
-                    _ => return Ok(Invocation::Thrown(type_error("createListFromArrayLike"))),
+                    _ => return self.throw_type_error("createListFromArrayLike"),
                 };
                 self.invoke(host, receiver, args, &this_arg)
             }
@@ -530,6 +508,18 @@ impl Vm {
         }
     }
 
+    pub(crate) fn type_error(&mut self, message: &str) -> Result<Value, VmError> {
+        self.alloc_error(
+            self.builtins.typeerror_prototype,
+            "TypeError",
+            Some(message.to_owned()),
+        )
+    }
+
+    pub(crate) fn throw_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
+        self.type_error(message).map(Invocation::Thrown)
+    }
+
     fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
         let prototype = match name {
             "Error" => self.builtins.error_prototype,
@@ -540,11 +530,21 @@ impl Vm {
                 )));
             }
         };
-        let id = self.heap.alloc_plain_with(Some(prototype));
         let message = match args.first() {
             Some(value) if *value != Value::Undefined => Some(ops::to_js_string(value)),
             _ => None,
         };
+        self.alloc_error(prototype, name, message)
+            .map(Invocation::Value)
+    }
+
+    fn alloc_error(
+        &mut self,
+        prototype: ObjectId,
+        name: &str,
+        message: Option<String>,
+    ) -> Result<Value, VmError> {
+        let id = self.heap.alloc_plain_with(Some(prototype));
         let stack = format!("{name}: {}", message.as_deref().unwrap_or_default());
         if let Some(message) = message {
             self.heap
@@ -552,7 +552,7 @@ impl Vm {
         }
         self.heap
             .set_own_string(id, "stack", Value::String(stack))?;
-        Ok(Invocation::Value(Value::Object(id)))
+        Ok(Value::Object(id))
     }
 
     fn construct_promise(
@@ -562,9 +562,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let executor = args.first().cloned().unwrap_or(Value::Undefined);
         if !self.is_callable(&executor) {
-            return Ok(Invocation::Thrown(type_error(
-                "Promise executor is not a function",
-            )));
+            return self.throw_type_error("Promise executor is not a function");
         }
         let promise = self.heap.alloc_promise();
         let (resolve_id, reject_id) = self.alloc_capability_pair(promise)?;
@@ -587,9 +585,7 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         if !matches!(receiver, Value::Object(id) if *id == self.builtins.symbol) {
-            return Ok(Invocation::Thrown(type_error(
-                "incompatible Symbol receiver",
-            )));
+            return self.throw_type_error("incompatible Symbol receiver");
         }
         call(self, args)
     }
@@ -599,9 +595,7 @@ impl Vm {
         let description = match args.first() {
             None | Some(Value::Undefined) => None,
             Some(Value::Symbol(_)) => {
-                return Ok(Invocation::Thrown(type_error(
-                    "Cannot convert a Symbol value to a string",
-                )));
+                return self.throw_type_error(ops::SYMBOL_TO_STRING);
             }
             Some(value) => Some(ops::to_js_string(value)),
         };
@@ -613,9 +607,7 @@ impl Vm {
         let key = match args.first() {
             None | Some(Value::Undefined) => "undefined".to_owned(),
             Some(Value::Symbol(_)) => {
-                return Ok(Invocation::Thrown(type_error(
-                    "Cannot convert a Symbol value to a string",
-                )));
+                return self.throw_type_error(ops::SYMBOL_TO_STRING);
             }
             Some(value) => ops::to_js_string(value),
         };
@@ -623,11 +615,9 @@ impl Vm {
         Ok(Invocation::Value(Value::Symbol(id)))
     }
 
-    fn symbol_key_for(&self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    fn symbol_key_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let Some(Value::Symbol(id)) = args.first() else {
-            return Ok(Invocation::Thrown(type_error(
-                "Symbol.keyFor requires a Symbol",
-            )));
+            return self.throw_type_error("Symbol.keyFor requires a Symbol");
         };
         let key = self
             .heap
@@ -643,9 +633,7 @@ impl Vm {
     fn queue_microtask(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let function = args.first().cloned().unwrap_or(Value::Undefined);
         if !self.is_callable(&function) {
-            return Ok(Invocation::Thrown(type_error(
-                "queueMicrotask argument is not a function",
-            )));
+            return self.throw_type_error("queueMicrotask argument is not a function");
         }
         self.microtasks.push_back(Microtask::Call {
             function,
@@ -677,9 +665,7 @@ impl Vm {
             "allSettled" => self.combine(host, CombineKind::AllSettled, args),
             "race" => self.combine(host, CombineKind::Race, args),
             "any" => self.combine(host, CombineKind::Any, args),
-            _ => Ok(Invocation::Thrown(type_error(&format!(
-                "Promise.{name} is not a function"
-            )))),
+            _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
         }
     }
 
@@ -690,9 +676,7 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         if self.heap.promise(receiver).is_err() {
-            return Ok(Invocation::Thrown(type_error(
-                "Promise method called on a non-promise",
-            )));
+            return self.throw_type_error("Promise method called on a non-promise");
         }
         match name {
             "then" => self.promise_then(receiver, args),
@@ -704,9 +688,7 @@ impl Vm {
                 )
             }
             "finally" => self.promise_finally(receiver, args),
-            _ => Ok(Invocation::Thrown(type_error(&format!(
-                "Promise.{name} is not a function"
-            )))),
+            _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
         }
     }
 
@@ -752,9 +734,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let iterable = args.first().cloned().unwrap_or(Value::Undefined);
         let Some(elements) = self.array_elements(&iterable)? else {
-            return Ok(Invocation::Thrown(type_error(
-                "Promise combinator iterable is not an array",
-            )));
+            return self.throw_type_error("Promise combinator iterable is not an array");
         };
         let result = self.heap.alloc_promise();
         if elements.is_empty() {
@@ -1043,32 +1023,36 @@ impl Vm {
     }
 }
 
-fn static_call(function: &BuiltinStatic) -> Result<BuiltinCall, Value> {
+fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
     match (function.name.as_str(), function.member.as_deref()) {
-        ("Promise", None) => Ok(BuiltinCall::Constructor),
-        ("queueMicrotask", None) => Ok(BuiltinCall::QueueMicrotask),
-        (name @ ("Error" | "TypeError"), None) => Ok(BuiltinCall::ErrorConstructor {
+        ("Promise", None) => Some(BuiltinCall::Constructor),
+        ("queueMicrotask", None) => Some(BuiltinCall::QueueMicrotask),
+        (name @ ("Error" | "TypeError"), None) => Some(BuiltinCall::ErrorConstructor {
             name: name.to_owned(),
         }),
-        ("Function", Some(name @ ("call" | "apply" | "bind"))) => Ok(BuiltinCall::FunctionMethod {
-            name: name.to_owned(),
-        }),
-        ("Object", Some(name @ "hasOwnProperty")) => Ok(BuiltinCall::ObjectMethod {
-            name: name.to_owned(),
-        }),
-        ("Array", Some("values")) => Ok(BuiltinCall::ArrayValues),
-        ("ArrayIterator", Some("next")) => Ok(BuiltinCall::ArrayIteratorNext),
-        ("Iterator", Some("identity")) => Ok(BuiltinCall::IteratorIdentity),
-        ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
-            Ok(BuiltinCall::Static(member.to_owned()))
+        ("Function", Some(name @ ("call" | "apply" | "bind"))) => {
+            Some(BuiltinCall::FunctionMethod {
+                name: name.to_owned(),
+            })
         }
-        ("Promise", Some(member)) if PROMISE_METHODS.contains(&member) => Ok(BuiltinCall::Method {
-            name: member.to_owned(),
+        ("Object", Some(name @ "hasOwnProperty")) => Some(BuiltinCall::ObjectMethod {
+            name: name.to_owned(),
         }),
-        ("Symbol", None) => Ok(BuiltinCall::SymbolConstructor),
-        ("Symbol", Some("for")) => Ok(BuiltinCall::SymbolFor),
-        ("Symbol", Some("keyFor")) => Ok(BuiltinCall::SymbolKeyFor),
-        _ => Err(type_error("value is not a function")),
+        ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
+        ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
+        ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
+        ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
+            Some(BuiltinCall::Static(member.to_owned()))
+        }
+        ("Promise", Some(member)) if PROMISE_METHODS.contains(&member) => {
+            Some(BuiltinCall::Method {
+                name: member.to_owned(),
+            })
+        }
+        ("Symbol", None) => Some(BuiltinCall::SymbolConstructor),
+        ("Symbol", Some("for")) => Some(BuiltinCall::SymbolFor),
+        ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
+        _ => None,
     }
 }
 

@@ -28,7 +28,8 @@ async function run() {
     o.x = 0;
     return false;
   } catch (e) {
-    if (e !== "TypeError: Cannot set property without a setter" || o.x !== 6) return false;
+    if (typeof e !== "object" || e.name !== "TypeError" ||
+        e.message !== "Cannot set property without a setter" || o.x !== 6) return false;
   }
   const throws = {set x(v) { throw v; }};
   try { throws.x = 4; } catch (e) { return e === 4; }
