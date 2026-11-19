@@ -61,11 +61,10 @@
 
 ## 4. 结构性缺口（影响后续所有语法特性）
 
-1. **`instr.rs::may_throw` 只列 5 条**：`Throw`、`CallFunction`、`CallValue`、`Construct`、`GetMember`、`SetMember`。任何新抛错指令（如未来 `Binary` 除零、`Symbol` 键访问）必须同步登记，否则异常边不进 liveness/提升。
-2. **值模型单类型化**：加 `Symbol`/`BigInt`/`RegExp` 都要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`。
-3. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-4. **`for…in`/`for…of` 无迭代器协议**：缺 Symbol 值类型就没有 `Symbol.iterator`，两者绑定。
-5. **解构与 rest/spread 共享同一条路径**：数组/对象解构、实参展开、`Function.prototype.apply` 都缺"把迭代或枚举编译成循环"的下限（无 `Symbol.iterator`、无 `Object.keys` 运行时）。
+1. **值模型单类型化**：加 `Symbol`/`BigInt`/`RegExp` 都要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`。
+2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
+3. **`for…in`/`for…of` 无迭代器协议**：缺 Symbol 值类型就没有 `Symbol.iterator`，两者绑定。
+4. **解构与 rest/spread 共享同一条路径**：数组/对象解构、实参展开、`Function.prototype.apply` 都缺"把迭代或枚举编译成循环"的下限（无 `Symbol.iterator`、无 `Object.keys` 运行时）。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 

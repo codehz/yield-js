@@ -10,16 +10,38 @@ use yield_vm::bytecode::{Instr, Slot};
 
 use crate::emit::Reg;
 
+/// Whether an instruction can transfer control to a JavaScript exception
+/// handler at this PC. `VmError` is not that control flow, and `Await`'s
+/// rejection path has its own resume entry, so neither counts. Exhaustive so a
+/// new opcode forces an explicit classification.
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
-    matches!(
-        instruction,
+    match instruction {
         Instr::Throw { .. }
-            | Instr::CallFunction { .. }
-            | Instr::CallValue { .. }
-            | Instr::Construct { .. }
-            | Instr::GetMember { .. }
-            | Instr::SetMember { .. }
-    )
+        | Instr::CallFunction { .. }
+        | Instr::CallValue { .. }
+        | Instr::Construct { .. }
+        | Instr::GetMember { .. }
+        | Instr::SetMember { .. } => true,
+        Instr::Const { .. }
+        | Instr::Undefined { .. }
+        | Instr::Move { .. }
+        | Instr::Binary { .. }
+        | Instr::Unary { .. }
+        | Instr::CallImport { .. }
+        | Instr::Closure { .. }
+        | Instr::NewObject { .. }
+        | Instr::NewArray { .. }
+        | Instr::GetBuiltin { .. }
+        | Instr::GetTopFunction { .. }
+        | Instr::DefineProperty { .. }
+        | Instr::GetBinding { .. }
+        | Instr::SetBinding { .. }
+        | Instr::DeclareBinding { .. }
+        | Instr::Await { .. }
+        | Instr::Jump { .. }
+        | Instr::BranchFalse { .. }
+        | Instr::Return { .. } => false,
+    }
 }
 
 pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
