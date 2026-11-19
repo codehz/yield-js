@@ -113,6 +113,9 @@ pub(crate) enum BuiltinCall {
     ReflectOwnKeys,
     ReflectDeleteProperty,
     ObjectConstructor,
+    ObjectCreate,
+    GetPrototypeOf { reflect: bool },
+    SetPrototypeOf { reflect: bool },
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
     DefineProperty { reflect: bool },
@@ -166,6 +169,9 @@ impl Vm {
             .expect("Object.prototype stores its constructor");
         for name in [
             "keys",
+            "create",
+            "getPrototypeOf",
+            "setPrototypeOf",
             "getOwnPropertyDescriptor",
             "defineProperty",
             "defineProperties",
@@ -330,6 +336,8 @@ impl Vm {
             "defineProperty",
             "preventExtensions",
             "isExtensible",
+            "getPrototypeOf",
+            "setPrototypeOf",
         ] {
             let method = self.heap.alloc_builtin("Reflect", Some(name));
             self.heap
@@ -519,6 +527,9 @@ impl Vm {
         match call {
             BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
+            BuiltinCall::ObjectCreate => self.object_create(host, &args),
+            BuiltinCall::GetPrototypeOf { reflect } => self.get_prototype_of(&args, reflect),
+            BuiltinCall::SetPrototypeOf { reflect } => self.set_prototype_of(&args, reflect),
             BuiltinCall::ObjectKeys => self.object_keys(&args),
             BuiltinCall::ObjectGetOwnPropertyDescriptor => {
                 self.get_own_property_descriptor(host, &args)
@@ -526,7 +537,13 @@ impl Vm {
             BuiltinCall::DefineProperty { reflect } => {
                 self.define_property_builtin(host, &args, reflect)
             }
-            BuiltinCall::ObjectDefineProperties => self.object_define_properties(host, &args),
+            BuiltinCall::ObjectDefineProperties => {
+                let Some(Value::Object(target)) = args.first() else {
+                    return self
+                        .throw_type_error("Object.defineProperties requires an object target");
+                };
+                self.define_properties(host, *target, args.get(1))
+            }
             BuiltinCall::PreventExtensions { reflect } => {
                 let target = args.first().unwrap_or(&Value::Undefined);
                 if let Value::Object(id) = target {
@@ -954,6 +971,70 @@ impl Vm {
         }
     }
 
+    fn object_create(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let prototype = match args.first() {
+            Some(Value::Null) => None,
+            Some(Value::Object(id)) => Some(*id),
+            _ => {
+                return self.throw_type_error("Object.create requires an object or null prototype");
+            }
+        };
+        let object = self.heap.alloc_plain_with(prototype);
+        match args.get(1) {
+            None | Some(Value::Undefined) => Ok(Invocation::Value(Value::Object(object))),
+            properties => self.define_properties(host, object, properties),
+        }
+    }
+
+    fn get_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error(if reflect {
+                "Reflect.getPrototypeOf requires an object"
+            } else {
+                "Object.getPrototypeOf requires an object in this VM"
+            });
+        };
+        Ok(Invocation::Value(
+            self.heap
+                .get(*target)?
+                .prototype()
+                .map_or(Value::Null, Value::Object),
+        ))
+    }
+
+    fn set_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
+        let target = args.first().unwrap_or(&Value::Undefined);
+        if reflect && !matches!(target, Value::Object(_)) {
+            return self.throw_type_error("Reflect.setPrototypeOf requires an object target");
+        }
+        if matches!(target, Value::Undefined | Value::Null) {
+            return self.throw_type_error("Object.setPrototypeOf requires a non-nullish target");
+        }
+        let prototype = match args.get(1) {
+            Some(Value::Null) => None,
+            Some(Value::Object(id)) => Some(*id),
+            _ => {
+                return self
+                    .throw_type_error("setPrototypeOf requires an object or null prototype");
+            }
+        };
+        let Value::Object(target) = target else {
+            return Ok(Invocation::Value(target.clone()));
+        };
+        let accepted = self.heap.set_prototype(*target, prototype)?;
+        if reflect {
+            Ok(Invocation::Value(Value::Bool(accepted)))
+        } else if accepted {
+            Ok(Invocation::Value(Value::Object(*target)))
+        } else {
+            self.throw_type_error("Object.setPrototypeOf cannot set the prototype")
+        }
+    }
+
     fn object_keys(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
         let keys = match args.first() {
             None | Some(Value::Undefined | Value::Null) => {
@@ -1058,15 +1139,13 @@ impl Vm {
         self.apply_property_update(*target, key, update)
     }
 
-    fn object_define_properties(
+    fn define_properties(
         &mut self,
         host: &mut dyn Host,
-        args: &[Value],
+        target: ObjectId,
+        properties: Option<&Value>,
     ) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
-            return self.throw_type_error("Object.defineProperties requires an object target");
-        };
-        let (properties, source) = match args.get(1) {
+        let (properties, source) = match properties {
             Some(properties @ Value::Object(source)) => (properties, *source),
             None | Some(Value::Undefined | Value::Null) => {
                 return self
@@ -1077,7 +1156,7 @@ impl Vm {
                 return self.throw_type_error("property descriptor must be an object");
             }
             // The other primitive wrappers have no enumerable own properties.
-            _ => return Ok(Invocation::Value(Value::Object(*target))),
+            _ => return Ok(Invocation::Value(Value::Object(target))),
         };
         let keys: Vec<_> = self.heap.get(source)?.own_keys(false).collect();
         let mut updates = Vec::new();
@@ -1101,12 +1180,12 @@ impl Vm {
         // Conversion errors precede all definitions; application errors keep earlier writes.
         for (key, update) in updates {
             if let thrown @ Invocation::Thrown(_) =
-                self.apply_property_update(*target, key, update)?
+                self.apply_property_update(target, key, update)?
             {
                 return Ok(thrown);
             }
         }
-        Ok(Invocation::Value(Value::Object(*target)))
+        Ok(Invocation::Value(Value::Object(target)))
     }
 
     fn read_property_descriptor(
@@ -1773,6 +1852,17 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         }
         ("Object", None) => Some(BuiltinCall::ObjectConstructor),
         ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
+        ("Object", Some("create")) => Some(BuiltinCall::ObjectCreate),
+        (owner @ ("Object" | "Reflect"), Some("getPrototypeOf")) => {
+            Some(BuiltinCall::GetPrototypeOf {
+                reflect: owner == "Reflect",
+            })
+        }
+        (owner @ ("Object" | "Reflect"), Some("setPrototypeOf")) => {
+            Some(BuiltinCall::SetPrototypeOf {
+                reflect: owner == "Reflect",
+            })
+        }
         ("Object", Some("getOwnPropertyDescriptor")) => {
             Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
         }

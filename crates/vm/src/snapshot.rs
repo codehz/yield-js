@@ -20,7 +20,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 16;
+// The serialized Object and Reflect builtin graph includes prototype APIs.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -513,6 +514,11 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         Ok(id)
     };
     let object_prototype = plain_root(ROOT_OBJECT_PROTOTYPE)?;
+    if matches!(heap.get(object_prototype)?, Object::Plain(plain) if plain.prototype.is_some()) {
+        return Err(VmError::InvalidSnapshot(
+            "Object.prototype must have a null prototype".to_owned(),
+        ));
+    }
     let object = builtin_root(ROOT_OBJECT, "Object")?;
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
     let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
@@ -536,12 +542,6 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         if !prototypes.insert(id) {
             return Err(VmError::InvalidSnapshot(format!(
                 "{name} aliases another prototype root"
-            )));
-        }
-        if !matches!(heap.get(id)?, Object::Plain(plain) if plain.prototype == Some(object_prototype))
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{name} must inherit from object.prototype"
             )));
         }
     }

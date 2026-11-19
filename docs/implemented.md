@@ -12,6 +12,7 @@
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this`、预置参数及脚本定义的自有属性可跨 `await` 快照恢复；绑定函数不支持 `new`，不自动创建 `prototype` 属性。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。`for…in` 仍不支持。
+- `Object.create(proto, descriptors?)` 用对象或 `null` 作为原型，复用 `Object.defineProperties` 的描述符转换。`Object` / `Reflect` 的 `getPrototypeOf` / `setPrototypeOf` 查询或修改内部原型，不调用 getter。成环、改变不可扩展对象的原型，或把 `Object.prototype` 的原型改为非 `null` 时，`Object` 抛出可捕获的 `TypeError`，`Reflect` 返回 `false`；把原型设为其当前值仍成功。`Reflect` 要求对象目标；`Object.getPrototypeOf` 暂不装箱，`Object.setPrototypeOf` 验证新原型后原样返回 `null` / `undefined` 之外的原始值。宿主原生句柄的原型固定为 `null`。
 - `Reflect.ownKeys(obj)` 返回全部自有键：数组索引键按数值升序，其余字符串键及 Symbol 键分别按创建顺序。`Object.keys(value)` 复用该顺序，仅返回可枚举的自有字符串键；字符串原始值按 UTF-16 索引枚举。两者都不遍历原型链或调用 getter。
 - `Object.defineProperty(obj, key, descriptor)` 定义或重定义自有数据或访问器属性，遵守不可扩展、不可配置和只读限制；`Reflect.defineProperty` 对定义被拒绝返回 `false`，参数转换异常仍会抛出。`Object.defineProperties(obj, descriptors)` 按自有键顺序转换描述符映射中可枚举的字符串键和 Symbol 键，全部转换成功后才开始定义；若定义中途失败，已定义的属性不会回滚。`Object.getOwnPropertyDescriptor` 查询属性而不调用其 getter。描述符可跨快照恢复。数组索引支持描述符和稀疏存储；`length` 不可枚举，缩短时不会删除不可配置的元素。原始值包装对象尚未实现。
 - `delete` 支持成员、计算键和可选链；只移除可配置的自有属性，不调用被删除属性的 getter，也不修改原型。不可配置键在严格模式下抛 `TypeError`，`Reflect.deleteProperty` 则返回 `false`。删除数组索引留下空洞，不改变 `length`；删除后重新添加的非索引键排在同类键末尾。删除结果和属性顺序可跨快照恢复。
@@ -25,5 +26,5 @@
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
-- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
+- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型（含修改过的内建共享原型）按身份保存；恢复时拒绝悬空链接、环境对象、原型环和 `Object.prototype` 的非空原型。普通属性可以互相引用。
 - 快照要求微任务队列已排空。

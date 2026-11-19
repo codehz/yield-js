@@ -250,6 +250,46 @@ export async function run() {
 }
 
 #[test]
+fn restore_allows_reparented_builtin_prototypes_but_rejects_non_null_object_prototype() {
+    let source = r#"
+export async function run() {
+  const arrayPrototype = Object.getPrototypeOf([]);
+  Object.setPrototypeOf(arrayPrototype, null);
+  await wait("a");
+  return Object.getPrototypeOf([]) === arrayPrototype &&
+    Object.getPrototypeOf(arrayPrototype) === null &&
+    Object.getPrototypeOf(Object.prototype) === null;
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let mut invalid = snapshot.clone();
+    let object_prototype = invalid.roots["object.prototype"];
+    let array_prototype = invalid.roots["array.prototype"];
+    let record = invalid
+        .objects
+        .iter_mut()
+        .find(|record| record.id == object_prototype)
+        .expect("Object.prototype in snapshot");
+    let Object::Plain(plain) = &mut record.object else {
+        panic!("Object.prototype must be a plain object");
+    };
+    // The array prototype has a null parent, so this edge does not create a cycle.
+    plain.prototype = Some(array_prototype);
+    let error = s
+        .restore(invalid)
+        .expect_err("non-null Object.prototype parent");
+    assert!(matches!(
+        error,
+        VmError::InvalidSnapshot(detail) if detail == "Object.prototype must have a null prototype"
+    ));
+
+    s.restore(json_round_trip(&snapshot)).expect("restore");
+    s.complete("wait:a", Completion::Fulfilled(number(0.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
+}
+
+#[test]
 fn builtin_roots_and_function_identity_survive_restore() {
     let source = r#"
 export async function run() {

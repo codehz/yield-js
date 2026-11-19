@@ -839,7 +839,7 @@ impl Object {
         }
     }
 
-    fn prototype(&self) -> Option<ObjectId> {
+    pub(crate) fn prototype(&self) -> Option<ObjectId> {
         match self {
             Self::Plain(plain)
             | Self::ArrayIterator { object: plain, .. }
@@ -852,6 +852,21 @@ impl Object {
             Self::Resolution(resolution) => resolution.object.prototype,
             Self::Native(_) | Self::Environment(_) => None,
         }
+    }
+
+    fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
+        Some(match self {
+            Self::Plain(o)
+            | Self::ArrayIterator { object: o, .. }
+            | Self::StringIterator { object: o, .. }
+            | Self::Bound(BoundObject { object: o, .. })
+            | Self::Resolution(Resolution { object: o, .. }) => &mut o.prototype,
+            Self::Array(o) => &mut o.prototype,
+            Self::Function(o) => &mut o.prototype,
+            Self::Promise(o) => &mut o.prototype,
+            Self::BuiltinStatic(o) => &mut o.prototype,
+            Self::Native(_) | Self::Environment(_) => return None,
+        })
     }
 
     /// Append every outgoing reference. Callers clear `out` only by relying on
@@ -1323,6 +1338,34 @@ impl Heap {
             previous = Some(current);
             current = next;
         }
+    }
+
+    pub(crate) fn set_prototype(
+        &mut self,
+        id: ObjectId,
+        prototype: Option<ObjectId>,
+    ) -> Result<bool, VmError> {
+        let object = self.get(id)?;
+        if object.prototype() == prototype {
+            return Ok(true);
+        }
+        if self.object_prototype == Some(id) || !object.is_extensible() {
+            return Ok(false);
+        }
+        // All existing links were checked at restore or installed here. A new
+        // link can only form a cycle if its chain leads back to the receiver.
+        let mut current = prototype;
+        while let Some(ancestor) = current {
+            if ancestor == id {
+                return Ok(false);
+            }
+            current = self.get(ancestor)?.prototype();
+        }
+        *self
+            .get_mut(id)?
+            .prototype_mut()
+            .expect("every extensible object has a prototype slot") = prototype;
+        Ok(true)
     }
 
     pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
