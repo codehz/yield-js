@@ -116,6 +116,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     emit: Emitter<'src>,
     control: Control<'ast>,
     param_bindings: Vec<BindingId>,
+    rest_binding: Option<BindingId>,
     this_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
 }
@@ -153,6 +154,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             emit: Emitter::new(source_text, span),
             control: Control::new(),
             param_bindings: Vec::new(),
+            rest_binding: None,
             this_binding: None,
             hoisted: BTreeSet::new(),
         }
@@ -224,6 +226,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_arrow: self.is_arrow,
             is_method: self.is_method,
             param_bindings: self.param_bindings.clone(),
+            rest_binding: self.rest_binding,
             this_binding: self.this_binding,
             promoted: BTreeMap::new(),
             reg_count: self.emit.reg_count(),
@@ -259,20 +262,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         params: &'ast FormalParameters<'ast>,
     ) -> Result<(), CompileError> {
-        if params.rest.is_some() {
-            return Err(unsupported(
-                self.source_text(),
-                params.span,
-                "rest parameter",
-            ));
-        }
-        let needs_prologue = params.items.iter().any(|parameter| {
-            parameter.initializer.is_some()
-                || !matches!(&parameter.pattern, BindingPattern::BindingIdentifier(_))
-        });
+        let needs_prologue = params.rest.is_some()
+            || params.items.iter().any(|parameter| {
+                parameter.initializer.is_some()
+                    || !matches!(&parameter.pattern, BindingPattern::BindingIdentifier(_))
+            });
         let mut pending = Vec::new();
-        for parameter in &params.items {
-            for_each_binding_name(&parameter.pattern, &mut |identifier| {
+        let patterns = params
+            .items
+            .iter()
+            .map(|parameter| &parameter.pattern)
+            .chain(params.rest.iter().map(|rest| &rest.rest.argument));
+        for pattern in patterns {
+            for_each_binding_name(pattern, &mut |identifier| {
                 let name = identifier.name.as_str();
                 if self.env.has_function_binding(name) {
                     return Err(CompileError::new(
@@ -309,6 +311,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     value
                 };
                 self.compile_binding_pattern(&parameter.pattern, value)?;
+            }
+            if let Some(rest) = &params.rest {
+                let binding = self.alloc_binding();
+                self.rest_binding = Some(binding);
+                let value = self.alloc_reg()?;
+                self.emit(Instr::GetBinding {
+                    dst: self.slot(value),
+                    binding,
+                });
+                self.compile_binding_pattern(&rest.rest.argument, value)?;
             }
         }
         Ok(())

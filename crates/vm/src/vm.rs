@@ -365,27 +365,28 @@ impl Vm {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
         let params = self.build.functions[function_index].params.clone();
+        let rest_param = self.build.functions[function_index].rest_param.clone();
         let this_param = self.build.functions[function_index].this_param.clone();
         let async_promise = is_async.then(|| self.heap.alloc_promise());
 
         let mut bindings = BTreeMap::new();
         let mut slot_args = Vec::new();
+        let mut bind = |param, value| match param {
+            ParamTarget::Binding(binding) => {
+                bindings.insert(binding, value);
+            }
+            ParamTarget::Slot(slot) => slot_args.push((slot, value)),
+        };
         if let Some(param) = this_param {
-            match param {
-                ParamTarget::Binding(binding) => {
-                    bindings.insert(binding, receiver.clone());
-                }
-                ParamTarget::Slot(slot) => slot_args.push((slot, receiver.clone())),
-            }
+            bind(param, receiver.clone());
         }
-        for (index, param) in params.into_iter().enumerate() {
-            let value = args.get(index).cloned().unwrap_or(Value::Undefined);
-            match param {
-                ParamTarget::Binding(binding) => {
-                    bindings.insert(binding, value);
-                }
-                ParamTarget::Slot(slot) => slot_args.push((slot, value)),
-            }
+        let mut args = args.into_iter();
+        for param in params {
+            bind(param, args.next().unwrap_or(Value::Undefined));
+        }
+        if let Some(param) = rest_param {
+            let rest = self.heap.alloc_array(args.collect());
+            bind(param, Value::Object(rest));
         }
         let needs_env = self.build.functions[function_index].needs_environment();
         let env = if needs_env {

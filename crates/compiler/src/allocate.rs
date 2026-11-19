@@ -71,27 +71,21 @@ pub(crate) fn allocate(
         })
         .collect::<Vec<_>>();
 
+    let param_target = |binding| match lowered.promoted.get(&binding) {
+        Some(reg) => ParamTarget::Slot(layout.remap(Slot {
+            kind: SlotKind::Transient,
+            index: *reg,
+        })),
+        None => ParamTarget::Binding(binding),
+    };
     let params = lowered
         .param_bindings
         .iter()
-        .map(|binding| match lowered.promoted.get(binding) {
-            Some(reg) => ParamTarget::Slot(layout.remap(Slot {
-                kind: SlotKind::Transient,
-                index: *reg,
-            })),
-            None => ParamTarget::Binding(*binding),
-        })
-        .collect::<Vec<_>>();
-
-    let this_param = lowered
-        .this_binding
-        .map(|binding| match lowered.promoted.get(&binding) {
-            Some(reg) => ParamTarget::Slot(layout.remap(Slot {
-                kind: SlotKind::Transient,
-                index: *reg,
-            })),
-            None => ParamTarget::Binding(binding),
-        });
+        .copied()
+        .map(param_target)
+        .collect();
+    let rest_param = lowered.rest_binding.map(param_target);
+    let this_param = lowered.this_binding.map(param_target);
 
     Ok(BytecodeFunction {
         func_id: lowered.func_id,
@@ -100,6 +94,7 @@ pub(crate) fn allocate(
         is_arrow: lowered.is_arrow,
         is_method: lowered.is_method,
         params,
+        rest_param,
         this_param,
         transient_slots: layout.transient_count,
         persistent_slots: layout.persistent_count,

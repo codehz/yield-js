@@ -21,7 +21,7 @@ pub(crate) struct BindingFacts {
 pub(crate) fn classify(functions: &[LoweredFunction]) -> Result<BindingFacts, CompileError> {
     let mut owners = BTreeMap::new();
     for function in functions {
-        for binding in &function.param_bindings {
+        for binding in function.param_bindings.iter().chain(&function.rest_binding) {
             record_owner(&mut owners, *binding, function.func_id)?;
         }
         if let Some(binding) = function.this_binding {

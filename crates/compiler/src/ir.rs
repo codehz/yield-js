@@ -33,6 +33,7 @@ pub(crate) struct LoweredFunction {
     pub(crate) is_arrow: bool,
     pub(crate) is_method: bool,
     pub(crate) param_bindings: Vec<BindingId>,
+    pub(crate) rest_binding: Option<BindingId>,
     /// Implicit receiver. Not a source parameter and not a JavaScript argument.
     pub(crate) this_binding: Option<BindingId>,
     /// Non-shared bindings assigned a fresh logical register, in `BindingId` order.

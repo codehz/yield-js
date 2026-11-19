@@ -22,7 +22,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ### 2.1 绑定与参数
 
-- 形参 rest（`rest parameter`），包括 `function f(...[x]) {}`；解构模式内部的 rest 已支持
 - `for…of` 多个声明（`for-of declaration`）
 - `arguments` 没有绑定。引用是 `unknown binding`，不是单独的 `unsupported syntax`
 - `const` 与 `let` 在绑定种类上不分。重复赋值 `const` 能编过，也不会在运行期拒绝

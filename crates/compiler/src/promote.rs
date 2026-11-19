@@ -75,8 +75,9 @@ fn promotion_inits(
     resumes: &[ResumeEntry],
     binding: BindingId,
 ) -> Result<Option<BTreeMap<usize, bool>>, CompileError> {
-    let is_param =
-        function.param_bindings.contains(&binding) || function.this_binding == Some(binding);
+    let is_param = function.param_bindings.contains(&binding)
+        || function.rest_binding == Some(binding)
+        || function.this_binding == Some(binding);
     let incoming = declared_in(function, resumes, binding, is_param)?;
     let mut inits = BTreeMap::new();
     for (pc, instruction) in function.code.iter().enumerate() {

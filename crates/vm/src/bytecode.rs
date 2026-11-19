@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 20;
+pub const BYTECODE_VERSION: u32 = 21;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -373,8 +373,10 @@ pub struct Function {
     pub is_async: bool,
     pub is_arrow: bool,
     pub is_method: bool,
-    /// Parameter destinations in source order. Does not include [`Self::this_param`].
+    /// Positional parameter destinations in source order.
     pub params: Vec<ParamTarget>,
+    /// Destination for a fresh array of arguments beyond the positional parameters.
+    pub rest_param: Option<ParamTarget>,
     /// Receiver binding when this function, or an arrow nested in it, uses `this`.
     /// Not a JavaScript argument.
     pub this_param: Option<ParamTarget>,
@@ -401,13 +403,11 @@ impl Function {
     /// protocol even when this function's own bindings were promoted.
     pub fn needs_environment(&self) -> bool {
         if self
-            .this_param
-            .as_ref()
-            .is_some_and(|param| matches!(param, ParamTarget::Binding(_)))
-            || self
-                .params
-                .iter()
-                .any(|param| matches!(param, ParamTarget::Binding(_)))
+            .params
+            .iter()
+            .chain(&self.rest_param)
+            .chain(&self.this_param)
+            .any(|param| matches!(param, ParamTarget::Binding(_)))
         {
             return true;
         }
@@ -606,7 +606,7 @@ impl Build {
                 self.script
             ));
         }
-        if !script.params.is_empty() || script.this_param.is_some() {
+        if !script.params.is_empty() || script.rest_param.is_some() || script.this_param.is_some() {
             return Err(format!(
                 "script function {} must not take arguments or a receiver",
                 self.script
@@ -684,7 +684,7 @@ impl Build {
         }
         let mut seen_bindings = std::collections::BTreeSet::new();
         let mut seen_slots = Vec::new();
-        for param in &function.params {
+        for param in function.params.iter().chain(&function.rest_param) {
             match param {
                 ParamTarget::Binding(binding) => {
                     if !seen_bindings.insert(*binding) {
