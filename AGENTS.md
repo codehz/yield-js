@@ -164,3 +164,16 @@ async function run() {
 ```
 
 Add a behavior case by dropping `snake_case.js` in `crates/poc/tests/cases/` (or one of its category subdirectories: `async`, `closures`, `control`, `functions`, `objects`, `promise`, `strings`). `build.rs` walks the directory recursively; the generated test is `case_<stem>` at top level or `case_<category>_<stem>` in a subdirectory. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
+
+## Commit Workflow
+
+Create a git commit immediately after each completed phase of behavior change (new syntax support, VM/snapshot contract changes, host protocol changes, new test cases). Do not accumulate changes into one large commit.
+
+Before committing, verify in order:
+
+1. `cargo fmt --check` and `cargo clippy --workspace --all-targets` pass (run `cargo fmt` first if they report changes).
+2. `cargo test --workspace` passes; for contract-related changes also run the matching layer (see Testing & QA).
+3. If behavior changed, update docs in sync: refresh `docs/gaps.md` (current-gap inventory); update `README.md` / `docs/design.md` when the target design is affected, and fix any outdated statements in this file.
+4. If bytecode or snapshot record shape changed, check whether `BYTECODE_VERSION` / `SNAPSHOT_FORMAT_VERSION` need a bump (see Code Conventions).
+
+Commit messages are a single imperative sentence in English describing the behavior change itself, e.g. `snapshot: reject restore when natives are missing`. Docs and tests land in the same commit, never split out separately.
