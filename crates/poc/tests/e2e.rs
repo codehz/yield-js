@@ -341,6 +341,108 @@ async function run() {
 }
 
 #[test]
+fn restore_validates_internal_prototypes_but_allows_property_cycles() {
+    let source = r#"
+function Box() {}
+
+async function run() {
+  Box.prototype.x = 7;
+  const first = new Box();
+  const second = new Box();
+  first.prototype = second;
+  second.peer = first;
+  const n = 1;
+  function captured() { return n; }
+  await wait("a");
+  return first.x === 7 && second.x === 7 &&
+    first.prototype === second && second.peer === first && captured() === 1;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
+    let (first, second) = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::Plain(plain) => match plain.props.get("prototype") {
+                Some(Value::Object(peer)) => Some((record.id, *peer)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("instances linked by a regular property named prototype");
+    let env = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::Function(function) => function.env,
+            _ => None,
+        })
+        .expect("captured environment");
+    let missing = u32::MAX;
+    for (case, target, reverse, expected) in [
+        (
+            "self cycle",
+            first,
+            false,
+            format!("prototype chain of object {first} is cyclic"),
+        ),
+        (
+            "two-node cycle",
+            second,
+            true,
+            format!("prototype chain of object {} is cyclic", first.min(second)),
+        ),
+        (
+            "missing target",
+            missing,
+            false,
+            format!("object {first} prototype {missing} does not exist"),
+        ),
+        (
+            "environment target",
+            env,
+            false,
+            format!("object {first} prototype {env} is an environment"),
+        ),
+    ] {
+        let mut invalid = snapshot.clone();
+        for record in &mut invalid.objects {
+            if let Object::Plain(plain) = &mut record.object {
+                if record.id == first {
+                    plain.prototype = Some(target);
+                } else if reverse && record.id == second {
+                    plain.prototype = Some(first);
+                }
+            }
+        }
+        let error = Vm::restore(invalid, build.clone(), &mut host).expect_err(case);
+        assert!(
+            matches!(&error, VmError::InvalidSnapshot(message) if *message == expected),
+            "{case}: {error}"
+        );
+    }
+
+    let json = snapshot.to_json().expect("snapshot json");
+    let snapshot = yield_vm::Snapshot::from_json(&json).expect("snapshot parse");
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(1.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Bool(true))
+    );
+}
+
+#[test]
 fn finally_completion_overrides_return_and_throw() {
     let source = r#"
 function run() {

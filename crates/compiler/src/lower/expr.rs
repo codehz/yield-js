@@ -346,7 +346,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
 
-        if let Expression::Identifier(callee) = &expression.callee {
+        let mut callee = &expression.callee;
+        while let Expression::ParenthesizedExpression(paren) = callee {
+            callee = &paren.expression;
+        }
+
+        if let Expression::Identifier(callee) = callee {
             let name = callee.name.as_str();
             match self.session.names().callee(&self.env, name) {
                 Callee::Binding(binding) => {
@@ -411,7 +416,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
             }
         }
-        if let Some(member) = expression.callee.as_member_expression() {
+        if let Some(member) = callee.as_member_expression() {
             let (object, key) = self.compile_member_parts(member)?;
             let callee = self.alloc_reg()?;
             self.emit(Instr::GetMember {
@@ -430,7 +435,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return Ok(dst);
         }
 
-        let callee = self.compile_expression(&expression.callee)?;
+        let callee = self.compile_expression(callee)?;
         let args = self.compile_arguments(expression)?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CallValue {

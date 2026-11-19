@@ -180,6 +180,7 @@ impl Vm {
         for record in &snapshot.objects {
             heap.insert_restore(record.id, record.object.clone())?;
         }
+        heap.combines = snapshot.combines.clone();
         check_heap_edges(&heap, host)?;
         require_value_objects(&heap, snapshot.globals.values())?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
@@ -187,10 +188,8 @@ impl Vm {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let operations = load_operations(&build, &heap, &snapshot.operations, host)?;
-        heap.combines = snapshot.combines.clone();
         let builtins = load_roots(&heap, &snapshot.roots)?;
         let functions = load_functions(&build, &heap, &snapshot.functions)?;
-        check_heap_edges(&heap, host)?;
         validate_jobs(&heap)?;
         validate_combines(&heap)?;
         Ok(Self::restored(
@@ -282,7 +281,9 @@ impl<'a> Tracer<'a> {
         self.heap.write_edges(id, &mut edges)?;
         for edge in &edges {
             match *edge {
-                OwnedEdge::Object(target) | OwnedEdge::Environment { id: target, .. } => {
+                OwnedEdge::Object(target)
+                | OwnedEdge::Prototype(target)
+                | OwnedEdge::Environment { id: target, .. } => {
                     self.mark_object(target)?;
                 }
                 OwnedEdge::Continuation(continuation) => {
@@ -419,6 +420,7 @@ fn load_functions(
 
 fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
     let mut edges = Vec::new();
+    let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
         if let Object::Native(native) = heap.get(id)?
             && !host.has_native(&native.key)
@@ -435,12 +437,45 @@ fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
                         )));
                     }
                 }
+                OwnedEdge::Prototype(target) => match heap.is_environment(target) {
+                    None => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} prototype {target} does not exist"
+                        )));
+                    }
+                    Some(true) => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} prototype {target} is an environment"
+                        )));
+                    }
+                    Some(false) => {
+                        prototypes.insert(id, target);
+                    }
+                },
                 OwnedEdge::Environment { id: env, role } => {
                     require_environment(heap, id, env, role)?;
                 }
                 OwnedEdge::Continuation(_) => {}
             }
         }
+    }
+
+    let mut completed = BTreeSet::new();
+    let mut path = BTreeSet::new();
+    for &id in prototypes.keys() {
+        let mut current = id;
+        while !completed.contains(&current) {
+            if !path.insert(current) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "prototype chain of object {id} is cyclic"
+                )));
+            }
+            let Some(&next) = prototypes.get(&current) else {
+                break;
+            };
+            current = next;
+        }
+        completed.extend(std::mem::take(&mut path));
     }
     Ok(())
 }

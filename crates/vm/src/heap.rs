@@ -231,6 +231,7 @@ pub(crate) enum EnvRole {
 #[derive(Clone, Copy)]
 pub(crate) enum OwnedEdge {
     Object(ObjectId),
+    Prototype(ObjectId),
     Environment { id: ObjectId, role: EnvRole },
     Continuation(ContinuationId),
 }
@@ -340,7 +341,7 @@ fn push_script(
     prototype: Option<ObjectId>,
 ) {
     if let Some(id) = prototype {
-        out.push(OwnedEdge::Object(id));
+        out.push(OwnedEdge::Prototype(id));
     }
     for value in props.values() {
         push_value(out, value);
@@ -600,34 +601,6 @@ impl Heap {
         self.alloc(Object::Native(NativeObject { key }))
     }
 
-    /// Own hit is `Some`, including `undefined`. `None` means the key is absent.
-    pub(crate) fn own_property(&self, id: ObjectId, key: &str) -> Result<Option<Value>, VmError> {
-        Ok(match self.get(id)? {
-            Object::Plain(plain) => plain.props.get(key).cloned(),
-            Object::Array(array) => array.own(key),
-            Object::Function(function) => function.props.get(key).cloned(),
-            Object::Promise(promise) => promise.props.get(key).cloned(),
-            Object::BuiltinStatic(builtin) => builtin.props.get(key).cloned(),
-            Object::Native(_) | Object::Resolution(_) => None,
-            Object::Environment(_) => {
-                return Err(VmError::InvalidState(format!(
-                    "object {id} is an environment and cannot be a prototype"
-                )));
-            }
-        })
-    }
-
-    pub(crate) fn internal_prototype(&self, id: ObjectId) -> Result<Option<ObjectId>, VmError> {
-        Ok(match self.get(id)? {
-            Object::Plain(plain) => plain.prototype,
-            Object::Array(array) => array.prototype,
-            Object::Function(function) => function.prototype,
-            Object::Promise(promise) => promise.prototype,
-            Object::BuiltinStatic(builtin) => builtin.prototype,
-            Object::Native(_) | Object::Resolution(_) | Object::Environment(_) => None,
-        })
-    }
-
     pub(crate) fn get_member(&self, object: &Value, key: &Value) -> Result<Value, VmError> {
         let key = property_key(key)?;
         let id = object_id(object, "property access on a non-object")?;
@@ -636,32 +609,44 @@ impl Heap {
 
     pub(crate) fn get_property(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
         let mut current = id;
-        let mut seen = BTreeSet::new();
+        let mut previous = None;
+        let mut remaining = self.objects.len();
         loop {
-            if !seen.insert(current) {
+            let object = self.objects.get(&current).ok_or_else(|| match previous {
+                Some(parent) => VmError::InvalidState(format!(
+                    "object {parent} prototype {current} does not exist"
+                )),
+                None => missing_object(current),
+            })?;
+            if matches!(object, Object::Environment(_)) {
+                return Err(VmError::InvalidState(match previous {
+                    Some(parent) => format!("object {parent} prototype {current} is an environment"),
+                    None => format!("object {id} is an environment and cannot be a prototype"),
+                }));
+            }
+            if remaining == 0 {
                 return Err(VmError::InvalidState(format!(
                     "prototype chain of object {id} is cyclic"
                 )));
             }
-            if let Some(value) = self.own_property(current, key)? {
+            remaining -= 1;
+            let (own, prototype) = match object {
+                Object::Plain(plain) => (plain.props.get(key).cloned(), plain.prototype),
+                Object::Array(array) => (array.own(key), array.prototype),
+                Object::Function(function) => (function.props.get(key).cloned(), function.prototype),
+                Object::Promise(promise) => (promise.props.get(key).cloned(), promise.prototype),
+                Object::BuiltinStatic(builtin) => (builtin.props.get(key).cloned(), builtin.prototype),
+                Object::Native(_) | Object::Resolution(_) => (None, None),
+                Object::Environment(_) => unreachable!(),
+            };
+            if let Some(value) = own {
                 return Ok(value);
             }
-            match self.internal_prototype(current)? {
-                Some(next) => {
-                    if !self.contains(next) {
-                        return Err(VmError::InvalidState(format!(
-                            "object {current} prototype {next} does not exist"
-                        )));
-                    }
-                    if self.is_environment(next) == Some(true) {
-                        return Err(VmError::InvalidState(format!(
-                            "object {current} prototype {next} is an environment"
-                        )));
-                    }
-                    current = next;
-                }
-                None => return Ok(Value::Undefined),
-            }
+            let Some(next) = prototype else {
+                return Ok(Value::Undefined);
+            };
+            previous = Some(current);
+            current = next;
         }
     }
 
