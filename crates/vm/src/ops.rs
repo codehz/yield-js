@@ -154,7 +154,7 @@ fn to_uint32(value: &Value) -> Result<u32, VmError> {
     Ok(to_int32(value)? as u32)
 }
 
-fn to_js_string(value: &Value) -> String {
+pub(crate) fn to_js_string(value: &Value) -> String {
     match value {
         Value::Undefined => "undefined".to_owned(),
         Value::Null => "null".to_owned(),

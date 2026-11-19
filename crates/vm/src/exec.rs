@@ -290,6 +290,12 @@ impl Vm {
             Some(Property::Accessor { get: Some(get), .. }) => {
                 self.invoke(host, &Value::Object(get), Vec::new(), object)
             }
+            None if self.heap.function(id).is_some()
+                && matches!(key.as_str(), "call" | "apply" | "bind") =>
+            {
+                let method = self.heap.alloc_builtin("Function", Some(&key));
+                Ok(Invocation::Value(Value::Object(method)))
+            }
             _ => Ok(Invocation::Value(Value::Undefined)),
         }
     }

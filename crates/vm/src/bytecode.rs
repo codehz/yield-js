@@ -15,7 +15,7 @@ pub const BYTECODE_VERSION: u32 = 6;
 ///
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
 /// The compiler and `Build::validate` both use this table; do not reorder it.
-pub const BUILTINS: [&str; 2] = ["Promise", "queueMicrotask"];
+pub const BUILTINS: [&str; 4] = ["Promise", "queueMicrotask", "Error", "TypeError"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

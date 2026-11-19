@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::builtins::{BuiltinRoots, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK};
+use crate::builtins::{
+    BuiltinRoots, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
+    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+};
 use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
 use crate::heap::{
@@ -13,7 +16,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -183,7 +186,7 @@ impl Vm {
             heap.insert_restore(record.id, record.object.clone())?;
         }
         heap.combines = snapshot.combines.clone();
-        check_heap_edges(&heap, host)?;
+        check_heap_edges(&build, &heap, host)?;
         validate_accessors(&build, &heap)?;
         require_value_objects(&heap, snapshot.globals.values())?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
@@ -332,9 +335,9 @@ fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 3 {
+    if roots.len() != 8 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 3",
+            "snapshot has {} builtin roots, expected 8",
             roots.len()
         )));
     }
@@ -372,10 +375,34 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             "Promise.prototype does not match the prototype root".to_owned(),
         ));
     }
+    let plain_root = |name| {
+        let id = required_root(roots, name)?;
+        if !matches!(heap.get(id), Ok(Object::Plain(_))) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{name} root is not a plain object"
+            )));
+        }
+        Ok(id)
+    };
+    let builtin_root = |key, name| {
+        let id = required_root(roots, key)?;
+        if !matches!(heap.get(id), Ok(Object::BuiltinStatic(f)) if f.name == name && f.member.is_none())
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{key} root is not the {name} constructor"
+            )));
+        }
+        Ok(id)
+    };
     Ok(BuiltinRoots {
         promise,
         promise_prototype: prototype,
         queue_microtask: queue,
+        object_prototype: plain_root(ROOT_OBJECT_PROTOTYPE)?,
+        error_prototype: plain_root(ROOT_ERROR_PROTOTYPE)?,
+        typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
+        error: builtin_root(ROOT_ERROR, "Error")?,
+        typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
     })
 }
 
@@ -420,7 +447,7 @@ fn load_functions(
     Ok(functions.clone())
 }
 
-fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
+fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
@@ -428,6 +455,15 @@ fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
             && !host.has_native(&native.key)
         {
             return Err(VmError::MissingNative(native.key.clone()));
+        }
+        // The shared edge walk below checks the bound receiver and arguments.
+        if let Object::Bound(bound) = heap.get(id)?
+            && !matches!(heap.function(bound.target), Some(f) if build.function(f.func_id).is_some())
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "bound target {} is missing or not a function",
+                bound.target
+            )));
         }
         heap.write_edges(id, &mut edges)?;
         for edge in edges.drain(..) {

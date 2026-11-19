@@ -1133,7 +1133,7 @@ function demo() {
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
-    assert_eq!(snapshot.roots.len(), 3);
+    assert_eq!(snapshot.roots.len(), 8);
     assert!(!snapshot.functions.is_empty());
 
     let mut missing = snapshot.clone();
@@ -1149,5 +1149,59 @@ function demo() {
     assert_eq!(
         restored.promise_state(&result).expect("result"),
         PromiseState::Fulfilled(Value::Number(4.0))
+    );
+}
+
+#[test]
+fn bound_function_survives_restore() {
+    let source = r#"
+async function run() {
+  const captured = 4;
+  const fn = function (arg, v) { return captured + this.n + arg.n + v; };
+  const bound = fn.bind({ n: 3 }, { n: 5 });
+  const v = await wait("a");
+  return ({ own: true }).hasOwnProperty("own") && bound(v);
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let roots = std::slice::from_ref(&result);
+    let snapshot = vm.snapshot(roots).expect("snapshot");
+    let bound_record = snapshot
+        .objects
+        .iter()
+        .find(|record| matches!(record.object, Object::Bound(_)))
+        .expect("bound function is reachable");
+
+    let mut invalid = snapshot.clone();
+    let record = invalid
+        .objects
+        .iter_mut()
+        .find(|r| r.id == bound_record.id)
+        .expect("bound record in cloned snapshot");
+    let Object::Bound(bound) = &mut record.object else {
+        unreachable!();
+    };
+    bound.target = invalid.roots["object.prototype"];
+    let error = Vm::restore(invalid, build.clone(), &mut host).expect_err("invalid bound target");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("bound target")));
+
+    let bound_record = bound_record.clone();
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    let recaptured = restored.snapshot(roots).expect("snapshot after restore");
+    assert_eq!(
+        recaptured.objects.iter().find(|r| r.id == bound_record.id),
+        Some(&bound_record)
+    );
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(HostValue::Number(2.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(14.0))
     );
 }

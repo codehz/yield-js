@@ -1,8 +1,8 @@
-//! VM builtins: `Promise` and `queueMicrotask`.
+//! VM builtins: promises, microtasks, and object model methods.
 //!
-//! `AggregateError` is not a heap object in this slice. `Promise.any` rejects
-//! with the string `AggregateError: All promises were rejected` when every
-//! input rejects. A later Error-object slice can replace that value.
+//! Script-visible `Error` and `TypeError` are objects. Internal errors remain
+//! strings, including the `AggregateError` rejection from `Promise.any`.
+//! `Object.prototype` has no constructor because there is no `Object` global.
 //!
 //! `queueMicrotask` enqueues a VM microtask. It does not call the host, so
 //! `Host::call` cannot re-enter the VM from this path. A throw inside that
@@ -13,9 +13,11 @@ use std::collections::BTreeMap;
 
 use crate::error::VmError;
 use crate::heap::{
-    BuiltinStatic, CombineKind, CombineState, Object, PromiseState, ReactionJob, Resolution,
+    BoundObject, BuiltinStatic, CombineKind, CombineState, Object, PromiseState, ReactionJob,
+    Resolution,
 };
 use crate::host::Host;
+use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::value::{ObjectId, Value};
 use crate::vm::Vm;
@@ -23,12 +25,22 @@ use crate::vm::Vm;
 pub(crate) const ROOT_PROMISE: &str = "promise";
 pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
+pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
+pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
+pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
+pub(crate) const ROOT_ERROR: &str = "error";
+pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
     pub promise: ObjectId,
     pub promise_prototype: ObjectId,
     pub queue_microtask: ObjectId,
+    pub object_prototype: ObjectId,
+    pub error_prototype: ObjectId,
+    pub typeerror_prototype: ObjectId,
+    pub error: ObjectId,
+    pub typeerror: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -37,21 +49,33 @@ impl BuiltinRoots {
             (ROOT_PROMISE.to_owned(), self.promise),
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
+            (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
+            (ROOT_ERROR_PROTOTYPE.to_owned(), self.error_prototype),
+            (
+                ROOT_TYPEERROR_PROTOTYPE.to_owned(),
+                self.typeerror_prototype,
+            ),
+            (ROOT_ERROR.to_owned(), self.error),
+            (ROOT_TYPEERROR.to_owned(), self.typeerror),
         ])
     }
 }
 
 pub(crate) enum BuiltinCall {
     Constructor,
+    ErrorConstructor { name: String },
+    FunctionMethod { name: String },
+    ObjectMethod { name: String },
     QueueMicrotask,
     Static(String),
     Method { name: String },
     Resolution { id: ObjectId },
 }
 
-enum Dispatch {
+enum Dispatch<'a> {
     Script { func_id: u32, env: Option<ObjectId> },
     Builtin(BuiltinCall),
+    Bound(&'a BoundObject),
 }
 
 const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
@@ -63,6 +87,13 @@ pub(crate) fn type_error(message: &str) -> Value {
 
 impl Vm {
     pub(crate) fn init_builtins(&mut self) {
+        let object_prototype = self.heap.alloc_plain();
+        self.heap.object_prototype = Some(object_prototype);
+        let has_own = self.heap.alloc_builtin("Object", Some("hasOwnProperty"));
+        self.heap
+            .set_own(object_prototype, "hasOwnProperty", Value::Object(has_own))
+            .expect("Object.prototype stores methods");
+
         let prototype = self.heap.alloc_plain();
         let promise = self.heap.alloc_builtin("Promise", None);
         let queue = self.heap.alloc_builtin("queueMicrotask", None);
@@ -85,10 +116,31 @@ impl Vm {
             .set_own(promise, "prototype", Value::Object(prototype))
             .expect("Promise.prototype");
         self.heap.promise_prototype = Some(prototype);
+
+        let error_prototype = self.heap.alloc_plain();
+        let typeerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
+        for (id, name) in [
+            (error_prototype, "Error"),
+            (typeerror_prototype, "TypeError"),
+        ] {
+            self.heap
+                .set_own(id, "name", Value::String(name.to_owned()))
+                .expect("Error prototype stores name");
+        }
+        self.heap
+            .set_own(error_prototype, "message", Value::String(String::new()))
+            .expect("Error.prototype stores message");
+        let error = self.heap.alloc_builtin("Error", None);
+        let typeerror = self.heap.alloc_builtin("TypeError", None);
         self.builtins = BuiltinRoots {
             promise,
             promise_prototype: prototype,
             queue_microtask: queue,
+            object_prototype,
+            error_prototype,
+            typeerror_prototype,
+            error,
+            typeerror,
         };
     }
 
@@ -98,7 +150,10 @@ impl Vm {
         };
         matches!(
             self.heap.get(*id),
-            Ok(Object::Function(_) | Object::BuiltinStatic(_) | Object::Resolution(_))
+            Ok(Object::Function(_)
+                | Object::BuiltinStatic(_)
+                | Object::Resolution(_)
+                | Object::Bound(_))
         )
     }
 
@@ -106,6 +161,8 @@ impl Vm {
         match builtin {
             0 => Ok(self.builtins.promise),
             1 => Ok(self.builtins.queue_microtask),
+            2 => Ok(self.builtins.error),
+            3 => Ok(self.builtins.typeerror),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -161,6 +218,12 @@ impl Vm {
                 self.call_function(host, func_id, env, args, receiver)
             }
             Some(Dispatch::Builtin(call)) => self.call_builtin(host, call, args, receiver),
+            Some(Dispatch::Bound(bound)) => {
+                let target = Value::Object(bound.target);
+                let bound_this = bound.bound_this.clone();
+                let args = bound.args.iter().cloned().chain(args).collect();
+                self.invoke(host, &target, args, &bound_this)
+            }
             None => Ok(Invocation::Thrown(type_error("value is not a function"))),
         }
     }
@@ -197,11 +260,14 @@ impl Vm {
                 }
             }
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
+            Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
+                self.construct_error(&name, args)
+            }
             _ => Ok(Invocation::Thrown(type_error("value is not a constructor"))),
         }
     }
 
-    fn classify(&self, value: &Value) -> Result<Option<Dispatch>, VmError> {
+    fn classify(&self, value: &Value) -> Result<Option<Dispatch<'_>>, VmError> {
         let Value::Object(id) = value else {
             return Ok(None);
         };
@@ -214,6 +280,7 @@ impl Vm {
         Ok(match self.heap.get(*id)? {
             Object::BuiltinStatic(function) => static_call(function).ok().map(Dispatch::Builtin),
             Object::Resolution(_) => Some(Dispatch::Builtin(BuiltinCall::Resolution { id: *id })),
+            Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             _ => None,
         })
     }
@@ -229,6 +296,27 @@ impl Vm {
             BuiltinCall::Constructor => Ok(Invocation::Thrown(type_error(
                 "Promise constructor requires new",
             ))),
+            BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
+            BuiltinCall::FunctionMethod { name } => {
+                self.call_function_method(host, &name, args, receiver)
+            }
+            BuiltinCall::ObjectMethod { name } => match name.as_str() {
+                "hasOwnProperty" => {
+                    let id = match *receiver {
+                        Value::Object(id) if self.heap.is_environment(id) == Some(false) => id,
+                        _ => {
+                            return Ok(Invocation::Thrown(type_error(
+                                "incompatible Object.prototype receiver",
+                            )));
+                        }
+                    };
+                    let key = ops::to_js_string(args.first().unwrap_or(&Value::Undefined));
+                    Ok(Invocation::Value(Value::Bool(self.heap.has_own(id, &key)?)))
+                }
+                _ => Err(VmError::InvalidState(format!(
+                    "unknown Object method {name}"
+                ))),
+            },
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::Static(name) => {
                 if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
@@ -257,6 +345,72 @@ impl Vm {
                 Ok(Invocation::Value(Value::Undefined))
             }
         }
+    }
+
+    fn call_function_method(
+        &mut self,
+        host: &mut dyn Host,
+        name: &str,
+        args: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let target = match *receiver {
+            Value::Object(id) if self.heap.function(id).is_some() => id,
+            _ => {
+                return Ok(Invocation::Thrown(type_error(
+                    "incompatible Function receiver",
+                )));
+            }
+        };
+        let mut args = args.into_iter();
+        let this_arg = args.next().unwrap_or(Value::Undefined);
+        match name {
+            "call" => self.invoke(host, receiver, args.collect(), &this_arg),
+            "apply" => {
+                let args = match args.next() {
+                    None | Some(Value::Undefined | Value::Null) => Vec::new(),
+                    Some(Value::Object(id)) if let Object::Array(array) = self.heap.get(id)? => {
+                        array.elements.clone()
+                    }
+                    _ => return Ok(Invocation::Thrown(type_error("createListFromArrayLike"))),
+                };
+                self.invoke(host, receiver, args, &this_arg)
+            }
+            "bind" => {
+                let id = self.heap.alloc(Object::Bound(BoundObject {
+                    target,
+                    bound_this: this_arg,
+                    args: args.collect(),
+                }));
+                Ok(Invocation::Value(Value::Object(id)))
+            }
+            _ => Err(VmError::InvalidState(format!(
+                "unknown Function method {name}"
+            ))),
+        }
+    }
+
+    fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
+        let prototype = match name {
+            "Error" => self.builtins.error_prototype,
+            "TypeError" => self.builtins.typeerror_prototype,
+            _ => {
+                return Err(VmError::InvalidState(format!(
+                    "unknown Error constructor {name}"
+                )));
+            }
+        };
+        let id = self.heap.alloc_plain_with(Some(prototype));
+        let message = match args.first() {
+            Some(value) if *value != Value::Undefined => Some(ops::to_js_string(value)),
+            _ => None,
+        };
+        let stack = format!("{name}: {}", message.as_deref().unwrap_or_default());
+        if let Some(message) = message {
+            self.heap.set_own(id, "message", Value::String(message))?;
+        }
+        self.heap.set_own(id, "stack", Value::String(stack))?;
+        Ok(Invocation::Value(Value::Object(id)))
     }
 
     fn construct_promise(
@@ -691,6 +845,15 @@ fn static_call(function: &BuiltinStatic) -> Result<BuiltinCall, Value> {
     match (function.name.as_str(), function.member.as_deref()) {
         ("Promise", None) => Ok(BuiltinCall::Constructor),
         ("queueMicrotask", None) => Ok(BuiltinCall::QueueMicrotask),
+        (name @ ("Error" | "TypeError"), None) => Ok(BuiltinCall::ErrorConstructor {
+            name: name.to_owned(),
+        }),
+        ("Function", Some(name @ ("call" | "apply" | "bind"))) => Ok(BuiltinCall::FunctionMethod {
+            name: name.to_owned(),
+        }),
+        ("Object", Some(name @ "hasOwnProperty")) => Ok(BuiltinCall::ObjectMethod {
+            name: name.to_owned(),
+        }),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Ok(BuiltinCall::Static(member.to_owned()))
         }

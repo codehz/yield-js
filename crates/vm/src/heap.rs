@@ -3,8 +3,9 @@
 //! restore consume that combined list instead of re-matching object kinds.
 //!
 //! Plain objects store own data or accessor properties. Only a missing key
-//! walks the prototype chain; environments are not script objects. Literals
-//! have no internal prototype: this slice does not expose `Object.prototype`.
+//! walks the prototype chain; environments are not script objects. Plain and
+//! array literals share `Object.prototype`; there is no `Array.prototype` yet.
+//! Bound functions have no own properties or internal prototype.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,21 +128,19 @@ pub struct ArrayObject {
 }
 
 impl ArrayObject {
-    /// `Some` is an own hit, including an explicit `undefined`. A missing
-    /// non-index key is `None` so lookup can continue.
+    /// `Some` is an own hit, including an explicit `undefined`.
     fn own(&self, key: &str) -> Option<Value> {
         if key == "length" {
             return Some(Value::Number(self.elements.len() as f64));
         }
+        self.own_value(key).cloned()
+    }
+
+    fn own_value(&self, key: &str) -> Option<&Value> {
         if let Some(index) = array_index(key) {
-            return Some(
-                self.elements
-                    .get(index)
-                    .cloned()
-                    .unwrap_or(Value::Undefined),
-            );
+            return self.elements.get(index);
         }
-        self.props.get(key).cloned()
+        self.props.get(key)
     }
 
     fn set(&mut self, key: &str, value: Value) -> Result<(), VmError> {
@@ -216,6 +215,13 @@ pub struct Resolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundObject {
+    pub target: ObjectId,
+    pub bound_this: Value,
+    pub args: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
     Promise(PromiseObject),
@@ -223,6 +229,7 @@ pub enum Object {
     Plain(PlainObject),
     Array(ArrayObject),
     Function(FunctionObject),
+    Bound(BoundObject),
     Environment(EnvironmentObject),
     BuiltinStatic(BuiltinStatic),
     Resolution(Resolution),
@@ -340,6 +347,13 @@ impl Object {
                 }
                 push_script(out, &function.props, function.prototype);
             }
+            Self::Bound(bound) => {
+                out.push(OwnedEdge::Object(bound.target));
+                push_value(out, &bound.bound_this);
+                for arg in &bound.args {
+                    push_value(out, arg);
+                }
+            }
             Self::Environment(environment) => {
                 if let Some(id) = environment.parent {
                     out.push(OwnedEdge::Environment {
@@ -424,6 +438,7 @@ pub(crate) struct Heap {
     /// the tracer did not reach: that capability is only held by an in-flight
     /// `then` call, which is not a snapshot root.
     pub(crate) resolutions: BTreeSet<ObjectId>,
+    pub(crate) object_prototype: Option<ObjectId>,
     /// Shared internal prototype of every Promise allocated by this heap.
     pub(crate) promise_prototype: Option<ObjectId>,
 }
@@ -435,6 +450,7 @@ impl Heap {
             next_id: 1,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
+            object_prototype: None,
             promise_prototype: None,
         }
     }
@@ -486,7 +502,7 @@ impl Heap {
     }
 
     pub(crate) fn alloc_plain(&mut self) -> ObjectId {
-        self.alloc_plain_with(None)
+        self.alloc_plain_with(self.object_prototype)
     }
 
     pub(crate) fn alloc_plain_with(&mut self, prototype: Option<ObjectId>) -> ObjectId {
@@ -500,7 +516,7 @@ impl Heap {
         self.alloc(Object::Array(ArrayObject {
             elements,
             props: BTreeMap::new(),
-            prototype: None,
+            prototype: self.object_prototype,
         }))
     }
 
@@ -665,7 +681,7 @@ impl Heap {
                     builtin.props.get(key).cloned().map(Property::Data),
                     builtin.prototype,
                 ),
-                Object::Native(_) | Object::Resolution(_) => (None, None),
+                Object::Native(_) | Object::Resolution(_) | Object::Bound(_) => (None, None),
                 Object::Environment(_) => unreachable!(),
             };
             if let Some(value) = own {
@@ -677,6 +693,20 @@ impl Heap {
             previous = Some(current);
             current = next;
         }
+    }
+
+    pub(crate) fn has_own(&self, id: ObjectId, key: &str) -> Result<bool, VmError> {
+        Ok(match self.get(id)? {
+            Object::Plain(plain) => plain.props.contains_key(key),
+            Object::Array(array) => key == "length" || array.own_value(key).is_some(),
+            Object::Function(function) => function.props.contains_key(key),
+            Object::Promise(promise) => promise.props.contains_key(key),
+            Object::BuiltinStatic(builtin) => builtin.props.contains_key(key),
+            Object::Native(_)
+            | Object::Resolution(_)
+            | Object::Environment(_)
+            | Object::Bound(_) => false,
+        })
     }
 
     /// Writes an own data property. Does not walk the chain or apply readonly checks.
