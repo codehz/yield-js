@@ -24,6 +24,8 @@ pub(crate) const ITERATOR_SYMBOL: SymbolId = 0;
 pub(crate) const ITERATOR_DESCRIPTION: &str = "Symbol.iterator";
 pub(crate) const TO_PRIMITIVE_SYMBOL: SymbolId = 1;
 pub(crate) const TO_PRIMITIVE_DESCRIPTION: &str = "Symbol.toPrimitive";
+pub(crate) const SPECIES_SYMBOL: SymbolId = 2;
+pub(crate) const SPECIES_DESCRIPTION: &str = "Symbol.species";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,18 +43,12 @@ pub enum ReactionJob {
     Await(ContinuationId),
     /// `then` / `catch`. A missing handler passes the settlement through.
     Script {
-        result: ObjectId,
+        resolve: Value,
+        reject: Value,
         on_fulfilled: Option<Value>,
         on_rejected: Option<Value>,
     },
-    /// `finally`. The saved settlement is captured when the source settles,
-    /// not stored on the pending job.
-    Finalize {
-        result: ObjectId,
-        on_finally: Value,
-    },
-    /// Copy `source`'s settlement onto `result` (thenable promise adoption,
-    /// including a `finally` tail). `result.adopting` points back here.
+    /// Copy the source settlement onto `result`; `result.adopting` points back here.
     Adopt {
         result: ObjectId,
     },
@@ -96,12 +92,6 @@ pub struct PromiseObject {
     pub locked: bool,
     /// Promise whose settlement this one is adopting, when `locked`.
     pub adopting: Option<ObjectId>,
-    /// When set, an `Adopt` fulfillment reapplies this settlement instead of
-    /// the source value. `finally` uses it so a returned thenable only delays
-    /// the original settlement, unless that thenable rejects.
-    /// Original settlement reapplied after a `finally` thenable. Distinct from
-    /// the value currently being adopted.
-    pub finally_settlement: Option<PromiseState>,
     pub props: PropertyTable<String, Property>,
     /// Symbol-keyed own properties, kept beside the string table.
     pub symbol_props: PropertyTable<SymbolId, Property>,
@@ -561,6 +551,10 @@ pub struct Resolution {
     pub promise: ObjectId,
     pub pair: ObjectId,
     pub resolve: bool,
+    /// Combinator element callbacks fulfill without assimilating their argument.
+    pub direct: bool,
+    /// Only pre-existing executor/thenable capabilities need the orphan guard.
+    pub track_unreachable: bool,
     pub called: bool,
     pub object: PlainObject,
 }
@@ -645,6 +639,24 @@ pub enum Object {
     Environment(EnvironmentObject),
     BuiltinStatic(BuiltinStatic),
     Resolution(Resolution),
+    PromiseCallback {
+        object: PlainObject,
+        callback: PromiseCallback,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PromiseCallback {
+    Executor(Option<(Value, Value)>),
+    Finally {
+        handler: Value,
+        species: Value,
+        rejected: bool,
+    },
+    Restore {
+        value: Value,
+        rejected: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -735,6 +747,7 @@ impl Object {
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
+            | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => &mut o.extensible,
             Self::Array(o) => &mut o.extensible,
             Self::Function(o) => &mut o.extensible,
@@ -755,6 +768,7 @@ impl Object {
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
+            | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => o.extensible,
             Self::Array(o) => o.extensible,
             Self::Function(o) => o.extensible,
@@ -818,6 +832,7 @@ impl Object {
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
+            | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => (&o.props, &o.symbol_props),
             Self::Array(o) => (&o.props, &o.symbol_props),
             Self::Function(o) => (&o.props, &o.symbol_props),
@@ -838,6 +853,7 @@ impl Object {
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
+            | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => (&mut o.props, &mut o.symbol_props),
             Self::Array(o) => (&mut o.props, &mut o.symbol_props),
             Self::Function(o) => (&mut o.props, &mut o.symbol_props),
@@ -937,6 +953,7 @@ impl Object {
             Self::BuiltinStatic(builtin) => builtin.prototype,
             Self::Bound(bound) => bound.object.prototype,
             Self::Resolution(resolution) => resolution.object.prototype,
+            Self::PromiseCallback { object, .. } => object.prototype,
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => None,
         }
     }
@@ -952,6 +969,7 @@ impl Object {
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
+            | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => &mut o.prototype,
             Self::Array(o) => &mut o.prototype,
             Self::Function(o) => &mut o.prototype,
@@ -992,13 +1010,24 @@ impl Object {
                 if let Some(id) = promise.adopting {
                     out.push(OwnedEdge::Object(id));
                 }
-                if let Some(state) = &promise.finally_settlement {
-                    push_state(out, state);
-                }
                 for job in &promise.reactions {
                     job.write_edges(out);
                 }
             }
+            Self::PromiseCallback { callback, .. } => match callback {
+                PromiseCallback::Executor(Some((resolve, reject))) => {
+                    push_value(out, resolve);
+                    push_value(out, reject);
+                }
+                PromiseCallback::Finally {
+                    handler, species, ..
+                } => {
+                    push_value(out, handler);
+                    push_value(out, species);
+                }
+                PromiseCallback::Restore { value, .. } => push_value(out, value),
+                PromiseCallback::Executor(None) => {}
+            },
             Self::Resolution(resolution) => {
                 out.push(OwnedEdge::Object(resolution.promise));
                 if resolution.pair != 0 {
@@ -1097,21 +1126,19 @@ impl ReactionJob {
         match self {
             Self::Await(id) => out.push(OwnedEdge::Continuation(*id)),
             Self::Script {
-                result,
+                resolve,
+                reject,
                 on_fulfilled,
                 on_rejected,
             } => {
-                out.push(OwnedEdge::Object(*result));
+                push_value(out, resolve);
+                push_value(out, reject);
                 if let Some(value) = on_fulfilled {
                     push_value(out, value);
                 }
                 if let Some(value) = on_rejected {
                     push_value(out, value);
                 }
-            }
-            Self::Finalize { result, on_finally } => {
-                out.push(OwnedEdge::Object(*result));
-                push_value(out, on_finally);
             }
             Self::Adopt { result } | Self::Combine { result, .. } => {
                 out.push(OwnedEdge::Object(*result));
@@ -1160,9 +1187,10 @@ impl Heap {
                     TO_PRIMITIVE_SYMBOL,
                     Some(TO_PRIMITIVE_DESCRIPTION.to_owned()),
                 ),
+                (SPECIES_SYMBOL, Some(SPECIES_DESCRIPTION.to_owned())),
             ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: 2,
+            next_symbol_id: 3,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
@@ -1229,7 +1257,6 @@ impl Heap {
             reactions: Vec::new(),
             locked: false,
             adopting: None,
-            finally_settlement: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.promise_prototype,
@@ -1354,7 +1381,11 @@ impl Heap {
             .objects
             .iter()
             .filter_map(|(id, object)| match object {
-                Object::Resolution(resolution) if !resolution.called => Some(*id),
+                Object::Resolution(resolution)
+                    if resolution.track_unreachable && !resolution.called =>
+                {
+                    Some(*id)
+                }
                 _ => None,
             })
             .collect();

@@ -490,7 +490,7 @@ fn restore_rejects_malformed_proxy_records() {
         vec![],
     );
     let snapshot = s.snapshot();
-    assert_eq!(snapshot.format_version, 28);
+    assert_eq!(snapshot.format_version, yield_vm::SNAPSHOT_FORMAT_VERSION);
     let index = snapshot
         .objects
         .iter()

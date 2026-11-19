@@ -99,15 +99,8 @@ pub(crate) enum Microtask {
     CallHandler {
         handler: Option<Value>,
         argument: Value,
-        result: ObjectId,
+        capability: (Value, Value),
         rejected: bool,
-    },
-    /// Run `finally`, then reapply `settlement` unless the callback rejects
-    /// or returns a thenable that rejects.
-    Finalize {
-        result: ObjectId,
-        on_finally: Value,
-        settlement: Settlement,
     },
     Assimilate {
         result: ObjectId,

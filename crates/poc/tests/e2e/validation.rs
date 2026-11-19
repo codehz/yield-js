@@ -291,6 +291,22 @@ fn symbol_snapshot_tampering_is_rejected() {
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("Symbol.toPrimitive"))
     );
 
+    let mut missing_species = snapshot.clone();
+    let species = snapshot
+        .symbols
+        .iter()
+        .find_map(|(id, description)| {
+            (description.as_deref() == Some("Symbol.species")).then_some(*id)
+        })
+        .expect("well-known species symbol");
+    missing_species.symbols.remove(&species);
+    let error = s
+        .restore(missing_species)
+        .expect_err("deleted species symbol");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("Symbol.species"))
+    );
+
     let mut lowered = snapshot.clone();
     lowered.next_symbol_id = symbol_id;
     let error = s.restore(lowered).expect_err("lowered high-water mark");

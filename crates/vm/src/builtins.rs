@@ -15,8 +15,8 @@ use crate::error::VmError;
 use crate::heap::CollectionKind;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
-    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseState, Property, ReactionJob,
-    Resolution, TO_PRIMITIVE_SYMBOL,
+    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseCallback, PromiseState, Property,
+    ReactionJob, Resolution, SPECIES_SYMBOL, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
 use crate::math::MATH_METHODS;
@@ -200,6 +200,7 @@ impl BuiltinRoots {
 
 pub(crate) enum BuiltinCall {
     Constructor,
+    PromiseSpecies,
     ErrorConstructor { name: String },
     FunctionMethod { name: String },
     ObjectMethod { name: String },
@@ -207,6 +208,7 @@ pub(crate) enum BuiltinCall {
     Static(String),
     Method { name: String },
     Resolution { id: ObjectId },
+    PromiseCallback { id: ObjectId },
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
@@ -490,6 +492,20 @@ impl Vm {
 
         let prototype = self.heap.alloc_plain();
         let promise = self.heap.alloc_builtin("Promise", None);
+        let species = self.heap.alloc_builtin("Promise", Some("get species"));
+        assert!(
+            self.heap
+                .apply_descriptor(
+                    promise,
+                    PropertyKey::Symbol(SPECIES_SYMBOL),
+                    DescriptorUpdate {
+                        get: Some(Some(species)),
+                        configurable: Some(true),
+                        ..DescriptorUpdate::default()
+                    }
+                )
+                .expect("Promise stores its species getter")
+        );
         let queue = self.heap.alloc_builtin("queueMicrotask", None);
         for name in PROMISE_STATICS {
             let id = self.heap.alloc_builtin("Promise", Some(name));
@@ -609,6 +625,14 @@ impl Vm {
                 Attributes::FIXED,
             )
             .expect("Symbol constructor stores the toPrimitive symbol");
+        self.heap
+            .define_data(
+                symbol,
+                "species",
+                Value::Symbol(SPECIES_SYMBOL),
+                Attributes::FIXED,
+            )
+            .expect("Symbol constructor stores the species symbol");
         let reflect = self.heap.alloc_plain();
         for name in [
             "ownKeys",
@@ -977,6 +1001,9 @@ impl Vm {
         Ok(match self.heap.get(*id)? {
             Object::BuiltinStatic(function) => static_call(function).map(Dispatch::Builtin),
             Object::Resolution(_) => Some(Dispatch::Builtin(BuiltinCall::Resolution { id: *id })),
+            Object::PromiseCallback { .. } => {
+                Some(Dispatch::Builtin(BuiltinCall::PromiseCallback { id: *id }))
+            }
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             _ => None,
         })
@@ -991,6 +1018,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match call {
             BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
+            BuiltinCall::PromiseSpecies => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
             BuiltinCall::ProxyConstructor => self.throw_type_error("Proxy requires new"),
             BuiltinCall::ObjectCreate => self.object_create(host, &args),
@@ -1206,7 +1234,7 @@ impl Vm {
                 if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
                     return self.throw_type_error("incompatible Promise receiver");
                 }
-                self.call_promise_static(host, &name, args)
+                self.call_promise_static(host, receiver, &name, args)
             }
             BuiltinCall::Method { name } => {
                 let Value::Object(id) = receiver else {
@@ -1215,13 +1243,14 @@ impl Vm {
                 if self.heap.get(*id)?.as_promise().is_none() {
                     return self.throw_type_error("incompatible Promise receiver");
                 }
-                self.call_promise_method(*id, &name, args)
+                self.call_promise_method(host, *id, &name, args)
             }
             BuiltinCall::Resolution { id } => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
                 self.capability_call(host, id, value)?;
                 Ok(Invocation::Value(Value::Undefined))
             }
+            BuiltinCall::PromiseCallback { id } => self.call_promise_callback(host, id, args),
         }
     }
 
@@ -1251,6 +1280,7 @@ impl Vm {
             Object::Function(_)
             | Object::BuiltinStatic(_)
             | Object::Bound(_)
+            | Object::PromiseCallback { .. }
             | Object::Resolution(_) => "Function",
             Object::Promise(_) => "Promise",
             _ => "Object",
@@ -2257,6 +2287,7 @@ impl Vm {
     fn call_promise_static(
         &mut self,
         host: &mut dyn Host,
+        receiver: &Value,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
@@ -2278,65 +2309,224 @@ impl Vm {
                 self.settle(promise, Settlement::Rejected(reason))?;
                 Ok(Invocation::Value(Value::Object(promise)))
             }
-            "all" => self.combine(host, CombineKind::All, args),
-            "allSettled" => self.combine(host, CombineKind::AllSettled, args),
-            "race" => self.combine(host, CombineKind::Race, args),
-            "any" => self.combine(host, CombineKind::Any, args),
+            "all" => self.combine(host, receiver, CombineKind::All, args),
+            "allSettled" => self.combine(host, receiver, CombineKind::AllSettled, args),
+            "race" => self.combine(host, receiver, CombineKind::Race, args),
+            "any" => self.combine(host, receiver, CombineKind::Any, args),
             _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
         }
     }
 
     fn call_promise_method(
         &mut self,
+        host: &mut dyn Host,
         receiver: ObjectId,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        if self.heap.promise(receiver).is_err() {
-            return self.throw_type_error("Promise method called on a non-promise");
-        }
+        let this = Value::Object(receiver);
         match name {
-            "then" => self.promise_then(receiver, args),
-            "catch" => {
-                let rejected = args.first().cloned();
-                self.promise_then(
+            "catch" => self.invoke_promise_then(
+                host,
+                &this,
+                vec![
+                    Value::Undefined,
+                    args.into_iter().next().unwrap_or(Value::Undefined),
+                ],
+            ),
+            "then" | "finally" => {
+                let species = match self.promise_species(host, &this)? {
+                    Invocation::Value(value) => value,
+                    thrown => return Ok(thrown),
+                };
+                if name == "finally" {
+                    let handler = args.into_iter().next().unwrap_or(Value::Undefined);
+                    let handlers = if self.is_callable(&handler) {
+                        [false, true]
+                            .into_iter()
+                            .map(|rejected| {
+                                self.alloc_promise_callback(PromiseCallback::Finally {
+                                    handler: handler.clone(),
+                                    species: species.clone(),
+                                    rejected,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        vec![handler.clone(), handler]
+                    };
+                    return self.invoke_promise_then(host, &this, handlers);
+                }
+                let (result, resolve, reject) = match self.new_promise_capability(host, &species)? {
+                    Ok(capability) => capability,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                self.react(
                     receiver,
-                    vec![Value::Undefined, rejected.unwrap_or(Value::Undefined)],
-                )
+                    ReactionJob::Script {
+                        resolve,
+                        reject,
+                        on_fulfilled: self.handler_arg(args.first()),
+                        on_rejected: self.handler_arg(args.get(1)),
+                    },
+                )?;
+                Ok(Invocation::Value(result))
             }
-            "finally" => self.promise_finally(receiver, args),
             _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
         }
     }
 
-    fn promise_then(
+    fn invoke_promise_then(
         &mut self,
-        receiver: ObjectId,
+        host: &mut dyn Host,
+        receiver: &Value,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        let on_fulfilled = self.handler_arg(args.first());
-        let on_rejected = self.handler_arg(args.get(1));
-        let result = self.heap.alloc_promise();
-        self.react(
-            receiver,
-            ReactionJob::Script {
-                result,
-                on_fulfilled,
-                on_rejected,
-            },
-        )?;
-        Ok(Invocation::Value(Value::Object(result)))
+        match self.read_property(host, receiver, PropertyKeyRef::String("then"))? {
+            Invocation::Value(then) => self.invoke(host, &then, args, receiver),
+            thrown => Ok(thrown),
+        }
     }
 
-    fn promise_finally(
+    fn promise_species(
         &mut self,
-        receiver: ObjectId,
+        host: &mut dyn Host,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let intrinsic = Value::Object(self.builtins.promise);
+        let constructor =
+            match self.read_property(host, receiver, PropertyKeyRef::String("constructor"))? {
+                Invocation::Value(Value::Undefined) => return Ok(Invocation::Value(intrinsic)),
+                Invocation::Value(value @ Value::Object(_)) => value,
+                Invocation::Value(_) => {
+                    return self.throw_type_error("Promise constructor is not an object");
+                }
+                thrown => return Ok(thrown),
+            };
+        match self.read_property(host, &constructor, PropertyKeyRef::Symbol(SPECIES_SYMBOL))? {
+            Invocation::Value(Value::Undefined | Value::Null) => Ok(Invocation::Value(intrinsic)),
+            Invocation::Value(value) if !self.is_constructor(&value)? => {
+                self.throw_type_error("Promise species is not a constructor")
+            }
+            other => Ok(other),
+        }
+    }
+
+    fn new_promise_capability(
+        &mut self,
+        host: &mut dyn Host,
+        species: &Value,
+    ) -> Result<Result<(Value, Value, Value), Value>, VmError> {
+        if *species == Value::Object(self.builtins.promise) {
+            let result = self.heap.alloc_promise();
+            let (resolve, reject) = self.alloc_resolution_pair(result, false, false)?;
+            return Ok(Ok((
+                Value::Object(result),
+                Value::Object(resolve),
+                Value::Object(reject),
+            )));
+        }
+        let executor = self.alloc_promise_callback(PromiseCallback::Executor(None));
+        let Value::Object(id) = executor else {
+            unreachable!()
+        };
+        let result = match self.construct_with(host, species, vec![executor], species)? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        if let Object::PromiseCallback {
+            callback: PromiseCallback::Executor(Some((resolve, reject))),
+            ..
+        } = self.heap.get(id)?
+            && matches!(result, Value::Object(_))
+            && self.is_callable(resolve)
+            && self.is_callable(reject)
+        {
+            return Ok(Ok((result, resolve.clone(), reject.clone())));
+        }
+        Ok(Err(self.type_error("invalid Promise species capability")?))
+    }
+
+    fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
+        Value::Object(self.heap.alloc(Object::PromiseCallback {
+            object: PlainObject::new(self.heap.function_prototype),
+            callback,
+        }))
+    }
+
+    fn call_promise_callback(
+        &mut self,
+        host: &mut dyn Host,
+        id: ObjectId,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        let on_finally = args.first().cloned().unwrap_or(Value::Undefined);
-        let result = self.heap.alloc_promise();
-        self.react(receiver, ReactionJob::Finalize { result, on_finally })?;
-        Ok(Invocation::Value(Value::Object(result)))
+        let mut args = args.into_iter();
+        let argument = args.next().unwrap_or(Value::Undefined);
+        let Object::PromiseCallback { callback, .. } = self.heap.get_mut(id)? else {
+            unreachable!()
+        };
+        match callback {
+            PromiseCallback::Executor(values) => {
+                if values.as_ref().is_some_and(|(resolve, reject)| {
+                    *resolve != Value::Undefined || *reject != Value::Undefined
+                }) {
+                    return self
+                        .throw_type_error("Promise capability executor already initialized");
+                }
+                *values = Some((argument, args.next().unwrap_or(Value::Undefined)));
+                Ok(Invocation::Value(Value::Undefined))
+            }
+            PromiseCallback::Restore { value, rejected } => Ok(if *rejected {
+                Invocation::Thrown(value.clone())
+            } else {
+                Invocation::Value(value.clone())
+            }),
+            PromiseCallback::Finally {
+                handler,
+                species,
+                rejected,
+            } => {
+                let (handler, species, rejected) = (handler.clone(), species.clone(), *rejected);
+                let value = match self.invoke(host, &handler, Vec::new(), &Value::Undefined)? {
+                    Invocation::Value(value) => value,
+                    thrown => return Ok(thrown),
+                };
+                let cleanup = match self.promise_resolve_with(host, &species, value)? {
+                    Invocation::Value(value) => value,
+                    thrown => return Ok(thrown),
+                };
+                let restore = self.alloc_promise_callback(PromiseCallback::Restore {
+                    value: argument,
+                    rejected,
+                });
+                self.invoke_promise_then(host, &cleanup, vec![restore])
+            }
+        }
+    }
+
+    fn promise_resolve_with(
+        &mut self,
+        host: &mut dyn Host,
+        species: &Value,
+        value: Value,
+    ) -> Result<Invocation, VmError> {
+        if matches!(&value, Value::Object(id) if self.heap.promise(*id).is_ok()) {
+            match self.read_property(host, &value, PropertyKeyRef::String("constructor"))? {
+                Invocation::Value(constructor) if constructor == *species => {
+                    return Ok(Invocation::Value(value));
+                }
+                Invocation::Value(_) => {}
+                thrown => return Ok(thrown),
+            }
+        }
+        let (result, resolve, _) = match self.new_promise_capability(host, species)? {
+            Ok(capability) => capability,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        match self.invoke(host, &resolve, vec![value], &Value::Undefined)? {
+            Invocation::Value(_) => Ok(Invocation::Value(result)),
+            thrown => Ok(thrown),
+        }
     }
 
     fn handler_arg(&self, value: Option<&Value>) -> Option<Value> {
@@ -2346,11 +2536,23 @@ impl Vm {
     fn combine(
         &mut self,
         host: &mut dyn Host,
+        receiver: &Value,
         kind: CombineKind,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let iterable = args.first().unwrap_or(&Value::Undefined);
         let result = self.heap.alloc_promise();
+        let resolve = match self.read_property(host, receiver, PropertyKeyRef::String("resolve"))? {
+            Invocation::Value(resolve) if self.is_callable(&resolve) => resolve,
+            invocation => {
+                let reason = match invocation {
+                    Invocation::Thrown(reason) => reason,
+                    Invocation::Value(_) => self.type_error("Promise.resolve is not callable")?,
+                };
+                self.settle(result, Settlement::Rejected(reason))?;
+                return Ok(Invocation::Value(Value::Object(result)));
+            }
+        };
         let (iterator, next) = match self.get_iterator(host, iterable)? {
             Ok(record) => record,
             Err(error) => {
@@ -2376,6 +2578,14 @@ impl Vm {
                     return Ok(Invocation::Value(Value::Object(result)));
                 }
             };
+            let resolved = match self.invoke(host, &resolve, vec![element], receiver)? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => {
+                    let _ = self.close_iterator(host, &iterator)?;
+                    self.settle(result, Settlement::Rejected(error))?;
+                    return Ok(Invocation::Value(Value::Object(result)));
+                }
+            };
             let index = state.elements.len();
             let slot = self.heap.alloc_promise();
             self.react(
@@ -2386,8 +2596,18 @@ impl Vm {
                     kind,
                 },
             )?;
-            // Resolve before advancing: reading an element's `then` may run script.
-            self.resolve_promise(host, slot, element)?;
+            let (fulfill, reject) = self.alloc_resolution_pair(slot, true, false)?;
+            if let Invocation::Thrown(error) = self.invoke_promise_then(
+                host,
+                &resolved,
+                vec![Value::Object(fulfill), Value::Object(reject)],
+            )? {
+                let _ = self.close_iterator(host, &iterator)?;
+                self.mark_resolution_called(fulfill)?;
+                self.mark_resolution_called(reject)?;
+                self.settle(result, Settlement::Rejected(error))?;
+                return Ok(Invocation::Value(Value::Object(result)));
+            }
             state.elements.push(slot);
             state.results.push(Value::Undefined);
             if kind == CombineKind::AllSettled {
@@ -2419,10 +2639,21 @@ impl Vm {
         &mut self,
         promise: ObjectId,
     ) -> Result<(ObjectId, ObjectId), VmError> {
+        self.alloc_resolution_pair(promise, false, true)
+    }
+
+    fn alloc_resolution_pair(
+        &mut self,
+        promise: ObjectId,
+        direct: bool,
+        track_unreachable: bool,
+    ) -> Result<(ObjectId, ObjectId), VmError> {
         let resolve_id = self.heap.alloc(Object::Resolution(Resolution {
             promise,
             pair: 0,
             resolve: true,
+            direct,
+            track_unreachable,
             called: false,
             object: PlainObject::new(self.heap.function_prototype),
         }));
@@ -2430,6 +2661,8 @@ impl Vm {
             promise,
             pair: resolve_id,
             resolve: false,
+            direct,
+            track_unreachable,
             called: false,
             object: PlainObject::new(self.heap.function_prototype),
         }));
@@ -2441,8 +2674,10 @@ impl Vm {
                 ));
             }
         }
-        self.heap.resolutions.insert(resolve_id);
-        self.heap.resolutions.insert(reject_id);
+        if track_unreachable {
+            self.heap.resolutions.insert(resolve_id);
+            self.heap.resolutions.insert(reject_id);
+        }
         Ok((resolve_id, reject_id))
     }
 
@@ -2452,11 +2687,12 @@ impl Vm {
         id: ObjectId,
         value: Value,
     ) -> Result<(), VmError> {
-        let (promise, pair, resolve, called) = match self.heap.get(id)? {
+        let (promise, pair, resolve, direct, called) = match self.heap.get(id)? {
             Object::Resolution(resolution) => (
                 resolution.promise,
                 resolution.pair,
                 resolution.resolve,
+                resolution.direct,
                 resolution.called,
             ),
             _ => {
@@ -2470,7 +2706,9 @@ impl Vm {
         }
         self.mark_resolution_called(id)?;
         self.mark_resolution_called(pair)?;
-        if resolve {
+        if resolve && direct {
+            self.settle(promise, Settlement::Fulfilled(value))
+        } else if resolve {
             self.resolve_promise(host, promise, value)
         } else {
             self.reject_if_open(promise, value)
@@ -2515,20 +2753,22 @@ impl Vm {
         host: &mut dyn Host,
         handler: Option<Value>,
         argument: Value,
-        result: ObjectId,
+        capability: (Value, Value),
         rejected: bool,
     ) -> Result<(), VmError> {
-        let handler = handler.filter(|value| self.is_callable(value));
-        let Some(handler) = handler else {
-            if rejected {
-                return self.settle(result, Settlement::Rejected(argument));
+        let (resolve, reject) = capability;
+        let (callback, value) = match handler {
+            Some(handler) => {
+                match self.invoke(host, &handler, vec![argument], &Value::Undefined)? {
+                    Invocation::Value(value) => (resolve, value),
+                    Invocation::Thrown(error) => (reject, error),
+                }
             }
-            return self.resolve_promise(host, result, argument);
+            None if rejected => (reject, argument),
+            None => (resolve, argument),
         };
-        match self.invoke(host, &handler, vec![argument], &Value::Undefined)? {
-            Invocation::Thrown(error) => self.settle(result, Settlement::Rejected(error)),
-            Invocation::Value(value) => self.resolve_promise(host, result, value),
-        }
+        let _ = self.invoke(host, &callback, vec![value], &Value::Undefined)?;
+        Ok(())
     }
 
     pub(crate) fn run_queue_call(
@@ -2643,7 +2883,10 @@ impl Vm {
 
 pub(crate) fn is_callable_object(object: &Object) -> bool {
     match object {
-        Object::Function(_) | Object::Resolution(_) | Object::Bound(_) => true,
+        Object::Function(_)
+        | Object::Resolution(_)
+        | Object::Bound(_)
+        | Object::PromiseCallback { .. } => true,
         Object::BuiltinStatic(function) => static_call(function).is_some(),
         _ => false,
     }
@@ -2652,6 +2895,7 @@ pub(crate) fn is_callable_object(object: &Object) -> bool {
 fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
     match (function.name.as_str(), function.member.as_deref()) {
         ("Promise", None) => Some(BuiltinCall::Constructor),
+        ("Promise", Some("get species")) => Some(BuiltinCall::PromiseSpecies),
         ("queueMicrotask", None) => Some(BuiltinCall::QueueMicrotask),
         (
             name @ ("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"

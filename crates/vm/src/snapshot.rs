@@ -18,7 +18,8 @@ use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
-    OwnedEdge, PromiseState, Property, ReactionJob, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    OwnedEdge, PromiseState, Property, ReactionJob, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::{Host, PendingOperationMeta};
@@ -26,8 +27,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Proxy records and builtin root.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 28;
+// Promise capability records and Symbol.species root.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 29;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -218,6 +219,7 @@ impl Vm {
         let mut symbol_ids = tracer.symbols;
         symbol_ids.insert(ITERATOR_SYMBOL);
         symbol_ids.insert(TO_PRIMITIVE_SYMBOL);
+        symbol_ids.insert(SPECIES_SYMBOL);
         symbol_ids.extend(self.heap.symbol_registry.values().copied());
         for id in symbol_ids {
             if let Some(description) = self.heap.symbols.get(&id) {
@@ -461,6 +463,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
         let reserved = match *id {
             ITERATOR_SYMBOL => Some(ITERATOR_DESCRIPTION),
             TO_PRIMITIVE_SYMBOL => Some(TO_PRIMITIVE_DESCRIPTION),
+            SPECIES_SYMBOL => Some(SPECIES_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -474,6 +477,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
     for (id, description) in [
         (ITERATOR_SYMBOL, ITERATOR_DESCRIPTION),
         (TO_PRIMITIVE_SYMBOL, TO_PRIMITIVE_DESCRIPTION),
+        (SPECIES_SYMBOL, SPECIES_DESCRIPTION),
     ] {
         if snapshot.symbols.get(&id).and_then(Option::as_deref) != Some(description) {
             return Err(VmError::InvalidSnapshot(format!(
@@ -483,14 +487,14 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
     }
     let mut registered = BTreeSet::new();
     for (key, id) in &snapshot.symbol_registry {
-        if *id == ITERATOR_SYMBOL || *id == TO_PRIMITIVE_SYMBOL {
+        if let Some(description) = match *id {
+            ITERATOR_SYMBOL => Some(ITERATOR_DESCRIPTION),
+            TO_PRIMITIVE_SYMBOL => Some(TO_PRIMITIVE_DESCRIPTION),
+            SPECIES_SYMBOL => Some(SPECIES_DESCRIPTION),
+            _ => None,
+        } {
             return Err(VmError::InvalidSnapshot(format!(
-                "registry key {key:?} points at reserved symbol {}",
-                if *id == ITERATOR_SYMBOL {
-                    ITERATOR_DESCRIPTION
-                } else {
-                    TO_PRIMITIVE_DESCRIPTION
-                },
+                "registry key {key:?} points at reserved symbol {description}"
             )));
         }
         if !registered.insert(*id) {
@@ -1247,10 +1251,19 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                 for job in &promise.reactions {
                     match job {
                         ReactionJob::Await(_) => {}
-                        ReactionJob::Script { result, .. }
-                        | ReactionJob::Finalize { result, .. }
-                        | ReactionJob::Adopt { result }
-                        | ReactionJob::Combine { result, .. } => {
+                        ReactionJob::Script {
+                            resolve, reject, ..
+                        } => {
+                            for callback in [resolve, reject] {
+                                if !matches!(callback, Value::Object(id) if heap.get(*id).is_ok_and(crate::builtins::is_callable_object))
+                                {
+                                    return Err(VmError::InvalidSnapshot(format!(
+                                        "Promise {id} reaction capability is not callable"
+                                    )));
+                                }
+                            }
+                        }
+                        ReactionJob::Adopt { result } | ReactionJob::Combine { result, .. } => {
                             require_promise(heap, *result, &format!("Promise {id} reaction"))?;
                         }
                     }

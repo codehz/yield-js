@@ -8,7 +8,7 @@ pub type BindingId = u32;
 pub type ContinuationId = u64;
 
 /// Symbol identity. Local to one VM instance and persisted in snapshots.
-/// The first two IDs are reserved for `Symbol.iterator` and `Symbol.toPrimitive`.
+/// The first three IDs are reserved for `Symbol.iterator`, `Symbol.toPrimitive`, and `Symbol.species`.
 pub type SymbolId = u32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

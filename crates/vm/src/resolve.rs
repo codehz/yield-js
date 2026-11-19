@@ -6,7 +6,7 @@
 //! A thenable's `then` is read synchronously, but called in a microtask.
 
 use crate::error::VmError;
-use crate::heap::{Object, PromiseState, ReactionJob};
+use crate::heap::{Object, PromiseState};
 use crate::host::Host;
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value};
@@ -162,81 +162,21 @@ impl Vm {
         }
     }
 
-    pub(crate) fn run_finalize(
-        &mut self,
-        host: &mut dyn Host,
-        result: ObjectId,
-        on_finally: Value,
-        settlement: Settlement,
-    ) -> Result<(), VmError> {
-        if !self.is_callable(&on_finally) {
-            return self.apply_saved(host, result, &settlement.to_state());
-        }
-        match self.invoke(host, &on_finally, Vec::new(), &Value::Undefined)? {
-            Invocation::Thrown(error) => self.reject_if_open(result, error),
-            Invocation::Value(value) => match self.classify_resolution(host, value)? {
-                ResolutionInput::Plain(_) => self.apply_saved(host, result, &settlement.to_state()),
-                ResolutionInput::Thrown(error) => {
-                    self.resolve_input(result, ResolutionInput::Thrown(error))
-                }
-                input => {
-                    if !matches!(self.heap.promise(result)?.state, PromiseState::Pending) {
-                        return Ok(());
-                    }
-                    let tail = self.heap.alloc_promise();
-                    let promise = self.heap.promise_mut(result)?;
-                    promise.locked = true;
-                    promise.finally_settlement = Some(settlement.to_state());
-                    promise.adopting = Some(tail);
-                    self.react(tail, ReactionJob::Adopt { result })?;
-                    self.resolve_input(tail, input)
-                }
-            },
-        }
-    }
-
     pub(crate) fn run_adopt(
         &mut self,
         host: &mut dyn Host,
         result: ObjectId,
         settlement: Settlement,
     ) -> Result<(), VmError> {
-        let saved = {
-            let promise = self.heap.promise_mut(result)?;
-            promise.locked = false;
-            promise.adopting = None;
-            promise.finally_settlement.take()
-        };
+        let promise = self.heap.promise_mut(result)?;
+        promise.locked = false;
+        promise.adopting = None;
         if !matches!(self.heap.promise(result)?.state, PromiseState::Pending) {
             return Ok(());
         }
-        if let Some(saved) = saved {
-            return match settlement {
-                Settlement::Rejected(reason) => self.settle(result, Settlement::Rejected(reason)),
-                Settlement::Fulfilled(_) => self.apply_saved(host, result, &saved),
-            };
-        }
         match settlement {
             Settlement::Rejected(reason) => self.settle(result, Settlement::Rejected(reason)),
             Settlement::Fulfilled(value) => self.resolve_promise(host, result, value),
-        }
-    }
-
-    pub(crate) fn apply_saved(
-        &mut self,
-        host: &mut dyn Host,
-        result: ObjectId,
-        saved: &PromiseState,
-    ) -> Result<(), VmError> {
-        let Some(settlement) = Settlement::from_state(saved) else {
-            return Ok(());
-        };
-        if !self.is_open(result)? {
-            return Ok(());
-        }
-        match settlement {
-            Settlement::Fulfilled(value) => self.resolve_promise(host, result, value),
-            Settlement::Rejected(reason) => self.settle(result, Settlement::Rejected(reason)),
         }
     }
 }

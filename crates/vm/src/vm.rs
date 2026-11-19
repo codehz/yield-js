@@ -120,14 +120,9 @@ impl Vm {
                 Microtask::CallHandler {
                     handler,
                     argument,
-                    result,
+                    capability,
                     rejected,
-                } => self.run_call_handler(host, handler, argument, result, rejected)?,
-                Microtask::Finalize {
-                    result,
-                    on_finally,
-                    settlement,
-                } => self.run_finalize(host, result, on_finally, settlement)?,
+                } => self.run_call_handler(host, handler, argument, capability, rejected)?,
                 Microtask::Assimilate {
                     result,
                     receiver,
@@ -289,7 +284,8 @@ impl Vm {
                 self.enqueue(continuation, settlement);
             }
             ReactionJob::Script {
-                result,
+                resolve,
+                reject,
                 on_fulfilled,
                 on_rejected,
             } => {
@@ -300,15 +296,8 @@ impl Vm {
                 self.microtasks.push_back(Microtask::CallHandler {
                     handler,
                     argument,
-                    result,
+                    capability: (resolve, reject),
                     rejected,
-                });
-            }
-            ReactionJob::Finalize { result, on_finally } => {
-                self.microtasks.push_back(Microtask::Finalize {
-                    result,
-                    on_finally,
-                    settlement,
                 });
             }
             ReactionJob::Adopt { result } => {
