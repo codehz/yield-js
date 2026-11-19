@@ -16,6 +16,7 @@ mod json;
 mod math;
 mod number;
 mod ops;
+mod proxy;
 mod resolve;
 mod runtime;
 pub mod snapshot;

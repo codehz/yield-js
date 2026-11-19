@@ -28,6 +28,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::HasProperty { .. }
         | Instr::InstanceOf { .. }
         | Instr::DeleteMember { .. }
+        | Instr::ForInNext { .. }
         | Instr::GetIterator { .. }
         | Instr::IteratorNext { .. }
         | Instr::IteratorSkip { .. }
@@ -56,7 +57,6 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::ArrayAppend { .. }
         | Instr::ArrayHole { .. }
         | Instr::GetForInIterator { .. }
-        | Instr::ForInNext { .. }
         | Instr::IteratorClose {
             preserve_throw: true,
             ..

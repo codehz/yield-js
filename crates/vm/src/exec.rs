@@ -329,7 +329,10 @@ impl Vm {
                 iterator,
             } => {
                 let iterator = object_id(frame.read_ref(iterator)?, "for-in cursor")?;
-                let key = self.heap.for_in_next(iterator)?;
+                let key = match self.for_in_next(host, iterator)? {
+                    Ok(key) => key,
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
                 frame.write(done, Value::Bool(key.is_none()))?;
                 frame.write(value, key.map_or(Value::Undefined, Value::String))?;
                 Ok(Step::Next)
@@ -887,18 +890,25 @@ impl Vm {
         receiver: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
-        if let Some(owner) = self.function_metadata_owner(target, key)? {
-            let PropertyKeyRef::String(key) = key else {
-                unreachable!("function metadata keys are strings");
-            };
-            return Ok(Invocation::Value(self.function_metadata(owner, key)?));
-        }
-        if let Some(property) = self
-            .heap
-            .find_property(target, key)?
-            .map(OwnProperty::into_owned)
-        {
-            return self.read_property_value(host, receiver, property);
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let object = self.heap.get(id)?;
+            if let Object::Proxy {
+                target, handler, ..
+            } = *object
+            {
+                return self.proxy_get(host, target, handler, key, receiver);
+            }
+            if self.has_own_function_metadata(id, key)? {
+                let PropertyKeyRef::String(name) = key else {
+                    unreachable!()
+                };
+                return Ok(Invocation::Value(self.function_metadata(id, name)?));
+            }
+            if let Some(property) = object.own_property(key) {
+                return self.read_property_value(host, receiver, property.into_owned());
+            }
+            current = object.prototype();
         }
         match key {
             PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key) => {
@@ -985,7 +995,7 @@ impl Vm {
             }
         };
         // Prototype links are kept acyclic by set_prototype and snapshot restore.
-        while let Some(parent) = self.heap.get(current)?.prototype() {
+        while let Some(parent) = self.heap.prototype_of(current)? {
             if parent == prototype {
                 return Ok(Invocation::Value(Value::Bool(true)));
             }
@@ -1007,19 +1017,32 @@ impl Vm {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(Invocation::Value(Value::Bool(
-            self.has_property_key(id, key.borrowed())?,
-        )))
+        self.has_property_key(host, id, key.borrowed())
     }
 
     pub(crate) fn has_property_key(
-        &self,
+        &mut self,
+        host: &mut dyn Host,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
-    ) -> Result<bool, VmError> {
-        Ok(self.heap.has_property(target, key)?
-            || self.function_metadata_owner(target, key)?.is_some()
-            || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key)))
+    ) -> Result<Invocation, VmError> {
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let object = self.heap.get(id)?;
+            if let Object::Proxy {
+                target, handler, ..
+            } = *object
+            {
+                return self.proxy_presence(host, target, handler, key, false);
+            }
+            if self.has_own_function_metadata(id, key)? || object.own_property(key).is_some() {
+                return Ok(Invocation::Value(Value::Bool(true)));
+            }
+            current = object.prototype();
+        }
+        Ok(Invocation::Value(Value::Bool(
+            matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key)),
+        )))
     }
 
     pub(crate) fn delete_property(
@@ -1043,6 +1066,13 @@ impl Vm {
                 coerced.borrowed()
             }
         };
+        if let Value::Object(id) = *target
+            && let Object::Proxy {
+                target, handler, ..
+            } = *self.heap.get(id)?
+        {
+            return self.proxy_presence(host, target, handler, key, true);
+        }
         let deleted = match (target, key) {
             (Value::Object(id), key) if self.has_own_function_metadata(*id, key)? => false,
             (Value::Object(id), key) => self.heap.delete_own(*id, key)?,
@@ -1067,32 +1097,7 @@ impl Vm {
             && (id == self.builtins.function_prototype || is_callable_object(self.heap.get(id)?)))
     }
 
-    // Find virtual metadata at its position in the prototype chain. A real
-    // own property on an earlier object still takes precedence.
-    fn function_metadata_owner(
-        &self,
-        mut id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Result<Option<ObjectId>, VmError> {
-        if !matches!(key, PropertyKeyRef::String("name" | "length")) {
-            return Ok(None);
-        }
-        loop {
-            if self.has_own_function_metadata(id, key)? {
-                return Ok(Some(id));
-            }
-            let object = self.heap.get(id)?;
-            if object.own_property(key).is_some() {
-                return Ok(None);
-            }
-            let Some(parent) = object.prototype() else {
-                return Ok(None);
-            };
-            id = parent;
-        }
-    }
-
-    fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
+    pub(crate) fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
         let (object, bound_args, prefix) = match self.heap.get(id)? {
             Object::Bound(bound) => (self.heap.get(bound.target)?, bound.args.len(), "bound "),
             object => (object, 0, ""),
@@ -1163,13 +1168,25 @@ impl Vm {
 
         // Lookup starts at the target. A setter sees the receiver as `this`;
         // a data write goes to the receiver, not to the descriptor's owner.
-        if self
-            .function_metadata_owner(target, key.borrowed())?
-            .is_some()
-        {
-            return reject(self, "Cannot assign to read only function metadata");
+        let mut current = Some(target);
+        let mut property = None;
+        while let Some(id) = current {
+            let object = self.heap.get(id)?;
+            if let Object::Proxy {
+                target, handler, ..
+            } = *object
+            {
+                return self.proxy_set(host, (target, handler), receiver, key, value, strict);
+            }
+            if self.has_own_function_metadata(id, key.borrowed())? {
+                return reject(self, "Cannot assign to read only function metadata");
+            }
+            property = object.own_property(key.borrowed());
+            if property.is_some() {
+                break;
+            }
+            current = object.prototype();
         }
-        let property = self.heap.find_property(target, key.borrowed())?;
         match property.as_ref().and_then(OwnProperty::setter) {
             Some(Some(set)) => {
                 return match self.invoke(host, &Value::Object(set), vec![value], receiver)? {
@@ -1196,6 +1213,29 @@ impl Vm {
         };
         if id != target && self.has_own_function_metadata(id, key.borrowed())? {
             return reject(self, "Cannot overwrite receiver function metadata");
+        }
+        if matches!(self.heap.get(id)?, Object::Proxy { .. }) {
+            let exists = match self.own_descriptor(host, id, key.borrowed())? {
+                Err(error) => return Ok(Invocation::Thrown(error)),
+                Ok(Some((property, attrs)))
+                    if !attrs.writable || !matches!(property, Property::Data(_)) =>
+                {
+                    return reject(self, "Cannot overwrite receiver property");
+                }
+                Ok(descriptor) => descriptor.is_some(),
+            };
+            let update = DescriptorUpdate {
+                value: Some(value),
+                writable: (!exists).then_some(true),
+                enumerable: (!exists).then_some(true),
+                configurable: (!exists).then_some(true),
+                ..DescriptorUpdate::default()
+            };
+            return match self.try_apply_property_update(host, id, key, update)? {
+                Ok(true) => Ok(success),
+                Ok(false) => reject(self, "Cannot define receiver property"),
+                Err(error) => Ok(Invocation::Thrown(error)),
+            };
         }
         let object = self.heap.get(id)?;
         // With the same extensible target and receiver, the lookup above
@@ -1252,19 +1292,20 @@ impl Vm {
             Value::Object(id) => {
                 // Capture the order once; an earlier getter may delete a later key
                 // or change its enumerability before it is visited.
-                let keys: Vec<_> = self.heap.get(*id)?.own_keys(false).collect();
+                let keys = match self.own_keys(host, *id, false)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
                 for key in keys {
                     if excluded.contains(&key.borrowed()) {
                         continue;
                     }
-                    let Some(property) = self.heap.get(*id)?.own_property(key.borrowed()) else {
-                        continue;
-                    };
-                    if !property.attributes().enumerable {
-                        continue;
+                    match self.own_descriptor(host, *id, key.borrowed())? {
+                        Ok(Some((_, attrs))) if attrs.enumerable => {}
+                        Ok(_) => continue,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
                     }
-                    let property = property.into_owned();
-                    match self.read_property_value(host, source, property)? {
+                    match self.read_property(host, source, key.borrowed())? {
                         Invocation::Value(value) => {
                             self.heap
                                 .define_property(target, key, Property::Data(value))?;

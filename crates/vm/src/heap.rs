@@ -318,7 +318,7 @@ impl DescriptorUpdate {
         self.value.is_some() || self.writable.is_some()
     }
 
-    fn complete(
+    pub(crate) fn complete(
         self,
         extensible: bool,
         current: Option<OwnProperty<'_>>,
@@ -595,6 +595,12 @@ pub enum Object {
     Native(NativeObject),
     Plain(PlainObject),
     Array(ArrayObject),
+    /// A non-callable proxy over an ordinary object, array, or another proxy.
+    Proxy {
+        target: ObjectId,
+        handler: ObjectId,
+        object: PlainObject,
+    },
     // Deleted slots remain empty so live cursors never shift.
     Map {
         object: PlainObject,
@@ -627,7 +633,7 @@ pub enum Object {
         byte_offset: usize,
     },
     /// Internal cursor: capture own keys per prototype, then recheck a key's
-    /// descriptor immediately before visiting it. No property stores or traps.
+    /// descriptor immediately before visiting it. The cursor has no properties.
     ForInIterator {
         current: Option<ObjectId>,
         pending: Option<VecDeque<String>>,
@@ -721,6 +727,7 @@ impl Object {
     fn extensible_mut(&mut self) -> Option<&mut bool> {
         Some(match self {
             Self::Plain(o)
+            | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
@@ -740,6 +747,7 @@ impl Object {
     pub(crate) fn is_extensible(&self) -> bool {
         match self {
             Self::Plain(o)
+            | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
@@ -802,6 +810,7 @@ impl Object {
     fn tables(&self) -> Option<PropertyTables<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
@@ -821,6 +830,7 @@ impl Object {
     fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
@@ -914,6 +924,7 @@ impl Object {
     pub(crate) fn prototype(&self) -> Option<ObjectId> {
         match self {
             Self::Plain(plain)
+            | Self::Proxy { object: plain, .. }
             | Self::Map { object: plain, .. }
             | Self::Set { object: plain, .. }
             | Self::WeakMap { object: plain, .. }
@@ -933,6 +944,7 @@ impl Object {
     fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
@@ -965,6 +977,12 @@ impl Object {
             }
         }
         match self {
+            Self::Proxy {
+                target, handler, ..
+            } => {
+                out.push(OwnedEdge::Object(*target));
+                out.push(OwnedEdge::Object(*handler));
+            }
             Self::Promise(promise) => {
                 if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) =
                     &promise.state
@@ -1270,76 +1288,6 @@ impl Heap {
         })
     }
 
-    pub(crate) fn for_in_next(&mut self, iterator: ObjectId) -> Result<Option<String>, VmError> {
-        loop {
-            let Object::ForInIterator {
-                current,
-                pending,
-                visited,
-                string_indices,
-            } = self.get_mut(iterator)?
-            else {
-                return Err(VmError::InvalidState("expected a for-in cursor".into()));
-            };
-            if let Some(index) = string_indices.next() {
-                return Ok(Some(index.to_string()));
-            }
-            let Some(id) = *current else {
-                return Ok(None);
-            };
-
-            if let Some(keys) = pending {
-                let key = keys.pop_front();
-                if let Some(key) = key.as_ref()
-                    && (visited.contains(key)
-                        || crate::ops::canonical_index(key)
-                            .is_some_and(|index| index < string_indices.end))
-                {
-                    continue;
-                }
-                let object = self.get(id)?;
-                if let Some(key) = key {
-                    // A deleted key was never visited; it may still occur on a prototype.
-                    let Some(property) = object.own_property(PropertyKeyRef::String(&key)) else {
-                        continue;
-                    };
-                    let enumerable = property.attributes().enumerable;
-                    let Object::ForInIterator { visited, .. } = self.get_mut(iterator)? else {
-                        unreachable!();
-                    };
-                    if enumerable {
-                        visited.insert(key.clone());
-                        return Ok(Some(key));
-                    }
-                    visited.insert(key);
-                } else {
-                    let prototype = object.prototype();
-                    let Object::ForInIterator {
-                        current, pending, ..
-                    } = self.get_mut(iterator)?
-                    else {
-                        unreachable!();
-                    };
-                    *current = prototype;
-                    *pending = None;
-                }
-            } else {
-                let keys = self
-                    .get(id)?
-                    .own_keys(false)
-                    .filter_map(|key| match key {
-                        PropertyKey::String(key) => Some(key),
-                        PropertyKey::Symbol(_) => None,
-                    })
-                    .collect();
-                let Object::ForInIterator { pending, .. } = self.get_mut(iterator)? else {
-                    unreachable!();
-                };
-                *pending = Some(keys);
-            }
-        }
-    }
-
     pub(crate) fn alloc_array(&mut self, elements: Vec<Value>) -> ObjectId {
         self.alloc(Object::Array(ArrayObject {
             length: elements.len(),
@@ -1424,6 +1372,26 @@ impl Heap {
         self.objects.get(&id).ok_or_else(|| missing_object(id))
     }
 
+    /// The ultimate target for operations with no Proxy trap.
+    pub(crate) fn proxy_target(&self, mut id: ObjectId) -> Result<ObjectId, VmError> {
+        let mut remaining = self.objects.len();
+        while let Object::Proxy { target, .. } = self.get(id)? {
+            if remaining == 0 {
+                return Err(VmError::InvalidState(format!(
+                    "proxy target chain at object {id} is cyclic"
+                )));
+            }
+            remaining -= 1;
+            id = *target;
+        }
+        Ok(id)
+    }
+
+    /// Read an internal prototype with no Proxy trap.
+    pub(crate) fn prototype_of(&self, id: ObjectId) -> Result<Option<ObjectId>, VmError> {
+        Ok(self.get(self.proxy_target(id)?)?.prototype())
+    }
+
     pub(crate) fn get_mut(&mut self, id: ObjectId) -> Result<&mut Object, VmError> {
         self.objects.get_mut(&id).ok_or_else(|| missing_object(id))
     }
@@ -1482,59 +1450,12 @@ impl Heap {
         self.alloc(Object::Native(NativeObject { key }))
     }
 
-    pub(crate) fn has_property(
-        &self,
-        id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Result<bool, VmError> {
-        Ok(self.find_property(id, key)?.is_some())
-    }
-
-    pub(crate) fn find_property(
-        &self,
-        id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Result<Option<OwnProperty<'_>>, VmError> {
-        let mut current = id;
-        let mut previous = None;
-        let mut remaining = self.objects.len();
-        loop {
-            let object = self.objects.get(&current).ok_or_else(|| match previous {
-                Some(parent) => VmError::InvalidState(format!(
-                    "object {parent} prototype {current} does not exist"
-                )),
-                None => missing_object(current),
-            })?;
-            if matches!(object, Object::Environment(_)) {
-                return Err(VmError::InvalidState(match previous {
-                    Some(parent) => {
-                        format!("object {parent} prototype {current} is an environment")
-                    }
-                    None => format!("object {id} is an environment and cannot be a prototype"),
-                }));
-            }
-            if remaining == 0 {
-                return Err(VmError::InvalidState(format!(
-                    "prototype chain of object {id} is cyclic"
-                )));
-            }
-            remaining -= 1;
-            if let Some(property) = object.own_property(key) {
-                return Ok(Some(property));
-            }
-            let Some(next) = object.prototype() else {
-                return Ok(None);
-            };
-            previous = Some(current);
-            current = next;
-        }
-    }
-
     pub(crate) fn set_prototype(
         &mut self,
         id: ObjectId,
         prototype: Option<ObjectId>,
     ) -> Result<bool, VmError> {
+        let id = self.proxy_target(id)?;
         let object = self.get(id)?;
         if object.prototype() == prototype {
             return Ok(true);
@@ -1546,6 +1467,7 @@ impl Heap {
         // link can only form a cycle if its chain leads back to the receiver.
         let mut current = prototype;
         while let Some(ancestor) = current {
+            let ancestor = self.proxy_target(ancestor)?;
             if ancestor == id {
                 return Ok(false);
             }

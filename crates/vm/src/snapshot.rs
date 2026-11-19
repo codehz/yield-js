@@ -7,7 +7,7 @@ use crate::builtins::{
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
     ROOT_JSON, ROOT_MATH, ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
-    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
+    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
     ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
     ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
@@ -26,8 +26,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// WeakMap records and builtin roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 27;
+// Proxy records and builtin root.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 28;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -718,6 +718,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         weakmap,
         weakmap_prototype,
         promise,
+        proxy: builtin_root(ROOT_PROXY, "Proxy")?,
         promise_prototype: prototype,
         queue_microtask: queue,
         object_prototype,
@@ -989,6 +990,30 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
                     }
                 }
             }
+        }
+        if let Object::Proxy {
+            target, handler, ..
+        } = heap.get(id)?
+        {
+            if !matches!(
+                heap.get(*target),
+                Ok(Object::Plain(_) | Object::Array(_) | Object::Proxy { .. })
+            ) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "proxy {id} has invalid target {target}"
+                )));
+            }
+            if matches!(
+                heap.get(*handler),
+                Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+            ) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "proxy {id} has invalid handler {handler}"
+                )));
+            }
+            // Follow the target before reading its prototype. This checks both
+            // target-only cycles and cycles involving ordinary prototype links.
+            prototypes.insert(id, *target);
         }
     }
 

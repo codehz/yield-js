@@ -20,7 +20,7 @@ pub const BYTECODE_VERSION: u32 = 26;
 /// objects; they load via [`Instr::GetBuiltin`]. Error constructors are appended
 /// after `String` at indices 11–16. The compiler and `Build::validate` both use
 /// this table; do not reorder it.
-pub const BUILTINS: [&str; 23] = [
+pub const BUILTINS: [&str; 24] = [
     "Promise",
     "queueMicrotask",
     "Error",
@@ -44,6 +44,7 @@ pub const BUILTINS: [&str; 23] = [
     "Map",
     "Set",
     "WeakMap",
+    "Proxy",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

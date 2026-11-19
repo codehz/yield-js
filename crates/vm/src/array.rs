@@ -153,9 +153,14 @@ impl Vm {
                 )));
             }
             "isArray" => {
-                return Ok(Invocation::Value(Value::Bool(
-                    self.array_length(arg(&args, 0))?.is_some(),
-                )));
+                let is_array = match arg(&args, 0) {
+                    Value::Object(id) => matches!(
+                        self.heap.get(self.heap.proxy_target(*id)?)?,
+                        Object::Array(_)
+                    ),
+                    _ => false,
+                };
+                return Ok(Invocation::Value(Value::Bool(is_array)));
             }
             "from" => return invocation(self.array_from(host, &args)),
             _ => {}
@@ -272,9 +277,13 @@ impl ArrayAccess<'_> {
         ))
     }
 
-    fn present(&self, id: ObjectId, index: usize) -> Result<bool, VmError> {
-        self.vm
-            .has_property_key(id, PropertyKeyRef::String(&index.to_string()))
+    fn present(&mut self, id: ObjectId, index: usize) -> Completion<bool> {
+        completion(self.vm.has_property_key(
+            self.host,
+            id,
+            PropertyKeyRef::String(&index.to_string()),
+        ))
+        .map(|result| result.map(|value| value.truthy()))
     }
 
     fn integer(&mut self, value: &Value) -> Completion<f64> {
@@ -315,7 +324,7 @@ impl ArrayAccess<'_> {
     }
 
     fn move_index(&mut self, from: usize, to: usize) -> Completion<()> {
-        if self.present(self.id, from)? {
+        if script!(self.present(self.id, from)) {
             let value = script!(self.get(self.id, from));
             script!(self.set(to.to_string(), value));
         } else {
@@ -376,7 +385,7 @@ impl ArrayAccess<'_> {
     fn copy_range(&mut self, start: usize, count: usize) -> Completion<ObjectId> {
         let result = self.vm.sparse_array(count)?;
         for i in 0..count {
-            if self.present(self.id, start + i)? {
+            if script!(self.present(self.id, start + i)) {
                 let value = script!(self.get(self.id, start + i));
                 self.define(result, i, value)?;
             }
@@ -437,7 +446,7 @@ impl ArrayAccess<'_> {
         let needle = arg(args, 0);
         for offset in 0..count {
             let index = if last { start - offset } else { start + offset };
-            if includes || self.present(self.id, index)? {
+            if includes || script!(self.present(self.id, index)) {
                 let value = script!(self.get(self.id, index));
                 let both_nan = matches!((&value, needle), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan());
                 if strict_equal(&value, needle) || includes && both_nan {
@@ -467,7 +476,7 @@ impl ArrayAccess<'_> {
         let visit_holes = matches!(name, "find" | "findIndex");
         let source = Value::Object(self.id);
         for index in 0..self.len {
-            if !visit_holes && !self.present(self.id, index)? {
+            if !visit_holes && !script!(self.present(self.id, index)) {
                 continue;
             }
             let value = script!(self.get(self.id, index));
@@ -532,7 +541,7 @@ impl ArrayAccess<'_> {
                         return Ok(Err(self.vm.make_range_error("invalid array length")?));
                     }
                     for index in 0..len {
-                        if self.present(id, index)? {
+                        if script!(self.present(id, index)) {
                             let item = script!(self.get(id, index));
                             self.define(result, output + index, item)?;
                         }
@@ -552,7 +561,7 @@ impl ArrayAccess<'_> {
                 value => script!(self.integer(value)),
             };
             for index in 0..self.len {
-                if self.present(self.id, index)? {
+                if script!(self.present(self.id, index)) {
                     let item = script!(self.get(self.id, index));
                     script!(self.flatten_value(result, &mut output, item, depth));
                 }
@@ -595,7 +604,7 @@ impl ArrayAccess<'_> {
                     return Ok(Ok(()));
                 };
                 if let Some(index) = indices.next() {
-                    if self.present(*id, index)? {
+                    if script!(self.present(*id, index)) {
                         value = script!(self.get(*id, index));
                         depth = *inner_depth;
                         break;

@@ -65,6 +65,7 @@ pub(crate) const ROOT_MATH: &str = "math";
 pub(crate) const ROOT_JSON: &str = "json";
 pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
 pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
+pub(crate) const ROOT_PROXY: &str = "proxy";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -112,6 +113,7 @@ pub(crate) struct BuiltinRoots {
     pub set_iterator_prototype: ObjectId,
     pub weakmap: ObjectId,
     pub weakmap_prototype: ObjectId,
+    pub proxy: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -131,6 +133,7 @@ impl BuiltinRoots {
             ),
             (ROOT_WEAK_MAP.to_owned(), self.weakmap),
             (ROOT_WEAK_MAP_PROTOTYPE.to_owned(), self.weakmap_prototype),
+            (ROOT_PROXY.to_owned(), self.proxy),
             (ROOT_PROMISE.to_owned(), self.promise),
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
@@ -237,6 +240,7 @@ pub(crate) enum BuiltinCall {
     ReflectHas,
     ReflectGetOwnPropertyDescriptor,
     ObjectConstructor,
+    ProxyConstructor,
     ObjectCreate,
     GetPrototypeOf { reflect: bool },
     SetPrototypeOf { reflect: bool },
@@ -264,6 +268,7 @@ enum Constructor {
     Script { func_id: u32, env: ObjectId },
     Promise,
     Object,
+    Proxy,
     Array,
     Collection(CollectionKind),
     WeakMap,
@@ -630,7 +635,9 @@ impl Vm {
         let (set, set_prototype, set_iterator_prototype) =
             self.init_collection(CollectionKind::Set, &identity);
         let (weakmap, weakmap_prototype) = self.init_weakmap();
+        let proxy = self.heap.alloc_builtin("Proxy", None);
         self.builtins = BuiltinRoots {
+            proxy,
             map,
             map_prototype,
             map_iterator_prototype,
@@ -710,6 +717,7 @@ impl Vm {
             20 => Ok(Value::Object(self.builtins.map)),
             21 => Ok(Value::Object(self.builtins.set)),
             22 => Ok(Value::Object(self.builtins.weakmap)),
+            23 => Ok(Value::Object(self.builtins.proxy)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -785,6 +793,7 @@ impl Vm {
             }
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
+            Some(Dispatch::Builtin(BuiltinCall::ProxyConstructor)) => Some(Constructor::Proxy),
             Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => Some(Constructor::Array),
             Some(Dispatch::Builtin(BuiltinCall::CollectionConstructor(kind))) => {
                 Some(Constructor::Collection(kind))
@@ -839,7 +848,8 @@ impl Vm {
             };
         };
         let distinct_new_target = !ops::strict_equal(callee, new_target);
-        let prototype = if distinct_new_target || matches!(constructor, Constructor::Script { .. })
+        let prototype = if !matches!(constructor, Constructor::Proxy)
+            && (distinct_new_target || matches!(constructor, Constructor::Script { .. }))
         {
             match self.read_property(host, new_target, PropertyKeyRef::String("prototype"))? {
                 Invocation::Value(Value::Object(id)) => Some(id),
@@ -877,6 +887,7 @@ impl Vm {
                 return self.construct_collection(host, kind, &args, prototype);
             }
             Constructor::WeakMap => return self.construct_weakmap(host, &args, prototype),
+            Constructor::Proxy => return self.construct_proxy(&args),
             Constructor::Error { name } => self.construct_error(host, &name, args)?,
         };
         if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
@@ -981,12 +992,13 @@ impl Vm {
         match call {
             BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
+            BuiltinCall::ProxyConstructor => self.throw_type_error("Proxy requires new"),
             BuiltinCall::ObjectCreate => self.object_create(host, &args),
             BuiltinCall::GetPrototypeOf { reflect } => self.get_prototype_of(&args, reflect),
             BuiltinCall::SetPrototypeOf { reflect } => self.set_prototype_of(&args, reflect),
-            BuiltinCall::ObjectKeys => self.object_keys(&args),
+            BuiltinCall::ObjectKeys => self.object_keys(host, &args),
             BuiltinCall::ObjectGetOwnPropertyDescriptors => {
-                self.get_own_property_descriptors(&args)
+                self.get_own_property_descriptors(host, &args)
             }
             BuiltinCall::ObjectAssign => self.object_assign(host, &args),
             BuiltinCall::ObjectIs => Ok(Invocation::Value(Value::Bool(ops::same_value(
@@ -1012,7 +1024,8 @@ impl Vm {
             BuiltinCall::PreventExtensions { reflect } => {
                 let target = args.first().unwrap_or(&Value::Undefined);
                 if let Value::Object(id) = target {
-                    self.heap.get_mut(*id)?.prevent_extensions();
+                    let id = self.heap.proxy_target(*id)?;
+                    self.heap.get_mut(id)?.prevent_extensions();
                 } else if reflect {
                     return self.throw_type_error("Reflect.preventExtensions requires an object");
                 }
@@ -1024,7 +1037,9 @@ impl Vm {
             }
             BuiltinCall::IsExtensible { reflect } => {
                 let extensible = match args.first() {
-                    Some(Value::Object(id)) => self.heap.get(*id)?.is_extensible(),
+                    Some(Value::Object(id)) => {
+                        self.heap.get(self.heap.proxy_target(*id)?)?.is_extensible()
+                    }
                     _ if reflect => {
                         return self.throw_type_error("Reflect.isExtensible requires an object");
                     }
@@ -1032,20 +1047,8 @@ impl Vm {
                 };
                 Ok(Invocation::Value(Value::Bool(extensible)))
             }
-            BuiltinCall::SetIntegrityLevel(level) => {
-                let target = args.first().unwrap_or(&Value::Undefined);
-                if let Value::Object(id) = target {
-                    self.heap.get_mut(*id)?.set_integrity_level(level);
-                }
-                Ok(Invocation::Value(target.clone()))
-            }
-            BuiltinCall::TestIntegrityLevel(level) => {
-                let satisfies = match args.first() {
-                    Some(Value::Object(id)) => self.heap.get(*id)?.test_integrity_level(level),
-                    _ => true,
-                };
-                Ok(Invocation::Value(Value::Bool(satisfies)))
-            }
+            BuiltinCall::SetIntegrityLevel(level) => self.set_integrity(host, &args, level),
+            BuiltinCall::TestIntegrityLevel(level) => self.test_integrity(host, &args, level),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(host, &name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -1064,7 +1067,10 @@ impl Vm {
                         Ok(key) => key,
                         Err(thrown) => return Ok(Invocation::Thrown(thrown)),
                     };
-                    Ok(Invocation::Value(Value::Bool(self.heap.has_own(id, &key)?)))
+                    match self.own_descriptor(host, id, key.borrowed())? {
+                        Ok(descriptor) => Ok(Invocation::Value(Value::Bool(descriptor.is_some()))),
+                        Err(error) => Ok(Invocation::Thrown(error)),
+                    }
                 }
                 "valueOf" => match *receiver {
                     Value::Object(id) if self.heap.is_environment(id) == Some(false) => {
@@ -1124,10 +1130,12 @@ impl Vm {
                 let Some(Value::Object(id)) = args.first() else {
                     return self.throw_type_error("Reflect.ownKeys requires an object");
                 };
-                let keys = self
-                    .heap
-                    .get(*id)?
-                    .own_keys(false)
+                let keys = match self.own_keys(host, *id, false)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                let keys = keys
+                    .into_iter()
                     .map(|key| match key {
                         PropertyKey::String(key) => Value::String(key),
                         PropertyKey::Symbol(id) => Value::Symbol(id),
@@ -1170,9 +1178,7 @@ impl Vm {
                     Ok(key) => key,
                     Err(thrown) => return Ok(Invocation::Thrown(thrown)),
                 };
-                Ok(Invocation::Value(Value::Bool(
-                    self.has_property_key(*target, key.borrowed())?,
-                )))
+                self.has_property_key(host, *target, key.borrowed())
             }
             BuiltinCall::ReflectSet => {
                 let Some(Value::Object(target)) = args.first() else {
@@ -1240,7 +1246,7 @@ impl Vm {
     }
 
     fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
-        Ok(match self.heap.get(id)? {
+        Ok(match self.heap.get(self.heap.proxy_target(id)?)? {
             Object::Array(_) => "Array",
             Object::Function(_)
             | Object::BuiltinStatic(_)
@@ -1563,6 +1569,26 @@ impl Vm {
         }
     }
 
+    fn construct_proxy(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error("Proxy requires an object target");
+        };
+        let Some(Value::Object(handler)) = args.get(1) else {
+            return self.throw_type_error("Proxy requires an object handler");
+        };
+        let base = self.heap.proxy_target(*target)?;
+        if !matches!(self.heap.get(base)?, Object::Plain(_) | Object::Array(_)) {
+            return self.throw_type_error("Proxy supports only plain object and array targets");
+        }
+        Ok(Invocation::Value(Value::Object(self.heap.alloc(
+            Object::Proxy {
+                target: *target,
+                handler: *handler,
+                object: PlainObject::new(None),
+            },
+        ))))
+    }
+
     fn object_create(
         &mut self,
         host: &mut dyn Host,
@@ -1592,7 +1618,7 @@ impl Vm {
         };
         Ok(Invocation::Value(
             self.heap
-                .get(*target)?
+                .get(self.heap.proxy_target(*target)?)?
                 .prototype()
                 .map_or(Value::Null, Value::Object),
         ))
@@ -1627,22 +1653,98 @@ impl Vm {
         }
     }
 
-    fn object_keys(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+    fn set_integrity(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+        level: IntegrityLevel,
+    ) -> Result<Invocation, VmError> {
+        let target = args.first().unwrap_or(&Value::Undefined);
+        let Value::Object(id) = *target else {
+            return Ok(Invocation::Value(target.clone()));
+        };
+        let base = self.heap.proxy_target(id)?;
+        if base == id {
+            self.heap.get_mut(id)?.set_integrity_level(level);
+            return Ok(Invocation::Value(target.clone()));
+        }
+        self.heap.get_mut(base)?.prevent_extensions();
+        let keys = match self.own_keys(host, id, false)? {
+            Ok(keys) => keys,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        for key in keys {
+            let writable = if matches!(level, IntegrityLevel::Frozen) {
+                match self.own_descriptor(host, id, key.borrowed())? {
+                    Ok(Some((Property::Data(_), _))) => Some(false),
+                    Ok(Some(_)) => None,
+                    Ok(None) => continue,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
+            } else {
+                None
+            };
+            let update = DescriptorUpdate {
+                configurable: Some(false),
+                writable,
+                ..DescriptorUpdate::default()
+            };
+            if let thrown @ Invocation::Thrown(_) =
+                self.apply_property_update(host, id, key, update)?
+            {
+                return Ok(thrown);
+            }
+        }
+        Ok(Invocation::Value(target.clone()))
+    }
+
+    fn test_integrity(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+        level: IntegrityLevel,
+    ) -> Result<Invocation, VmError> {
+        let result = |value| Ok(Invocation::Value(Value::Bool(value)));
+        let Some(Value::Object(id)) = args.first() else {
+            return result(true);
+        };
+        let base = self.heap.proxy_target(*id)?;
+        if base == *id {
+            return result(self.heap.get(base)?.test_integrity_level(level));
+        }
+        if self.heap.get(base)?.is_extensible() {
+            return result(false);
+        }
+        let keys = match self.own_keys(host, *id, false)? {
+            Ok(keys) => keys,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        for key in keys {
+            match self.own_descriptor(host, *id, key.borrowed())? {
+                Ok(Some((property, attributes)))
+                    if attributes.configurable
+                        || (matches!(level, IntegrityLevel::Frozen)
+                            && matches!(property, Property::Data(_))
+                            && attributes.writable) =>
+                {
+                    return result(false);
+                }
+                Ok(_) => {}
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        }
+        result(true)
+    }
+
+    fn object_keys(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
         let keys = match args.first() {
             None | Some(Value::Undefined | Value::Null) => {
                 return self.throw_type_error("Object.keys requires a non-nullish value");
             }
-            Some(Value::Object(id)) => self
-                .heap
-                .get(*id)?
-                .own_keys(true)
-                .map(|key| {
-                    let PropertyKey::String(key) = key else {
-                        unreachable!("only string keys")
-                    };
-                    Value::String(key)
-                })
-                .collect(),
+            Some(Value::Object(id)) => match self.enumerable_string_keys(host, *id)? {
+                Ok(keys) => keys.into_iter().map(Value::String).collect(),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
             Some(Value::String(text)) => (0..text.encode_utf16().count())
                 .map(|index| Value::String(index.to_string()))
                 .collect(),
@@ -1666,11 +1768,20 @@ impl Vm {
             Ok(key) => key,
             Err(thrown) => return Ok(Invocation::Thrown(thrown)),
         };
-        let Some(property) = self.heap.get(*target)?.own_property(key.borrowed()) else {
-            return Ok(Invocation::Value(Value::Undefined));
-        };
-        let attributes = property.attributes();
-        let property = property.into_owned();
+        match self.own_descriptor(host, *target, key.borrowed())? {
+            Ok(Some((property, attributes))) => Ok(Invocation::Value(Value::Object(
+                self.descriptor_object(property, attributes)?,
+            ))),
+            Ok(None) => Ok(Invocation::Value(Value::Undefined)),
+            Err(error) => Ok(Invocation::Thrown(error)),
+        }
+    }
+
+    fn descriptor_object(
+        &mut self,
+        property: Property,
+        attributes: Attributes,
+    ) -> Result<ObjectId, VmError> {
         let result = self.heap.alloc_plain();
         match property {
             Property::Data(value) => {
@@ -1695,56 +1806,31 @@ impl Vm {
             .set_own_string(result, "enumerable", Value::Bool(attributes.enumerable))?;
         self.heap
             .set_own_string(result, "configurable", Value::Bool(attributes.configurable))?;
-        Ok(Invocation::Value(Value::Object(result)))
+        Ok(result)
     }
 
-    fn get_own_property_descriptors(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+    fn get_own_property_descriptors(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
         let Some(Value::Object(target)) = args.first() else {
             return self.throw_type_error(
                 "Object.getOwnPropertyDescriptors requires an object in this VM",
             );
         };
-        let keys = self.heap.get(*target)?.own_keys(false).collect::<Vec<_>>();
+        let keys = match self.own_keys(host, *target, false)? {
+            Ok(keys) => keys,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         let result = self.heap.alloc_plain();
         for key in keys {
-            let Some(property) = self.heap.get(*target)?.own_property(key.borrowed()) else {
-                continue;
+            let (property, attributes) = match self.own_descriptor(host, *target, key.borrowed())? {
+                Ok(Some(descriptor)) => descriptor,
+                Ok(None) => continue,
+                Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            let attributes = property.attributes();
-            let property = property.into_owned();
-            let descriptor = self.heap.alloc_plain();
-            match property {
-                Property::Data(value) => {
-                    self.heap.set_own_string(descriptor, "value", value)?;
-                    self.heap.set_own_string(
-                        descriptor,
-                        "writable",
-                        Value::Bool(attributes.writable),
-                    )?;
-                }
-                Property::Accessor { get, set } => {
-                    self.heap.set_own_string(
-                        descriptor,
-                        "get",
-                        get.map_or(Value::Undefined, Value::Object),
-                    )?;
-                    self.heap.set_own_string(
-                        descriptor,
-                        "set",
-                        set.map_or(Value::Undefined, Value::Object),
-                    )?;
-                }
-            }
-            self.heap.set_own_string(
-                descriptor,
-                "enumerable",
-                Value::Bool(attributes.enumerable),
-            )?;
-            self.heap.set_own_string(
-                descriptor,
-                "configurable",
-                Value::Bool(attributes.configurable),
-            )?;
+            let descriptor = self.descriptor_object(property, attributes)?;
             self.heap.set_own(result, key, Value::Object(descriptor))?;
         }
         Ok(Invocation::Value(Value::Object(result)))
@@ -1796,13 +1882,15 @@ impl Vm {
                 // Primitive sources currently have no enumerable own keys.
                 continue;
             };
-            let keys: Vec<_> = self.heap.get(*source_id)?.own_keys(false).collect();
+            let keys = match self.own_keys(host, *source_id, false)? {
+                Ok(keys) => keys,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
             for key in keys {
-                let Some(property) = self.heap.get(*source_id)?.own_property(key.borrowed()) else {
-                    continue;
-                };
-                if !property.attributes().enumerable {
-                    continue;
+                match self.own_descriptor(host, *source_id, key.borrowed())? {
+                    Ok(Some((_, attributes))) if attributes.enumerable => {}
+                    Ok(_) => continue,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
                 }
                 let value = match self.read_property(host, source, key.borrowed())? {
                     Invocation::Value(value) => value,
@@ -1837,15 +1925,17 @@ impl Vm {
             // The other primitive wrappers have no enumerable own properties.
             _ => return Ok(Invocation::Value(Value::Object(target))),
         };
-        let keys: Vec<_> = self.heap.get(source)?.own_keys(false).collect();
+        let keys = match self.own_keys(host, source, false)? {
+            Ok(keys) => keys,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         let mut updates = Vec::new();
         for key in keys {
             // Getters can change the enumerability of keys still to be visited.
-            let Some(property) = self.heap.get(source)?.own_property(key.borrowed()) else {
-                continue;
-            };
-            if !property.attributes().enumerable {
-                continue;
+            match self.own_descriptor(host, source, key.borrowed())? {
+                Ok(Some((_, attributes))) if attributes.enumerable => {}
+                Ok(_) => continue,
+                Err(error) => return Ok(Invocation::Thrown(error)),
             }
             let descriptor = match self.read_property(host, properties, key.borrowed())? {
                 Invocation::Value(value) => value,
@@ -1867,7 +1957,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(target)))
     }
 
-    fn read_property_descriptor(
+    pub(crate) fn read_property_descriptor(
         &mut self,
         host: &mut dyn Host,
         descriptor: &Value,
@@ -1889,8 +1979,10 @@ impl Vm {
             "set",
         ] {
             let key = PropertyKeyRef::String(name);
-            if !self.heap.has_property(id, key)? {
-                continue;
+            match self.has_property_key(host, id, key)? {
+                Invocation::Value(value) if value.truthy() => {}
+                Invocation::Value(_) => continue,
+                Invocation::Thrown(error) => return Ok(Err(error)),
             }
             let value = match self.read_property(host, descriptor, key)? {
                 Invocation::Value(value) => value,
@@ -1949,6 +2041,7 @@ impl Vm {
         key: PropertyKey,
         mut update: DescriptorUpdate,
     ) -> Result<Result<bool, Value>, VmError> {
+        let target = self.heap.proxy_target(target)?;
         if self.has_own_function_metadata(target, key.borrowed())? {
             return Ok(Ok(false));
         }
@@ -2578,6 +2671,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             })
         }
         ("Object", None) => Some(BuiltinCall::ObjectConstructor),
+        ("Proxy", None) => Some(BuiltinCall::ProxyConstructor),
         ("Object", Some("assign")) => Some(BuiltinCall::ObjectAssign),
         ("Object", Some("is")) => Some(BuiltinCall::ObjectIs),
 

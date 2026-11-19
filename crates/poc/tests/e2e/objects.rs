@@ -484,6 +484,52 @@ fn restore_rejects_corrupt_collection_records() {
 }
 
 #[test]
+fn restore_rejects_malformed_proxy_records() {
+    let mut s = Suspended::start(
+        "export async function run() { const p = new Proxy({}, {}); await wait('a'); return p.x; }",
+        vec![],
+    );
+    let snapshot = s.snapshot();
+    assert_eq!(snapshot.format_version, 28);
+    let index = snapshot
+        .objects
+        .iter()
+        .position(|record| matches!(&record.object, Object::Proxy { .. }))
+        .expect("live proxy record");
+    let proxy_id = snapshot.objects[index].id;
+    let constructor = snapshot.roots["proxy"];
+    let environment = snapshot
+        .objects
+        .iter()
+        .find(|record| matches!(&record.object, Object::Environment(_)))
+        .expect("live environment")
+        .id;
+    for (target_override, handler_override, message) in [
+        (Some(u32::MAX), None, "missing object"),
+        (None, Some(u32::MAX), "missing object"),
+        (Some(constructor), None, "invalid target"),
+        (None, Some(environment), "invalid handler"),
+        (Some(proxy_id), None, "cyclic"),
+    ] {
+        let mut corrupt = snapshot.clone();
+        let Object::Proxy {
+            target, handler, ..
+        } = &mut corrupt.objects[index].object
+        else {
+            unreachable!("proxy record");
+        };
+        if let Some(id) = target_override {
+            *target = id;
+        }
+        if let Some(id) = handler_override {
+            *handler = id;
+        }
+        let error = s.restore(corrupt).expect_err("malformed proxy record");
+        assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
+    }
+}
+
+#[test]
 fn weakmap_snapshot_drops_unreachable_entries_and_values() {
     let mut s = Suspended::start(
         r#"

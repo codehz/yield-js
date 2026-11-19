@@ -546,7 +546,12 @@ impl Vm {
             Value::Number(value) if value.is_finite() => JsonValue::Number(value),
             Value::Number(_) => JsonValue::Null,
             Value::String(value) => JsonValue::String(value),
-            Value::Object(id) if matches!(self.heap.get(id)?, Object::Array(_)) => {
+            Value::Object(id)
+                if matches!(
+                    self.heap.get(self.heap.proxy_target(id)?)?,
+                    Object::Array(_)
+                ) =>
+            {
                 match self.serialize_array(host, state, id)? {
                     Ok(value) => value,
                     Err(error) => return Ok(Err(error)),
@@ -571,17 +576,31 @@ impl Vm {
             return Ok(Err(error));
         }
         state.stack.push(id);
+        let is_proxy = matches!(self.heap.get(id)?, Object::Proxy { .. });
         let length = match self.heap.get(id)? {
             Object::Array(array) => array.length,
-            _ => 0,
+            _ => {
+                let length = match self.read_property(
+                    host,
+                    &Value::Object(id),
+                    PropertyKeyRef::String("length"),
+                )? {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => return Ok(Err(error)),
+                };
+                match self.coerce_number(host, &length)? {
+                    Ok(length) => length.clamp(0.0, 9_007_199_254_740_991.0) as usize,
+                    Err(error) => return Ok(Err(error)),
+                }
+            }
         };
-        let mut values = Vec::with_capacity(length);
+        let mut values = Vec::with_capacity(if is_proxy { 0 } else { length });
         let saved = state.path.clone();
         for index in 0..length {
             state.path = format!("{saved}[{index}]");
             let key = index.to_string();
             let owned = PropertyKey::String(key.clone());
-            if !self.heap.has_own(id, &owned)? {
+            if !is_proxy && !self.heap.has_own(id, &owned)? {
                 values.push(JsonValue::Null);
                 continue;
             }
@@ -609,14 +628,10 @@ impl Vm {
         let keys = if let Some(properties) = state.properties {
             properties.to_vec()
         } else {
-            self.heap
-                .get(id)?
-                .own_keys(true)
-                .filter_map(|key| match key {
-                    PropertyKey::String(key) => Some(key),
-                    PropertyKey::Symbol(_) => None,
-                })
-                .collect()
+            match self.enumerable_string_keys(host, id)? {
+                Ok(keys) => keys,
+                Err(error) => return Ok(Err(error)),
+            }
         };
         let mut values = Vec::new();
         let saved = state.path.clone();
