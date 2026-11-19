@@ -21,10 +21,47 @@
 - Rust 与宿主之间采用手工设计的 C ABI，以不透明 VM 句柄表达跨调用生命周期状态。
 - compiler 复用 Rust JavaScript parser（如 Oxc），转换到项目自有 IR；实现时选择当时最新稳定版本并锁定依赖。Oxc AST 不进入 VM 或字节码契约。
 - VM 堆采用 VM 自有对象表/句柄与 tracing GC，支持对象环、闭包共享状态及快照对象身份。
-- 首版 JavaScript 语法清单延期到盘点实际应用脚本后确定；在此之前不冻结具体子集范围。
+- 首版以能运行锁定版本的 Solid Universal 和 React 自定义 renderer 为兼容基线，按下文的构建产物与行为用例验收，而不是按 ECMAScript 年份或 npm 包名宣称兼容。
 - 宿主异步操作统一使用 operation 生命周期协议；timer、UI 事件订阅、fetch 等由各自宿主适配器定义恢复、重试或拒绝策略。宿主是 operation 状态的权威来源。
 - 恢复时若任一待恢复 operation 缺失或不可重建，整体拒绝恢复，不启动 VM。
 
+
+## 首版 JavaScript 支持范围
+
+### 兼容目标与构建输入
+
+| 验收目标 | 锁定的运行时入口 | 不包含 |
+| --- | --- | --- |
+| Solid 非 Web | [`solid-js@1.9.9`](https://unpkg.com/solid-js@1.9.9/package.json) 的生产响应式核心、`solid-js/universal` 的 `createRenderer` 和 `solid-js/store` 的 `createStore`。构建显式选用 `dist/solid.js` 和 `store/dist/store.js`，不能因 `node`/`worker` 条件误选 SSR 入口。 | `solid-js/web`、SSR、浏览器 hydration；不启用依赖浏览器 `MessageChannel` 的可选 `enableScheduling()` 路径。 |
+| React 非 Web | `react@19.2.0`、`react/jsx-runtime`、[`react-reconciler@0.33.0`](https://unpkg.com/react-reconciler@0.33.0/package.json) 和 `scheduler@0.27.0` 的生产包；使用自定义 mutation-mode `HostConfig`，按该版本实现调度与事件优先级接口。 | React DOM、React Native/Fabric 平台层、SSR/RSC、hydration 和开发工具。 |
+
+应用可写 JS/TS/JSX/TSX。离线构建负责去除类型、用 Solid 的 universal JSX 转换或 React 的 JSX runtime 转换，并解析 npm 依赖及条件导出、固定生产分支、转换 CommonJS、打成单一严格模式 JS 脚本。`compiler` 接收这份脚本、声明的宿主绑定及可选源码映射；不承担 JSX/TS 转译或包解析，VM 不加载模块。转换必须保留 ESM 活绑定和 CommonJS 初始化等可观察行为；若打包后仍有裸 `import`、`export` 或运行时 `require`，构建失败。不得替换框架核心或 scheduler 来通过验收。
+
+### 字节码编译器直接支持的语法
+
+| 类别 | 首版直接支持 |
+| --- | --- |
+| 绑定与函数 | `var`、`let`、`const`、块作用域与 TDZ；函数声明、表达式、箭头函数、对象方法和访问器；闭包、每轮循环绑定、严格模式 `arguments`、调用点的 `this` 与箭头函数词法 `this`；默认参数、rest、数组/对象解构。 |
+| 表达式 | 标准数字、布尔、字符串、`null`、正则字面量与数组/对象字面量（含空洞、计算属性、展开）；非标签模板；普通/成员/构造调用与实参展开；算术、位运算、比较、赋值、自增减、短路、三元、逗号、可选链、`??` 与逻辑赋值；`typeof`、`void`、`delete`、`in`、`instanceof`。 |
+| 控制流 | `if`、`switch`、`for`、`while`、`do…while`、`for…in`、同步 `for…of`（含提前退出时的 iterator close）；标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。 |
+| 异步 | `async` 函数与 `await`；thenable 同化、异常拒绝、Promise 微任务顺序与已结算 Promise 的异步恢复。 |
+
+`class`（含 `extends`、字段和私有成员）与标签模板应在离线构建降级，只接受落在上述子集内且保留所用语义的输出；原生 generator、async generator、`for await…of`、顶层 `await`、动态模块加载、`eval`、`Function` 动态构造、`with` 不在首版契约内。直接输入中不支持的语法在编译期报告特性名和源码位置；缺失声明的宿主绑定在装载时拒绝。普通 JS 的可选全局探测保留标准语义（如未声明的 `MessageChannel` 在 `typeof` 中返回 `"undefined"`）。
+
+### VM 内建与可观察语义
+
+- 支持普通对象和原型链、属性描述符、getter/setter、字符串与 Symbol 属性键、标准枚举顺序、稀疏数组、严格模式赋值失败。实现 `Object` 的创建、原型/描述符查询、`defineProperty`/`defineProperties`、枚举、`assign`、`is`、冻结及冻结检查，以及 `Function.prototype.call/apply/bind`。
+- 支持 `Array`/`String` 的常用访问、转换、搜索、切片与迭代，以及 `Array.isArray/from`、`push/pop/shift/unshift/splice`、`map/filter/reduce/forEach/some/every/flat`；提供 `Number`、`Math`、`RegExp`、`JSON` 和标准 `Error` 类型。具体方法和正则用法以锁定构建和回归用例补齐，不以整个内建对象的存在宣称完整兼容。
+- 支持 `Symbol`（含 `Symbol.for/keyFor`、`Symbol.iterator`）、同步 iterator 协议、`Map`、`Set`、`WeakMap`。快照保存 symbol 注册表和引用身份、集合条目与顺序；`WeakMap` 遵循弱键/ephemeron 可达性，只存活键所对应的条目，不能把键提升成强根。
+- Solid 响应式 props/store 需要真正的 VM `Proxy`：首版覆盖普通对象/数组目标的 `get`、`set`、`has`、`deleteProperty`、`ownKeys`、`getOwnPropertyDescriptor` 陷阱及相应 `Reflect` 操作；遵守属性描述符与不可扩展目标不变量。快照保存代理、目标、handler 及其捕获环境的身份和关系，不执行 trap 来枚举快照。可撤销代理、代理函数/构造器及其他 traps 不在此基线。
+- `Promise` 由 VM 实现：构造器、`then/catch/finally`、`resolve/reject/all/allSettled/race/any`。快照保留未结算 Promise 的反应闭包、链式结果与 async 续体；不序列化宿主 Promise。`queueMicrotask` 进入同一 VM 微任务队列，不是宿主 timer。`WeakRef`、`FinalizationRegistry`、共享内存、`Atomics` 不在此基线。
+
+### 非 Web 宿主与验收
+
+- 两套 renderer 均在 VM 内执行 JS，调用同一类宿主树能力：创建节点/文本、设置属性/文本、插入/移动/删除、遍历父子兄弟、分发输入事件。框架状态和回调闭包归 VM；原生节点由宿主持有，用稳定键恢复。可用可观察的内存节点树测试此接口，无需先实现 Apple/Android UI，也不提供 DOM、Node 或 React Native 全局环境。
+- React 的生产 `scheduler` 选用 [`setTimeout` 回退分支](https://unpkg.com/scheduler@0.27.0/cjs/scheduler.production.js)。宿主适配器提供可取消的 timer、`performance.now()` 单调时钟和错误日志出口；恢复须延续同一时钟域，不能从零重新计时。`setTimeout`/`clearTimeout` 包装层与回调在 VM 内，宿主只保存 timer operation 的 ID、计时及取消状态。到期后宿主在新的 VM 任务轮次结算 operation 对应的 Promise，由 VM 驱动已登记的脚本回调并排空微任务；回调抛错按任务错误报告，不把内部 Promise 拒绝暴露给应用。取消或重复到期投递不执行回调。树事件也在新任务轮次投递，不从原生调用栈同步重入 VM。
+- **运行验收**：用冻结版本的真实生产包和实际 JSX 构建产物。Solid 验证 signal/memo、响应式 props、嵌套 store、列表节点重排、事件更新和卸载清理；React 验证函数组件、`useState`、effect 及清理、事件更新、带 key 的子节点重排、Promise 驱动的 Suspense 恢复和卸载。与同一产物在参考 JS 引擎、同一宿主适配器契约下的节点树和事件日志对照。
+- **恢复验收**：分别在已挂载、等待可恢复 operation 的边界保存并恢复，补齐原生绑定后触发原事件或完成原 operation。断言状态与节点/闭包身份延续、挂载副作用不重跑、后续更新和清理正常；React 另验证挂起的 scheduler timer 恢复后只触发一次、已取消 timer 不执行。参考连续运行结果，不能用重新挂载代替恢复。
 
 ## 总体架构
 
@@ -40,13 +77,11 @@ flowchart LR
 
 ### 编译器
 
-`compiler` 是唯一接收 JS 源码的模块。它复用 Rust JavaScript parser，将解析结果转换为项目自有 IR；负责解析严格模式 JS 子集、解析词法绑定、降低异常与异步控制流、分析活性并分配帧槽，最后输出版本化字节码。不支持的语法在编译期报错。具体语法清单待盘点应用脚本后确定。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
+`compiler` 是唯一接收 JS 源码的运行核心模块。它复用 Rust JavaScript parser，将离线构建输出的严格模式 JS 转换为项目自有 IR；负责校验语法子集、解析词法绑定、降低异常与异步控制流、分析活性并分配帧槽，最后输出版本化字节码。不支持的语法在编译期报错。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
 
 ### 虚拟机
 
 `vm` 只接受字节码构建产物及宿主绑定，不接收源码、AST 或编译器 IR，不依赖 `compiler`。它拥有字节码契约及加载验证，显式管理脚本栈、对象堆、全局环境、Promise 和 async 续体。VM 堆使用自有对象表/句柄与 tracing GC。编译器遵循该契约；发布产物可只部署 `vm` 与字节码，不携带解析器。恢复时必须先加载同一构建的字节码，不重新编译源码。
-
-实际语法范围需基于应用脚本清单确定；闭包、对象与数组、异常、Promise、`async/await` 是候选能力，不代表首版已承诺支持。
 
 ### 宿主接口
 
@@ -127,7 +162,9 @@ async function run(input) {
 
 只在同步执行栈已清空、当前微任务轮次排空后创建快照。同步调用和原生函数执行中的状态不保证可暂停或恢复。此边界避免序列化宿主栈及半途执行的原生调用。
 
-宿主恢复其权威持有的异步 operation 状态，并按稳定 operation ID 重新建立宿主工作；完成或拒绝对应 VM Promise 后，VM 推进相应 async 续体。operation ID 用于当前待恢复工作的关联，不要求 VM 保留已处理 ID 历史。
+待触发的宿主 timer 不等于已入队的 VM 微任务，可以跨快照存在。宿主的快照切点须协调 timer/事件投递与存档：不接受已从宿主摘下、却尚未进入 VM 处理且未持久化的投递。恢复完成且绑定通过前不得投递；不保存正在运行的框架调度调用栈。
+
+宿主恢复其权威持有的异步 operation 状态，并按稳定 operation ID 重新建立宿主工作；完成或拒绝对应 VM Promise 后，VM 推进相应 Promise 反应或 async 续体。operation ID 用于当前待恢复工作的关联，不要求 VM 保留已处理 ID 历史。
 
 ## 快照数据
 
@@ -160,7 +197,7 @@ VM 以稳定键 `(type, id)` 标识外部原生对象，不把原生指针写入
 
 ## 主要风险与待实现时验证事项
 
-- JavaScript 子集越界会导致兼容性预期不清；应以明确的语法清单和编译期诊断控制范围。
+- 框架升级或打包器改动可能引入新的语法、内建或宿主依赖；升级时须重新检查实际构建产物并通过上述运行及恢复验收，不能仅凭入口不变宣称兼容。
 - async 帧、闭包环境和对象图的序列化必须保留引用关系与对象身份。
 - 宿主必须协调 UI 存档、VM 快照与宿主 operation 状态；恢复中任一必需原生绑定或 operation 缺失时整体失败，避免从不一致状态启动脚本。
 - 精确版本策略简单可靠，但脚本升级后旧快照不可直接恢复；宿主需实现重新初始化与 UI 重建路径。
