@@ -63,7 +63,7 @@ cargo run -p yield-poc
 
 - 顶层 `function` 声明；嵌套函数声明（提升）；函数表达式；箭头函数；`async` 函数；`await`。
 - `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
-- 字面量、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`、数组展开）、成员读写。
+- 字面量、非标签模板、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`、数组展开）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
 - 可选链 `?.` 支持静态成员、计算成员和调用；遇到 `null` 或 `undefined` 时跳过链中剩余的求值，方法调用仍保留接收者。
@@ -75,7 +75,7 @@ cargo run -p yield-poc
 ## 已知未覆盖
 
 - `super`、对象展开、实参展开；对象/数组跨宿主边界（当前只在 VM 内使用）。
-- 类、模板字符串、generator、async generator、顶层 `await`。
+- 类、标签模板、generator、async generator、顶层 `await`。
 - `for…in`、`for await…of`、字符串迭代和 `for…of` 解构目标。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
