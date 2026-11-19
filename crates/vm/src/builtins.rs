@@ -29,6 +29,7 @@ pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_ARRAY: &str = "array";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
+pub(crate) const ROOT_ARRAY_VALUES: &str = "array.values";
 pub(crate) const ROOT_STRING: &str = "string";
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
@@ -63,6 +64,7 @@ pub(crate) struct BuiltinRoots {
     pub object_prototype: ObjectId,
     pub array: ObjectId,
     pub array_prototype: ObjectId,
+    pub array_values: ObjectId,
     pub string: ObjectId,
     pub string_prototype: ObjectId,
     pub function_prototype: ObjectId,
@@ -99,6 +101,7 @@ impl BuiltinRoots {
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
             (ROOT_ARRAY.to_owned(), self.array),
             (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
+            (ROOT_ARRAY_VALUES.to_owned(), self.array_values),
             (ROOT_STRING.to_owned(), self.string),
             (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
             (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
@@ -373,7 +376,8 @@ impl Vm {
         self.heap
             .define_data(array_prototype, "toString", to_string, Attributes::METHOD)
             .expect("Array.prototype stores toString");
-        let values = Value::Object(self.heap.alloc_builtin("Array", Some("values")));
+        let array_values = self.heap.alloc_builtin("Array", Some("values"));
+        let values = Value::Object(array_values);
         let string_iterator_prototype = self.heap.alloc_plain();
         let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
         let string_prototype = self.heap.alloc_plain();
@@ -562,6 +566,7 @@ impl Vm {
             object_prototype,
             array,
             array_prototype,
+            array_values,
             string,
             string_prototype,
             function_prototype,
@@ -1168,12 +1173,34 @@ impl Vm {
         result
     }
 
+    pub(crate) fn create_arguments_object(&mut self, args: &[Value]) -> Result<Value, VmError> {
+        let id = self.heap.alloc_plain();
+        for (index, value) in args.iter().enumerate() {
+            self.heap.define_data(
+                id,
+                PropertyKey::String(index.to_string()),
+                value.clone(),
+                Attributes::ORDINARY,
+            )?;
+        }
+        self.heap.define_data(
+            id,
+            "length",
+            Value::Number(args.len() as f64),
+            Attributes::METHOD,
+        )?;
+        self.heap.define_data(
+            id,
+            PropertyKey::Symbol(ITERATOR_SYMBOL),
+            Value::Object(self.builtins.array_values),
+            Attributes::METHOD,
+        )?;
+        Ok(Value::Object(id))
+    }
+
     fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let id = match *receiver {
-            Value::Object(id) if matches!(self.heap.get(id)?, Object::Array(_)) => id,
-            _ => {
-                return self.throw_type_error("Array.values requires an array");
-            }
+        let Value::Object(id) = *receiver else {
+            return self.throw_type_error("Array.values requires an object");
         };
         let iterator = self.heap.alloc(Object::ArrayIterator {
             object: PlainObject::new(Some(self.builtins.array_iterator_prototype)),
@@ -1199,12 +1226,25 @@ impl Vm {
             return self.throw_type_error(invalid_receiver);
         };
         let next = if let Some(source) = *array {
-            let Object::Array(array) = self.heap.get(source)? else {
-                return Err(VmError::InvalidState(
-                    "array iterator source is not an array".to_owned(),
-                ));
+            let index = *next_index;
+            let length = match self.heap.get(source)? {
+                Object::Array(array) => array.length,
+                _ => {
+                    let value = match self.read_property(
+                        host,
+                        &Value::Object(source),
+                        PropertyKeyRef::String("length"),
+                    )? {
+                        Invocation::Value(value) => value,
+                        thrown => return Ok(thrown),
+                    };
+                    match self.coerce_number(host, &value)? {
+                        Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as usize,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                }
             };
-            let next = (*next_index < array.length).then_some((source, *next_index));
+            let next = (index < length).then_some((source, index));
             let Object::ArrayIterator {
                 array, next_index, ..
             } = self.heap.get_mut(id)?
@@ -1212,7 +1252,7 @@ impl Vm {
                 unreachable!()
             };
             if next.is_some() {
-                *next_index += 1;
+                *next_index = index + 1;
             } else {
                 *array = None;
             }
@@ -1222,7 +1262,16 @@ impl Vm {
         };
         let done = next.is_none();
         let value = if let Some((source, index)) = next {
-            match self.read_array_index(host, source, index)? {
+            let result = if matches!(self.heap.get(source)?, Object::Array(_)) {
+                self.read_array_index(host, source, index)?
+            } else {
+                self.read_property(
+                    host,
+                    &Value::Object(source),
+                    PropertyKeyRef::String(&index.to_string()),
+                )?
+            };
+            match result {
                 Invocation::Value(value) => value,
                 thrown => return Ok(thrown),
             }

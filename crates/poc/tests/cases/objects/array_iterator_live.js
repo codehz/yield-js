@@ -27,12 +27,14 @@ export async function run() {
       error.message === "ArrayIterator.next requires an array iterator";
   }
   const borrowed = { values: a.values, length: 1, 0: 42 };
+  const borrowedValue = borrowed.values().next();
+  const bareValues = a.values;
   let badValues = false;
   try {
-    borrowed.values();
+    bareValues();
   } catch (error) {
     badValues = typeof error === "object" && error.name === "TypeError" &&
-      error.message === "Array.values requires an array";
+      error.message === "Array.values requires an object";
   }
 
   it.next = 42;
@@ -45,6 +47,7 @@ export async function run() {
     && after.hasOwnProperty("value") && after.value === undefined
     && again.hasOwnProperty("value") && again.value === undefined
     && empty.done === true && empty.hasOwnProperty("value") && empty.value === undefined
+    && borrowedValue.value === 42 && borrowedValue.done === false
     && badNext && badValues && it.hasOwnProperty("next") && it.next === 42
     && a.hasOwnProperty(Symbol.iterator) && a[Symbol.iterator] === 43;
 }

@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
-    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE,
-    ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT,
-    ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK,
+    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
+    ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
+    ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK,
     ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE,
     ROOT_REFLECT, ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE,
     ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE,
@@ -24,8 +24,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Builtin roots include the String and standard Error constructors.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 21;
+// Builtin roots include the original Array.prototype.values method.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 22;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -533,6 +533,13 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     }
     let array = builtin_root(ROOT_ARRAY, "Array")?;
     require_fixed_prototype(heap, array, array_prototype, "Array")?;
+    let array_values = required_root(roots, ROOT_ARRAY_VALUES)?;
+    if !matches!(heap.get(array_values), Ok(Object::BuiltinStatic(f)) if f.name == "Array" && f.member.as_deref() == Some("values"))
+    {
+        return Err(VmError::InvalidSnapshot(
+            "array.values root is not the builtin".to_owned(),
+        ));
+    }
     let string_prototype = plain_root(ROOT_STRING_PROTOTYPE)?;
     let string = builtin_root(ROOT_STRING, "String")?;
     require_fixed_prototype(heap, string, string_prototype, "String")?;
@@ -636,6 +643,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         object_prototype,
         array,
         array_prototype,
+        array_values,
         string,
         string_prototype,
         array_iterator_prototype,
@@ -768,10 +776,10 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
         if let Object::ArrayIterator {
             array: Some(array), ..
         } = heap.get(id)?
-            && !matches!(heap.get(*array), Ok(Object::Array(_)))
+            && heap.get(*array).is_err()
         {
             return Err(VmError::InvalidSnapshot(format!(
-                "array iterator {id} references missing or non-array source {array}"
+                "array iterator {id} references missing source {array}"
             )));
         }
         if let Object::StringIterator {

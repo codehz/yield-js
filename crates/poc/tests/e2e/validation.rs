@@ -315,23 +315,27 @@ fn array_iterator_snapshot_tampering_is_rejected() {
         .iter()
         .position(|record| matches!(record.object, Object::ArrayIterator { array: Some(_), .. }))
         .expect("live array iterator");
-    for target in [
+    let mut invalid_source = snapshot.clone();
+    let Object::ArrayIterator { array, .. } = &mut invalid_source.objects[iterator].object else {
+        unreachable!();
+    };
+    *array = Some(yield_vm::value::ObjectId::MAX);
+    let error = s
+        .restore(invalid_source)
+        .expect_err("missing iterator source");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("array iterator"))
+    );
+
+    let mut invalid_values = snapshot.clone();
+    invalid_values.roots.insert(
+        "array.values".to_owned(),
         snapshot.roots["object.prototype"],
-        yield_vm::value::ObjectId::MAX,
-    ] {
-        let mut invalid_source = snapshot.clone();
-        let Object::ArrayIterator { array, .. } = &mut invalid_source.objects[iterator].object
-        else {
-            unreachable!();
-        };
-        *array = Some(target);
-        let error = s
-            .restore(invalid_source)
-            .expect_err("invalid iterator source");
-        assert!(
-            matches!(error, VmError::InvalidSnapshot(message) if message.contains("array iterator"))
-        );
-    }
+    );
+    let error = s
+        .restore(invalid_values)
+        .expect_err("invalid array.values root");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("array.values")));
 
     let mut missing_root = snapshot.clone();
     assert!(

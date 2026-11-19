@@ -367,6 +367,7 @@ impl Vm {
         let params = self.build.functions[function_index].params.clone();
         let rest_param = self.build.functions[function_index].rest_param.clone();
         let this_param = self.build.functions[function_index].this_param.clone();
+        let arguments_param = self.build.functions[function_index].arguments_param.clone();
         let async_promise = is_async.then(|| self.heap.alloc_promise());
 
         let mut bindings = BTreeMap::new();
@@ -379,6 +380,9 @@ impl Vm {
         };
         if let Some(param) = this_param {
             bind(param, receiver.clone());
+        }
+        if let Some(param) = arguments_param {
+            bind(param, self.create_arguments_object(&args)?);
         }
         let mut args = args.into_iter();
         for param in params {

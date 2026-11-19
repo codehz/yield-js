@@ -36,6 +36,7 @@ pub(crate) struct LoweredFunction {
     pub(crate) rest_binding: Option<BindingId>,
     /// Implicit receiver. Not a source parameter and not a JavaScript argument.
     pub(crate) this_binding: Option<BindingId>,
+    pub(crate) arguments_binding: Option<BindingId>,
     /// Non-shared bindings assigned a fresh logical register, in `BindingId` order.
     pub(crate) promoted: BTreeMap<BindingId, LogicalReg>,
     pub(crate) reg_count: u16,

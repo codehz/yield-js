@@ -118,6 +118,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     param_bindings: Vec<BindingId>,
     rest_binding: Option<BindingId>,
     this_binding: Option<BindingId>,
+    arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
 }
 
@@ -156,6 +157,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: Vec::new(),
             rest_binding: None,
             this_binding: None,
+            arguments_binding: None,
             hoisted: BTreeSet::new(),
         }
     }
@@ -228,6 +230,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: self.param_bindings.clone(),
             rest_binding: self.rest_binding,
             this_binding: self.this_binding,
+            arguments_binding: self.arguments_binding,
             promoted: BTreeMap::new(),
             reg_count: self.emit.reg_count(),
             code: self.emit.take_code(),
@@ -292,6 +295,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 Ok::<(), CompileError>(())
             })?;
+        }
+        if !self.env.has_function_binding("arguments") && function_uses_arguments(self.source) {
+            let binding = self.alloc_binding();
+            self.env.insert_function("arguments".to_owned(), binding);
+            self.arguments_binding = Some(binding);
         }
         if needs_prologue {
             // Keep incoming arguments separate from the names initialized by
@@ -863,6 +871,30 @@ struct ThisScan {
 impl<'a> Visit<'a> for ThisScan {
     fn visit_this_expression(&mut self, _: &ThisExpression) {
         self.found = true;
+    }
+
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+}
+
+fn function_uses_arguments(source: FunctionSource<'_>) -> bool {
+    let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
+        return false;
+    };
+    let mut scan = ArgumentsScan { found: false };
+    scan.visit_formal_parameters(&function.params);
+    if let Some(body) = &function.body {
+        scan.visit_function_body(body);
+    }
+    scan.found
+}
+
+struct ArgumentsScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for ArgumentsScan {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.found |= identifier.name.as_str() == "arguments";
     }
 
     fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}

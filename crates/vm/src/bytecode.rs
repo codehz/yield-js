@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 22;
+pub const BYTECODE_VERSION: u32 = 23;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -393,6 +393,8 @@ pub struct Function {
     /// Receiver binding when this function, or an arrow nested in it, uses `this`.
     /// Not a JavaScript argument.
     pub this_param: Option<ParamTarget>,
+    /// Destination for the fresh, unmapped arguments object.
+    pub arguments_param: Option<ParamTarget>,
     pub transient_slots: u16,
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
@@ -420,6 +422,7 @@ impl Function {
             .iter()
             .chain(&self.rest_param)
             .chain(&self.this_param)
+            .chain(&self.arguments_param)
             .any(|param| matches!(param, ParamTarget::Binding(_)))
         {
             return true;
@@ -619,7 +622,11 @@ impl Build {
                 self.script
             ));
         }
-        if !script.params.is_empty() || script.rest_param.is_some() || script.this_param.is_some() {
+        if !script.params.is_empty()
+            || script.rest_param.is_some()
+            || script.this_param.is_some()
+            || script.arguments_param.is_some()
+        {
             return Err(format!(
                 "script function {} must not take arguments or a receiver",
                 self.script
@@ -695,9 +702,18 @@ impl Build {
         if function.params.len() > u16::MAX as usize {
             return Err(format!("{location}: too many parameters"));
         }
+        if function.is_arrow && function.arguments_param.is_some() {
+            return Err(format!("{location}: arrow cannot have an arguments target"));
+        }
         let mut seen_bindings = std::collections::BTreeSet::new();
         let mut seen_slots = Vec::new();
-        for param in function.params.iter().chain(&function.rest_param) {
+        for param in function
+            .params
+            .iter()
+            .chain(&function.rest_param)
+            .chain(&function.this_param)
+            .chain(&function.arguments_param)
+        {
             match param {
                 ParamTarget::Binding(binding) => {
                     if !seen_bindings.insert(*binding) {
@@ -706,22 +722,6 @@ impl Build {
                 }
                 ParamTarget::Slot(slot) => {
                     check_slot(*slot, "parameter")?;
-                    if seen_slots.contains(slot) {
-                        return Err(format!("{location}: duplicate parameter slot {slot:?}"));
-                    }
-                    seen_slots.push(*slot);
-                }
-            }
-        }
-        if let Some(param) = &function.this_param {
-            match param {
-                ParamTarget::Binding(binding) => {
-                    if !seen_bindings.insert(*binding) {
-                        return Err(format!("{location}: duplicate parameter binding {binding}"));
-                    }
-                }
-                ParamTarget::Slot(slot) => {
-                    check_slot(*slot, "this")?;
                     if seen_slots.contains(slot) {
                         return Err(format!("{location}: duplicate parameter slot {slot:?}"));
                     }
