@@ -55,7 +55,7 @@ cargo run -p yield-poc
 已支持的主要语法：
 
 - 顶层 `function` 声明；嵌套函数声明（提升）；函数表达式；箭头函数；`async` 函数；`await`。
-- `var` / `let` / `const`（无 TDZ 精确保留）、块作用域、简单参数。
+- `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
 - 字面量、对象/数组字面量（Init 属性、静态/计算键、数组空洞按 `undefined`）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
 - 赋值、算术复合赋值与逻辑赋值（`&&=`、`||=`、`??=`）、`typeof` / `void`、普通函数调用、函数值调用、导入调用。
@@ -68,7 +68,7 @@ cargo run -p yield-poc
 - 对象方法/getter/setter、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - `this`、类、模板字符串、generator、async generator、顶层 `await`。
 - `switch`、`for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
-- 每轮循环独立绑定、TDZ 精确报错、catch 参数解构。
+- 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
 - Promise thenable 同化、`Promise.then` 等公开方法、`queueMicrotask`。
 - 运行期 tracing GC（目前有对象表与快照可达性遍历，没有回收器）。

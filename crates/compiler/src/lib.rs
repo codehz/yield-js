@@ -18,8 +18,8 @@
 //! ```
 
 mod allocate;
-mod bindings;
 mod analyze;
+mod bindings;
 mod emit;
 mod env;
 mod error;

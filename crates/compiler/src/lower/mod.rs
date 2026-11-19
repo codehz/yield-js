@@ -17,11 +17,11 @@ use yield_vm::bytecode::{Constant, Instr};
 
 use crate::allocate;
 use crate::bindings;
-use crate::promote;
 use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, Env};
 use crate::error::{CompileError, unsupported};
 use crate::ir::LoweredFunction;
+use crate::promote;
 use crate::session::Session;
 use control::Control;
 
@@ -318,6 +318,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.env.lookup(name)
     }
 
+    pub(super) fn check_tdz(
+        &self,
+        binding: BindingId,
+        name: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        self.env.check_tdz(binding, name, self.session.source, span)
+    }
     pub(super) fn emit_constant(&mut self, constant: Constant) -> Result<Reg, CompileError> {
         let index = self.session.intern(constant);
         let dst = self.alloc_reg()?;
@@ -384,31 +392,27 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         statements: &'ast [Statement<'ast>],
     ) -> Result<(), CompileError> {
+        let mut function_names = BTreeSet::new();
+        let mut lexical = Vec::new();
         for statement in statements {
             match statement {
                 Statement::VariableDeclaration(declaration) => {
-                    for declarator in &declaration.declarations {
-                        if let BindingPattern::BindingIdentifier(identifier) = &declarator.id {
-                            self.predeclare_name(
-                                identifier.name.as_str(),
-                                declaration.kind,
-                                declarator.span,
-                            )?;
-                        }
-                    }
+                    lexical.extend(self.register_declarators(declaration)?);
                 }
                 Statement::FunctionDeclaration(function) => {
                     if let Some(identifier) = &function.id {
-                        self.predeclare_name(
-                            identifier.name.as_str(),
-                            VariableDeclarationKind::Let,
-                            function.span,
-                        )?;
+                        let name = identifier.name.as_str();
+                        function_names.insert(name.to_owned());
+                        self.predeclare_name(name, VariableDeclarationKind::Let, function.span)?;
                     }
                 }
                 _ => {}
             }
         }
+        // Function declarations are initialized at block entry. They use a
+        // lexical kind internally but are not pending.
+        lexical.retain(|(_, name)| !function_names.contains(name));
+        self.open_pending(lexical.iter().map(|(binding, _)| *binding))?;
 
         // Function declarations are initialized at block entry, before any
         // other statement runs. Their captured scope already includes every
@@ -437,16 +441,82 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
+    /// Register a `for` initializer list before its first initializer runs, so
+    /// a later binding in the list shadows an outer name of the same spelling.
+    pub(super) fn predeclare_variable_list(
+        &mut self,
+        declaration: &'ast VariableDeclaration<'ast>,
+    ) -> Result<(), CompileError> {
+        let lexical = self.register_declarators(declaration)?;
+        self.open_pending(lexical.into_iter().map(|(binding, _)| binding))
+    }
+
+    fn register_declarators(
+        &mut self,
+        declaration: &'ast VariableDeclaration<'ast>,
+    ) -> Result<Vec<(BindingId, String)>, CompileError> {
+        let mut lexical = Vec::new();
+        let is_lexical = matches!(
+            declaration.kind,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Const
+        );
+        for declarator in &declaration.declarations {
+            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                continue;
+            };
+            let name = identifier.name.as_str();
+            let Some(binding) = self.predeclare_name(name, declaration.kind, declarator.span)?
+            else {
+                continue;
+            };
+            if is_lexical {
+                lexical.push((binding, name.to_owned()));
+            }
+        }
+        Ok(lexical)
+    }
+
+    /// Declare and store `undefined` for lexical bindings at scope entry.
+    ///
+    /// Heap `DeclareBinding` only inserts a missing binding, so a loop that
+    /// re-enters this block must also store `undefined`. One undefined
+    /// register is shared by every binding opened here.
+    fn open_pending(
+        &mut self,
+        bindings: impl IntoIterator<Item = BindingId>,
+    ) -> Result<(), CompileError> {
+        let mut unique = Vec::new();
+        let mut seen = BTreeSet::new();
+        for binding in bindings {
+            if seen.insert(binding) {
+                unique.push(binding);
+            }
+        }
+        for binding in &unique {
+            self.env.mark_pending(*binding);
+        }
+        if unique.is_empty() {
+            return Ok(());
+        }
+        let undefined = self.emit_undefined()?;
+        let src = self.slot(undefined);
+        for binding in unique {
+            self.emit(Instr::DeclareBinding { binding });
+            self.emit(Instr::SetBinding { binding, src });
+        }
+        Ok(())
+    }
+
     fn predeclare_name(
         &mut self,
         name: &str,
         kind: VariableDeclarationKind,
         span: Span,
-    ) -> Result<(), CompileError> {
+    ) -> Result<Option<BindingId>, CompileError> {
         let binding_kind = as_binding_kind(self.source_text(), kind, span)?;
-        self.env
-            .predeclare(self.session.binding_ids(), name, binding_kind);
-        Ok(())
+        Ok(self
+            .env
+            .predeclare(self.session.binding_ids(), name, binding_kind))
     }
 
     pub(super) fn compile_block(
@@ -466,6 +536,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         declaration: &'ast VariableDeclaration<'ast>,
     ) -> Result<(), CompileError> {
+        let lexical = matches!(
+            declaration.kind,
+            VariableDeclarationKind::Let | VariableDeclarationKind::Const
+        );
         for declarator in &declaration.declarations {
             let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
                 return Err(unsupported(
@@ -476,13 +550,28 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             };
             let name = identifier.name.as_str();
             let (binding, _) = self.declare(name, declaration.kind, declarator.span)?;
-            self.emit(Instr::DeclareBinding { binding });
-            if let Some(expression) = &declarator.init {
-                let value = self.compile_expression(expression)?;
+            if lexical {
+                let value = if let Some(expression) = &declarator.init {
+                    self.compile_expression(expression)?
+                } else {
+                    // A closure may have written this binding before the
+                    // declaration. The declaration overwrites that write.
+                    self.emit_undefined()?
+                };
                 self.emit(Instr::SetBinding {
                     binding,
                     src: self.slot(value),
                 });
+                self.env.clear_pending(binding);
+            } else {
+                self.emit(Instr::DeclareBinding { binding });
+                if let Some(expression) = &declarator.init {
+                    let value = self.compile_expression(expression)?;
+                    self.emit(Instr::SetBinding {
+                        binding,
+                        src: self.slot(value),
+                    });
+                }
             }
         }
         Ok(())

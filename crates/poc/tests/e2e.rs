@@ -540,8 +540,11 @@ function run() {
     let build = build(source);
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &host).expect("bindings");
-    let error = vm.start(&mut host, "run", Vec::new()).expect_err("read");
-    assert!(matches!(error, VmError::InvalidState(message) if message.contains("binding")));
+    // Scope entry initializes `x`; the later initializer never runs.
+    let result = vm
+        .start(&mut host, "run", Vec::new())
+        .expect("captured read");
+    assert_eq!(result, Value::Undefined);
 }
 
 #[test]

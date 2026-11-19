@@ -3,10 +3,14 @@
 //! The compiler assigns stable [`BindingId`]s and records the scope chain a
 //! nested function captures. Bindings read or written from another function
 //! stay in a heap environment; the rest become frame slots after lowering.
-//! `let` and `const` are not distinguished: this PoC does not track TDZ. That
-//! distinction, when added, belongs here rather than in the emitter.
+//! `let` and `const` are not distinguished. [`Env::pending_lexicals`] tracks
+//! bindings that have entered scope in this function but have not finished
+//! initializing. [`Env::capture`] copies only the name-to-id chain, so a
+//! nested function starts with an empty pending set and does not reject an
+//! early read of an outer binding. This is not full ECMAScript TDZ, and loop
+//! iterations do not get fresh bindings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oxc::span::Span;
 use yield_vm::BindingId;
@@ -27,6 +31,8 @@ pub(crate) struct Env {
     function_scope: BTreeMap<String, BindingId>,
     scopes: Vec<BTreeMap<String, BindingId>>,
     outer_scopes: Vec<BTreeMap<String, BindingId>>,
+    /// Lexical bindings in this function whose initializer has not run.
+    pending_lexicals: BTreeSet<BindingId>,
 }
 
 impl Env {
@@ -35,6 +41,7 @@ impl Env {
             function_scope: BTreeMap::new(),
             scopes: vec![BTreeMap::new()],
             outer_scopes,
+            pending_lexicals: BTreeSet::new(),
         }
     }
 
@@ -65,7 +72,43 @@ impl Env {
     }
 
     pub(crate) fn exit_block(&mut self) {
-        self.scopes.pop();
+        if let Some(scope) = self.scopes.pop() {
+            for binding in scope.values() {
+                self.pending_lexicals.remove(binding);
+            }
+        }
+    }
+
+    pub(crate) fn current_binding(&self, name: &str) -> Option<BindingId> {
+        self.scopes
+            .last()
+            .and_then(|scope| scope.get(name).copied())
+    }
+
+    pub(crate) fn mark_pending(&mut self, binding: BindingId) {
+        self.pending_lexicals.insert(binding);
+    }
+
+    pub(crate) fn clear_pending(&mut self, binding: BindingId) {
+        self.pending_lexicals.remove(&binding);
+    }
+
+    /// Reject a use of a lexical binding whose initializer has not been lowered.
+    pub(crate) fn check_tdz(
+        &self,
+        binding: BindingId,
+        name: &str,
+        source: &str,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if self.pending_lexicals.contains(&binding) {
+            return Err(CompileError::new(
+                source,
+                span,
+                format!("cannot access {name:?} before initialization"),
+            ));
+        }
+        Ok(())
     }
 
     /// Scope chain a nested function closes over, including this function's
@@ -121,35 +164,39 @@ impl Env {
     /// Install a hoisted name if it is not already present. Duplicate `let`
     /// against the function scope is reported later by [`Self::declare`], when
     /// the declaration statement is lowered.
+    ///
+    /// `Some` is the id in the scope the name was installed into. A lexical
+    /// name skipped because it clashes with the function scope is `None`.
     pub(crate) fn predeclare(
         &mut self,
         next_binding: &mut BindingId,
         name: &str,
         kind: BindingKind,
-    ) {
+    ) -> Option<BindingId> {
         match kind {
             BindingKind::Var => {
-                if !self.function_scope.contains_key(name) {
-                    let binding = alloc_binding(next_binding);
-                    self.function_scope.insert(name.to_owned(), binding);
+                if let Some(binding) = self.function_scope.get(name).copied() {
+                    return Some(binding);
                 }
+                let binding = alloc_binding(next_binding);
+                self.function_scope.insert(name.to_owned(), binding);
+                Some(binding)
             }
             BindingKind::Lexical => {
                 let conflicts_with_function_scope =
                     self.scopes.len() == 1 && self.function_scope.contains_key(name);
-                if !conflicts_with_function_scope
-                    && !self
-                        .scopes
-                        .last()
-                        .expect("scope stack is never empty")
-                        .contains_key(name)
-                {
-                    let binding = alloc_binding(next_binding);
-                    self.scopes
-                        .last_mut()
-                        .expect("scope stack is never empty")
-                        .insert(name.to_owned(), binding);
+                if let Some(binding) = self.current_binding(name) {
+                    return Some(binding);
                 }
+                if conflicts_with_function_scope {
+                    return None;
+                }
+                let binding = alloc_binding(next_binding);
+                self.scopes
+                    .last_mut()
+                    .expect("scope stack is never empty")
+                    .insert(name.to_owned(), binding);
+                Some(binding)
             }
         }
     }

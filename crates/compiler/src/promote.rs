@@ -53,9 +53,9 @@ pub(crate) fn promote(
     let mut next = function.reg_count;
     for (binding, _) in &accepted {
         let reg = next;
-        next = next.checked_add(1).ok_or_else(|| {
-            CompileError::new(source, function.span, "too many slots")
-        })?;
+        next = next
+            .checked_add(1)
+            .ok_or_else(|| CompileError::new(source, function.span, "too many slots"))?;
         locals.insert(*binding, reg);
     }
     function.reg_count = next;
@@ -173,9 +173,9 @@ fn note(incoming: &mut [Option<Declared>], pc: usize, state: Declared) -> bool {
 }
 
 fn covering(handlers: &[ExceptionHandler], pc: usize) -> impl Iterator<Item = &ExceptionHandler> {
-    handlers.iter().filter(move |handler| {
-        handler.start_pc as usize <= pc && pc < handler.end_pc as usize
-    })
+    handlers
+        .iter()
+        .filter(move |handler| handler.start_pc as usize <= pc && pc < handler.end_pc as usize)
 }
 
 fn rewrite(

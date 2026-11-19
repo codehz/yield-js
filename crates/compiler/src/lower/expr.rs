@@ -148,6 +148,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         identifier: &IdentifierReference<'_>,
     ) -> Result<Reg, CompileError> {
         let name = identifier.name.as_str();
+        if let Some(binding) = self.lookup(name) {
+            self.check_tdz(binding, name, identifier.span)?;
+        }
         match self.session.names().value(&self.env, name) {
             ValueName::Binding(binding) => {
                 let dst = self.alloc_reg()?;
@@ -292,6 +295,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             && let Expression::Identifier(identifier) = &expression.argument
         {
             let name = identifier.name.as_str();
+            if let Some(binding) = self.lookup(name) {
+                self.check_tdz(binding, name, identifier.span)?;
+            }
             if let Some(folded) = self.session.names().typeof_fold(&self.env, name) {
                 return self.emit_constant(Constant::String(folded.to_owned()));
             }
@@ -331,6 +337,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let name = callee.name.as_str();
             match self.session.names().callee(&self.env, name) {
                 Callee::Binding(binding) => {
+                    self.check_tdz(binding, name, callee.span)?;
                     let callee = self.alloc_reg()?;
                     self.emit(Instr::GetBinding {
                         dst: self.slot(callee),
@@ -419,6 +426,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     format!("assignment to unknown binding {name:?}"),
                 )
             })?;
+            self.check_tdz(binding, name, identifier.span)?;
             if let Some(op) = logical_assignment_operator(expression.operator) {
                 let result = self.alloc_reg()?;
                 self.emit(Instr::GetBinding {

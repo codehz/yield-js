@@ -109,6 +109,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Statement::ForStatement(statement) => {
                 self.env.enter_block();
+                if let Some(ForStatementInit::VariableDeclaration(declaration)) = &statement.init {
+                    self.predeclare_variable_list(declaration)?;
+                }
                 if let Some(init) = &statement.init {
                     match init {
                         ForStatementInit::VariableDeclaration(declaration) => {
