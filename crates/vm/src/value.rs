@@ -25,10 +25,10 @@ pub enum Value {
 
 // JSON serializes non-finite floats as null, which cannot deserialize as f64.
 // Keep finite numbers as numeric tokens and spell out the three special values.
-mod number_serde {
+pub(crate) mod number_serde {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
-    pub(super) fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    pub(crate) fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
         if value.is_finite() {
             serializer.serialize_f64(*value)
         } else {
@@ -42,7 +42,7 @@ mod number_serde {
         }
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Number {

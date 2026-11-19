@@ -13,7 +13,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::error::VmError;
-use crate::ops::array_index;
+use crate::ops::{array_index, canonical_index};
 use crate::value::{
     BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
@@ -263,7 +263,7 @@ fn collect_own_keys<'a, V>(
             .map(|(key, property)| {
                 let order = match array_index(key) {
                     Some(index) => (0, index),
-                    None => (1, property.ordinal),
+                    None => (2, property.ordinal),
                 };
                 (order, PropertyKeyRef::String(key))
             }),
@@ -273,7 +273,7 @@ fn collect_own_keys<'a, V>(
             symbols
                 .0
                 .iter()
-                .map(|(&id, property)| ((2, property.ordinal), PropertyKeyRef::Symbol(id))),
+                .map(|(&id, property)| ((3, property.ordinal), PropertyKeyRef::Symbol(id))),
         );
     }
 }
@@ -316,13 +316,16 @@ impl DescriptorUpdate {
         if current.is_none() && !extensible {
             return None;
         }
-        let length;
+        let virtual_property;
         let (old, attrs) = match current {
             Some(OwnProperty::Stored(property, attrs)) => (Some(property), attrs),
             Some(property @ OwnProperty::ArrayLength(..)) => {
                 let attrs = property.attributes();
-                length = property.into_owned();
-                (Some(&length), attrs)
+                virtual_property = property.into_owned();
+                (Some(&virtual_property), attrs)
+            }
+            Some(OwnProperty::StringIndex(_) | OwnProperty::StringLength(_)) => {
+                unreachable!("fixed string descriptors are validated without materializing them")
             }
             None => (None, Attributes::FIXED),
         };
@@ -375,18 +378,54 @@ impl DescriptorUpdate {
         };
         Some((property, next))
     }
+
+    fn allows_fixed_string(&self, property: OwnProperty<'_>) -> bool {
+        !self.is_accessor()
+            && self.writable != Some(true)
+            && self.configurable != Some(true)
+            && self
+                .enumerable
+                .is_none_or(|flag| flag == property.attributes().enumerable)
+            && self
+                .value
+                .as_ref()
+                .is_none_or(|value| match (property, value) {
+                    (OwnProperty::StringLength(length), Value::Number(number)) => {
+                        crate::ops::same_value(
+                            &Value::Number(length as f64),
+                            &Value::Number(*number),
+                        )
+                    }
+                    (OwnProperty::StringIndex(unit), Value::String(text)) => {
+                        text.encode_utf16().eq([unit])
+                    }
+                    _ => false,
+                })
+    }
 }
 
 pub(crate) enum OwnProperty<'a> {
     Stored(&'a Property, Attributes),
     ArrayLength(usize, bool),
+    StringLength(usize),
+    StringIndex(u16),
 }
 
 impl OwnProperty<'_> {
+    pub(crate) fn has_unrepresentable_value(&self) -> bool {
+        matches!(self, Self::StringIndex(unit) if is_surrogate(*unit))
+    }
+
     pub(crate) fn into_owned(self) -> Property {
         match self {
             Self::Stored(property, _) => property.clone(),
             Self::ArrayLength(length, _) => Property::Data(Value::Number(length as f64)),
+            Self::StringLength(length) => Property::Data(Value::Number(length as f64)),
+            Self::StringIndex(unit) => Property::Data(Value::String(
+                char::from_u32(u32::from(unit))
+                    .expect("caller checked that the UTF-16 unit is representable")
+                    .to_string(),
+            )),
         }
     }
 
@@ -395,6 +434,11 @@ impl OwnProperty<'_> {
             Self::Stored(_, attributes) => *attributes,
             Self::ArrayLength(_, writable) => Attributes {
                 writable: *writable,
+                ..Attributes::FIXED
+            },
+            Self::StringLength(_) => Attributes::FIXED,
+            Self::StringIndex(_) => Attributes {
+                enumerable: true,
                 ..Attributes::FIXED
             },
         }
@@ -582,6 +626,21 @@ pub enum CollectionIteration {
     Entries,
 }
 
+/// Internal primitive data of a wrapper. A wrapper never contains another object,
+/// null, or undefined as its payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoxedPrimitive {
+    String(String),
+    Number(#[serde(with = "crate::value::number_serde")] f64),
+    Bool(bool),
+    Symbol(SymbolId),
+}
+
+fn is_surrogate(unit: u16) -> bool {
+    (0xd800..=0xdfff).contains(&unit)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -589,6 +648,10 @@ pub enum Object {
     Native(NativeObject),
     Plain(PlainObject),
     Array(ArrayObject),
+    Boxed {
+        primitive: BoxedPrimitive,
+        object: PlainObject,
+    },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
         target: ObjectId,
@@ -739,6 +802,7 @@ impl Object {
     fn extensible_mut(&mut self) -> Option<&mut bool> {
         Some(match self {
             Self::Plain(o)
+            | Self::Boxed { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -760,6 +824,7 @@ impl Object {
     pub(crate) fn is_extensible(&self) -> bool {
         match self {
             Self::Plain(o)
+            | Self::Boxed { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -824,6 +889,7 @@ impl Object {
     fn tables(&self) -> Option<PropertyTables<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Boxed { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -845,6 +911,7 @@ impl Object {
     fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Boxed { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -863,6 +930,31 @@ impl Object {
         })
     }
 
+    fn boxed_string(&self) -> Option<&str> {
+        match self {
+            Self::Boxed {
+                primitive: BoxedPrimitive::String(text),
+                ..
+            } => Some(text),
+            _ => None,
+        }
+    }
+
+    fn string_own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'static>> {
+        let text = self.boxed_string()?;
+        let PropertyKeyRef::String(key) = key else {
+            return None;
+        };
+        if key == "length" {
+            return Some(OwnProperty::StringLength(text.encode_utf16().count()));
+        }
+        let index = canonical_index(key)?;
+        if index >= text.len() {
+            return None;
+        }
+        text.encode_utf16().nth(index).map(OwnProperty::StringIndex)
+    }
+
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
         if let (Self::Array(array), PropertyKeyRef::String(key)) = (self, key) {
             if key == "length" {
@@ -875,6 +967,9 @@ impl Object {
                 return array.own_index(index);
             }
         }
+        if let Some(property) = self.string_own_property(key) {
+            return Some(property);
+        }
         let (props, symbols) = self.tables()?;
         lookup_tables(props, symbols, key).map(|p| OwnProperty::Stored(&p.value, p.attributes))
     }
@@ -886,6 +981,10 @@ impl Object {
         let mut keys = Vec::new();
         if let Some((props, symbols)) = self.tables() {
             collect_own_keys(&mut keys, props, symbols, enumerable_strings_only);
+        }
+        let string_length = self.boxed_string().map(|text| text.encode_utf16().count());
+        if string_length.is_some() && !enumerable_strings_only {
+            keys.push(((1, 0), PropertyKeyRef::String("length")));
         }
         keys.sort_unstable_by_key(|&(order, _)| order);
         let array = match self {
@@ -907,6 +1006,9 @@ impl Object {
                 array
                     .filter(|_| !enumerable_strings_only)
                     .map(|_| "length".into()),
+            )
+            .chain(
+                (0..string_length.unwrap_or(0)).map(|index| PropertyKey::String(index.to_string())),
             )
             .chain(keys.into_iter().map(|(_, key)| match key {
                 PropertyKeyRef::String(key) => PropertyKey::String(key.to_owned()),
@@ -933,6 +1035,15 @@ impl Object {
                         .keys()
                         .all(|key| key != "length" && array_index(key).is_none())
             }
+            Self::Boxed {
+                primitive: BoxedPrimitive::String(text),
+                object,
+            } => {
+                let length = text.encode_utf16().count();
+                object.props.0.keys().all(|key| {
+                    key != "length" && canonical_index(key).is_none_or(|index| index >= length)
+                })
+            }
             _ => true,
         }
     }
@@ -940,6 +1051,7 @@ impl Object {
     pub(crate) fn prototype(&self) -> Option<ObjectId> {
         match self {
             Self::Plain(plain)
+            | Self::Boxed { object: plain, .. }
             | Self::Proxy { object: plain, .. }
             | Self::Map { object: plain, .. }
             | Self::Set { object: plain, .. }
@@ -961,6 +1073,7 @@ impl Object {
     fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
         Some(match self {
             Self::Plain(o)
+            | Self::Boxed { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -1032,6 +1145,11 @@ impl Object {
                 out.push(OwnedEdge::Object(resolution.promise));
                 if resolution.pair != 0 {
                     out.push(OwnedEdge::Object(resolution.pair));
+                }
+            }
+            Self::Boxed { primitive, .. } => {
+                if let BoxedPrimitive::Symbol(symbol) = primitive {
+                    out.push(OwnedEdge::Symbol(*symbol));
                 }
             }
             Self::Native(_)
@@ -1535,6 +1653,9 @@ impl Heap {
                 return Ok(true);
             }
         }
+        if object.string_own_property(key).is_some() {
+            return Ok(false);
+        }
         let Some((props, symbols)) = object.tables_mut() else {
             // Opaque objects expose no own script properties.
             return Ok(true);
@@ -1591,9 +1712,13 @@ impl Heap {
         {
             return Ok(false);
         }
-        let Some((property, attrs)) =
-            update.complete(object.is_extensible(), object.own_property(key.borrowed()))
-        else {
+        let current = object.own_property(key.borrowed());
+        if let Some(property @ (OwnProperty::StringLength(_) | OwnProperty::StringIndex(_))) =
+            current
+        {
+            return Ok(update.allows_fixed_string(property));
+        }
+        let Some((property, attrs)) = update.complete(object.is_extensible(), current) else {
             return Ok(false);
         };
         if key.as_string() == Some("length")
@@ -1617,6 +1742,11 @@ impl Heap {
         attributes: Option<Attributes>,
     ) -> Result<(), VmError> {
         let object = self.get_mut(id)?;
+        if object.string_own_property(key.borrowed()).is_some() {
+            return Err(VmError::InvalidState(format!(
+                "object {id} has a fixed virtual string property"
+            )));
+        }
         if let (Object::Array(array), PropertyKeyRef::String(name)) = (&mut *object, key.borrowed())
             && let Some(index) = array_index(name)
         {

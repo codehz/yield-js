@@ -4,15 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
-    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
-    ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
-    ROOT_JSON, ROOT_MATH, ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
-    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
+    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
+    ROOT_BOOLEAN_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR,
+    ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_JSON, ROOT_MATH, ROOT_NUMBER,
+    ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
+    ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
     ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
-    ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
-    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP,
-    ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
+    ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE,
+    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE,
+    ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -27,8 +28,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Promise capability records and Symbol.species root.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 29;
+// Primitive wrapper objects and Boolean/Symbol prototype roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 30;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -618,6 +619,12 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             "Number prototype constructor is invalid".to_owned(),
         ));
     }
+    let boolean_prototype = plain_root(ROOT_BOOLEAN_PROTOTYPE)?;
+    let boolean_constructor = builtin_root(ROOT_BOOLEAN, "Boolean")?;
+    require_fixed_prototype(heap, boolean_constructor, boolean_prototype, "Boolean")?;
+    let symbol_prototype = plain_root(ROOT_SYMBOL_PROTOTYPE)?;
+    let symbol = builtin_root(ROOT_SYMBOL, "Symbol")?;
+    require_fixed_prototype(heap, symbol, symbol_prototype, "Symbol")?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
     let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
@@ -701,6 +708,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     for (name, id) in [
         (ROOT_STRING_PROTOTYPE, string_prototype),
         (ROOT_NUMBER_PROTOTYPE, number_prototype),
+        (ROOT_BOOLEAN_PROTOTYPE, boolean_prototype),
+        (ROOT_SYMBOL_PROTOTYPE, symbol_prototype),
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
         (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
@@ -733,6 +742,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         string_prototype,
         number,
         number_prototype,
+        boolean_constructor,
+        boolean_prototype,
         array_iterator_prototype,
         string_iterator,
         string_iterator_prototype,
@@ -753,7 +764,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         evalerror,
         urierror,
         aggregateerror,
-        symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
+        symbol,
+        symbol_prototype,
         reflect: plain_root(ROOT_REFLECT)?,
         object,
         math: plain_root(ROOT_MATH)?,
@@ -1001,7 +1013,10 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
         {
             if !matches!(
                 heap.get(*target),
-                Ok(Object::Plain(_) | Object::Array(_) | Object::Proxy { .. })
+                Ok(Object::Plain(_)
+                    | Object::Array(_)
+                    | Object::Boxed { .. }
+                    | Object::Proxy { .. })
             ) {
                 return Err(VmError::InvalidSnapshot(format!(
                     "proxy {id} has invalid target {target}"

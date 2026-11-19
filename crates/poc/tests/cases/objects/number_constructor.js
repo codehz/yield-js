@@ -13,10 +13,9 @@ export function run() {
   Object.defineProperty(Number.prototype, "doubled", {get() { return this.valueOf() * 2; }});
   if (n.doubled !== 8 || n["constructor"] !== Number) return false;
   let errors = 0;
-  try { new Number(4); } catch (e) { if (e instanceof TypeError) errors++; }
   try { Number(Symbol()); } catch (e) { if (e instanceof TypeError) errors++; }
   try { n.extra = "changed"; } catch (e) { if (e instanceof TypeError) errors++; }
   try { n.other = 0; } catch (e) { if (e instanceof TypeError) errors++; }
   try { Number.prototype.valueOf(); } catch (e) { if (e instanceof TypeError) errors++; }
-  return errors === 5 && n.extra === "shared" && n.other === undefined;
+  return errors === 4 && n.extra === "shared" && n.other === undefined;
 }

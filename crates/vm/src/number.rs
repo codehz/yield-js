@@ -1,7 +1,7 @@
-//! Number builtins operate on primitive numbers; no wrapper objects are allocated.
+//! Number constructors, static functions, and prototype methods.
 
 use crate::error::VmError;
-use crate::heap::Attributes;
+use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::ops;
 use crate::runtime::Invocation;
@@ -132,13 +132,24 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let Value::Number(number) = *receiver else {
+        let number = match receiver {
+            Value::Number(number) => Some(*number),
+            Value::Object(id) => match self.heap.get(*id)? {
+                Object::Boxed {
+                    primitive: BoxedPrimitive::Number(number),
+                    ..
+                } => Some(*number),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(number) = number else {
             return self.throw_type_error("Number method called on incompatible receiver");
         };
         if method == "valueOf" {
             return Ok(Invocation::Value(Value::Number(number)));
         }
-        let decimal = || ops::to_js_string(receiver);
+        let decimal = || ops::to_js_string(&Value::Number(number));
         let string = |text| Ok(Invocation::Value(Value::String(text)));
         let arg = args.first().unwrap_or(&Value::Undefined);
         let omitted = matches!(arg, Value::Undefined);

@@ -8,7 +8,7 @@ export async function run() {
   const sym = Symbol("primitive");
   for (const value of [1, "text", false, sym]) {
     if (Object.setPrototypeOf(value, null) !== value) return false;
-    if (!throwsTypeError(() => Object.getPrototypeOf(value))) return false;
+    if (Object.getPrototypeOf(value) !== Object.getPrototypeOf(Object(value))) return false;
     if (!throwsTypeError(() => Reflect.getPrototypeOf(value))) return false;
     if (!throwsTypeError(() => Reflect.setPrototypeOf(value, null))) return false;
     if (!throwsTypeError(() => Object.create(value))) return false;

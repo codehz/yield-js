@@ -6,7 +6,7 @@ async function asyncTarget() {}
 export function run() {
   const arrow = () => 0;
   const method = {method() {}}.method;
-  const invalid = [arrow, method, asyncTarget, arrow.bind(null), method.bind(null), asyncTarget.bind(null), String, {}];
+  const invalid = [arrow, method, asyncTarget, arrow.bind(null), method.bind(null), asyncTarget.bind(null), Symbol, {}];
   let touched = false;
   const list = {get length() { touched = true; return 0; }};
   let caught = 0;

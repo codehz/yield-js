@@ -719,11 +719,14 @@ impl Vm {
     }
 
     fn read_data(&mut self, id: ObjectId, key: &str) -> Result<Invocation, VmError> {
-        let property = self
-            .heap
-            .get(id)?
-            .own_property(PropertyKeyRef::String(key))
-            .map(crate::heap::OwnProperty::into_owned);
+        let property = self.heap.get(id)?.own_property(PropertyKeyRef::String(key));
+        if property
+            .as_ref()
+            .is_some_and(crate::heap::OwnProperty::has_unrepresentable_value)
+        {
+            return self.throw_type_error("string index cannot represent a lone surrogate");
+        }
+        let property = property.map(crate::heap::OwnProperty::into_owned);
         Ok(Invocation::Value(match property {
             Some(crate::heap::Property::Data(value)) => value,
             _ => Value::Undefined,

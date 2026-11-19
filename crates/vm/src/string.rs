@@ -1,6 +1,7 @@
 //! UTF-16 string operations. String results containing a lone surrogate are rejected.
 
 use crate::error::VmError;
+use crate::heap::{BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::Value;
@@ -48,11 +49,7 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
-        construct: bool,
     ) -> Result<Invocation, VmError> {
-        if construct {
-            return self.throw_type_error("String does not support primitive wrappers");
-        }
         let Some(value) = args.first() else {
             return Ok(Invocation::Value(Value::String(String::new())));
         };
@@ -66,7 +63,13 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let text = match self.require_string(host, receiver)? {
+        if matches!(method, StringMethod::ToString | StringMethod::ValueOf) {
+            return self.string_primitive(receiver);
+        }
+        if matches!(receiver, Value::Undefined | Value::Null) {
+            return self.throw_type_error("String method requires a non-null receiver");
+        }
+        let text = match self.coerce_string(host, receiver)? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -93,9 +96,7 @@ impl Vm {
             StringMethod::PadStart => self.string_pad(&text, host, args, true),
             StringMethod::PadEnd => self.string_pad(&text, host, args, false),
             StringMethod::Replace => self.string_replace(&text, host, args),
-            StringMethod::ToString | StringMethod::ValueOf => {
-                Ok(Invocation::Value(Value::String(text)))
-            }
+            StringMethod::ToString | StringMethod::ValueOf => unreachable!("handled above"),
         }
     }
 
@@ -112,17 +113,21 @@ impl Vm {
         }
     }
 
-    fn require_string(
-        &mut self,
-        host: &mut dyn Host,
-        value: &Value,
-    ) -> Result<Result<String, Value>, VmError> {
-        match value {
-            Value::String(text) => Ok(Ok(text.clone())),
-            Value::Object(_) => self.coerce_string(host, value),
-            _ => Ok(Err(
-                self.type_error("String method called on incompatible receiver")?
-            )),
+    fn string_primitive(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let text = match receiver {
+            Value::String(text) => Some(text),
+            Value::Object(id) => match self.heap.get(*id)? {
+                Object::Boxed {
+                    primitive: BoxedPrimitive::String(text),
+                    ..
+                } => Some(text),
+                _ => None,
+            },
+            _ => None,
+        };
+        match text {
+            Some(text) => Ok(Invocation::Value(Value::String(text.clone()))),
+            None => self.throw_type_error("String method called on incompatible receiver"),
         }
     }
 

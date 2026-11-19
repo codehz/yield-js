@@ -296,7 +296,16 @@ impl Vm {
             target, handler, ..
         } = *self.heap.get(id)?
         else {
-            return Ok(Ok(self.heap.get(id)?.own_property(key).map(|property| {
+            let property = self.heap.get(id)?.own_property(key);
+            if property
+                .as_ref()
+                .is_some_and(crate::heap::OwnProperty::has_unrepresentable_value)
+            {
+                return Ok(Err(
+                    self.type_error("string index cannot represent a lone surrogate")?
+                ));
+            }
+            return Ok(Ok(property.map(|property| {
                 let attrs = property.attributes();
                 (property.into_owned(), attrs)
             })));

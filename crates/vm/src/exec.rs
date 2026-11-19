@@ -835,8 +835,7 @@ impl Vm {
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
-        // Primitive strings resolve length, UTF-16 indices, and String.prototype
-        // without implementing primitive boxing.
+        // Primitive strings resolve indexed reads without allocating wrappers.
         if let Value::String(text) = object {
             if matches!(key, PropertyKeyRef::Symbol(_)) {
                 return self.read_property_with_receiver(
@@ -869,13 +868,8 @@ impl Vm {
                 key,
             );
         }
-        if matches!(object, Value::Number(_)) {
-            return self.read_property_with_receiver(
-                host,
-                self.builtins.number_prototype,
-                object,
-                key,
-            );
+        if let Some(prototype) = self.primitive_prototype(object) {
+            return self.read_property_with_receiver(host, prototype, object, key);
         }
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
@@ -906,6 +900,9 @@ impl Vm {
                 return Ok(Invocation::Value(self.function_metadata(id, name)?));
             }
             if let Some(property) = object.own_property(key) {
+                if property.has_unrepresentable_value() {
+                    return self.throw_type_error("string index cannot represent a lone surrogate");
+                }
                 return self.read_property_value(host, receiver, property.into_owned());
             }
             current = object.prototype();
@@ -1129,6 +1126,7 @@ impl Vm {
 
     fn has_virtual_function_method(&self, id: ObjectId, key: &str) -> bool {
         matches!(key, "call" | "apply" | "bind") && self.heap.function(id).is_some()
+            || key == "call" && matches!(self.heap.get(id), Ok(Object::BuiltinStatic(_)))
     }
 
     fn write_member(

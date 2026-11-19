@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
+use crate::heap::BoxedPrimitive;
 use crate::heap::CollectionKind;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
@@ -37,6 +38,9 @@ pub(crate) const ROOT_STRING: &str = "string";
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
 pub(crate) const ROOT_NUMBER: &str = "number";
 pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
+pub(crate) const ROOT_BOOLEAN: &str = "boolean";
+pub(crate) const ROOT_BOOLEAN_PROTOTYPE: &str = "boolean.prototype";
+pub(crate) const ROOT_SYMBOL_PROTOTYPE: &str = "symbol.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
@@ -79,6 +83,9 @@ pub(crate) struct BuiltinRoots {
     pub string_prototype: ObjectId,
     pub number: ObjectId,
     pub number_prototype: ObjectId,
+    pub boolean_constructor: ObjectId,
+    pub boolean_prototype: ObjectId,
+    pub symbol_prototype: ObjectId,
     pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
     pub string_iterator: ObjectId,
@@ -144,6 +151,9 @@ impl BuiltinRoots {
             (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
             (ROOT_NUMBER.to_owned(), self.number),
             (ROOT_NUMBER_PROTOTYPE.to_owned(), self.number_prototype),
+            (ROOT_BOOLEAN.to_owned(), self.boolean_constructor),
+            (ROOT_BOOLEAN_PROTOTYPE.to_owned(), self.boolean_prototype),
+            (ROOT_SYMBOL_PROTOTYPE.to_owned(), self.symbol_prototype),
             (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
             (
                 ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
@@ -211,6 +221,9 @@ pub(crate) enum BuiltinCall {
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
+    SymbolMethod(&'static str),
+    BooleanConstructor,
+    BooleanMethod { stringify: bool },
     ArrayConstructor,
     CollectionConstructor(CollectionKind),
     CollectionMethod(CollectionKind, CollectionMethod),
@@ -269,6 +282,9 @@ enum Constructor {
     Script { func_id: u32, env: ObjectId },
     Promise,
     Object,
+    String,
+    Number,
+    Boolean,
     Proxy,
     Array,
     Collection(CollectionKind),
@@ -312,6 +328,38 @@ const STRING_STATICS: &[(&str, StringStatic)] = &[
 ];
 
 impl Vm {
+    fn init_wrapper_prototype(&mut self, name: &str, constructor: ObjectId) -> ObjectId {
+        let prototype = self.heap.alloc_plain();
+        self.heap
+            .define_data(
+                constructor,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FIXED,
+            )
+            .expect("constructor stores its prototype");
+        self.heap
+            .define_data(
+                prototype,
+                "constructor",
+                Value::Object(constructor),
+                Attributes::METHOD,
+            )
+            .expect("prototype stores its constructor");
+        for method in ["valueOf", "toString"] {
+            let function = self.heap.alloc_builtin(name, Some(method));
+            self.heap
+                .define_data(
+                    prototype,
+                    method,
+                    Value::Object(function),
+                    Attributes::METHOD,
+                )
+                .expect("prototype stores its methods");
+        }
+        prototype
+    }
+
     fn init_string_constructor(&mut self, prototype: ObjectId, iterator: ObjectId) -> ObjectId {
         let constructor = self.heap.alloc_builtin("String", None);
         self.heap
@@ -452,6 +500,8 @@ impl Vm {
         let string = self.init_string_constructor(string_prototype, string_iterator);
         let number_prototype = self.heap.alloc_plain();
         let number = self.init_number_constructor(number_prototype);
+        let boolean_constructor = self.heap.alloc_builtin("Boolean", None);
+        let boolean_prototype = self.init_wrapper_prototype("Boolean", boolean_constructor);
         let math = self.init_math();
         let json = self.init_json();
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
@@ -602,6 +652,21 @@ impl Vm {
         let urierror = error_constructors["URIError"];
         let aggregateerror = error_constructors["AggregateError"];
         let symbol = self.heap.alloc_builtin("Symbol", None);
+        let symbol_prototype = self.init_wrapper_prototype("Symbol", symbol);
+        let description = self.heap.alloc_builtin("Symbol", Some("get description"));
+        assert!(
+            self.heap
+                .apply_descriptor(
+                    symbol_prototype,
+                    PropertyKey::String("description".to_owned()),
+                    DescriptorUpdate {
+                        get: Some(Some(description)),
+                        configurable: Some(true),
+                        ..DescriptorUpdate::default()
+                    }
+                )
+                .expect("Symbol.prototype stores its description getter")
+        );
         for name in ["for", "keyFor"] {
             let id = self.heap.alloc_builtin("Symbol", Some(name));
             self.heap
@@ -681,6 +746,9 @@ impl Vm {
             number,
             math,
             number_prototype,
+            boolean_constructor,
+            boolean_prototype,
+            symbol_prototype,
             function_prototype,
             array_iterator_prototype,
             string_iterator,
@@ -741,6 +809,7 @@ impl Vm {
             21 => Ok(Value::Object(self.builtins.set)),
             22 => Ok(Value::Object(self.builtins.weakmap)),
             23 => Ok(Value::Object(self.builtins.proxy)),
+            24 => Ok(Value::Object(self.builtins.boolean_constructor)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -816,6 +885,9 @@ impl Vm {
             }
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
+            Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => Some(Constructor::String),
+            Some(Dispatch::Builtin(BuiltinCall::NumberConstructor)) => Some(Constructor::Number),
+            Some(Dispatch::Builtin(BuiltinCall::BooleanConstructor)) => Some(Constructor::Boolean),
             Some(Dispatch::Builtin(BuiltinCall::ProxyConstructor)) => Some(Constructor::Proxy),
             Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => Some(Constructor::Array),
             Some(Dispatch::Builtin(BuiltinCall::CollectionConstructor(kind))) => {
@@ -858,12 +930,6 @@ impl Vm {
         }
         let Some(constructor) = self.constructor(dispatch)? else {
             return match self.classify(callee)? {
-                Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
-                    self.call_string(host, &args, true)
-                }
-                Some(Dispatch::Builtin(BuiltinCall::NumberConstructor)) => {
-                    self.throw_type_error("Number does not support primitive boxing")
-                }
                 Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
                     self.throw_type_error("Symbol is not a constructor")
                 }
@@ -904,6 +970,17 @@ impl Vm {
                     )));
                 }
                 return self.construct_object(&args);
+            }
+            Constructor::String => match self.call_string(host, &args)? {
+                Invocation::Value(value) => self.construct_object(&[value])?,
+                thrown => thrown,
+            },
+            Constructor::Number => match self.call_number(host, &args)? {
+                Invocation::Value(value) => self.construct_object(&[value])?,
+                thrown => thrown,
+            },
+            Constructor::Boolean => {
+                self.construct_object(&[Value::Bool(args.first().is_some_and(Value::truthy))])?
             }
             Constructor::Array => self.construct_array(args)?,
             Constructor::Collection(kind) => {
@@ -1134,12 +1211,33 @@ impl Vm {
             BuiltinCall::CollectionNext(kind) => self.collection_next(kind, receiver),
             BuiltinCall::WeakMapConstructor => self.throw_type_error("WeakMap requires new"),
             BuiltinCall::WeakMapMethod(method) => self.weakmap_method(method, receiver, &args),
-            BuiltinCall::StringConstructor => self.call_string(host, &args, false),
+            BuiltinCall::StringConstructor => self.call_string(host, &args),
             BuiltinCall::StringMethod(method) => {
                 self.call_string_method(host, method, receiver, &args)
             }
             BuiltinCall::StringStatic(method) => self.call_string_static(host, method, &args),
             BuiltinCall::NumberConstructor => self.call_number(host, &args),
+            BuiltinCall::BooleanConstructor => Ok(Invocation::Value(Value::Bool(
+                args.first().is_some_and(Value::truthy),
+            ))),
+            BuiltinCall::BooleanMethod { stringify } => {
+                let value = match receiver {
+                    Value::Bool(value) => *value,
+                    Value::Object(id) => match self.heap.get(*id)? {
+                        Object::Boxed {
+                            primitive: BoxedPrimitive::Bool(value),
+                            ..
+                        } => *value,
+                        _ => return self.throw_type_error("incompatible Boolean receiver"),
+                    },
+                    _ => return self.throw_type_error("incompatible Boolean receiver"),
+                };
+                Ok(Invocation::Value(if stringify {
+                    Value::String(value.to_string())
+                } else {
+                    Value::Bool(value)
+                }))
+            }
             BuiltinCall::NumberMethod(method) => {
                 self.call_number_method(host, method, receiver, &args)
             }
@@ -1223,6 +1321,7 @@ impl Vm {
             }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(host, args),
+            BuiltinCall::SymbolMethod(method) => self.symbol_method(receiver, method),
             BuiltinCall::SymbolFor => {
                 self.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args)
             }
@@ -1275,6 +1374,12 @@ impl Vm {
 
     fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
         Ok(match self.heap.get(self.heap.proxy_target(id)?)? {
+            Object::Boxed { primitive, .. } => match primitive {
+                BoxedPrimitive::String(_) => "String",
+                BoxedPrimitive::Number(_) => "Number",
+                BoxedPrimitive::Bool(_) => "Boolean",
+                BoxedPrimitive::Symbol(_) => "Symbol",
+            },
             Object::Array(_) => "Array",
             Object::Function(_)
             | Object::BuiltinStatic(_)
@@ -1529,6 +1634,11 @@ impl Vm {
                 self.throw_type_error("incompatible Function.prototype.toString receiver")
             };
         }
+        if name == "call" && self.is_callable(receiver) {
+            let mut args = args.into_iter();
+            let this_arg = args.next().unwrap_or(Value::Undefined);
+            return self.invoke(host, receiver, args.collect(), &this_arg);
+        }
         let target = match *receiver {
             Value::Object(id) if self.heap.function(id).is_some() => id,
             _ => {
@@ -1538,7 +1648,6 @@ impl Vm {
         let mut args = args.into_iter();
         let this_arg = args.next().unwrap_or(Value::Undefined);
         match name {
-            "call" => self.invoke(host, receiver, args.collect(), &this_arg),
             "apply" => {
                 let list = args.next();
                 let args = match list {
@@ -1594,7 +1703,32 @@ impl Vm {
                 Ok(Invocation::Value(Value::Object(self.heap.alloc_plain())))
             }
             Some(value @ Value::Object(_)) => Ok(Invocation::Value(value.clone())),
-            _ => self.throw_type_error("Object does not support primitive wrappers"),
+            Some(value) => {
+                let prototype = self.primitive_prototype(value);
+                let primitive = match value {
+                    Value::String(text) => BoxedPrimitive::String(text.clone()),
+                    Value::Number(number) => BoxedPrimitive::Number(*number),
+                    Value::Bool(value) => BoxedPrimitive::Bool(*value),
+                    Value::Symbol(id) => BoxedPrimitive::Symbol(*id),
+                    _ => unreachable!("only boxable primitives reach this arm"),
+                };
+                Ok(Invocation::Value(Value::Object(self.heap.alloc(
+                    Object::Boxed {
+                        primitive,
+                        object: PlainObject::new(prototype),
+                    },
+                ))))
+            }
+        }
+    }
+
+    pub(crate) fn primitive_prototype(&self, value: &Value) -> Option<ObjectId> {
+        match value {
+            Value::String(_) => Some(self.builtins.string_prototype),
+            Value::Number(_) => Some(self.builtins.number_prototype),
+            Value::Bool(_) => Some(self.builtins.boolean_prototype),
+            Value::Symbol(_) => Some(self.builtins.symbol_prototype),
+            _ => None,
         }
     }
 
@@ -1606,8 +1740,13 @@ impl Vm {
             return self.throw_type_error("Proxy requires an object handler");
         };
         let base = self.heap.proxy_target(*target)?;
-        if !matches!(self.heap.get(base)?, Object::Plain(_) | Object::Array(_)) {
-            return self.throw_type_error("Proxy supports only plain object and array targets");
+        if !matches!(
+            self.heap.get(base)?,
+            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. }
+        ) {
+            return self.throw_type_error(
+                "Proxy supports only plain object, array, and primitive wrapper targets",
+            );
         }
         Ok(Invocation::Value(Value::Object(self.heap.alloc(
             Object::Proxy {
@@ -1639,10 +1778,17 @@ impl Vm {
 
     fn get_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
         let Some(Value::Object(target)) = args.first() else {
+            if !reflect
+                && let Some(prototype) = args
+                    .first()
+                    .and_then(|value| self.primitive_prototype(value))
+            {
+                return Ok(Invocation::Value(Value::Object(prototype)));
+            }
             return self.throw_type_error(if reflect {
                 "Reflect.getPrototypeOf requires an object"
             } else {
-                "Object.getPrototypeOf requires an object in this VM"
+                "Object.getPrototypeOf cannot convert null or undefined to an object"
             });
         };
         Ok(Invocation::Value(
@@ -2222,6 +2368,29 @@ impl Vm {
             return self.throw_type_error("incompatible Symbol receiver");
         }
         call(self, args)
+    }
+
+    fn symbol_method(&mut self, receiver: &Value, method: &str) -> Result<Invocation, VmError> {
+        let id = match receiver {
+            Value::Symbol(id) => *id,
+            Value::Object(id) => match self.heap.get(*id)? {
+                Object::Boxed {
+                    primitive: BoxedPrimitive::Symbol(id),
+                    ..
+                } => *id,
+                _ => return self.throw_type_error("incompatible Symbol receiver"),
+            },
+            _ => return self.throw_type_error("incompatible Symbol receiver"),
+        };
+        let description = self.heap.symbols.get(&id).and_then(Option::as_deref);
+        Ok(Invocation::Value(match method {
+            "valueOf" => Value::Symbol(id),
+            "toString" => Value::String(format!("Symbol({})", description.unwrap_or_default())),
+            "get description" => {
+                description.map_or(Value::Undefined, |text| Value::String(text.to_owned()))
+            }
+            _ => unreachable!("unknown Symbol method"),
+        }))
     }
 
     /// `Symbol(desc)`: every call produces a fresh identity.
@@ -2988,6 +3157,12 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         }
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Number", None) => Some(BuiltinCall::NumberConstructor),
+        ("Boolean", None) => Some(BuiltinCall::BooleanConstructor),
+        ("Boolean", Some("valueOf")) => Some(BuiltinCall::BooleanMethod { stringify: false }),
+        ("Boolean", Some("toString")) => Some(BuiltinCall::BooleanMethod { stringify: true }),
+        ("Symbol", Some("valueOf")) => Some(BuiltinCall::SymbolMethod("valueOf")),
+        ("Symbol", Some("toString")) => Some(BuiltinCall::SymbolMethod("toString")),
+        ("Symbol", Some("get description")) => Some(BuiltinCall::SymbolMethod("get description")),
         ("Number", Some(name)) => NUMBER_METHODS
             .iter()
             .find(|&&key| key == name)
