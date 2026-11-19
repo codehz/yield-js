@@ -482,3 +482,73 @@ fn restore_rejects_corrupt_collection_records() {
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
 }
+
+#[test]
+fn weakmap_snapshot_drops_unreachable_entries_and_values() {
+    let mut s = Suspended::start(
+        r#"
+const live = {};
+function makeMap() {
+  const a = {};
+  const b = {};
+  return new WeakMap([[a, b], [b, { back: a, native: bind('weak-only') }], [live, 7]]);
+}
+export async function run() {
+  const map = makeMap();
+  await wait('a');
+  return map.get(live);
+}
+"#,
+        vec![],
+    );
+    let snapshot = json_round_trip(&s.snapshot());
+    let entries = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::WeakMap { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("reachable WeakMap");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.values().next(), Some(&Value::Number(7.0)));
+    assert!(
+        snapshot
+            .objects
+            .iter()
+            .all(|record| !matches!(record.object, Object::Native(_)))
+    );
+    s.host.reject_native = true;
+    s.restore(snapshot)
+        .expect("weak-only native is not rebound");
+    s.complete("wait:a", Completion::Fulfilled(HostValue::Undefined));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
+}
+
+#[test]
+fn restore_rejects_dangling_weakmap_entries() {
+    let mut s = Suspended::start(
+        "export async function run() { const key = {}; const map = new WeakMap([[key, 1]]); await wait('a'); return map.get(key); }",
+        vec![],
+    );
+    let snapshot = s.snapshot();
+    for (key, value) in [
+        (Some(u32::MAX), Value::Number(1.0)),
+        (None, Value::Object(u32::MAX)),
+        (None, Value::Symbol(u32::MAX)),
+    ] {
+        let mut corrupt = snapshot.clone();
+        let entries = corrupt
+            .objects
+            .iter_mut()
+            .find_map(|record| match &mut record.object {
+                Object::WeakMap { entries, .. } => Some(entries),
+                _ => None,
+            })
+            .expect("reachable WeakMap");
+        let (original_key, _) = entries.pop_first().expect("live entry");
+        entries.insert(key.unwrap_or(original_key), value);
+        let error = s.restore(corrupt).expect_err("dangling WeakMap entry");
+        assert!(matches!(error, VmError::InvalidSnapshot(_)), "{error:?}");
+    }
+}

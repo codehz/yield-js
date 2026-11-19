@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::collections::CollectionMethod;
+use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
 use crate::heap::CollectionKind;
 use crate::heap::{
@@ -63,6 +63,8 @@ pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
 pub(crate) const ROOT_MATH: &str = "math";
 pub(crate) const ROOT_JSON: &str = "json";
+pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
+pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -108,6 +110,8 @@ pub(crate) struct BuiltinRoots {
     pub set: ObjectId,
     pub set_prototype: ObjectId,
     pub set_iterator_prototype: ObjectId,
+    pub weakmap: ObjectId,
+    pub weakmap_prototype: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -125,6 +129,8 @@ impl BuiltinRoots {
                 "setIterator.prototype".to_owned(),
                 self.set_iterator_prototype,
             ),
+            (ROOT_WEAK_MAP.to_owned(), self.weakmap),
+            (ROOT_WEAK_MAP_PROTOTYPE.to_owned(), self.weakmap_prototype),
             (ROOT_PROMISE.to_owned(), self.promise),
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
@@ -205,6 +211,8 @@ pub(crate) enum BuiltinCall {
     CollectionConstructor(CollectionKind),
     CollectionMethod(CollectionKind, CollectionMethod),
     CollectionNext(CollectionKind),
+    WeakMapConstructor,
+    WeakMapMethod(WeakMapMethod),
     ArrayOperation(String),
     ArrayValues,
     ArrayIteratorNext,
@@ -258,6 +266,7 @@ enum Constructor {
     Object,
     Array,
     Collection(CollectionKind),
+    WeakMap,
     Error { name: String },
 }
 
@@ -620,6 +629,7 @@ impl Vm {
             self.init_collection(CollectionKind::Map, &identity);
         let (set, set_prototype, set_iterator_prototype) =
             self.init_collection(CollectionKind::Set, &identity);
+        let (weakmap, weakmap_prototype) = self.init_weakmap();
         self.builtins = BuiltinRoots {
             map,
             map_prototype,
@@ -627,6 +637,8 @@ impl Vm {
             set,
             set_prototype,
             set_iterator_prototype,
+            weakmap,
+            weakmap_prototype,
             promise,
             promise_prototype: prototype,
             queue_microtask: queue,
@@ -697,6 +709,7 @@ impl Vm {
             19 => Ok(Value::Object(self.builtins.json)),
             20 => Ok(Value::Object(self.builtins.map)),
             21 => Ok(Value::Object(self.builtins.set)),
+            22 => Ok(Value::Object(self.builtins.weakmap)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -776,6 +789,7 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::CollectionConstructor(kind))) => {
                 Some(Constructor::Collection(kind))
             }
+            Some(Dispatch::Builtin(BuiltinCall::WeakMapConstructor)) => Some(Constructor::WeakMap),
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 Some(Constructor::Error { name })
             }
@@ -841,6 +855,7 @@ impl Vm {
             Constructor::Collection(kind) => {
                 return self.construct_collection(host, kind, &args, prototype);
             }
+            Constructor::WeakMap => return self.construct_weakmap(host, &args, prototype),
             Constructor::Error { name } => self.construct_error(host, &name, args)?,
         };
         if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
@@ -1060,6 +1075,8 @@ impl Vm {
                 self.collection_method(host, kind, method, receiver, &args)
             }
             BuiltinCall::CollectionNext(kind) => self.collection_next(kind, receiver),
+            BuiltinCall::WeakMapConstructor => self.throw_type_error("WeakMap requires new"),
+            BuiltinCall::WeakMapMethod(method) => self.weakmap_method(method, receiver, &args),
             BuiltinCall::StringConstructor => self.call_string(host, &args, false),
             BuiltinCall::StringMethod(method) => {
                 self.call_string_method(host, method, receiver, &args)
@@ -2601,6 +2618,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         }
         ("Map", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Map)),
         ("Set", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Set)),
+        ("WeakMap", None) => Some(BuiltinCall::WeakMapConstructor),
+        ("WeakMap", Some(member)) => WeakMapMethod::lookup(member).map(BuiltinCall::WeakMapMethod),
         ("MapIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Map)),
         ("SetIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Set)),
         (name @ ("Map" | "Set"), Some(member)) => {

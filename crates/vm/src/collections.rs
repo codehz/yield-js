@@ -1,4 +1,4 @@
-//! Ordered strong collections. Tombstones keep live cursor positions stable.
+//! Strong and weak collections. Strong collection tombstones keep live cursor positions stable.
 
 use crate::error::VmError;
 use crate::heap::{
@@ -46,6 +46,29 @@ impl CollectionMethod {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum WeakMapMethod {
+    Get,
+    Set,
+    Has,
+    Delete,
+}
+
+impl WeakMapMethod {
+    const METHODS: [(&'static str, Self); 4] = [
+        ("get", Self::Get),
+        ("set", Self::Set),
+        ("has", Self::Has),
+        ("delete", Self::Delete),
+    ];
+
+    pub(crate) fn lookup(name: &str) -> Option<Self> {
+        Self::METHODS
+            .into_iter()
+            .find_map(|(key, method)| (key == name).then_some(method))
+    }
+}
+
 fn same_value_zero(a: &Value, b: &Value) -> bool {
     a == b || matches!((a, b), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
 }
@@ -68,25 +91,8 @@ impl Vm {
             CollectionKind::Map => ("Map", "MapIterator"),
             CollectionKind::Set => ("Set", "SetIterator"),
         };
-        let constructor = self.heap.alloc_builtin(name, None);
-        let prototype = self.heap.alloc_plain();
+        let (constructor, prototype) = self.init_collection_prototype(name);
         let iterator = self.heap.alloc_plain();
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("collection constructor prototype");
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(constructor),
-                Attributes::METHOD,
-            )
-            .expect("collection prototype constructor");
         for (name_key, method) in CollectionMethod::methods(kind) {
             let function = self.heap.alloc_builtin(name, Some(name_key));
             if matches!(method, CollectionMethod::Size) {
@@ -143,6 +149,79 @@ impl Vm {
         (constructor, prototype, iterator)
     }
 
+    fn init_collection_prototype(&mut self, name: &str) -> (ObjectId, ObjectId) {
+        let constructor = self.heap.alloc_builtin(name, None);
+        let prototype = self.heap.alloc_plain();
+        self.heap
+            .define_data(
+                constructor,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FIXED,
+            )
+            .expect("collection constructor prototype");
+        self.heap
+            .define_data(
+                prototype,
+                "constructor",
+                Value::Object(constructor),
+                Attributes::METHOD,
+            )
+            .expect("collection prototype constructor");
+        (constructor, prototype)
+    }
+
+    pub(crate) fn init_weakmap(&mut self) -> (ObjectId, ObjectId) {
+        let (constructor, prototype) = self.init_collection_prototype("WeakMap");
+        for (name, _) in WeakMapMethod::METHODS {
+            let function = self.heap.alloc_builtin("WeakMap", Some(name));
+            self.heap
+                .define_data(prototype, name, Value::Object(function), Attributes::METHOD)
+                .expect("WeakMap method");
+        }
+        (constructor, prototype)
+    }
+
+    pub(crate) fn construct_weakmap(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+        prototype: Option<ObjectId>,
+    ) -> Result<Invocation, VmError> {
+        let object = PlainObject::new(prototype.or(Some(self.builtins.weakmap_prototype)));
+        let collection = Value::Object(self.heap.alloc(Object::WeakMap {
+            object,
+            entries: Default::default(),
+        }));
+        self.populate_collection(host, collection, args, "set")
+    }
+
+    pub(crate) fn weakmap_method(
+        &mut self,
+        method: WeakMapMethod,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Value::Object(id) = *receiver else {
+            return self.throw_type_error("incompatible WeakMap receiver");
+        };
+        let Object::WeakMap { entries, .. } = self.heap.get_mut(id)? else {
+            return self.throw_type_error("incompatible WeakMap receiver");
+        };
+        let Some(&Value::Object(key)) = args.first() else {
+            return self.throw_type_error("WeakMap key must be an object");
+        };
+        Ok(Invocation::Value(match method {
+            WeakMapMethod::Get => entries.get(&key).cloned().unwrap_or(Value::Undefined),
+            WeakMapMethod::Set => {
+                entries.insert(key, args.get(1).cloned().unwrap_or(Value::Undefined));
+                receiver.clone()
+            }
+            WeakMapMethod::Has => Value::Bool(entries.contains_key(&key)),
+            WeakMapMethod::Delete => Value::Bool(entries.remove(&key).is_some()),
+        }))
+    }
+
     pub(crate) fn construct_collection(
         &mut self,
         host: &mut dyn Host,
@@ -165,6 +244,16 @@ impl Vm {
                 elements: Vec::new(),
             },
         }));
+        self.populate_collection(host, collection, args, adder_name)
+    }
+
+    fn populate_collection(
+        &mut self,
+        host: &mut dyn Host,
+        collection: Value,
+        args: &[Value],
+        adder_name: &str,
+    ) -> Result<Invocation, VmError> {
         let Some(iterable) = args
             .first()
             .filter(|v| !matches!(v, Value::Null | Value::Undefined))
@@ -189,7 +278,8 @@ impl Vm {
                 Ok(None) => return Ok(Invocation::Value(collection)),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            let outcome = self.collection_add_item(host, kind, &collection, &adder, item)?;
+            let outcome =
+                self.collection_add_item(host, adder_name == "set", &collection, &adder, item)?;
             if matches!(outcome, Invocation::Thrown(_)) {
                 // IteratorClose preserves the original throw over a return-method throw.
                 self.close_iterator(host, &iterator)?;
@@ -201,14 +291,14 @@ impl Vm {
     fn collection_add_item(
         &mut self,
         host: &mut dyn Host,
-        kind: CollectionKind,
+        entry_pairs: bool,
         collection: &Value,
         adder: &Value,
         item: Value,
     ) -> Result<Invocation, VmError> {
-        let args = if kind == CollectionKind::Map {
+        let args = if entry_pairs {
             if !matches!(item, Value::Object(_)) {
-                return self.throw_type_error("Map entry must be an object");
+                return self.throw_type_error("collection entry must be an object");
             }
             let mut pair = Vec::with_capacity(2);
             for name in ["0", "1"] {

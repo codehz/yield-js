@@ -1,6 +1,6 @@
-//! Object table. Every heap edge is listed by [`Object::write_edges`] plus
+//! Object table. Strong edges are listed by [`Object::write_edges`] plus
 //! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
-//! restore consume that combined list instead of re-matching object kinds.
+//! restore handle WeakMap entries separately as ephemerons.
 //!
 //! Script property tables store data or accessor properties. Only a missing
 //! key walks the prototype chain; environments and native handles are opaque.
@@ -592,6 +592,10 @@ pub enum Object {
         object: PlainObject,
         elements: Vec<Option<Value>>,
     },
+    WeakMap {
+        object: PlainObject,
+        entries: BTreeMap<ObjectId, Value>,
+    },
     CollectionIterator {
         object: PlainObject,
         kind: CollectionKind,
@@ -707,6 +711,7 @@ impl Object {
             Self::Plain(o)
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
+            | Self::WeakMap { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -725,6 +730,7 @@ impl Object {
             Self::Plain(o)
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
+            | Self::WeakMap { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -786,6 +792,7 @@ impl Object {
             Self::Plain(o)
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
+            | Self::WeakMap { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -804,6 +811,7 @@ impl Object {
             Self::Plain(o)
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
+            | Self::WeakMap { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -896,6 +904,7 @@ impl Object {
             Self::Plain(plain)
             | Self::Map { object: plain, .. }
             | Self::Set { object: plain, .. }
+            | Self::WeakMap { object: plain, .. }
             | Self::CollectionIterator { object: plain, .. }
             | Self::ArrayIterator { object: plain, .. }
             | Self::StringIterator { object: plain, .. } => plain.prototype,
@@ -914,6 +923,7 @@ impl Object {
             Self::Plain(o)
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
+            | Self::WeakMap { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -927,8 +937,7 @@ impl Object {
         })
     }
 
-    /// Append every outgoing reference. Callers clear `out` only by relying on
-    /// this method, which replaces the buffer contents.
+    /// Replace `out` with this object's outgoing strong references.
     pub(crate) fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
         out.clear();
         if let Some(id) = self.prototype() {
@@ -969,6 +978,7 @@ impl Object {
             Self::Native(_)
             | Self::Plain(_)
             | Self::BuiltinStatic(_)
+            | Self::WeakMap { .. }
             | Self::StringIterator { .. } => {}
             Self::Map { entries, .. } => {
                 for (key, value) in entries.iter().flatten() {
@@ -1038,7 +1048,7 @@ fn push_property(out: &mut Vec<OwnedEdge>, property: &Property) {
     }
 }
 
-fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
+pub(crate) fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
     match value {
         Value::Object(id) => out.push(OwnedEdge::Object(*id)),
         Value::Symbol(id) => out.push(OwnedEdge::Symbol(*id)),
@@ -1406,10 +1416,6 @@ impl Heap {
         self.objects.get_mut(&id).ok_or_else(|| missing_object(id))
     }
 
-    pub(crate) fn cloned(&self, id: ObjectId) -> Result<Object, VmError> {
-        self.get(id).cloned()
-    }
-
     /// `None` if missing, otherwise whether the object is an environment.
     pub(crate) fn is_environment(&self, id: ObjectId) -> Option<bool> {
         self.objects
@@ -1677,6 +1683,7 @@ impl Heap {
             Object::Plain(plain)
             | Object::Map { object: plain, .. }
             | Object::Set { object: plain, .. }
+            | Object::WeakMap { object: plain, .. }
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
             | Object::StringIterator { object: plain, .. } => plain,

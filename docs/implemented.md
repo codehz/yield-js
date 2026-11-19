@@ -30,7 +30,8 @@
 - `Object.preventExtensions` / `isExtensible`、`seal` / `isSealed`、`freeze` / `isFrozen` 控制及查询对象的扩展性和自有描述符。密封使自有属性不可配置；冻结还使自有数据属性（含数组 `length`）不可写，但保留访问器的 getter/setter，不递归处理属性值。不可扩展对象不能新增字符串键、Symbol 键或数组索引，但仍可调用继承的 setter；可写的数组 `length` 可以增长而不创建索引。`Reflect.preventExtensions` 返回布尔值，与 `Reflect.isExtensible` 一样要求对象参数。宿主原生句柄始终不可扩展。扩展性和描述符限制均跨快照恢复。
 - 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。数组字面量展开和实参展开复用该迭代协议，已求值的元素或实参可跨 `await` 保存。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `Array` 可调用或构造；数值长度创建稀疏数组，无效长度抛出可捕获的 `RangeError`。`isArray` 识别真实数组，`of` 和 `from` 创建稠密数组；`from` 优先使用同步迭代器，也可读取类数组对象。数组原型支持 `push` / `pop` / `shift` / `unshift` / `splice` / `slice` / `fill`、`map` / `filter` / `reduce` / `forEach` / `some` / `every`、`flat` / `flatMap` / `concat` 及 `indexOf` / `lastIndexOf` / `includes` / `find` / `findIndex`。`map` 和切片保留空洞，`flat` 跳过遍历层中的空洞。
-- `Map` 和 `Set` 必须用 `new` 构造，接受可选的同步可迭代对象。键和集合元素按 SameValueZero 比较。原型提供 `size` 访问器、增删查、`clear`、`forEach` 以及 `keys` / `values` / `entries` / `[Symbol.iterator]`。迭代和 `forEach` 都按插入顺序读取实时数据：跳过已删除的槽位，访问尚未读到的更新和追加项，删除后重新插入会排到末尾；已结束的迭代器不会被追加项重新激活。当前实现线性查找，并保留空槽以维持游标位置，不压缩删除留下的槽。`WeakMap` 未实现。
+- `Map` 和 `Set` 必须用 `new` 构造，接受可选的同步可迭代对象。键和集合元素按 SameValueZero 比较。原型提供 `size` 访问器、增删查、`clear`、`forEach` 以及 `keys` / `values` / `entries` / `[Symbol.iterator]`。迭代和 `forEach` 都按插入顺序读取实时数据：跳过已删除的槽位，访问尚未读到的更新和追加项，删除后重新插入会排到末尾；已结束的迭代器不会被追加项重新激活。当前实现线性查找，并保留空槽以维持游标位置，不压缩删除留下的槽。
+- `WeakMap` 必须用 `new` 构造，接受可选的键值对同步可迭代对象。提供 `get`、`has`、`set`、`delete`，按对象身份比较键；四种方法均拒绝原始值键（含 Symbol），抛出 `TypeError`。不提供 `size` 或迭代。
 - `String()` 返回原始字符串：无实参返回空字符串，Symbol 沿用现有字符串转换并抛出可捕获的 `TypeError`；不支持 `new String()` 或其他字符串装箱。字符串的 `length` 和索引按 UTF-16 码元计算，其余属性从共享的 `String.prototype` 查找，找不到则返回 `undefined`。严格模式下写入字符串成员会抛出 `TypeError`。
 - `String.prototype` 提供 `charAt` / `charCodeAt` / `codePointAt` / `at`、`indexOf` / `lastIndexOf` / `includes` / `startsWith` / `endsWith`、`slice` / `substring`、`toUpperCase` / `toLowerCase`、`trim` / `trimStart` / `trimEnd`、`split` / `concat` / `repeat` / `padStart` / `padEnd` / `replace`，以及 `toString` / `valueOf`。`split` 使用字符串分隔符，`replace` 替换首个字符串匹配，支持替换文本中的 `$` 转义或可调用替换值，不支持正则匹配。
 - `String.fromCharCode` / `fromCodePoint` 从 UTF-16 码元或 Unicode 码点构造字符串；`String.raw` 可直接读取 `raw` 类数组并插入替换值。会生成单独代理码元的字符串操作抛出 `TypeError`，但数值访问方法仍可读取这些码元。`[Symbol.iterator]` 通过 `String.prototype` 查找并按码点迭代；内建身份、原型修改和迭代位置可跨 `await` 快照恢复。
@@ -55,4 +56,5 @@
 - 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型（含修改过的内建共享原型）按身份保存；恢复时拒绝悬空链接、环境对象、原型环和 `Object.prototype` 的非空原型。普通属性可以互相引用。
 - `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。
+- `WeakMap` 构造器及其共享原型也是快照根。快照按 ephemeron 规则追踪：仅在 WeakMap 和键均已可达时追踪对应值，反复处理直至没有新增可达对象；不会仅因条目存在而保留键。不可达键的条目从快照省略，恢复拒绝条目中的悬空引用。这不表示运行期间会回收堆对象。
 - 快照要求微任务队列已排空。

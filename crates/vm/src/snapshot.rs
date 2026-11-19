@@ -11,7 +11,8 @@ use crate::builtins::{
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
     ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
     ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
-    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, is_callable_object,
+    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP,
+    ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -19,14 +20,14 @@ use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
     OwnedEdge, PromiseState, Property, ReactionJob, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
-use crate::heap::{CollectionIteration, CollectionKind};
+use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Ordered collection records, live iterators, and collection builtin roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 26;
+// WeakMap records and builtin roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 27;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -128,7 +129,6 @@ impl Vm {
         for operation in self.operations.values() {
             tracer.mark_object(operation.promise)?;
         }
-        tracer.drain()?;
         for id in self.builtins.to_map().values() {
             tracer.mark_object(*id)?;
         }
@@ -151,6 +151,7 @@ impl Vm {
             }
         }
         tracer.drain()?;
+        tracer.mark_ephemerons()?;
         if self
             .heap
             .resolutions
@@ -167,10 +168,18 @@ impl Vm {
         snapshot.roots = self.builtins.to_map();
         snapshot.script_env = self.script_env;
         for id in &tracer.objects {
-            snapshot.objects.push(ObjectRecord {
-                id: *id,
-                object: self.heap.cloned(*id)?,
-            });
+            let object = match self.heap.get(*id)? {
+                Object::WeakMap { object, entries } => Object::WeakMap {
+                    object: object.clone(),
+                    entries: entries
+                        .iter()
+                        .filter(|(key, _)| tracer.objects.contains(key))
+                        .map(|(&key, value)| (key, value.clone()))
+                        .collect(),
+                },
+                object => object.clone(),
+            };
+            snapshot.objects.push(ObjectRecord { id: *id, object });
         }
         for id in tracer.continuations_seen {
             let continuation = self.continuations.get(&id).ok_or_else(|| {
@@ -276,6 +285,7 @@ struct Tracer<'a> {
     objects: BTreeSet<ObjectId>,
     symbols: BTreeSet<SymbolId>,
     continuations_seen: BTreeSet<ContinuationId>,
+    weak_maps: Vec<ObjectId>,
     object_queue: VecDeque<ObjectId>,
     continuation_queue: VecDeque<ContinuationId>,
     edges: Vec<OwnedEdge>,
@@ -289,6 +299,7 @@ impl<'a> Tracer<'a> {
             objects: BTreeSet::new(),
             symbols: BTreeSet::new(),
             continuations_seen: BTreeSet::new(),
+            weak_maps: Vec::new(),
             object_queue: VecDeque::new(),
             continuation_queue: VecDeque::new(),
             edges: Vec::new(),
@@ -348,7 +359,32 @@ impl<'a> Tracer<'a> {
         Ok(())
     }
 
+    fn mark_ephemerons(&mut self) -> Result<(), VmError> {
+        let heap = self.heap;
+        loop {
+            // Values can reveal more keys (or more WeakMaps) through strong edges.
+            // A scan that queues no new objects cannot unlock more entries.
+            for index in 0..self.weak_maps.len() {
+                let Object::WeakMap { entries, .. } = heap.get(self.weak_maps[index])? else {
+                    unreachable!("only WeakMaps are deferred");
+                };
+                for (key, value) in entries {
+                    if self.objects.contains(key) {
+                        self.mark_value(value)?;
+                    }
+                }
+            }
+            if self.object_queue.is_empty() {
+                return Ok(());
+            }
+            self.drain()?;
+        }
+    }
+
     fn walk_object(&mut self, id: ObjectId) -> Result<(), VmError> {
+        if matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
+            self.weak_maps.push(id);
+        }
         let mut edges = std::mem::take(&mut self.edges);
         self.heap.write_edges(id, &mut edges)?;
         for edge in &edges {
@@ -545,6 +581,9 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let set_prototype = plain_root("set.prototype")?;
     let set_iterator_prototype = plain_root("setIterator.prototype")?;
     require_fixed_prototype(heap, set, set_prototype, "Set")?;
+    let weakmap = builtin_root(ROOT_WEAK_MAP, "WeakMap")?;
+    let weakmap_prototype = plain_root(ROOT_WEAK_MAP_PROTOTYPE)?;
+    require_fixed_prototype(heap, weakmap, weakmap_prototype, "WeakMap")?;
     let array_prototype = required_root(roots, ROOT_ARRAY_PROTOTYPE)?;
     if !matches!(heap.get(array_prototype)?, Object::Array(_)) {
         return Err(VmError::InvalidSnapshot(
@@ -676,6 +715,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         set,
         set_prototype,
         set_iterator_prototype,
+        weakmap,
+        weakmap_prototype,
         promise,
         promise_prototype: prototype,
         queue_microtask: queue,
@@ -886,6 +927,19 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             )));
         }
         heap.write_edges(id, &mut edges)?;
+        if let Object::WeakMap { entries, .. } = heap.get(id)? {
+            for (key, value) in entries {
+                if matches!(
+                    heap.get(*key),
+                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                ) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "WeakMap {id} has an invalid key {key}"
+                    )));
+                }
+                push_value(&mut edges, value);
+            }
+        }
         for edge in edges.drain(..) {
             match edge {
                 OwnedEdge::Object(target) => {
