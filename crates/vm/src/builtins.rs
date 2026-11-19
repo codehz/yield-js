@@ -122,6 +122,7 @@ pub(crate) enum BuiltinCall {
     SetPrototypeOf { reflect: bool },
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
+    ObjectGetOwnPropertyDescriptors,
     DefineProperty { reflect: bool },
     ObjectDefineProperties,
     PreventExtensions { reflect: bool },
@@ -181,6 +182,7 @@ impl Vm {
             "getPrototypeOf",
             "setPrototypeOf",
             "getOwnPropertyDescriptor",
+            "getOwnPropertyDescriptors",
             "defineProperty",
             "defineProperties",
             "preventExtensions",
@@ -543,6 +545,9 @@ impl Vm {
             BuiltinCall::GetPrototypeOf { reflect } => self.get_prototype_of(&args, reflect),
             BuiltinCall::SetPrototypeOf { reflect } => self.set_prototype_of(&args, reflect),
             BuiltinCall::ObjectKeys => self.object_keys(&args),
+            BuiltinCall::ObjectGetOwnPropertyDescriptors => {
+                self.get_own_property_descriptors(&args)
+            }
             BuiltinCall::ObjectAssign => self.object_assign(host, &args),
             BuiltinCall::ObjectIs => Ok(Invocation::Value(Value::Bool(ops::same_value(
                 args.first().unwrap_or(&Value::Undefined),
@@ -1168,6 +1173,58 @@ impl Vm {
             .set_own_string(result, "enumerable", Value::Bool(attributes.enumerable))?;
         self.heap
             .set_own_string(result, "configurable", Value::Bool(attributes.configurable))?;
+        Ok(Invocation::Value(Value::Object(result)))
+    }
+
+    fn get_own_property_descriptors(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error(
+                "Object.getOwnPropertyDescriptors requires an object in this VM",
+            );
+        };
+        let keys = self.heap.get(*target)?.own_keys(false).collect::<Vec<_>>();
+        let result = self.heap.alloc_plain();
+        for key in keys {
+            let Some(property) = self.heap.get(*target)?.own_property(key.borrowed()) else {
+                continue;
+            };
+            let attributes = property.attributes();
+            let property = property.into_owned();
+            let descriptor = self.heap.alloc_plain();
+            match property {
+                Property::Data(value) => {
+                    self.heap.set_own_string(descriptor, "value", value)?;
+                    self.heap.set_own_string(
+                        descriptor,
+                        "writable",
+                        Value::Bool(attributes.writable),
+                    )?;
+                }
+                Property::Accessor { get, set } => {
+                    self.heap.set_own_string(
+                        descriptor,
+                        "get",
+                        get.map_or(Value::Undefined, Value::Object),
+                    )?;
+                    self.heap.set_own_string(
+                        descriptor,
+                        "set",
+                        set.map_or(Value::Undefined, Value::Object),
+                    )?;
+                }
+            }
+            self.heap.set_own_string(
+                descriptor,
+                "enumerable",
+                Value::Bool(attributes.enumerable),
+            )?;
+            self.heap.set_own_string(
+                descriptor,
+                "configurable",
+                Value::Bool(attributes.configurable),
+            )?;
+            self.heap.set_own(result, key, Value::Object(descriptor))?;
+        }
         Ok(Invocation::Value(Value::Object(result)))
     }
 
@@ -1981,6 +2038,9 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             } else {
                 BuiltinCall::ObjectGetOwnPropertyDescriptor
             })
+        }
+        ("Object", Some("getOwnPropertyDescriptors")) => {
+            Some(BuiltinCall::ObjectGetOwnPropertyDescriptors)
         }
         (owner @ ("Object" | "Reflect"), Some("defineProperty")) => {
             Some(BuiltinCall::DefineProperty {
