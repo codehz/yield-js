@@ -933,3 +933,43 @@ async function run() {
         PromiseState::Fulfilled(Value::Number(5.0))
     );
 }
+
+#[test]
+fn builtin_roots_and_function_identity_survive_restore() {
+    let source = r#"
+async function run() {
+  const then = Promise.prototype.then;
+  const fn = demo;
+  await wait("a");
+  return then === Promise.prototype.then && fn === demo && new demo().n;
+}
+function demo() {
+  this.n = 4;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
+    assert_eq!(snapshot.roots.len(), 3);
+    assert!(!snapshot.functions.is_empty());
+
+    let mut missing = snapshot.clone();
+    missing.roots.pop_first();
+    let error = Vm::restore(missing, build.clone(), &mut host).expect_err("missing root");
+    assert!(matches!(error, VmError::InvalidSnapshot(_)));
+
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(HostValue::Number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(4.0))
+    );
+}

@@ -1,11 +1,11 @@
 //! PoC name-resolution policy.
 //!
-//! Locals shadow everything at value and call positions. Host imports and
-//! top-level functions are callable, but not first-class values. `typeof` is
+//! Locals shadow everything at value and call positions. Host imports are
+//! callable, but not first-class values. Top-level functions are callable and,
+//! when not shadowed by a local, import, or builtin, also values. `typeof` is
 //! the exception: an import or top-level function of the same name is reported
 //! as `"function"` even when a local binding shadows it. That quirk is
 //! intentional compatibility with the current PoC, not an accident of the walker.
-
 use std::collections::BTreeMap;
 
 use crate::env::Env;
@@ -20,10 +20,12 @@ pub(crate) struct Tables<'a> {
 pub(crate) enum ValueName {
     Binding(BindingId),
     Undefined,
-    /// Import or top-level function. The PoC rejects reading it as a value.
+    /// Host import. The PoC rejects reading it as a value.
     NotFirstClass,
     /// Index into [`BUILTINS`]. Locals shadow this; the builtin shadows imports.
     Builtin(usize),
+    /// Top-level function id. Locals, builtins, and imports win first.
+    TopFunction(u32),
     Unknown,
 }
 
@@ -43,8 +45,10 @@ impl Tables<'_> {
             ValueName::Undefined
         } else if let Some(index) = builtin_index(name) {
             ValueName::Builtin(index)
-        } else if self.is_import_or_top_level(name) {
+        } else if self.imports.contains_key(name) {
             ValueName::NotFirstClass
+        } else if let Some(function) = self.top_level.get(name).copied() {
+            ValueName::TopFunction(function)
         } else {
             ValueName::Unknown
         }

@@ -64,8 +64,13 @@ function run() {
         .collect();
     assert!(
         code.iter()
-            .any(|instruction| matches!(instruction, Instr::GetBuiltinMember { .. })),
-        "Promise.then lowers to GetBuiltinMember"
+            .any(|instruction| matches!(instruction, Instr::GetBuiltin { builtin: 0, .. })),
+        "Promise loads through GetBuiltin"
+    );
+    assert!(
+        code.iter()
+            .any(|instruction| matches!(instruction, Instr::GetMember { .. })),
+        "Promise.then lowers to GetMember"
     );
     assert!(
         code.iter()
@@ -74,16 +79,16 @@ function run() {
     );
     assert!(
         code.iter()
-            .any(|instruction| matches!(instruction, Instr::CallBuiltin { builtin: 0, .. })),
-        "new Promise lowers to CallBuiltin"
+            .any(|instruction| matches!(instruction, Instr::Construct { .. })),
+        "new Promise lowers to Construct"
     );
 
     let error = compile(
         "function run() {\n  return new Foo();\n}\n",
         &CompileOptions::default(),
     )
-    .expect_err("new Foo is outside the subset");
-    assert!(error.message().contains("unsupported syntax: 'new' Foo"));
+    .expect_err("new Foo needs a binding");
+    assert!(error.message().contains("unknown binding"));
     assert_eq!(error.line(), 2);
     assert!(error.column() > 1);
 }

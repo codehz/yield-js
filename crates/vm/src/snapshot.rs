@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::builtins::{BuiltinRoots, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK};
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{CombineState, EnvRole, Heap, Object, OwnedEdge, PromiseState, ReactionJob};
@@ -10,7 +11,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -53,6 +54,8 @@ pub struct Snapshot {
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
     pub globals: BTreeMap<String, Value>,
+    pub roots: BTreeMap<String, ObjectId>,
+    pub functions: BTreeMap<u32, ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
 }
 
@@ -66,6 +69,8 @@ impl Snapshot {
             continuations: Vec::new(),
             operations: Vec::new(),
             globals: BTreeMap::new(),
+            roots: BTreeMap::new(),
+            functions: BTreeMap::new(),
             combines: BTreeMap::new(),
         }
     }
@@ -98,6 +103,13 @@ impl Vm {
             tracer.mark_object(operation.promise)?;
         }
         tracer.drain()?;
+        for id in self.builtins.to_map().values() {
+            tracer.mark_object(*id)?;
+        }
+        for id in self.functions.values() {
+            tracer.mark_object(*id)?;
+        }
+        tracer.drain()?;
         if self
             .heap
             .resolutions
@@ -111,6 +123,8 @@ impl Vm {
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.globals = self.globals.clone();
+        snapshot.roots = self.builtins.to_map();
+        snapshot.functions = self.functions.clone();
         for id in &tracer.objects {
             snapshot.objects.push(ObjectRecord {
                 id: *id,
@@ -174,6 +188,8 @@ impl Vm {
         }
         let operations = load_operations(&build, &heap, &snapshot.operations, host)?;
         heap.combines = snapshot.combines.clone();
+        let builtins = load_roots(&heap, &snapshot.roots)?;
+        let functions = load_functions(&build, &heap, &snapshot.functions)?;
         check_heap_edges(&heap, host)?;
         validate_jobs(&heap)?;
         validate_combines(&heap)?;
@@ -183,6 +199,8 @@ impl Vm {
             continuations,
             operations,
             snapshot.globals,
+            builtins,
+            functions,
         ))
     }
 }
@@ -307,6 +325,96 @@ fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
         )));
     }
     Ok(())
+}
+
+fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
+    if roots.len() != 3 {
+        return Err(VmError::InvalidSnapshot(format!(
+            "snapshot has {} builtin roots, expected 3",
+            roots.len()
+        )));
+    }
+    let promise = required_root(roots, ROOT_PROMISE)?;
+    let prototype = required_root(roots, ROOT_PROMISE_PROTOTYPE)?;
+    let queue = required_root(roots, ROOT_QUEUE_MICROTASK)?;
+    match heap.get(promise)? {
+        Object::BuiltinStatic(function)
+            if function.name == "Promise" && function.member.is_none() => {}
+        _ => {
+            return Err(VmError::InvalidSnapshot(
+                "promise root is not the Promise constructor".to_owned(),
+            ));
+        }
+    }
+    if !matches!(heap.get(prototype)?, Object::Plain(_)) {
+        return Err(VmError::InvalidSnapshot(
+            "promise.prototype root is not a plain object".to_owned(),
+        ));
+    }
+    match heap.get(queue)? {
+        Object::BuiltinStatic(function)
+            if function.name == "queueMicrotask" && function.member.is_none() => {}
+        _ => {
+            return Err(VmError::InvalidSnapshot(
+                "queueMicrotask root is not the builtin".to_owned(),
+            ));
+        }
+    }
+    let prototype_value = heap.get_member(
+        &Value::Object(promise),
+        &Value::String("prototype".to_owned()),
+    )?;
+    if prototype_value != Value::Object(prototype) {
+        return Err(VmError::InvalidSnapshot(
+            "Promise.prototype does not match the prototype root".to_owned(),
+        ));
+    }
+    Ok(BuiltinRoots {
+        promise,
+        promise_prototype: prototype,
+        queue_microtask: queue,
+    })
+}
+
+fn required_root(roots: &BTreeMap<String, ObjectId>, name: &str) -> Result<ObjectId, VmError> {
+    roots
+        .get(name)
+        .copied()
+        .ok_or_else(|| VmError::InvalidSnapshot(format!("snapshot is missing builtin root {name}")))
+}
+
+fn load_functions(
+    build: &Build,
+    heap: &Heap,
+    functions: &BTreeMap<u32, ObjectId>,
+) -> Result<BTreeMap<u32, ObjectId>, VmError> {
+    for (func_id, id) in functions {
+        if build.function(*func_id).is_none() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "function table references missing function {func_id}"
+            )));
+        }
+        match heap.get(*id)? {
+            Object::Function(function)
+                if function.func_id == *func_id && function.env.is_none() => {}
+            _ => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "function {func_id} does not match object {id}"
+                )));
+            }
+        }
+    }
+    for id in heap.ids() {
+        if let Object::Function(function) = heap.get(id)?
+            && function.env.is_none()
+            && functions.get(&function.func_id) != Some(&id)
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "top-level function object {id} is missing from the function table"
+            )));
+        }
+    }
+    Ok(functions.clone())
 }
 
 fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
@@ -555,9 +663,6 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                         resolution.pair
                     )));
                 }
-            }
-            Object::BuiltinMethod(method) => {
-                require_promise(heap, method.receiver, &format!("builtin method {id}"))?;
             }
             _ => {}
         }

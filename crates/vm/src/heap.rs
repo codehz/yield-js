@@ -2,11 +2,11 @@
 //! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
 //! restore consume that combined list instead of re-matching object kinds.
 //!
-//! Builtin function objects are ordinary heap objects so a suspended script can
-//! point at `then` or `Promise.resolve`. Their identity cache lives on the VM
-//! and is not snapshotted: `Promise.resolve === Promise.resolve` holds for one
-//! run, not across restore. Restore rebuilds the cache on demand; a restored
-//! object still dispatches from its own fields.
+//! Script objects store own string data properties and an internal prototype.
+//! `Some(undefined)` is an own hit; only a missing key walks the chain. Writes
+//! always land on the receiver. Environments are not script objects and cannot
+//! be prototypes. Ordinary literals have no internal prototype: this slice does
+//! not expose `Object.prototype`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +90,12 @@ pub struct PromiseObject {
     /// When set, an `Adopt` fulfillment reapplies this settlement instead of
     /// the source value. `finally` uses it so a returned thenable only delays
     /// the original settlement, unless that thenable rejects.
+    /// Original settlement reapplied after a `finally` thenable. Distinct from
+    /// the value currently being adopted.
     pub finally_settlement: Option<PromiseState>,
+    pub props: BTreeMap<String, Value>,
+    /// Internal prototype. Promise instances share one identity.
+    pub prototype: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,31 +106,34 @@ pub struct NativeObject {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlainObject {
     pub props: BTreeMap<String, Value>,
-}
-
-impl PlainObject {
-    fn get(&self, key: &str) -> Value {
-        self.props.get(key).cloned().unwrap_or(Value::Undefined)
-    }
-
-    fn set(&mut self, key: String, value: Value) {
-        self.props.insert(key, value);
-    }
+    /// Internal prototype. Literals use `None`.
+    pub prototype: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayObject {
     pub elements: Vec<Value>,
+    /// Own properties other than `length` and canonical indices.
+    pub props: BTreeMap<String, Value>,
+    pub prototype: Option<ObjectId>,
 }
 
 impl ArrayObject {
-    fn get(&self, key: &str) -> Value {
+    /// `Some` is an own hit, including an explicit `undefined`. A missing
+    /// non-index key is `None` so lookup can continue.
+    fn own(&self, key: &str) -> Option<Value> {
         if key == "length" {
-            return Value::Number(self.elements.len() as f64);
+            return Some(Value::Number(self.elements.len() as f64));
         }
-        array_index(key)
-            .and_then(|index| self.elements.get(index).cloned())
-            .unwrap_or(Value::Undefined)
+        if let Some(index) = array_index(key) {
+            return Some(
+                self.elements
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(Value::Undefined),
+            );
+        }
+        self.props.get(key).cloned()
     }
 
     fn set(&mut self, key: &str, value: Value) -> Result<(), VmError> {
@@ -143,47 +151,47 @@ impl ArrayObject {
             self.elements.resize(length as usize, Value::Undefined);
             return Ok(());
         }
-        let Some(index) = array_index(key) else {
-            return Err(VmError::InvalidState(format!(
-                "unsupported array property {key:?}"
-            )));
-        };
-        if self.elements.len() <= index {
-            self.elements.resize(index + 1, Value::Undefined);
+        if let Some(index) = array_index(key) {
+            if self.elements.len() <= index {
+                self.elements.resize(index + 1, Value::Undefined);
+            }
+            self.elements[index] = value;
+            return Ok(());
         }
-        self.elements[index] = value;
+        self.props.insert(key.to_owned(), value);
         Ok(())
     }
 }
 
-/// A closure. `env` is the lexical environment where the function value was
-/// created; `None` is used by direct top-level calls.
+/// A function value. `env` is the lexical environment captured at creation;
+/// top-level cached functions use `None`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionObject {
     pub func_id: u32,
     pub env: Option<ObjectId>,
+    pub props: BTreeMap<String, Value>,
+    /// Internal prototype. Not the constructable `.prototype` property.
+    pub prototype: Option<ObjectId>,
 }
 
 /// One invocation environment. Bindings are addressed by compile-time IDs, so
 /// shadowed names and closures share mutable cells without name lookup.
+/// Environments are not script objects and cannot be prototypes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentObject {
     pub parent: Option<ObjectId>,
     pub bindings: BTreeMap<BindingId, Value>,
 }
 
-/// `promise.then` / `catch` / `finally`, bound to `receiver`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BuiltinMethod {
-    pub receiver: ObjectId,
-    pub name: String,
-}
-
-/// Top-level `Promise` / `queueMicrotask`, or a static such as `Promise.resolve`.
+/// `Promise`, `queueMicrotask`, a static such as `Promise.resolve`, or one
+/// shared instance method such as `then`. The receiver is supplied by the call,
+/// not stored on the object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuiltinStatic {
     pub name: String,
     pub member: Option<String>,
+    pub props: BTreeMap<String, Value>,
+    pub prototype: Option<ObjectId>,
 }
 
 /// One-shot `resolve` or `reject` passed to an executor or a thenable `then`.
@@ -208,7 +216,6 @@ pub enum Object {
     Array(ArrayObject),
     Function(FunctionObject),
     Environment(EnvironmentObject),
-    BuiltinMethod(BuiltinMethod),
     BuiltinStatic(BuiltinStatic),
     Resolution(Resolution),
 }
@@ -284,11 +291,11 @@ impl Object {
                 for job in &promise.reactions {
                     job.write_edges(out);
                 }
+                push_script(out, &promise.props, promise.prototype);
             }
-            Self::BuiltinMethod(method) => {
-                out.push(OwnedEdge::Object(method.receiver));
+            Self::BuiltinStatic(builtin) => {
+                push_script(out, &builtin.props, builtin.prototype);
             }
-            Self::BuiltinStatic(_) => {}
             Self::Resolution(resolution) => {
                 out.push(OwnedEdge::Object(resolution.promise));
                 if resolution.pair != 0 {
@@ -296,15 +303,12 @@ impl Object {
                 }
             }
             Self::Native(_) => {}
-            Self::Plain(plain) => {
-                for value in plain.props.values() {
-                    push_value(out, value);
-                }
-            }
+            Self::Plain(plain) => push_script(out, &plain.props, plain.prototype),
             Self::Array(array) => {
                 for value in &array.elements {
                     push_value(out, value);
                 }
+                push_script(out, &array.props, array.prototype);
             }
             Self::Function(function) => {
                 if let Some(id) = function.env {
@@ -313,6 +317,7 @@ impl Object {
                         role: EnvRole::Closure,
                     });
                 }
+                push_script(out, &function.props, function.prototype);
             }
             Self::Environment(environment) => {
                 if let Some(id) = environment.parent {
@@ -326,6 +331,19 @@ impl Object {
                 }
             }
         }
+    }
+}
+
+fn push_script(
+    out: &mut Vec<OwnedEdge>,
+    props: &BTreeMap<String, Value>,
+    prototype: Option<ObjectId>,
+) {
+    if let Some(id) = prototype {
+        out.push(OwnedEdge::Object(id));
+    }
+    for value in props.values() {
+        push_value(out, value);
     }
 }
 
@@ -385,6 +403,8 @@ pub(crate) struct Heap {
     /// the tracer did not reach: that capability is only held by an in-flight
     /// `then` call, which is not a snapshot root.
     pub(crate) resolutions: BTreeSet<ObjectId>,
+    /// Shared internal prototype of every Promise allocated by this heap.
+    pub(crate) promise_prototype: Option<ObjectId>,
 }
 
 impl Heap {
@@ -394,6 +414,7 @@ impl Heap {
             next_id: 1,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
+            promise_prototype: None,
         }
     }
 
@@ -414,6 +435,8 @@ impl Heap {
             locked: false,
             adopting: None,
             finally_settlement: None,
+            props: BTreeMap::new(),
+            prototype: self.promise_prototype,
         }))
     }
 
@@ -442,17 +465,40 @@ impl Heap {
     }
 
     pub(crate) fn alloc_plain(&mut self) -> ObjectId {
+        self.alloc_plain_with(None)
+    }
+
+    pub(crate) fn alloc_plain_with(&mut self, prototype: Option<ObjectId>) -> ObjectId {
         self.alloc(Object::Plain(PlainObject {
             props: BTreeMap::new(),
+            prototype,
         }))
     }
 
     pub(crate) fn alloc_array(&mut self, elements: Vec<Value>) -> ObjectId {
-        self.alloc(Object::Array(ArrayObject { elements }))
+        self.alloc(Object::Array(ArrayObject {
+            elements,
+            props: BTreeMap::new(),
+            prototype: None,
+        }))
     }
 
     pub(crate) fn alloc_function(&mut self, func_id: u32, env: Option<ObjectId>) -> ObjectId {
-        self.alloc(Object::Function(FunctionObject { func_id, env }))
+        self.alloc(Object::Function(FunctionObject {
+            func_id,
+            env,
+            props: BTreeMap::new(),
+            prototype: None,
+        }))
+    }
+
+    pub(crate) fn alloc_builtin(&mut self, name: &str, member: Option<&str>) -> ObjectId {
+        self.alloc(Object::BuiltinStatic(BuiltinStatic {
+            name: name.to_owned(),
+            member: member.map(str::to_owned),
+            props: BTreeMap::new(),
+            prototype: None,
+        }))
     }
 
     pub(crate) fn alloc_environment(
@@ -554,15 +600,68 @@ impl Heap {
         self.alloc(Object::Native(NativeObject { key }))
     }
 
+    /// Own hit is `Some`, including `undefined`. `None` means the key is absent.
+    pub(crate) fn own_property(&self, id: ObjectId, key: &str) -> Result<Option<Value>, VmError> {
+        Ok(match self.get(id)? {
+            Object::Plain(plain) => plain.props.get(key).cloned(),
+            Object::Array(array) => array.own(key),
+            Object::Function(function) => function.props.get(key).cloned(),
+            Object::Promise(promise) => promise.props.get(key).cloned(),
+            Object::BuiltinStatic(builtin) => builtin.props.get(key).cloned(),
+            Object::Native(_) | Object::Resolution(_) => None,
+            Object::Environment(_) => {
+                return Err(VmError::InvalidState(format!(
+                    "object {id} is an environment and cannot be a prototype"
+                )));
+            }
+        })
+    }
+
+    pub(crate) fn internal_prototype(&self, id: ObjectId) -> Result<Option<ObjectId>, VmError> {
+        Ok(match self.get(id)? {
+            Object::Plain(plain) => plain.prototype,
+            Object::Array(array) => array.prototype,
+            Object::Function(function) => function.prototype,
+            Object::Promise(promise) => promise.prototype,
+            Object::BuiltinStatic(builtin) => builtin.prototype,
+            Object::Native(_) | Object::Resolution(_) | Object::Environment(_) => None,
+        })
+    }
+
     pub(crate) fn get_member(&self, object: &Value, key: &Value) -> Result<Value, VmError> {
         let key = property_key(key)?;
         let id = object_id(object, "property access on a non-object")?;
-        match self.get(id)? {
-            Object::Plain(plain) => Ok(plain.get(&key)),
-            Object::Array(array) => Ok(array.get(&key)),
-            _ => Err(VmError::InvalidState(format!(
-                "object {id} does not expose script properties"
-            ))),
+        self.get_property(id, &key)
+    }
+
+    pub(crate) fn get_property(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
+        let mut current = id;
+        let mut seen = BTreeSet::new();
+        loop {
+            if !seen.insert(current) {
+                return Err(VmError::InvalidState(format!(
+                    "prototype chain of object {id} is cyclic"
+                )));
+            }
+            if let Some(value) = self.own_property(current, key)? {
+                return Ok(value);
+            }
+            match self.internal_prototype(current)? {
+                Some(next) => {
+                    if !self.contains(next) {
+                        return Err(VmError::InvalidState(format!(
+                            "object {current} prototype {next} does not exist"
+                        )));
+                    }
+                    if self.is_environment(next) == Some(true) {
+                        return Err(VmError::InvalidState(format!(
+                            "object {current} prototype {next} is an environment"
+                        )));
+                    }
+                    current = next;
+                }
+                None => return Ok(Value::Undefined),
+            }
         }
     }
 
@@ -574,12 +673,33 @@ impl Heap {
     ) -> Result<(), VmError> {
         let key = property_key(key)?;
         let id = object_id(object, "property write on a non-object")?;
+        self.set_own_key(id, &key, value)
+    }
+
+    /// Writes an own data property. Does not walk the chain or apply readonly checks.
+    pub(crate) fn set_own(&mut self, id: ObjectId, key: &str, value: Value) -> Result<(), VmError> {
+        self.set_own_key(id, key, value)
+    }
+
+    fn set_own_key(&mut self, id: ObjectId, key: &str, value: Value) -> Result<(), VmError> {
         match self.get_mut(id)? {
             Object::Plain(plain) => {
-                plain.set(key, value);
+                plain.props.insert(key.to_owned(), value);
                 Ok(())
             }
-            Object::Array(array) => array.set(&key, value),
+            Object::Function(function) => {
+                function.props.insert(key.to_owned(), value);
+                Ok(())
+            }
+            Object::Promise(promise) => {
+                promise.props.insert(key.to_owned(), value);
+                Ok(())
+            }
+            Object::BuiltinStatic(builtin) => {
+                builtin.props.insert(key.to_owned(), value);
+                Ok(())
+            }
+            Object::Array(array) => array.set(key, value),
             _ => Err(VmError::InvalidState(format!(
                 "object {id} does not expose script properties"
             ))),

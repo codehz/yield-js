@@ -1,12 +1,12 @@
 //! Interpreter. A step either continues, leaves the frame, or throws.
 //! Handlers run in one place; call sites do not each reimplement catch.
 
-use crate::builtins::BuiltinCall;
+use crate::builtins::type_error;
 use crate::bytecode::{ExceptionHandler, Instr, Slot, SlotKind, UnaryOp};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::host::{Host, HostReply};
-use crate::ops::{self, property_key, unary_op};
+use crate::ops::{self, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
 use crate::value::{ObjectId, Value};
@@ -148,11 +148,21 @@ impl Vm {
                 args,
             } => {
                 let args = frame.read_list(&args)?;
-                let invocation = self.call_function(host, function, None, args)?;
+                let invocation =
+                    self.call_function(host, function, None, args, &Value::Undefined)?;
                 store_invocation(frame, dst, invocation)
             }
-            Instr::CallValue { dst, callee, args } => {
-                self.call_value(host, frame, dst, callee, args)
+            Instr::CallValue {
+                dst,
+                callee,
+                args,
+                receiver,
+            } => self.call_value(host, frame, dst, callee, args, receiver),
+            Instr::Construct { dst, callee, args } => {
+                let args = frame.read_list(&args)?;
+                let callee = frame.read(callee)?;
+                let invocation = self.construct(host, &callee, args)?;
+                store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
             Instr::NewObject { dst } => {
@@ -172,40 +182,27 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetBuiltin { dst, builtin } => {
-                let id = self.ensure_top(builtin)?;
+                let id = self.builtin_id(builtin)?;
                 frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
-            Instr::CallBuiltin { dst, builtin, args } => {
-                let args = frame.read_list(&args)?;
-                let call = match builtin {
-                    0 => BuiltinCall::Constructor,
-                    1 => BuiltinCall::QueueMicrotask,
-                    _ => {
-                        return Err(VmError::InvalidState(format!(
-                            "builtin {builtin} does not exist"
-                        )));
-                    }
-                };
-                let invocation = self.call_builtin(host, call, args)?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::GetBuiltinMember { dst, builtin, key } => {
-                let Value::String(name) = self.constant(key)? else {
-                    return Err(VmError::InvalidState(
-                        "GetBuiltinMember key is not a string".to_owned(),
-                    ));
-                };
-                if let Err(thrown) = Self::known_static_member(builtin, &name) {
-                    return Ok(Step::Throw(thrown));
-                }
-                let id = self.ensure_static(builtin, Some(&name))?;
+            Instr::GetTopFunction { dst, function } => {
+                let id = self.top_function(function)?;
                 frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
             Instr::SetMember { object, key, src } => {
+                let object_value = frame.read(object)?;
+                let key_value = frame.read(key)?;
+                if let Value::String(name) = &key_value
+                    && self.prototype_write_rejected(&object_value, name)
+                {
+                    return Ok(Step::Throw(type_error(
+                        "Cannot assign to read only property 'prototype'",
+                    )));
+                }
                 self.heap
-                    .set_member(&frame.read(object)?, &frame.read(key)?, frame.read(src)?)?;
+                    .set_member(&object_value, &key_value, frame.read(src)?)?;
                 Ok(Step::Next)
             }
             Instr::GetBinding { dst, binding } => {
@@ -255,25 +252,19 @@ impl Vm {
         dst: Slot,
         callee: Slot,
         args: Vec<Slot>,
+        receiver: Option<Slot>,
     ) -> Result<Step, VmError> {
         let args = frame.read_list(&args)?;
         let callee = frame.read(callee)?;
-        let invocation = self.invoke(host, &callee, args)?;
+        let receiver = match receiver {
+            Some(slot) => frame.read(slot)?,
+            None => Value::Undefined,
+        };
+        let invocation = self.invoke(host, &callee, args, &receiver)?;
         store_invocation(frame, dst, invocation)
     }
 
     fn read_member(&mut self, object: &Value, key: &Value) -> Result<Value, VmError> {
-        if let Value::Object(id) = object
-            && self.heap.get(*id)?.as_promise().is_some()
-        {
-            let name = property_key(key)?;
-            return match name.as_str() {
-                "then" | "catch" | "finally" => Ok(Value::Object(self.ensure_method(*id, name)?)),
-                _ => Err(VmError::InvalidState(format!(
-                    "object {id} does not expose script properties"
-                ))),
-            };
-        }
         self.heap.get_member(object, key)
     }
 
@@ -286,7 +277,7 @@ impl Vm {
         let env = frame.env.ok_or_else(|| {
             VmError::InvalidState("closure without an invocation environment".into())
         })?;
-        let id = self.heap.alloc_function(func_id, Some(env));
+        let id = self.materialize_function(func_id, Some(env))?;
         frame.write(dst, Value::Object(id))?;
         Ok(Step::Next)
     }

@@ -24,6 +24,9 @@ pub(crate) fn classify(functions: &[LoweredFunction]) -> Result<BindingFacts, Co
         for binding in &function.param_bindings {
             record_owner(&mut owners, *binding, function.func_id)?;
         }
+        if let Some(binding) = function.this_binding {
+            record_owner(&mut owners, binding, function.func_id)?;
+        }
         for instruction in &function.code {
             if let Instr::DeclareBinding { binding } = instruction {
                 record_owner(&mut owners, *binding, function.func_id)?;

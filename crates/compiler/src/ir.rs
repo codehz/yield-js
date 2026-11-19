@@ -30,7 +30,10 @@ pub(crate) struct LoweredFunction {
     pub(crate) func_id: u32,
     pub(crate) name: String,
     pub(crate) is_async: bool,
+    pub(crate) is_arrow: bool,
     pub(crate) param_bindings: Vec<BindingId>,
+    /// Implicit receiver. Not a source parameter and not a JavaScript argument.
+    pub(crate) this_binding: Option<BindingId>,
     /// Non-shared bindings assigned a fresh logical register, in `BindingId` order.
     pub(crate) promoted: BTreeMap<BindingId, LogicalReg>,
     pub(crate) reg_count: u16,

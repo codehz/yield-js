@@ -9,10 +9,10 @@ use oxc::syntax::operator::{
 use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Constant, Instr, Slot, UnaryOp};
 
-use super::{FunctionSource, Lowerer};
+use super::{FunctionSource, Lowerer, THIS_BINDING};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
-use crate::names::{Callee, ValueName, builtin_index};
+use crate::names::{Callee, ValueName};
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_expression<'node>(
@@ -106,13 +106,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ArrayExpression(expression) => self.compile_array(expression),
             Expression::StaticMemberExpression(member) => self.compile_static_member_value(member),
             Expression::ComputedMemberExpression(member) => {
-                if self.builtin_object(&member.object) {
-                    return Err(unsupported(
-                        self.source_text(),
-                        member.span,
-                        "computed member on a builtin",
-                    ));
-                }
                 let (object, key) = self.compile_computed_member(member)?;
                 let dst = self.alloc_reg()?;
                 self.emit(Instr::GetMember {
@@ -123,6 +116,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(dst)
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
+            Expression::ThisExpression(expression) => self.compile_this(expression.span),
             Expression::FunctionExpression(function) => {
                 let hint = function
                     .id
@@ -172,10 +166,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
+            ValueName::TopFunction(function) => {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetTopFunction {
+                    dst: self.slot(dst),
+                    function,
+                });
+                Ok(dst)
+            }
             ValueName::NotFirstClass => Err(CompileError::new(
                 self.source_text(),
                 identifier.span,
-                format!("function/import value {name:?} is not first-class in this PoC"),
+                format!("import value {name:?} is not first-class in this PoC"),
             )),
             ValueName::Unknown => Err(CompileError::new(
                 self.source_text(),
@@ -360,6 +362,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         dst: self.slot(dst),
                         callee: self.slot(callee),
                         args,
+                        receiver: None,
                     });
                     return Ok(dst);
                 }
@@ -384,12 +387,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     return Ok(dst);
                 }
                 Callee::Builtin(index) => {
+                    let callee = self.alloc_reg()?;
+                    self.emit(Instr::GetBuiltin {
+                        dst: self.slot(callee),
+                        builtin: index as u32,
+                    });
                     let args = self.compile_argument_slice(&expression.arguments)?;
                     let dst = self.alloc_reg()?;
-                    self.emit(Instr::CallBuiltin {
+                    self.emit(Instr::CallValue {
                         dst: self.slot(dst),
-                        builtin: index as u32,
+                        callee: self.slot(callee),
                         args,
+                        receiver: None,
                     });
                     return Ok(dst);
                 }
@@ -402,8 +411,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
             }
         }
+        if let Some(member) = expression.callee.as_member_expression() {
+            let (object, key) = self.compile_member_parts(member)?;
+            let callee = self.alloc_reg()?;
+            self.emit(Instr::GetMember {
+                dst: self.slot(callee),
+                object: self.slot(object),
+                key: self.slot(key),
+            });
+            let args = self.compile_arguments(expression)?;
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::CallValue {
+                dst: self.slot(dst),
+                callee: self.slot(callee),
+                args,
+                receiver: Some(self.slot(object)),
+            });
+            return Ok(dst);
+        }
 
-        // Member/value callees run before argument evaluation.
         let callee = self.compile_expression(&expression.callee)?;
         let args = self.compile_arguments(expression)?;
         let dst = self.alloc_reg()?;
@@ -411,6 +437,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             dst: self.slot(dst),
             callee: self.slot(callee),
             args,
+            receiver: None,
         });
         Ok(dst)
     }
@@ -442,43 +469,31 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_new(&mut self, expression: &'ast NewExpression<'ast>) -> Result<Reg, CompileError> {
-        if let Expression::Identifier(identifier) = &expression.callee
-            && identifier.name.as_str() == "Promise"
-            && matches!(
-                self.session.names().callee(&self.env, "Promise"),
-                Callee::Builtin(0)
-            )
-        {
-            let args = self.compile_argument_slice(&expression.arguments)?;
-            let dst = self.alloc_reg()?;
-            self.emit(Instr::CallBuiltin {
-                dst: self.slot(dst),
-                builtin: 0,
-                args,
-            });
-            return Ok(dst);
-        }
-        let name = match &expression.callee {
-            Expression::Identifier(identifier) => identifier.name.as_str(),
-            _ => "expression",
-        };
-        Err(CompileError::new(
-            self.source_text(),
-            expression.span,
-            format!("unsupported syntax: 'new' {name}"),
-        ))
+        let callee = self.compile_expression(&expression.callee)?;
+        let args = self.compile_argument_slice(&expression.arguments)?;
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::Construct {
+            dst: self.slot(dst),
+            callee: self.slot(callee),
+            args,
+        });
+        Ok(dst)
     }
 
-    fn builtin_object(&self, object: &Expression<'_>) -> bool {
-        let Expression::Identifier(identifier) = object else {
-            return false;
+    fn compile_this(&mut self, span: oxc::span::Span) -> Result<Reg, CompileError> {
+        let Some(binding) = self.lookup(THIS_BINDING) else {
+            return Err(CompileError::new(
+                self.source_text(),
+                span,
+                "this is not available",
+            ));
         };
-        matches!(
-            self.session
-                .names()
-                .value(&self.env, identifier.name.as_str()),
-            ValueName::Builtin(_)
-        )
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::GetBinding {
+            dst: self.slot(dst),
+            binding,
+        });
+        Ok(dst)
     }
 
     fn compile_static_member_value(
@@ -491,24 +506,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 member.span,
                 "optional member access",
             ));
-        }
-        if let Expression::Identifier(object) = &member.object
-            && let Some(index) = builtin_index(object.name.as_str())
-            && matches!(
-                self.session.names().value(&self.env, object.name.as_str()),
-                ValueName::Builtin(_)
-            )
-        {
-            let key = self
-                .session
-                .intern(Constant::String(member.property.name.as_str().to_owned()));
-            let dst = self.alloc_reg()?;
-            self.emit(Instr::GetBuiltinMember {
-                dst: self.slot(dst),
-                builtin: index as u32,
-                key,
-            });
-            return Ok(dst);
         }
         let (object, key) = self.compile_static_member(member)?;
         let dst = self.alloc_reg()?;

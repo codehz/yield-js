@@ -16,8 +16,8 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Throw { .. }
             | Instr::CallFunction { .. }
             | Instr::CallValue { .. }
-            | Instr::CallBuiltin { .. }
-            | Instr::GetBuiltinMember { .. }
+            | Instr::Construct { .. }
+            | Instr::SetMember { .. }
     )
 }
 
@@ -47,14 +47,33 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             }
             defs.insert(dst.index);
         }
-        Instr::CallValue { dst, callee, args } => {
+        Instr::CallValue {
+            dst,
+            callee,
+            args,
+            receiver,
+        } => {
+            uses.insert(callee.index);
+            for arg in args {
+                uses.insert(arg.index);
+            }
+            if let Some(slot) = receiver {
+                uses.insert(slot.index);
+            }
+            defs.insert(dst.index);
+        }
+        Instr::Construct { dst, callee, args } => {
             uses.insert(callee.index);
             for arg in args {
                 uses.insert(arg.index);
             }
             defs.insert(dst.index);
         }
-        Instr::Closure { dst, .. } | Instr::NewObject { dst } | Instr::GetBinding { dst, .. } => {
+        Instr::Closure { dst, .. }
+        | Instr::NewObject { dst }
+        | Instr::GetBinding { dst, .. }
+        | Instr::GetBuiltin { dst, .. }
+        | Instr::GetTopFunction { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::NewArray { dst, elements } => {
@@ -84,15 +103,6 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Jump { .. } => {}
         Instr::BranchFalse { cond, .. } => {
             uses.insert(cond.index);
-        }
-        Instr::GetBuiltin { dst, .. } | Instr::GetBuiltinMember { dst, .. } => {
-            defs.insert(dst.index);
-        }
-        Instr::CallBuiltin { dst, args, .. } => {
-            for arg in args {
-                uses.insert(arg.index);
-            }
-            defs.insert(dst.index);
         }
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
@@ -137,7 +147,18 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             function,
             args: args.into_iter().map(remap).collect(),
         },
-        Instr::CallValue { dst, callee, args } => Instr::CallValue {
+        Instr::CallValue {
+            dst,
+            callee,
+            args,
+            receiver,
+        } => Instr::CallValue {
+            dst: remap(dst),
+            callee: remap(callee),
+            args: args.into_iter().map(remap).collect(),
+            receiver: receiver.map(remap),
+        },
+        Instr::Construct { dst, callee, args } => Instr::Construct {
             dst: remap(dst),
             callee: remap(callee),
             args: args.into_iter().map(remap).collect(),
@@ -186,15 +207,9 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             builtin,
         },
-        Instr::CallBuiltin { dst, builtin, args } => Instr::CallBuiltin {
+        Instr::GetTopFunction { dst, function } => Instr::GetTopFunction {
             dst: remap(dst),
-            builtin,
-            args: args.into_iter().map(remap).collect(),
-        },
-        Instr::GetBuiltinMember { dst, builtin, key } => Instr::GetBuiltinMember {
-            dst: remap(dst),
-            builtin,
-            key,
+            function,
         },
     }
 }

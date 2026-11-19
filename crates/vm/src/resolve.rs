@@ -59,6 +59,7 @@ impl Vm {
                     host,
                     &then_fn,
                     vec![Value::Object(resolve_id), Value::Object(reject_id)],
+                    &Value::Object(id),
                 )?;
                 if let Invocation::Thrown(error) = invocation {
                     self.capability_call(host, reject_id, error)?;
@@ -71,15 +72,19 @@ impl Vm {
     }
 
     pub(crate) fn thenable_then(&self, id: ObjectId) -> Result<Option<Value>, VmError> {
-        let then = match self.heap.get(id)? {
-            Object::Plain(plain) => plain.props.get("then").cloned(),
-            Object::Array(_) => Some(
-                self.heap
-                    .get_member(&Value::Object(id), &Value::String("then".to_owned()))?,
-            ),
-            _ => return Ok(None),
-        };
-        Ok(then.filter(|value| self.is_callable(value)))
+        if matches!(
+            self.heap.get(id)?,
+            Object::Environment(_) | Object::Native(_)
+        ) {
+            return Ok(None);
+        }
+        let then = self
+            .heap
+            .get_member(&Value::Object(id), &Value::String("then".to_owned()))?;
+        if matches!(then, Value::Undefined) {
+            return Ok(None);
+        }
+        Ok(Some(then).filter(|value| self.is_callable(value)))
     }
 
     pub(crate) fn is_assimilable(&self, value: &Value) -> Result<bool, VmError> {
@@ -123,7 +128,7 @@ impl Vm {
         if !self.is_callable(&on_finally) {
             return self.apply_saved(host, result, &settlement.to_state());
         }
-        match self.invoke(host, &on_finally, Vec::new())? {
+        match self.invoke(host, &on_finally, Vec::new(), &Value::Undefined)? {
             Invocation::Thrown(error) => self.reject_if_open(result, error),
             Invocation::Value(value) => {
                 if self.is_assimilable(&value)? {

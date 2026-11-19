@@ -11,7 +11,9 @@ mod stmt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxc::ast::ast::*;
+use oxc::ast_visit::Visit;
 use oxc::span::{GetSpan, Span};
+use oxc::syntax::scope::ScopeFlags;
 use yield_vm::BindingId;
 use yield_vm::bytecode::{Constant, Instr};
 
@@ -73,6 +75,10 @@ impl FunctionSource<'_> {
             Self::Arrow(arrow) => arrow.r#async,
         }
     }
+
+    fn is_arrow(self) -> bool {
+        matches!(self, Self::Arrow(_))
+    }
 }
 
 struct Task<'ast> {
@@ -90,10 +96,12 @@ struct Lowerer<'ast, 'borrow, 'src> {
     source: FunctionSource<'ast>,
     span: Span,
     is_async: bool,
+    is_arrow: bool,
     env: Env,
     emit: Emitter<'src>,
     control: Control,
     param_bindings: Vec<BindingId>,
+    this_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
 }
 
@@ -123,10 +131,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             source: task.source,
             span,
             is_async,
+            is_arrow: task.source.is_arrow(),
             env: Env::new(task.outer_scopes),
             emit: Emitter::new(source_text, span),
             control: Control::new(),
             param_bindings: Vec::new(),
+            this_binding: None,
             hoisted: BTreeSet::new(),
         }
     }
@@ -134,6 +144,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn compile(&mut self) -> Result<LoweredFunction, CompileError> {
         let source = self.source;
         self.compile_parameters(source)?;
+        self.install_this_binding(source);
         match source {
             FunctionSource::Function(function) => {
                 let body = function.body.as_ref().ok_or_else(|| {
@@ -185,7 +196,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             func_id: self.func_id,
             name: self.name.clone(),
             is_async: self.is_async,
+            is_arrow: self.is_arrow,
             param_bindings: self.param_bindings.clone(),
+            this_binding: self.this_binding,
             promoted: BTreeMap::new(),
             reg_count: self.emit.reg_count(),
             code: self.emit.take_code(),
@@ -193,6 +206,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             handlers: self.control.take_handlers(),
             span: self.span,
         })
+    }
+    fn install_this_binding(&mut self, source: FunctionSource<'ast>) {
+        if self.is_arrow || !function_uses_this(source) {
+            return;
+        }
+        let binding = self.alloc_binding();
+        self.env.insert_function(THIS_BINDING.to_owned(), binding);
+        self.this_binding = Some(binding);
     }
 
     fn compile_parameters(&mut self, source: FunctionSource<'ast>) -> Result<(), CompileError> {
@@ -596,4 +617,31 @@ fn as_binding_kind(
             },
         )),
     }
+}
+
+/// Not a JavaScript identifier, so script cannot name or shadow this binding.
+pub(super) const THIS_BINDING: &str = "\0this";
+
+fn function_uses_this(source: FunctionSource<'_>) -> bool {
+    let FunctionSource::Function(function) = source else {
+        return false;
+    };
+    let Some(body) = &function.body else {
+        return false;
+    };
+    let mut scan = ThisScan { found: false };
+    scan.visit_function_body(body);
+    scan.found
+}
+
+struct ThisScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for ThisScan {
+    fn visit_this_expression(&mut self, _: &ThisExpression) {
+        self.found = true;
+    }
+
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
 }

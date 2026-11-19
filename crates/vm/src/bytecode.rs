@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 4;
+pub const BYTECODE_VERSION: u32 = 5;
 
 /// VM-provided callable names, in builtin-index order.
 ///
@@ -138,6 +138,15 @@ pub enum Instr {
         dst: Slot,
         callee: Slot,
         args: Vec<Slot>,
+        /// `None` is a bare call (`this` is `undefined`). `Some` is the member
+        /// base, evaluated once and passed as the receiver.
+        receiver: Option<Slot>,
+    },
+    /// Constructs `callee` with `args`. The new instance, not a member base, is `this`.
+    Construct {
+        dst: Slot,
+        callee: Slot,
+        args: Vec<Slot>,
     },
     /// Creates a closure that captures the frame's current environment.
     Closure {
@@ -192,22 +201,16 @@ pub enum Instr {
     Throw {
         src: Slot,
     },
-    /// Loads a cached builtin function value (`Promise` or `queueMicrotask`).
+    /// Loads a cached builtin value (`Promise` or `queueMicrotask`).
     GetBuiltin {
         dst: Slot,
         builtin: u32,
     },
-    /// Calls a top-level builtin. `builtin` is an index into [`BUILTINS`].
-    CallBuiltin {
+    /// Loads the VM's single top-level function object. Direct calls stay
+    /// [`Instr::CallFunction`] and do not materialize that object.
+    GetTopFunction {
         dst: Slot,
-        builtin: u32,
-        args: Vec<Slot>,
-    },
-    /// Loads a static method such as `Promise.resolve`. `key` is a string constant.
-    GetBuiltinMember {
-        dst: Slot,
-        builtin: u32,
-        key: u32,
+        function: u32,
     },
 }
 
@@ -247,8 +250,12 @@ pub struct Function {
     pub func_id: u32,
     pub name: String,
     pub is_async: bool,
-    /// Parameter destinations in source order.
+    pub is_arrow: bool,
+    /// Parameter destinations in source order. Does not include [`Self::this_param`].
     pub params: Vec<ParamTarget>,
+    /// Receiver binding when this function, or an arrow nested in it, uses `this`.
+    /// Not a JavaScript argument.
+    pub this_param: Option<ParamTarget>,
     pub transient_slots: u16,
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
@@ -264,9 +271,13 @@ impl Function {
     /// protocol even when this function's own bindings were promoted.
     pub fn needs_environment(&self) -> bool {
         if self
-            .params
-            .iter()
-            .any(|param| matches!(param, ParamTarget::Binding(_)))
+            .this_param
+            .as_ref()
+            .is_some_and(|param| matches!(param, ParamTarget::Binding(_)))
+            || self
+                .params
+                .iter()
+                .any(|param| matches!(param, ParamTarget::Binding(_)))
         {
             return true;
         }
@@ -455,6 +466,22 @@ impl Build {
                 }
             }
         }
+        if let Some(param) = &function.this_param {
+            match param {
+                ParamTarget::Binding(binding) => {
+                    if !seen_bindings.insert(*binding) {
+                        return Err(format!("{location}: duplicate parameter binding {binding}"));
+                    }
+                }
+                ParamTarget::Slot(slot) => {
+                    check_slot(*slot, "this")?;
+                    if seen_slots.contains(slot) {
+                        return Err(format!("{location}: duplicate parameter slot {slot:?}"));
+                    }
+                    seen_slots.push(*slot);
+                }
+            }
+        }
 
         for (pc, instr) in function.code.iter().enumerate() {
             let check_target = |target: u32, what: &str| -> Result<(), String> {
@@ -515,11 +542,26 @@ impl Build {
                         check_slot(*arg, "CallFunction.arg")?;
                     }
                 }
-                Instr::CallValue { dst, callee, args } => {
+                Instr::CallValue {
+                    dst,
+                    callee,
+                    args,
+                    receiver,
+                } => {
                     check_slot(*dst, "CallValue.dst")?;
                     check_slot(*callee, "CallValue.callee")?;
                     for arg in args {
                         check_slot(*arg, "CallValue.arg")?;
+                    }
+                    if let Some(slot) = receiver {
+                        check_slot(*slot, "CallValue.receiver")?;
+                    }
+                }
+                Instr::Construct { dst, callee, args } => {
+                    check_slot(*dst, "Construct.dst")?;
+                    check_slot(*callee, "Construct.callee")?;
+                    for arg in args {
+                        check_slot(*arg, "Construct.arg")?;
                     }
                 }
                 Instr::Closure {
@@ -576,28 +618,15 @@ impl Build {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
                 }
-                Instr::CallBuiltin { dst, builtin, args } => {
-                    check_slot(*dst, "CallBuiltin.dst")?;
-                    self.check_builtin(*builtin, &location, pc, "CallBuiltin")?;
-                    for arg in args {
-                        check_slot(*arg, "CallBuiltin.arg")?;
-                    }
-                }
-                Instr::GetBuiltinMember { dst, builtin, key } => {
-                    check_slot(*dst, "GetBuiltinMember.dst")?;
-                    self.check_builtin(*builtin, &location, pc, "GetBuiltinMember")?;
-                    match self.constants.get(*key as usize) {
-                        Some(Constant::String(_)) => {}
-                        Some(_) => {
-                            return Err(format!(
-                                "{location}: GetBuiltinMember at pc {pc} key {key} is not a string constant"
-                            ));
-                        }
-                        None => {
-                            return Err(format!(
-                                "{location}: GetBuiltinMember at pc {pc} references constant {key}"
-                            ));
-                        }
+                Instr::GetTopFunction {
+                    dst,
+                    function: callee,
+                } => {
+                    check_slot(*dst, "GetTopFunction.dst")?;
+                    if self.function(*callee).is_none() {
+                        return Err(format!(
+                            "{location}: GetTopFunction at pc {pc} references function {callee}"
+                        ));
                     }
                 }
             }

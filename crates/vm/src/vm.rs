@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::builtins::BuiltinCacheKey;
+use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -18,14 +18,18 @@ pub struct Vm {
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<String, Value>,
     next_continuation_id: ContinuationId,
-    pub(crate) builtins: BTreeMap<BuiltinCacheKey, ObjectId>,
+    pub(crate) builtins: BuiltinRoots,
+    /// Materialized top-level function objects, keyed by function id.
+    pub(crate) functions: BTreeMap<u32, ObjectId>,
 }
 
 impl Vm {
     pub fn new(build: Build, host: &dyn Host) -> Result<Self, VmError> {
         build.validate().map_err(VmError::InvalidBuild)?;
         Self::check_imports(&build, host)?;
-        Ok(Self::empty(build))
+        let mut vm = Self::empty(build);
+        vm.init_builtins();
+        Ok(vm)
     }
 
     fn empty(build: Build) -> Self {
@@ -37,7 +41,8 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
             next_continuation_id: 1,
-            builtins: BTreeMap::new(),
+            builtins: BuiltinRoots::default(),
+            functions: BTreeMap::new(),
         }
     }
 
@@ -73,7 +78,8 @@ impl Vm {
             .iter()
             .map(|value| self.host_to_value(value))
             .collect::<Result<Vec<_>, _>>()?;
-        self.call_function(host, func_id, None, args)?.into_result()
+        self.call_function(host, func_id, None, args, &Value::Undefined)?
+            .into_result()
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the
@@ -306,14 +312,24 @@ impl Vm {
         func_id: u32,
         parent_env: Option<ObjectId>,
         args: Vec<Value>,
+        receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
         let params = self.build.functions[function_index].params.clone();
+        let this_param = self.build.functions[function_index].this_param.clone();
         let async_promise = is_async.then(|| self.heap.alloc_promise());
 
         let mut bindings = BTreeMap::new();
         let mut slot_args = Vec::new();
+        if let Some(param) = this_param {
+            match param {
+                ParamTarget::Binding(binding) => {
+                    bindings.insert(binding, receiver.clone());
+                }
+                ParamTarget::Slot(slot) => slot_args.push((slot, receiver.clone())),
+            }
+        }
         for (index, param) in params.into_iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Undefined);
             match param {
@@ -356,7 +372,10 @@ impl Vm {
         continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
         operations: BTreeMap<String, PendingOperation>,
         globals: BTreeMap<String, Value>,
+        builtins: BuiltinRoots,
+        functions: BTreeMap<u32, ObjectId>,
     ) -> Self {
+        heap.promise_prototype = Some(builtins.promise_prototype);
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
         Self {
@@ -367,7 +386,8 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals,
             next_continuation_id,
-            builtins: BTreeMap::new(),
+            builtins,
+            functions,
         }
     }
 }

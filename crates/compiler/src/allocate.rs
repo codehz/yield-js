@@ -83,11 +83,23 @@ pub(crate) fn allocate(
         })
         .collect::<Vec<_>>();
 
+    let this_param = lowered
+        .this_binding
+        .map(|binding| match lowered.promoted.get(&binding) {
+            Some(reg) => ParamTarget::Slot(layout.remap(Slot {
+                kind: SlotKind::Transient,
+                index: *reg,
+            })),
+            None => ParamTarget::Binding(binding),
+        });
+
     Ok(BytecodeFunction {
         func_id: lowered.func_id,
         name: lowered.name,
         is_async: lowered.is_async,
+        is_arrow: lowered.is_arrow,
         params,
+        this_param,
         transient_slots: layout.transient_count,
         persistent_slots: layout.persistent_count,
         code,
