@@ -1481,15 +1481,13 @@ impl Vm {
         match name {
             "call" => self.invoke(host, receiver, args.collect(), &this_arg),
             "apply" => {
-                let args = match args.next() {
+                let list = args.next();
+                let args = match list {
                     None | Some(Value::Undefined | Value::Null) => Vec::new(),
-                    Some(Value::Object(id)) if let Object::Array(array) = self.heap.get(id)? => {
-                        match self.read_array_elements(host, id, array.length)? {
-                            Ok(values) => values,
-                            Err(error) => return Ok(Invocation::Thrown(error)),
-                        }
-                    }
-                    _ => return self.throw_type_error("createListFromArrayLike"),
+                    Some(list) => match self.arguments_from_array_like(host, &list)? {
+                        Ok(values) => values,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    },
                 };
                 self.invoke(host, receiver, args, &this_arg)
             }
@@ -2295,22 +2293,6 @@ impl Vm {
             self.heap.combines.insert(result, state);
         }
         Ok(Invocation::Value(Value::Object(result)))
-    }
-
-    fn read_array_elements(
-        &mut self,
-        host: &mut dyn Host,
-        id: ObjectId,
-        length: usize,
-    ) -> Result<Result<Vec<Value>, Value>, VmError> {
-        let mut values = Vec::new();
-        for index in 0..length {
-            match self.read_array_index(host, id, index)? {
-                Invocation::Value(value) => values.push(value),
-                Invocation::Thrown(error) => return Ok(Err(error)),
-            }
-        }
-        Ok(Ok(values))
     }
 
     pub(crate) fn alloc_capability_pair(
