@@ -42,16 +42,16 @@ cargo run -p yield-poc
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this` 与预置参数可跨 `await` 快照恢复；绑定函数不支持 `new`，没有自有属性或原型。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
-- 普通对象与数组字面量共享 `Object.prototype`，可调用 `hasOwnProperty`；尚无 `Object` 全局或 `Array.prototype`。
+- 普通对象与数组字面量共享 `Object.prototype`，可调用 `hasOwnProperty`（含 Symbol 键）；尚无 `Object` 全局或 `Array.prototype`。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
-- 内建包括 `Error`、`TypeError`、`queueMicrotask` 与 `Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）。内建单例、共享原型与已物化的顶层函数对象进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
+- 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例、共享原型与已物化的顶层函数对象进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
-- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层函数表和脚本根出发。
-- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、顶层函数身份、缺失 operation、缺失 native 绑定。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
+- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层函数表和脚本根出发。`Symbol.iterator` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
+- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、顶层函数身份、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
 - 快照要求微任务队列已排空。
 
 ## 当前子集
@@ -74,6 +74,6 @@ cargo run -p yield-poc
 - `for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
-- VM 内部抛出的错误仍是字符串。`Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。没有 `Symbol`、`Date`、`RegExp`、`JSON` 和 `Math`。
+- VM 内部抛出的错误仍是字符串。`Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。Symbol 不能 `new`、不能跨宿主边界，参与强制数值/字符串转换时抛可捕获的 `TypeError`。没有 `Date`、`RegExp`、`JSON` 和 `Math`。
 - 运行期 tracing GC（目前有对象表与快照可达性遍历，没有回收器）。
 - C ABI、Apple/Android 宿主适配器、React/Solid 验收。

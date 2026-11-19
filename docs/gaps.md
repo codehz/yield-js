@@ -5,15 +5,15 @@
 
 ## 1. 值模型缺口
 
-当前 `Value`：`Undefined / Null / Bool / Number(f64) / String / Object(ObjectId)`。
+当前 `Value`：`Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。
 
 | 特性 | 目标（design.md） | 现状 | 缺口性质 |
 | --- | --- | --- | --- |
-| `Symbol` | 支持，含 `Symbol.for/keyFor`、`Symbol.iterator`，快照保留注册表与身份 | 无 Symbol 值；属性键仅为字符串 | 值类型 + 快照契约 |
+| `Symbol` | 支持，含 `Symbol.for/keyFor`、`Symbol.iterator`，快照保留注册表与身份 | 已支持：`Symbol()`/`Symbol.for/keyFor`/`Symbol.iterator`，`PropertyKey::Symbol` 分表存储，快照 v8 保留描述、注册表与高水位（iterator 与注册项恒为根）；Symbol 不可跨宿主边界，不能 `new` | 已落地 |
 | 正则字面量 | `RegExp` 支持 | 字面量与 `RegExp` 内建均无（落到 fallback 表达式拒绝） | 内建 + 字面量编译 |
 | `BigInt` | （设计未列） | 无；`Build::validate` 拒绝非有限数，`1n` 直接走"表达式形式超出子集"拒绝 | 未列入首版契约 |
 | 数字语义 | 标准 | f64 直接编码，无 -0/-NaN 规范化问题，但无 `Number` 包装 | 部分覆盖 |
-| `type_of` | `"function"`、`"symbol"` 等 | 只有 5 种返回值；可调用对象归入 `"object"`，没有 function/object 之分 | 值模型 |
+| `type_of` | `"function"`、`"symbol"` 等 | 已含 `"symbol"`；可调用对象报 `"function"`（`exec.rs::unary`），不可调用对象仍是 `"object"` | 部分覆盖 |
 
 ## 2. 编译期已拒绝（`lower` 各处显式 `unsupported`）
 
@@ -52,7 +52,7 @@
 | --- | --- | --- |
 | `arguments` | 支持（严格模式 `arguments`） | 无任何绑定或降级；引用即"unknown binding"/未知名 |
 | 原型链、属性描述符、getter/setter 运行时 | 支持 | 堆只有对象/数组/闭包/promise 等，无 `GetMember` 的原型查找语义说明；getter/setter 仅编译期存在（`DefineProperty` 带种类），行为依赖堆实现 |
-| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | `BUILTINS` 只有 `["Promise", "queueMicrotask", "Error", "TypeError"]` |
+| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | `BUILTINS` 只有 `["Promise", "queueMicrotask", "Error", "TypeError", "Symbol"]` |
 | 完整 ECMAScript TDZ | 明确不做 | `pending_lexicals` 仅本函数静态检查；闭包提前读得 `undefined` |
 | 循环每轮新绑定 | 明确不做 | 共享绑定 |
 | 名称策略例外 | — | `typeof` 对被局部遮蔽的 import/顶层函数报 `"function"`（有意保留，`names.rs`） |
@@ -61,10 +61,10 @@
 
 ## 4. 结构性缺口（影响后续所有语法特性）
 
-1. **值模型单类型化**：加 `Symbol`/`BigInt`/`RegExp` 都要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`。
+1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **`for…in`/`for…of` 无迭代器协议**：缺 Symbol 值类型就没有 `Symbol.iterator`，两者绑定。
-4. **解构与 rest/spread 共享同一条路径**：数组/对象解构、实参展开、`Function.prototype.apply` 都缺"把迭代或枚举编译成循环"的下限（无 `Symbol.iterator`、无 `Object.keys` 运行时）。
+3. **`for…in`/`for…of` 无迭代器协议**：`Symbol.iterator` 值已存在（保留 id 0），但无可调用迭代协议、无 for…of。
+4. **解构与 rest/spread 共享同一条路径**：数组/对象解构、实参展开、`Function.prototype.apply` 都缺"把迭代或枚举编译成循环"的下限（无迭代协议、无 `Object.keys` 运行时；`Symbol.iterator` 值已可用作属性键）。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 
