@@ -44,7 +44,7 @@ Suspend/resume invariants (do not weaken these):
 - `undefined` is a real value. Frame slot `None` means uninitialized, not `undefined`.
 - Bindings read or written from another function, plus exported bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
-- Settled promises still resume through the microtask queue. `AWAIT` never continues inline.
+- After successful preparation, `Await` always resumes through the microtask queue, even for settled promises. A throwing `constructor` getter transfers control to the script exception handler without suspending.
 - Snapshot roots include the script environment, builtins, pending operations, and caller-supplied script roots. Traverse reachable closure environments and async continuations. Native pointers, host callbacks, and queued microtasks are not in the snapshot. Native objects are `(type, id)` keys.
 - Restore is exact-version: `SNAPSHOT_FORMAT_VERSION`, `BYTECODE_VERSION`, and `build_id` must match. Missing native binding or missing operation rejects the whole restore; the VM must not start. No snapshot migration.
 

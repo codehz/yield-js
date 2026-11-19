@@ -47,7 +47,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 | 语义点 | 现状 |
 | --- | --- |
-| Promise 构造器身份与方法覆写 | `Promise.resolve(p)` 总是新建 Promise，不按 `p.constructor` 判断是否直接返回 `p`；`await` 和内部决议对 VM Promise 走专用路径，不模拟构造器探测或被覆写的 `then` |
+| Promise 方法覆写与派生构造器 | `Promise.prototype.catch` / `finally` 仍走内部反应，不调用接收者覆写的 `then`；`then` / `finally` 不按 `Symbol.species` 选择结果构造器 |
 | Promise 组合子 | `all` / `allSettled` / `race` / `any` 已接入同步迭代协议，但仍使用 VM 内部决议流程，不查找接收者覆写的 `resolve`。`Promise.any` 全拒绝时的拒绝值是字符串 `AggregateError: All promises were rejected`，不是带 `errors` 数组的 `AggregateError` 对象 |
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |

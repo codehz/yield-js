@@ -42,6 +42,30 @@ impl Vm {
         self.resolve_input(result, input)
     }
 
+    /// PromiseResolve(%Promise%, value) can reuse a genuine promise, but only
+    /// after observing its constructor. Resolving functions never do this check.
+    pub(crate) fn promise_identity(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
+        let Value::Object(id) = *value else {
+            return Ok(Ok(None));
+        };
+        if !matches!(self.heap.get(id)?, Object::Promise(_)) {
+            return Ok(Ok(None));
+        }
+        match self.read_property(host, value, PropertyKeyRef::String("constructor"))? {
+            Invocation::Value(Value::Object(constructor))
+                if constructor == self.builtins.promise =>
+            {
+                Ok(Ok(Some(id)))
+            }
+            Invocation::Value(_) => Ok(Ok(None)),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
+    }
+
     fn classify_resolution(
         &mut self,
         host: &mut dyn Host,
@@ -50,13 +74,17 @@ impl Vm {
         let Value::Object(id) = value else {
             return Ok(ResolutionInput::Plain(value));
         };
-        match self.heap.get(id)? {
-            Object::Promise(_) => return Ok(ResolutionInput::Promise(id)),
+        let promise = match self.heap.get(id)? {
             Object::Environment(_) | Object::Native(_) => return Ok(ResolutionInput::Plain(value)),
-            _ => {}
-        }
+            object => matches!(object, Object::Promise(_)),
+        };
         Ok(
             match self.read_property(host, &value, PropertyKeyRef::String("then"))? {
+                // The intrinsic then only installs reactions in this subset.
+                // Keep the direct adoption link for snapshots.
+                Invocation::Value(then) if promise && self.is_intrinsic_promise_then(&then) => {
+                    ResolutionInput::Promise(id)
+                }
                 Invocation::Value(then) if self.is_callable(&then) => ResolutionInput::Thenable {
                     receiver: value,
                     then,
@@ -118,14 +146,18 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         input: Value,
-    ) -> Result<AwaitPrepared, VmError> {
+    ) -> Result<Result<AwaitPrepared, Value>, VmError> {
+        match self.promise_identity(host, &input)? {
+            Ok(Some(id)) => return Ok(Ok(AwaitPrepared::Promise(id))),
+            Ok(None) => {}
+            Err(error) => return Ok(Err(error)),
+        }
         match self.classify_resolution(host, input)? {
-            ResolutionInput::Plain(value) => Ok(AwaitPrepared::Plain(value)),
-            ResolutionInput::Promise(id) => Ok(AwaitPrepared::Promise(id)),
+            ResolutionInput::Plain(value) => Ok(Ok(AwaitPrepared::Plain(value))),
             input => {
                 let promise = self.heap.alloc_promise();
                 self.resolve_input(promise, input)?;
-                Ok(AwaitPrepared::Promise(promise))
+                Ok(Ok(AwaitPrepared::Promise(promise)))
             }
         }
     }

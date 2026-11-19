@@ -456,10 +456,7 @@ impl Vm {
                 self.heap.declare_binding(env, binding)?;
                 Ok(Step::Next)
             }
-            Instr::Await { input, resume, .. } => {
-                self.suspend(host, frame, input, resume)?;
-                Ok(Step::Suspend)
-            }
+            Instr::Await { input, resume, .. } => self.suspend(host, frame, input, resume),
             Instr::Jump { target } => {
                 frame.pc = target as usize;
                 Ok(Step::Next)
@@ -1163,7 +1160,7 @@ impl Vm {
         frame: &Frame,
         input: Slot,
         resume: u32,
-    ) -> Result<(), VmError> {
+    ) -> Result<Step, VmError> {
         let input_value = frame.read(input)?;
         let async_promise = frame
             .async_promise
@@ -1175,7 +1172,10 @@ impl Vm {
             .cloned()
             .ok_or_else(|| VmError::InvalidState(format!("resume {resume} does not exist")))?;
         let values = frame.read_saved(&resume_entry.saved_slots)?;
-        let prepared = self.prepare_await(host, input_value)?;
+        let prepared = match self.prepare_await(host, input_value)? {
+            Ok(prepared) => prepared,
+            Err(error) => return Ok(Step::Throw(error)),
+        };
         let (waiting_on, plain) = match prepared {
             AwaitPrepared::Promise(id) => (Some(id), Value::Undefined),
             AwaitPrepared::Plain(value) => (None, value),
@@ -1192,7 +1192,8 @@ impl Vm {
                 values,
             },
         );
-        self.schedule_resume(continuation_id, waiting_on, plain)
+        self.schedule_resume(continuation_id, waiting_on, plain)?;
+        Ok(Step::Suspend)
     }
 
     fn schedule_resume(

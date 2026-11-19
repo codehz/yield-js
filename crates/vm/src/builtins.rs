@@ -1525,6 +1525,12 @@ impl Vm {
         Ok(Invocation::Value(Value::Undefined))
     }
 
+    pub(crate) fn is_intrinsic_promise_then(&self, value: &Value) -> bool {
+        matches!(value, Value::Object(id) if matches!(self.heap.get(*id),
+            Ok(Object::BuiltinStatic(function))
+                if function.name == "Promise" && function.member.as_deref() == Some("then")))
+    }
+
     fn call_promise_static(
         &mut self,
         host: &mut dyn Host,
@@ -1534,6 +1540,11 @@ impl Vm {
         match name {
             "resolve" => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
+                match self.promise_identity(host, &value)? {
+                    Ok(Some(id)) => return Ok(Invocation::Value(Value::Object(id))),
+                    Ok(None) => {}
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
                 let promise = self.heap.alloc_promise();
                 self.resolve_promise(host, promise, value)?;
                 Ok(Invocation::Value(Value::Object(promise)))

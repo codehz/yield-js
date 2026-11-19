@@ -11,9 +11,9 @@ use yield_vm::bytecode::{BinaryOp, CallArgs, Instr, Slot, UnaryOp};
 use crate::emit::Reg;
 
 /// Whether an instruction can transfer control to a JavaScript exception
-/// handler at this PC. `VmError` is not that control flow, and `Await`'s
-/// rejection path has its own resume entry, so neither counts. Exhaustive so a
-/// new opcode forces an explicit classification.
+/// handler at this PC. `VmError` and `Await`'s asynchronous rejection do
+/// not count; the latter has its own resume entry. `Await` can still throw
+/// here when reading a promise's constructor. Classification is exhaustive.
 ///
 /// Coercion may invoke script (including for loose equality).
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
@@ -21,6 +21,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Throw { .. }
         | Instr::CallValue { .. }
         | Instr::Construct { .. }
+        | Instr::Await { .. }
         | Instr::GetMember { .. }
         | Instr::GetDestructuredMember { .. }
         | Instr::HasProperty { .. }
@@ -61,7 +62,6 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
         | Instr::DeclareBinding { .. }
-        | Instr::Await { .. }
         | Instr::Jump { .. }
         | Instr::BranchFalse { .. }
         | Instr::Return { .. } => false,
