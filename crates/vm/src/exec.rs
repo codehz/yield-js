@@ -129,7 +129,7 @@ impl Vm {
             }
         }
         let outcome = self.execute_frame(host, frame)?;
-        self.settle_outcome(async_promise, outcome)
+        self.settle_outcome(host, async_promise, outcome)
     }
 
     fn step(

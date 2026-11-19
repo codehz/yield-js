@@ -24,7 +24,7 @@
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
-- async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
+- async 函数、`await`、Promise 微任务恢复。`await` 已结算 Promise 或没有可调用 `then` 的值（包括普通对象、数组、函数与宿主原生句柄）也经微任务恢复，并保留兑现值的身份。async 返回值走共享的 Promise 决议流程：对一般 thenable，同步读取一次 `then`，在微任务里以原对象为接收者调用；getter 或调用抛错走拒绝路径。Promise 直接以自身决议会拒绝为脚本可捕获的 `TypeError`。
 - 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - Promise 组合子接受任意同步可迭代值（包括字符串、自定义迭代器和覆写迭代器的数组）。每取一个元素就调用 VM 的决议流程，再推进迭代；迭代协议异常拒绝返回的 Promise，不从调用点同步抛出。等待中的组合子可跨快照恢复，不重跑迭代或改变结果中的输入顺序。
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。

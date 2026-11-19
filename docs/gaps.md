@@ -48,8 +48,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 | 语义点 | 现状 |
 | --- | --- |
-| `await` 普通对象 | thenable 同化已有。没有可调用 `then` 的对象（普通对象、数组、函数、宿主原生句柄）在 `await` 上是 `VmError`：`await only supports VM promises and plain values`。同一值交给 `Promise.resolve` 可以兑现 |
-| Promise 自决议 | 用自身决议被忽略，不抛规范里的 `TypeError` |
+| Promise 构造器身份与方法覆写 | `Promise.resolve(p)` 总是新建 Promise，不按 `p.constructor` 判断是否直接返回 `p`；`await` 和内部决议对 VM Promise 走专用路径，不模拟构造器探测或被覆写的 `then` |
 | Promise 组合子 | `all` / `allSettled` / `race` / `any` 已接入同步迭代协议，但仍使用 VM 内部决议流程，不查找接收者覆写的 `resolve`。`Promise.any` 全拒绝时的拒绝值是字符串 `AggregateError: All promises were rejected`，不是带 `errors` 数组的 `AggregateError` 对象 |
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |

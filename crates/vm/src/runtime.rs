@@ -109,6 +109,15 @@ pub(crate) enum Microtask {
         on_finally: Value,
         settlement: Settlement,
     },
+    Assimilate {
+        result: ObjectId,
+        receiver: Value,
+        then: Value,
+    },
+    BeginAdopt {
+        result: ObjectId,
+        source: ObjectId,
+    },
     Adopt {
         result: ObjectId,
         settlement: Settlement,
@@ -121,5 +130,8 @@ pub(crate) enum Microtask {
     },
     /// `queueMicrotask`. A throw has no result promise and is not reported:
     /// this slice does not track unhandled rejections.
-    Call { function: Value, args: Vec<Value> },
+    Call {
+        function: Value,
+        args: Vec<Value>,
+    },
 }

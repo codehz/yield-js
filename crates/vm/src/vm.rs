@@ -126,6 +126,14 @@ impl Vm {
                     on_finally,
                     settlement,
                 } => self.run_finalize(host, result, on_finally, settlement)?,
+                Microtask::Assimilate {
+                    result,
+                    receiver,
+                    then,
+                } => self.run_assimilate(host, result, receiver, then)?,
+                Microtask::BeginAdopt { result, source } => {
+                    self.react(source, ReactionJob::Adopt { result })?
+                }
                 Microtask::Adopt { result, settlement } => {
                     self.run_adopt(host, result, settlement)?
                 }
@@ -323,12 +331,13 @@ impl Vm {
 
     pub(crate) fn settle_outcome(
         &mut self,
+        host: &mut dyn Host,
         promise: ObjectId,
         outcome: ExecOutcome,
     ) -> Result<(), VmError> {
         match outcome {
             ExecOutcome::Suspended => Ok(()),
-            ExecOutcome::Return(value) => self.settle(promise, Settlement::Fulfilled(value)),
+            ExecOutcome::Return(value) => self.resolve_promise(host, promise, value),
             ExecOutcome::Thrown(value) => self.settle(promise, Settlement::Rejected(value)),
         }
     }
@@ -407,7 +416,7 @@ impl Vm {
         let outcome = self.execute_frame(host, frame)?;
         match async_promise {
             Some(promise) => {
-                self.settle_outcome(promise, outcome)?;
+                self.settle_outcome(host, promise, outcome)?;
                 Ok(Invocation::Value(Value::Object(promise)))
             }
             None => match outcome {
