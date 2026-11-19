@@ -1,5 +1,62 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Walks `tests/cases` recursively and returns `(relative_path, category, stem)` for each `.js` case.
+///
+/// `category` is the case's directory name under `tests/cases` (empty for
+/// top-level cases). Per-file stems stay validated against `valid_stem`; the
+/// category must be lowercase ASCII like a stem.
+fn collect_cases(cases_dir: &Path) -> Vec<(PathBuf, String, String)> {
+    let mut cases = Vec::new();
+    let mut walk = vec![cases_dir.to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+        for entry in entries {
+            let entry =
+                entry.unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));
+            if file_type.is_dir() {
+                walk.push(path);
+                continue;
+            }
+            if !file_type.is_file()
+                || path.extension().and_then(|extension| extension.to_str()) != Some("js")
+            {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_else(|| panic!("invalid case file name {}", path.display()))
+                .to_string();
+            if !valid_stem(&stem) {
+                panic!("invalid case file stem `{stem}` ({})", path.display());
+            }
+            let relative = path
+                .strip_prefix(cases_dir)
+                .unwrap_or_else(|error| panic!("failed to relativize {}: {error}", path.display()))
+                .to_path_buf();
+            let category = relative
+                .parent()
+                .and_then(|parent| parent.file_name().and_then(|name| name.to_str()))
+                .map(str::to_string)
+                .unwrap_or_default();
+            if !category.is_empty() && !valid_stem(&category) {
+                panic!("invalid case category `{category}` ({})", path.display());
+            }
+            cases.push((relative, category, stem));
+        }
+    }
+    cases.sort_by(|left, right| left.0.cmp(&right.0));
+    if cases.is_empty() {
+        panic!("tests/cases contains no .js cases");
+    }
+    cases
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=tests/cases");
@@ -10,45 +67,33 @@ fn main() {
         panic!("tests/cases directory is missing");
     }
 
-    let entries = fs::read_dir(&cases_dir)
-        .unwrap_or_else(|error| panic!("failed to read tests/cases: {error}"));
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| panic!("failed to read tests/cases: {error}"));
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .unwrap_or_else(|error| panic!("failed to stat {}: {error}", path.display()));
-        if !file_type.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|extension| extension.to_str()) != Some("js") {
-            continue;
-        }
-        files.push(path);
-    }
-    files.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
-    if files.is_empty() {
-        panic!("tests/cases contains no .js cases");
-    }
+    let cases = collect_cases(&cases_dir);
 
     let mut generated = String::new();
-    for path in &files {
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_else(|| panic!("invalid case file name {}", path.display()));
-        if !valid_stem(stem) {
-            panic!("invalid case file stem `{stem}` ({})", path.display());
-        }
+    for (relative, category, stem) in &cases {
+        let path = cases_dir.join(relative);
         let path_literal = format!(
             "{:?}",
             path.to_str()
                 .unwrap_or_else(|| panic!("case path is not UTF-8: {}", path.display()))
         );
-        let function = rust_fn_name(stem);
+        // `run_case` keys on the path relative to `tests/cases`, so failures
+        // keep the file's location even across categories.
+        let name = format!(
+            "{}.js",
+            relative.to_str().unwrap_or_else(|| {
+                panic!(
+                    "case path is not UTF-8: {}",
+                    cases_dir.join(relative).display()
+                )
+            })
+        );
+        let function = match category.as_str() {
+            "" => rust_fn_name(stem),
+            category => format!("case_{category}_{}", rust_fn_name(stem)),
+        };
         generated.push_str(&format!(
-            "#[test]\nfn {function}() {{\n    let source = include_str!({path_literal});\n    if let Err(error) = yield_poc::run_case(\"{stem}.js\", source) {{\n        panic!(\"{{error}}\");\n    }}\n}}\n\n"
+            "#[test]\nfn {function}() {{\n    let source = include_str!({path_literal});\n    if let Err(error) = yield_poc::run_case(\"{name}\", source) {{\n        panic!(\"{{error}}\");\n    }}\n}}\n\n"
         ));
     }
 
