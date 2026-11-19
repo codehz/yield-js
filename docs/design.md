@@ -8,7 +8,7 @@
 
 ## 已确定的设计约束
 
-- 面向应用自有脚本，采用严格模式 JavaScript 子集，不以完整 ECMAScript 兼容或任意 npm 包兼容为目标。
+- 面向应用自有脚本，输入默认按 ECMAScript Module（ESM）解析和执行，隐式启用严格模式；不依赖文件扩展名或 `"use strict"`，也不回退到 Script 模式。不以完整 ECMAScript 或任意 npm 包兼容为目标。
 - 同步执行阶段和原生函数调用中不要求支持暂停或恢复。
 - 支持可恢复的异步帧；VM 内 Promise 可恢复，宿主异步工作通过统一的可恢复 operation 协议接入。operation 类型的恢复语义由宿主适配器定义。
 - 不恢复正在执行的一次性原生异步任务；宿主回调、Promise、句柄和原生指针不进入 VM 快照。可恢复 operation 的宿主状态由宿主持有；VM 快照只保存稳定 operation ID 及其与 VM Promise/续体的关联。
@@ -35,15 +35,15 @@
 | Solid 非 Web | [`solid-js@1.9.9`](https://unpkg.com/solid-js@1.9.9/package.json) 的生产响应式核心、`solid-js/universal` 的 `createRenderer` 和 `solid-js/store` 的 `createStore`。构建显式选用 `dist/solid.js` 和 `store/dist/store.js`，不能因 `node`/`worker` 条件误选 SSR 入口。 | `solid-js/web`、SSR、浏览器 hydration；不启用依赖浏览器 `MessageChannel` 的可选 `enableScheduling()` 路径。 |
 | React 非 Web | `react@19.2.0`、`react/jsx-runtime`、[`react-reconciler@0.33.0`](https://unpkg.com/react-reconciler@0.33.0/package.json) 和 `scheduler@0.27.0` 的生产包；使用自定义 mutation-mode `HostConfig`，按该版本实现调度与事件优先级接口。 | React DOM、React Native/Fabric 平台层、SSR/RSC、hydration 和开发工具。 |
 
-应用可写 JS/TS/JSX/TSX。离线构建负责去除类型、用 Solid 的 universal JSX 转换或 React 的 JSX runtime 转换，并解析 npm 依赖及条件导出、固定生产分支、转换 CommonJS、打成单一严格模式 JS 脚本。`compiler` 接收这份脚本、声明的宿主绑定及可选源码映射；不承担 JSX/TS 转译或包解析，VM 不加载模块。转换必须保留 ESM 活绑定和 CommonJS 初始化等可观察行为；若打包后仍有裸 `import`、`export` 或运行时 `require`，构建失败。不得替换框架核心或 scheduler 来通过验收。
+应用可写 JS/TS/JSX/TSX。离线构建负责去除类型、用 Solid 的 universal JSX 转换或 React 的 JSX runtime 转换，并解析 npm 依赖及条件导出、固定生产分支、转换 CommonJS、打成一个自包含的 ESM 入口。`compiler` 接收这份源码、声明的宿主绑定及可选源码映射；不承担 JSX/TS 转译或包解析，VM 不加载或链接模块。转换必须保留 ESM 活绑定和 CommonJS 初始化等可观察行为，并保留入口显式声明的公开导出名及其绑定语义，不把依赖的内部导出自动暴露给宿主。首版产物不得残留 `import` 声明、再导出或运行时 `require`。不得替换框架核心或 scheduler 来通过验收。
 
-新建 VM 时先验证构建与宿主导入，再在同步脚本帧执行一次顶层初始化，并排空由此调度的微任务；未完成的宿主 operation 仍由宿主交付。宿主按顶层函数声明名调用其当前绑定。快照保留顶层环境，恢复时不重播初始化。
+新建 VM 时先验证构建与宿主导入，再在同步初始化帧执行一次入口模块，并排空由此调度的微任务；未完成的宿主 operation 仍由宿主交付。顶层 `var`、`let`、`const` 和函数声明的绑定属于模块环境；它们可以遮蔽同名全局，但不会创建或覆盖全局变量或 `globalThis` 属性。顶层 `this` 为 `undefined`，给未声明名字赋值不会隐式创建全局。只有显式 `export` 的绑定对宿主公开；未导出的顶层函数和变量不构成宿主接口。快照保留模块环境，恢复时不重播初始化。
 
 ### 字节码编译器直接支持的语法
 
 | 类别 | 首版直接支持 |
 | --- | --- |
-| 脚本执行模型 | 当前实现将严格模式脚本编译为脚本帧；直接函数声明是宿主入口，脚本初始化执行一次且恢复不重播。顶层 `await` 与模块语法不支持。语法支持范围以 `README.md` 当前子集为准。 |
+| 模块执行模型 | 输入采用严格 ESM 的解析目标与顶层作用域，编译为同步模块初始化帧。首版支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`，以及 `export { local }` / `export { local as publicName }`。未知局部绑定和重复导出名在编译期报错。首版不支持默认导出、再导出（`export … from` / `export *`）、`import` 声明、`import.meta` 或顶层 `await`。 |
 | 表达式 | 标准数字、布尔、字符串、`null`、正则字面量与数组/对象字面量（含空洞、计算属性、展开）；非标签模板；普通/成员/构造调用与实参展开；算术、位运算、比较、赋值、自增减、短路、三元、逗号、可选链、`??` 与逻辑赋值；`typeof`、`void`、`delete`、`in`、`instanceof`。 |
 | 控制流 | `if`、`switch`、`for`、`while`、`do…while`、`for…in`、同步 `for…of`（含提前退出时的 iterator close）；标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。 |
 | 异步 | `async` 函数与 `await`；thenable 同化、异常拒绝、Promise 微任务顺序与已结算 Promise 的异步恢复。 |
@@ -62,14 +62,14 @@
 
 - 两套 renderer 均在 VM 内执行 JS，调用同一类宿主树能力：创建节点/文本、设置属性/文本、插入/移动/删除、遍历父子兄弟、分发输入事件。框架状态和回调闭包归 VM；原生节点由宿主持有，用稳定键恢复。可用可观察的内存节点树测试此接口，无需先实现 Apple/Android UI，也不提供 DOM、Node 或 React Native 全局环境。
 - React 的生产 `scheduler` 选用 [`setTimeout` 回退分支](https://unpkg.com/scheduler@0.27.0/cjs/scheduler.production.js)。宿主适配器提供可取消的 timer、`performance.now()` 单调时钟和错误日志出口；恢复须延续同一时钟域，不能从零重新计时。`setTimeout`/`clearTimeout` 包装层与回调在 VM 内，宿主只保存 timer operation 的 ID、计时及取消状态。到期后宿主在新的 VM 任务轮次结算 operation 对应的 Promise，由 VM 驱动已登记的脚本回调并排空微任务；回调抛错按任务错误报告，不把内部 Promise 拒绝暴露给应用。取消或重复到期投递不执行回调。树事件也在新任务轮次投递，不从原生调用栈同步重入 VM。
-- **运行验收**：用冻结版本的真实生产包和实际 JSX 构建产物。Solid 验证 signal/memo、响应式 props、嵌套 store、列表节点重排、事件更新和卸载清理；React 验证函数组件、`useState`、effect 及清理、事件更新、带 key 的子节点重排、Promise 驱动的 Suspense 恢复和卸载。与同一产物在参考 JS 引擎、同一宿主适配器契约下的节点树和事件日志对照。
+- **运行验收**：用冻结版本的真实生产包和实际 JSX 构建产物。Solid 验证 signal/memo、响应式 props、嵌套 store、列表节点重排、事件更新和卸载清理；React 验证函数组件、`useState`、effect 及清理、带 key 的子节点重排、Promise 驱动的 Suspense 恢复和卸载。与参考 JS 引擎以 ESM 模式执行同一产物、遵循同一宿主适配器契约时的节点树和事件日志对照。
 - **恢复验收**：分别在已挂载、等待可恢复 operation 的边界保存并恢复，补齐原生绑定后触发原事件或完成原 operation。断言状态与节点/闭包身份延续、挂载副作用不重跑、后续更新和清理正常；React 另验证挂起的 scheduler timer 恢复后只触发一次、已取消 timer 不执行。参考连续运行结果，不能用重新挂载代替恢复。
 
 ## 总体架构
 
 ```mermaid
 flowchart LR
-    A[JS 子集源码] --> B[解析与编译]
+    A[自包含 ESM 源码] --> B[解析与编译]
     B --> C[版本化字节码]
     C --> D[VM：栈、帧、堆、Promise]
     D <--> E[宿主接口：可恢复 operations 与原生对象绑定]
@@ -79,15 +79,16 @@ flowchart LR
 
 ### 编译器
 
-`compiler` 是唯一接收 JS 源码的运行核心模块。它复用 Rust JavaScript parser，将离线构建输出的严格模式 JS 转换为项目自有 IR；负责校验语法子集、解析词法绑定、降低异常与异步控制流、分析活性并分配帧槽，最后输出版本化字节码。不支持的语法在编译期报错。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
+`compiler` 是唯一接收 JS 源码的运行核心模块。它复用 Rust JavaScript parser，以 ESM 为解析目标，将离线构建输出转换为项目自有 IR；负责校验语法子集、解析词法绑定、降低异常与异步控制流、分析活性并分配帧槽，最后输出版本化字节码。不支持的语法在编译期报错。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
 
 ### 虚拟机
 
-`vm` 只接受字节码构建产物及宿主绑定，不接收源码、AST 或编译器 IR，不依赖 `compiler`。它拥有字节码契约及加载验证，显式管理脚本栈、对象堆、全局环境、Promise 和 async 续体。VM 堆使用自有对象表/句柄与 tracing GC。编译器遵循该契约；发布产物可只部署 `vm` 与字节码，不携带解析器。恢复时必须先加载同一构建的字节码，不重新编译源码。
+`vm` 只接受字节码构建产物及宿主绑定，不接收源码、AST 或编译器 IR，不依赖 `compiler`。它拥有字节码契约及加载验证，显式管理脚本栈、对象堆、彼此独立的模块环境与全局环境、Promise 和 async 续体。VM 堆使用自有对象表/句柄与 tracing GC。编译器遵循该契约；发布产物可只部署 `vm` 与字节码，不携带解析器。恢复时必须先加载同一构建的字节码，不重新编译源码。
 
 ### 宿主接口
 
 - 提供稳定的 C ABI 宿主接口，并管理 VM 句柄的创建、恢复、执行与释放。
+- 模块初始化完成后，宿主可按公开导出名读取当前值或调用当前可调用值；公开名可不同于局部名。导出是活绑定，不缓存初始化时的值，也不给宿主提供直接改写绑定的接口。未知导出名和调用不可调用值均报错，不回退到查找顶层声明或全局对象。
 - 为 timer、UI 事件订阅、fetch 等异步工作提供统一 operation ID 与 Promise/续体关联；各 operation 类型的恢复、重试或拒绝策略由宿主适配器定义。
 - 持有并持久化宿主 operation 状态；恢复时按 operation ID 重新建立宿主工作，并完成或拒绝对应 VM Promise。
 - 持久化 VM 快照，并独立处理 UI 状态存档；协调 UI 状态、VM 快照与宿主 operation 状态属于同一恢复代际。
@@ -98,7 +99,7 @@ flowchart LR
 
 ### 构建产物
 
-字节码采用显式槽位操作数，不保留跨挂起点的隐式操作数栈。构建产物包含 `bytecode_version`、常量池、宿主导入表、函数表及指令、脚本帧的函数 ID 和宿主入口绑定表。常量池只放不可变字面量与静态描述；每次求值应创建新身份的对象不得提升成共享常量。`build_id` 是执行相关字节码内容的摘要，覆盖恢复表、异常表、宿主导入声明及入口元数据，不含源码映射等旁路数据。
+字节码采用显式槽位操作数，不保留跨挂起点的隐式操作数栈。构建产物包含 `bytecode_version`、常量池、宿主导入表、函数表及指令、模块初始化帧的函数 ID，以及从公开导出名到模块绑定的导出表。导出绑定保留在模块环境中，不降为初始化帧的临时槽；加载时校验导出名唯一且目标是有效模块绑定。常量池只放不可变字面量与静态描述；每次求值应创建新身份的对象不得提升成共享常量。`build_id` 是执行相关字节码内容的摘要，覆盖恢复表、异常表、宿主导入声明及导出表，不含源码映射等旁路数据。
 
 每个函数有构建内的 `func_id`、入口、瞬时槽数、持久槽数、异常表和恢复表。`AWAIT input, resume_id` 引用函数内的恢复表项，不以运行时栈指针或下一条指令的 PC 标识续体。表项为：
 
@@ -136,12 +137,12 @@ ResumeEntry {
 - `AWAIT` 将输入转为 VM 内可等待的 Promise，读取操作数后保存续体，按 JS 微任务顺序安排后续反应。即使 Promise 已结算，也不能在 `AWAIT` 原地同步执行续体。
 - 挂起帧的逻辑快照记录为 `(object_id, func_id, resume_id, result_promise_ref, slot_values[])`；最后一项按 `saved_slots` 顺序写值，无需逐槽写编号。被等待 Promise 的反应记录引用续体，等待关系不在帧中重复编码。VM 在当前微任务轮次排空后才允许快照，因此无需落盘已入队但尚未执行的恢复任务。
 - 恢复先核对版本与构建，再为堆、Promise 和续体分配身份并解析引用，校验槽值数量、ID、记录类型与等待关系；每个挂起续体必须恰好对应一个未结算 Promise 上的等待反应。根据函数布局重建挂起帧，只填充指定的 `P` 槽；其余槽初始不可读。原生绑定验证通过前不调度。未来 Promise 结算时，VM 重建瞬时槽，写入成功值或拒绝原因，从对应落点执行；不重跑 `AWAIT` 或之前的副作用。
-快照从全局环境、宿主持有的脚本根及 VM 的可恢复 operation 等持久根遍历对象图。遍历可达续体时只访问表中槽值与必要的运行时引用；从槽中省略某个引用，不代表经全局或闭包仍可达的对象也可以省略。
+快照从模块环境、全局环境、宿主持有的脚本根及 VM 的可恢复 operation 等持久根遍历对象图。遍历可达续体时只访问表中槽值与必要的运行时引用；从槽中省略某个引用，不代表经模块环境、全局环境或闭包仍可达的对象也可以省略。
 
 ### 两个挂起点的示例
 
 ```js
-async function run(input) {
+export async function run(input) {
   inspect(input);
   const base = seed();
   const x = await wait("a");
@@ -173,7 +174,7 @@ async function run(input) {
 快照至少应包含：
 
 - VM 快照格式版本、字节码版本与脚本构建 ID。
-- VM 堆对象图与对象间引用关系、顶层脚本环境。
+- VM 堆对象图与对象间引用关系、入口模块的顶层环境（独立于全局环境），包括导出绑定的当前值。恢复后从同一构建的导出表定位恢复后的绑定，不重复序列化导出值。
 - 可达的 VM Promise、挂起续体和等待关系；局部状态只包含当前恢复表指定的持久槽。
 - 当前挂起的宿主 operation ID，以及它与 VM Promise/续体的关联；operation 私有状态由宿主持久化，不复制到 VM 快照。
 - 原生对象包装对象的脚本侧身份和属性，以及关联的 `(type, id)` 稳定键。
@@ -204,6 +205,8 @@ VM 以稳定键 `(type, id)` 标识外部原生对象，不把原生指针写入
 - 宿主必须协调 UI 存档、VM 快照与宿主 operation 状态；恢复中任一必需原生绑定或 operation 缺失时整体失败，避免从不一致状态启动脚本。
 - 精确版本策略简单可靠，但脚本升级后旧快照不可直接恢复；宿主需实现重新初始化与 UI 重建路径。
 - 实现阶段应为快照往返、挂起 async 帧恢复、对象身份保持、缺失绑定拒绝执行及版本不匹配拒绝恢复设计针对性验证。
+- 验证无需 `"use strict"` 即按严格 ESM 执行：顶层 `this` 为 `undefined`，顶层声明不成为全局对象属性，且同名模块绑定不会修改原全局值。
+- 验证宿主只能通过公开名读取或调用显式导出，包括别名；未导出的函数不能调用，非可调用导出可以读取但不能调用。脚本更新导出绑定后，宿主读到新值、调用新函数；恢复后仍观察到更新后的绑定，且顶层初始化不重跑。编译器拒绝重复导出名与不存在的局部绑定。
 - 对同一函数的不同挂起点断言实际写出的槽和值；验证不从快照保存只在瞬时槽可达的对象，同时保留由闭包或全局别名引用的对象。以未快照运行作为对照，比较结果、宿主 operation 完成次序及副作用次数。
 - 覆盖仅拒绝路径使用的槽、`finally` 内二次挂起时的待完成状态、已结算 Promise 仍通过微任务恢复，以及续体释放后无多余强引用。
 - 验证加载器拒绝缺失活跃槽、越界恢复点和非法落点，快照恢复器拒绝槽数量不符或 Promise/续体关联损坏，均不得启动 VM。
