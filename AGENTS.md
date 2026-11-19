@@ -60,6 +60,7 @@ Suspend/resume invariants (do not weaken these):
 | `crates/poc/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
 | `crates/poc/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |
 | `docs/design.md` | Target design, Chinese. Not a status report |
+| `docs/gaps.md` | Current JS-subset implementation gap inventory (what is rejected/missing today, derived from code). Status report; refresh after behavior changes. |
 
 There is no `scripts/` directory and no CI.
 
