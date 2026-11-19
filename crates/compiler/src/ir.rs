@@ -1,0 +1,38 @@
+//! Compiler IR after syntax lowering and before frame-slot allocation.
+//!
+//! Instructions still use the VM [`Instr`] enum, but every [`Slot`] is a
+//! logical register: `kind` is meaningless and `index` is a [`Reg`]. Oxc is
+//! gone. Liveness and slot allocation are the only consumers.
+
+use oxc::span::Span;
+use yield_vm::BindingId;
+use yield_vm::bytecode::{ExceptionHandler, Instr};
+
+use crate::emit::Reg;
+
+/// A value location assigned during lowering, before persistent/transient split.
+pub(crate) type LogicalReg = Reg;
+
+#[derive(Debug)]
+pub(crate) struct AwaitSite {
+    pub(crate) result: LogicalReg,
+    pub(crate) fulfill_pc: usize,
+    pub(crate) reject_pc: usize,
+}
+
+/// One function lowered to logical-register bytecode.
+///
+/// `resumes` are not filled in yet: each [`AwaitSite`] becomes a
+/// [`yield_vm::bytecode::ResumeEntry`] once liveness decides `saved_slots`.
+#[derive(Debug)]
+pub(crate) struct LoweredFunction {
+    pub(crate) func_id: u32,
+    pub(crate) name: String,
+    pub(crate) is_async: bool,
+    pub(crate) param_bindings: Vec<BindingId>,
+    pub(crate) reg_count: u16,
+    pub(crate) code: Vec<Instr>,
+    pub(crate) awaits: Vec<AwaitSite>,
+    pub(crate) handlers: Vec<ExceptionHandler>,
+    pub(crate) span: Span,
+}
