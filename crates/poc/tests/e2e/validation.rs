@@ -321,6 +321,35 @@ fn symbol_snapshot_tampering_is_rejected() {
 }
 
 #[test]
+fn restore_rejects_missing_or_mismatched_global_this_root() {
+    let source = include_str!("../cases/async/global_this_snapshot.js");
+    let mut suspended = Suspended::start(source, vec![]);
+    let snapshot = suspended.snapshot();
+
+    let mut missing = snapshot.clone();
+    assert!(missing.roots.remove("globalThis").is_some());
+    let error = suspended
+        .restore(missing)
+        .expect_err("missing globalThis root");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("builtin roots"))
+    );
+
+    for root in ["promise", "object.prototype"] {
+        let mut mismatched = snapshot.clone();
+        mismatched
+            .roots
+            .insert("globalThis".to_owned(), snapshot.roots[root]);
+        let error = suspended
+            .restore(mismatched)
+            .expect_err("mismatched globalThis root");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("globalThis"))
+        );
+    }
+}
+
+#[test]
 fn array_iterator_snapshot_tampering_is_rejected() {
     let source = include_str!("../cases/objects/array_iterator_restore.js");
     let mut s = Suspended::start(source, vec![]);

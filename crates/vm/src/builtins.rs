@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::bytecode::BUILTINS;
 use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
 use crate::heap::BoxedPrimitive;
@@ -27,6 +28,7 @@ use crate::string::{StringMethod, StringStatic};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
+pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
 pub(crate) const ROOT_PROMISE: &str = "promise";
 pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
@@ -72,6 +74,7 @@ pub(crate) const ROOT_PROXY: &str = "proxy";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
+    pub global_this: ObjectId,
     pub promise: ObjectId,
     pub promise_prototype: ObjectId,
     pub queue_microtask: ObjectId,
@@ -125,6 +128,7 @@ pub(crate) struct BuiltinRoots {
 impl BuiltinRoots {
     pub(crate) fn to_map(self) -> BTreeMap<String, ObjectId> {
         BTreeMap::from([
+            (ROOT_GLOBAL_THIS.to_owned(), self.global_this),
             ("map".to_owned(), self.map),
             ("map.prototype".to_owned(), self.map_prototype),
             (
@@ -724,7 +728,9 @@ impl Vm {
             self.init_collection(CollectionKind::Set, &identity);
         let (weakmap, weakmap_prototype) = self.init_weakmap();
         let proxy = self.heap.alloc_builtin("Proxy", None);
+        let global_this = self.heap.alloc_plain_with(Some(object_prototype));
         self.builtins = BuiltinRoots {
+            global_this,
             proxy,
             map,
             map_prototype,
@@ -774,6 +780,20 @@ impl Vm {
             object,
             json,
         };
+        for (index, name) in BUILTINS.into_iter().enumerate() {
+            let value = self.builtin_value(index as u32).expect("global builtin");
+            self.heap
+                .define_data(global_this, name, value, Attributes::ORDINARY)
+                .expect("global builtin property");
+        }
+        self.heap
+            .define_data(
+                global_this,
+                "undefined",
+                Value::Undefined,
+                Attributes::ORDINARY,
+            )
+            .expect("global undefined property");
     }
 
     pub(crate) fn is_callable(&self, value: &Value) -> bool {
@@ -810,6 +830,7 @@ impl Vm {
             22 => Ok(Value::Object(self.builtins.weakmap)),
             23 => Ok(Value::Object(self.builtins.proxy)),
             24 => Ok(Value::Object(self.builtins.boolean_constructor)),
+            25 => Ok(Value::Object(self.builtins.global_this)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
