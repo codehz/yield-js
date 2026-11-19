@@ -49,6 +49,21 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
+fn rejects_delete_of_property_with_location() {
+    let error = compile(
+        "function run(o) { return delete ((o.x)); }",
+        &CompileOptions::default(),
+    )
+    .expect_err("property delete is outside the PoC subset");
+    assert!(
+        error.message().contains("unsupported syntax: delete"),
+        "{error}"
+    );
+    assert_eq!(error.line(), 1);
+    assert!(error.column() > 1);
+}
+
+#[test]
 fn rejects_labelled_jump_across_finally() {
     for keyword in ["break", "continue"] {
         let source = format!(

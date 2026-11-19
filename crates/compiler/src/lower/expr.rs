@@ -362,7 +362,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         expression: &'ast UnaryExpression<'ast>,
     ) -> Result<Reg, CompileError> {
         if matches!(expression.operator, UnaryOperator::Delete) {
-            return Err(unsupported(self.source_text(), expression.span, "delete"));
+            // `delete` as a value operator: the operand is evaluated for side
+            // effects only. Property removal is not supported, so the result
+            // is always `true` after the operand completes normally.
+            let mut argument = &expression.argument;
+            while let Expression::ParenthesizedExpression(paren) = argument {
+                argument = &paren.expression;
+            }
+            match argument {
+                Expression::Identifier(_)
+                | Expression::StaticMemberExpression(_)
+                | Expression::ComputedMemberExpression(_)
+                | Expression::PrivateFieldExpression(_)
+                | Expression::ChainExpression(_) => {
+                    return Err(unsupported(self.source_text(), expression.span, "delete"));
+                }
+                _ => {}
+            }
+            self.compile_expression(&expression.argument)?;
+            return self.emit_constant(Constant::Bool(true));
         }
         if matches!(expression.operator, UnaryOperator::Typeof)
             && let Expression::Identifier(identifier) = &expression.argument
