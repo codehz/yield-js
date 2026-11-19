@@ -16,6 +16,8 @@ use yield_vm::BindingId;
 use yield_vm::bytecode::{Constant, Instr};
 
 use crate::allocate;
+use crate::bindings;
+use crate::promote;
 use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, Env};
 use crate::error::{CompileError, unsupported};
@@ -36,9 +38,16 @@ pub(crate) fn lower_all<'ast>(
             outer_scopes: Vec::new(),
         });
     }
+    let mut lowered = Vec::new();
     while let Some(task) = tasks.pop_front() {
-        let lowered = Lowerer::compile_task(session, &mut tasks, task)?;
-        let function = allocate::allocate(session.source, lowered)?;
+        lowered.push(Lowerer::compile_task(session, &mut tasks, task)?);
+    }
+    let facts = bindings::classify(&lowered)?;
+    for function in &mut lowered {
+        promote::promote(session.source, function, &facts)?;
+    }
+    for function in lowered {
+        let function = allocate::allocate(session.source, function)?;
         session.push_function(function);
     }
     Ok(())
@@ -177,6 +186,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             name: self.name.clone(),
             is_async: self.is_async,
             param_bindings: self.param_bindings.clone(),
+            promoted: BTreeMap::new(),
             reg_count: self.emit.reg_count(),
             code: self.emit.take_code(),
             awaits: self.control.take_awaits(),

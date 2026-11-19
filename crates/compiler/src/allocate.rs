@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use yield_vm::bytecode::{
-    ExceptionHandler, Function as BytecodeFunction, ResumeEntry, Slot, SlotKind,
+    ExceptionHandler, Function as BytecodeFunction, ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 
 use crate::analyze;
@@ -35,19 +35,12 @@ pub(crate) fn allocate(
     }
 
     let live_in = analyze::live_in(&lowered.code, &resumes, &lowered.handlers)?;
-    let mut saved_regs = BTreeSet::new();
+    let mut saved_sets = Vec::with_capacity(resumes.len());
     for resume in &resumes {
-        let mut saved = live_in[resume.fulfill_pc as usize].clone();
-        saved.extend(live_in[resume.reject_pc as usize].iter().copied());
-        saved.remove(&resume.fulfill_dst.index);
-        saved.remove(&resume.reject_dst.index);
-        if saved.iter().any(|reg| *reg >= lowered.reg_count) {
-            return Err(CompileError::new(
-                source,
-                lowered.span,
-                "internal liveness error: unknown register",
-            ));
-        }
+        saved_sets.push(saved_set(source, &lowered, &live_in, resume)?);
+    }
+    let mut saved_regs = BTreeSet::new();
+    for saved in &saved_sets {
         saved_regs.extend(saved);
     }
 
@@ -58,11 +51,7 @@ pub(crate) fn allocate(
         .map(|instruction| map_slots(instruction, &|slot| layout.remap(slot)))
         .collect::<Vec<_>>();
     let mut remapped_resumes = resumes;
-    for resume in &mut remapped_resumes {
-        let mut saved = live_in[resume.fulfill_pc as usize].clone();
-        saved.extend(live_in[resume.reject_pc as usize].iter().copied());
-        saved.remove(&resume.fulfill_dst.index);
-        saved.remove(&resume.reject_dst.index);
+    for (resume, saved) in remapped_resumes.iter_mut().zip(&saved_sets) {
         resume.saved_slots = saved
             .iter()
             .map(|reg| layout.persistent[reg])
@@ -82,11 +71,23 @@ pub(crate) fn allocate(
         })
         .collect::<Vec<_>>();
 
+    let params = lowered
+        .param_bindings
+        .iter()
+        .map(|binding| match lowered.promoted.get(binding) {
+            Some(reg) => ParamTarget::Slot(layout.remap(Slot {
+                kind: SlotKind::Transient,
+                index: *reg,
+            })),
+            None => ParamTarget::Binding(*binding),
+        })
+        .collect::<Vec<_>>();
+
     Ok(BytecodeFunction {
         func_id: lowered.func_id,
         name: lowered.name,
         is_async: lowered.is_async,
-        param_bindings: lowered.param_bindings,
+        params,
         transient_slots: layout.transient_count,
         persistent_slots: layout.persistent_count,
         code,
@@ -137,4 +138,25 @@ impl FrameLayout {
             }
         }
     }
+}
+
+fn saved_set(
+    source: &str,
+    lowered: &LoweredFunction,
+    live_in: &[BTreeSet<Reg>],
+    resume: &ResumeEntry,
+) -> Result<BTreeSet<Reg>, CompileError> {
+    let mut saved = live_in[resume.fulfill_pc as usize].clone();
+    saved.remove(&resume.fulfill_dst.index);
+    let mut reject = live_in[resume.reject_pc as usize].clone();
+    reject.remove(&resume.reject_dst.index);
+    saved.extend(reject);
+    if saved.iter().any(|reg| *reg >= lowered.reg_count) {
+        return Err(CompileError::new(
+            source,
+            lowered.span,
+            "internal liveness error: unknown register",
+        ));
+    }
+    Ok(saved)
 }

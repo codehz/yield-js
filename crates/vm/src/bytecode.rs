@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 2;
+pub const BYTECODE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -208,19 +208,55 @@ pub struct ExceptionHandler {
     pub target_pc: u32,
     pub dst: Slot,
 }
+/// Where one source parameter is written before the first instruction.
+///
+/// A shared binding stays in the invocation environment. A binding private to
+/// this function is a frame slot. The two destinations cannot share one field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamTarget {
+    Binding(BindingId),
+    Slot(Slot),
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     pub func_id: u32,
     pub name: String,
     pub is_async: bool,
-    /// Binding ID for each declared parameter, in source order.
-    pub param_bindings: Vec<BindingId>,
+    /// Parameter destinations in source order.
+    pub params: Vec<ParamTarget>,
     pub transient_slots: u16,
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
     pub resumes: Vec<ResumeEntry>,
     pub handlers: Vec<ExceptionHandler>,
+}
+
+impl Function {
+    /// Whether this function allocates an invocation environment.
+    ///
+    /// Derived from validated code. A bytecode flag would be forgeable and is
+    /// not part of the contract. Closure creation keeps the existing capture
+    /// protocol even when this function's own bindings were promoted.
+    pub fn needs_environment(&self) -> bool {
+        if self
+            .params
+            .iter()
+            .any(|param| matches!(param, ParamTarget::Binding(_)))
+        {
+            return true;
+        }
+        self.code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instr::GetBinding { .. }
+                    | Instr::SetBinding { .. }
+                    | Instr::DeclareBinding { .. }
+                    | Instr::Closure { .. }
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -361,8 +397,30 @@ impl Build {
             Ok(())
         };
 
-        if function.param_bindings.len() > u16::MAX as usize {
+        if function.params.len() > u16::MAX as usize {
             return Err(format!("{location}: too many parameters"));
+        }
+        let mut seen_bindings = std::collections::BTreeSet::new();
+        let mut seen_slots = Vec::new();
+        for param in &function.params {
+            match param {
+                ParamTarget::Binding(binding) => {
+                    if !seen_bindings.insert(*binding) {
+                        return Err(format!(
+                            "{location}: duplicate parameter binding {binding}"
+                        ));
+                    }
+                }
+                ParamTarget::Slot(slot) => {
+                    check_slot(*slot, "parameter")?;
+                    if seen_slots.contains(slot) {
+                        return Err(format!(
+                            "{location}: duplicate parameter slot {slot:?}"
+                        ));
+                    }
+                    seen_slots.push(*slot);
+                }
+            }
         }
 
         for (pc, instr) in function.code.iter().enumerate() {

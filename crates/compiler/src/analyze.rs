@@ -1,10 +1,12 @@
 //! CFG liveness over lowered bytecode.
 //!
 //! Successors include the fall-through edge, explicit jumps, both await resume
-//! entries, and the innermost-or-covering exception edge of a throwing
-//! instruction. The saved set at an await is the union of the two resume
-//! entries' live-in, minus the result register the VM writes.
-
+//! entries, and every covering exception edge of a throwing instruction. A
+//! normal edge kills the instruction's definitions before joining; an exception
+//! edge kills only the handler destination. Uses are joined last, so a
+//! self-move is read before it is written. The saved set at an await is the
+//! union of each resume entry's live-in after subtracting that entry's result
+//! register.
 use std::collections::BTreeSet;
 
 use yield_vm::bytecode::{ExceptionHandler, Instr, ResumeEntry};
@@ -23,9 +25,13 @@ pub(crate) fn live_in(
         let mut changed = false;
         for pc in (0..code.len()).rev() {
             let (uses, defs) = instr::uses_defs(&code[pc]);
-            let mut next = uses;
+            let mut next = BTreeSet::new();
             for successor in normal_successors(code, resumes, pc)? {
-                next.extend(live_in[successor].iter().copied());
+                let mut incoming = live_in[successor].clone();
+                for definition in &defs {
+                    incoming.remove(definition);
+                }
+                next.extend(incoming);
             }
             if may_throw(&code[pc]) {
                 for handler in handlers.iter().filter(|handler| {
@@ -36,9 +42,7 @@ pub(crate) fn live_in(
                     next.extend(target);
                 }
             }
-            for definition in defs {
-                next.remove(&definition);
-            }
+            next.extend(uses);
             if next != live_in[pc] {
                 live_in[pc] = next;
                 changed = true;
@@ -50,7 +54,7 @@ pub(crate) fn live_in(
     }
 }
 
-fn normal_successors(
+pub(crate) fn normal_successors(
     code: &[Instr],
     resumes: &[ResumeEntry],
     pc: usize,

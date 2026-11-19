@@ -20,7 +20,7 @@ cargo run -p yield-poc
 
 `yield-poc` 编译并执行设计文档中的双 `await` 例子，在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation。输出会显示：
 
-- 变量位于堆上的调用环境，快照保存环境引用；纯临时值仍按 `saved_slots` 保存；
+- 未捕获的局部值在持久槽中，按 `saved_slots` 保存；闭包共享的绑定仍在调用环境，没有捕获时快照不保留该环境；
 - `inspect` / `seed` 在恢复后不会重跑；
 - 最终结果 `15`。
 
@@ -36,9 +36,9 @@ cargo run -p yield-poc
 
 - 字节码版本、构建 ID 摘要、函数/导入/常量/恢复表/异常表结构校验。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
-- 编译期 CFG 活性分析：`saved_slots` 取成功/拒绝恢复入口 live-in 的并集，再扣除结果槽；异常边参与活性。
+- 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
-- 变量绑定位于堆环境；闭包共享可变环境，快照保留环境、闭包与对象身份。
+- 未跨函数共享的绑定在帧槽中；闭包共享的绑定仍在堆环境，快照保留环境、闭包与对象身份。没有共享绑定且不创建闭包的调用不分配环境。
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。
 - 对象/数组字面量、计算属性键、成员读写、数组 `length` 与索引、复合成员赋值。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
@@ -47,7 +47,7 @@ cargo run -p yield-poc
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境和脚本根出发。
-- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境/闭包引用、缺失 operation、缺失 native 绑定。
+- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、缺失 operation、缺失 native 绑定。
 - 快照要求微任务队列已排空。
 
 ## 当前子集

@@ -16,7 +16,7 @@ pub mod value;
 mod vm;
 
 pub use bytecode::{
-    Build, Constant, ExceptionHandler, Function, Instr, ResumeEntry, Slot, SlotKind,
+    Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 pub use error::VmError;
 pub use heap::{Object, PromiseState};

@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::{Build, Instr, Slot};
+use yield_vm::heap::EnvironmentObject;
+use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{
     Completion, Host, HostReply, HostValue, NativeKey, Object, PendingOperationMeta, PromiseState,
     Value, Vm, VmError,
@@ -128,13 +130,14 @@ fn snapshot_and_restore_across_two_awaits() {
         .expect("quiescent snapshot");
     assert_eq!(snapshot.continuations.len(), 1);
     assert_eq!(snapshot.operations.len(), 1);
-    assert!(
-        snapshot.continuations[0].values.is_empty(),
-        "variables live in the captured environment, not frame slots"
+    assert_eq!(
+        snapshot.continuations[0].values,
+        vec![Value::Number(10.0)],
+        "base is the only value live across the first await"
     );
     assert!(
-        snapshot.continuations[0].env.is_some(),
-        "the captured environment is part of the continuation"
+        snapshot.continuations[0].env.is_none(),
+        "uncaptured locals do not keep a call environment"
     );
     let json = snapshot.to_json().expect("snapshot serializes");
     let snapshot = yield_vm::Snapshot::from_json(&json).expect("snapshot deserializes");
@@ -160,11 +163,12 @@ fn snapshot_and_restore_across_two_awaits() {
     let snapshot = restored
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot at second await");
-    assert!(
-        snapshot.continuations[0].values.is_empty(),
-        "variables live in the captured environment, not frame slots"
+    assert_eq!(
+        snapshot.continuations[0].values,
+        vec![Value::Number(12.0)],
+        "sum is the only value live across the second await"
     );
-    assert!(snapshot.continuations[0].env.is_some());
+    assert!(snapshot.continuations[0].env.is_none());
     let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore at second await");
     restored
         .complete_operation("wait:b", Completion::Fulfilled(number(3.0)))
@@ -1057,4 +1061,294 @@ function run(n) {
         Err(VmError::InvalidState(message)) if message == "value is not an object"
     ));
     assert_eq!(result, Value::Number(6.0));
+}
+
+fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<String> {
+    snapshot
+        .objects
+        .iter()
+        .filter_map(|record| {
+            let Object::Plain(plain) = &record.object else {
+                return None;
+            };
+            match plain.props.get("tag") {
+                Some(Value::String(tag)) => Some(tag.clone()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn has_environment(snapshot: &yield_vm::Snapshot) -> bool {
+    snapshot
+        .objects
+        .iter()
+        .any(|record| matches!(record.object, Object::Environment(_)))
+}
+
+#[test]
+fn promoted_dead_object_is_absent_from_the_snapshot_graph() {
+    let source = r#"
+async function run() {
+  const dead = {tag: "discard-only"};
+  const live = {n: 7};
+  await wait("a");
+  return live.n;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
+    assert!(
+        !plain_tags(&snapshot).iter().any(|tag| tag == "discard-only"),
+        "dead must not remain reachable through a call environment or saved slot"
+    );
+    assert!(!has_environment(&snapshot));
+    assert!(snapshot.continuations[0].env.is_none());
+    let saved_objects: Vec<_> = snapshot.continuations[0]
+        .values
+        .iter()
+        .filter_map(|value| match value {
+            Value::Object(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(saved_objects.len(), 1, "only live is saved across the await");
+    assert!(snapshot.objects.iter().any(|record| {
+        record.id == saved_objects[0]
+            && matches!(&record.object, Object::Plain(plain) if plain.props.get("n") == Some(&Value::Number(7.0)))
+    }));
+
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(7.0))
+    );
+}
+
+#[test]
+fn captured_binding_keeps_object_identity_across_restore() {
+    let source = r#"
+async function run() {
+  const dead = {tag: "discard-only"};
+  const live = {n: 7};
+  const alias = () => live;
+  await wait("a");
+  return alias() === live;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
+    assert!(!plain_tags(&snapshot).iter().any(|tag| tag == "discard-only"));
+    assert!(has_environment(&snapshot));
+    assert!(snapshot.continuations[0].env.is_some());
+
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Bool(true))
+    );
+}
+
+#[test]
+fn catch_reads_object_saved_across_the_reject_edge() {
+    let source = r#"
+async function run() {
+  const kept = {tag: "kept"};
+  try {
+    await wait("a");
+  } catch (e) {
+    return kept.tag;
+  }
+  return "missing";
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let snapshot = vm.snapshot(std::slice::from_ref(&result)).expect("snapshot");
+    assert!(plain_tags(&snapshot).iter().any(|tag| tag == "kept"));
+    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
+    restored
+        .complete_operation(
+            "wait:a",
+            Completion::Rejected(HostValue::String("boom".into())),
+        )
+        .expect("reject");
+    restored.run_until_idle(&mut host).expect("catch");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::String("kept".into()))
+    );
+}
+
+#[test]
+fn var_redeclaration_of_a_parameter_does_not_clear_it() {
+    let source = r#"
+async function run(x) {
+  var x;
+  await wait("a");
+  return x;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm
+        .start(&mut host, "run", vec![HostValue::Number(5.0)])
+        .expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
+        .expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(5.0))
+    );
+}
+
+#[test]
+fn same_name_inner_and_outer_bindings_stay_independent() {
+    let source = r#"
+async function run() {
+  const x = {n: 1};
+  const inner = () => x;
+  await wait("a");
+  {
+    const x = {n: 2};
+    return inner().n;
+  }
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
+        .expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Number(1.0))
+    );
+}
+
+#[test]
+fn missing_parameter_stays_undefined_across_await() {
+    let source = r#"
+async function run(x) {
+  await wait("a");
+  return x;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
+        .expect("restore");
+    restored
+        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
+        .expect("complete");
+    restored.run_until_idle(&mut host).expect("finish");
+    assert_eq!(
+        restored.promise_state(&result).expect("result"),
+        PromiseState::Fulfilled(Value::Undefined)
+    );
+}
+
+#[test]
+fn restore_rejects_an_environment_the_function_does_not_use() {
+    let source = r#"
+async function run() {
+  const live = {n: 7};
+  await wait("a");
+  return live.n;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let mut snapshot = vm.snapshot(&[result]).expect("snapshot");
+    assert!(snapshot.continuations[0].env.is_none());
+    let env_id = snapshot
+        .objects
+        .iter()
+        .map(|record| record.id)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut bindings = std::collections::BTreeMap::new();
+    bindings.insert(1, Value::Number(1.0));
+    snapshot.objects.push(ObjectRecord {
+        id: env_id,
+        object: Object::Environment(EnvironmentObject {
+            parent: None,
+            bindings,
+        }),
+    });
+    snapshot.continuations[0].env = Some(env_id);
+    let calls = host.count("wait");
+    let error = Vm::restore(snapshot, build, &mut host).expect_err("extra environment");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("does not use an invocation environment"))
+    );
+    assert_eq!(host.count("wait"), calls, "restore must not run script");
+}
+
+#[test]
+fn restore_rejects_a_missing_environment_required_by_layout() {
+    let source = r#"
+async function run() {
+  const live = {n: 1};
+  const alias = () => live;
+  await wait("a");
+  return alias().n;
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
+    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    vm.run_until_idle(&mut host).expect("await");
+    let mut snapshot = vm.snapshot(&[result]).expect("snapshot");
+    assert!(snapshot.continuations[0].env.is_some());
+    snapshot.continuations[0].env = None;
+    let calls = host.count("wait");
+    let error = Vm::restore(snapshot, build, &mut host).expect_err("missing environment");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("no invocation environment"))
+    );
+    assert_eq!(host.count("wait"), calls, "restore must not run script");
 }

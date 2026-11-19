@@ -82,8 +82,8 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
         .iter()
         .map(|continuation| {
             format!(
-                "func {} resume {} values {:?}",
-                continuation.func_id, continuation.resume_id, continuation.values
+                "func {} resume {} env {:?} values {:?}",
+                continuation.func_id, continuation.resume_id, continuation.env, continuation.values
             )
         })
         .collect::<Vec<_>>()

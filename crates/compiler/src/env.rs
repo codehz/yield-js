@@ -1,9 +1,10 @@
 //! Lexical environments.
 //!
-//! Bindings live in heap environments at runtime, so the compiler only assigns
-//! stable [`BindingId`]s and records which scope chain a nested function
-//! captures. `let` and `const` are not distinguished: this PoC does not track
-//! TDZ. That distinction, when added, belongs here rather than in the emitter.
+//! The compiler assigns stable [`BindingId`]s and records the scope chain a
+//! nested function captures. Bindings read or written from another function
+//! stay in a heap environment; the rest become frame slots after lowering.
+//! `let` and `const` are not distinguished: this PoC does not track TDZ. That
+//! distinction, when added, belongs here rather than in the emitter.
 
 use std::collections::BTreeMap;
 

@@ -10,12 +10,15 @@
 //! source
 //!   → frontend   parse, top-level function declarations
 //!   → lower      bindings, exceptions, await  →  LoweredFunction
+//!   → bindings   owner table; cross-function reads and writes stay shared
+//!   → promote    unshared bindings become logical registers
 //!   → analyze    CFG live-in, including resume and handler edges
 //!   → allocate   persistent slots for cross-await values, transient otherwise
 //!   → Build
 //! ```
 
 mod allocate;
+mod bindings;
 mod analyze;
 mod emit;
 mod env;
@@ -25,6 +28,7 @@ mod instr;
 mod ir;
 mod lower;
 mod names;
+mod promote;
 mod session;
 
 use oxc::allocator::Allocator;

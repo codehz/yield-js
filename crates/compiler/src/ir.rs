@@ -4,6 +4,8 @@
 //! logical register: `kind` is meaningless and `index` is a [`Reg`]. Oxc is
 //! gone. Liveness and slot allocation are the only consumers.
 
+use std::collections::BTreeMap;
+
 use oxc::span::Span;
 use yield_vm::BindingId;
 use yield_vm::bytecode::{ExceptionHandler, Instr};
@@ -12,7 +14,6 @@ use crate::emit::Reg;
 
 /// A value location assigned during lowering, before persistent/transient split.
 pub(crate) type LogicalReg = Reg;
-
 #[derive(Debug)]
 pub(crate) struct AwaitSite {
     pub(crate) result: LogicalReg,
@@ -30,6 +31,8 @@ pub(crate) struct LoweredFunction {
     pub(crate) name: String,
     pub(crate) is_async: bool,
     pub(crate) param_bindings: Vec<BindingId>,
+    /// Non-shared bindings assigned a fresh logical register, in `BindingId` order.
+    pub(crate) promoted: BTreeMap<BindingId, LogicalReg>,
     pub(crate) reg_count: u16,
     pub(crate) code: Vec<Instr>,
     pub(crate) awaits: Vec<AwaitSite>,

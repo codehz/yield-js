@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::bytecode::Build;
+use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{Heap, PromiseState};
@@ -222,21 +222,31 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
-        let param_bindings = self.build.functions[function_index].param_bindings.clone();
+        let params = self.build.functions[function_index].params.clone();
         let async_promise = is_async.then(|| self.heap.alloc_promise());
 
         let mut bindings = BTreeMap::new();
-        for (index, binding) in param_bindings.into_iter().enumerate() {
+        let mut slot_args = Vec::new();
+        for (index, param) in params.into_iter().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Undefined);
-            bindings.insert(binding, value);
+            match param {
+                ParamTarget::Binding(binding) => {
+                    bindings.insert(binding, value);
+                }
+                ParamTarget::Slot(slot) => slot_args.push((slot, value)),
+            }
         }
-        let env = self.heap.alloc_environment(parent_env, bindings);
-        let frame = Frame::new(
+        let needs_env = self.build.functions[function_index].needs_environment();
+        let env = needs_env.then(|| self.heap.alloc_environment(parent_env, bindings));
+        let mut frame = Frame::new(
             function_index,
             &self.build.functions[function_index],
-            Some(env),
+            env,
             async_promise,
         );
+        for (slot, value) in slot_args {
+            frame.write(slot, value)?;
+        }
         let outcome = self.execute_frame(host, frame)?;
         match async_promise {
             Some(promise) => {

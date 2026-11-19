@@ -10,7 +10,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -28,7 +28,8 @@ pub struct ContinuationRecord {
     /// Promise the continuation waits on. Only recoverable, unsettled promises
     /// are persisted, so this is required for every restored continuation.
     pub waiting_on: ObjectId,
-    /// Invocation environment of the suspended frame.
+    /// Invocation environment of the suspended frame. Required exactly when
+    /// [`crate::bytecode::Function::needs_environment`] is true.
     pub env: Option<ObjectId>,
     /// Values in `ResumeEntry::saved_slots` order.
     pub values: Vec<Value>,
@@ -437,25 +438,32 @@ fn validate_continuation(
             resume.saved_slots.len()
         )));
     }
-    let Some(env) = record.env else {
+    if function.needs_environment() {
+        let Some(env) = record.env else {
+            return Err(VmError::InvalidSnapshot(format!(
+                "continuation {} has no invocation environment",
+                record.id
+            )));
+        };
+        if !matches!(heap.is_environment(env), Some(true)) {
+            let missing = heap.is_environment(env).is_none();
+            return Err(VmError::InvalidSnapshot(if missing {
+                format!(
+                    "continuation {} references missing environment {env}",
+                    record.id
+                )
+            } else {
+                format!(
+                    "continuation {} environment {env} is not an environment",
+                    record.id
+                )
+            }));
+        }
+    } else if let Some(env) = record.env {
         return Err(VmError::InvalidSnapshot(format!(
-            "continuation {} has no invocation environment",
+            "continuation {} does not use an invocation environment, found {env}",
             record.id
         )));
-    };
-    if !matches!(heap.is_environment(env), Some(true)) {
-        let missing = heap.is_environment(env).is_none();
-        return Err(VmError::InvalidSnapshot(if missing {
-            format!(
-                "continuation {} references missing environment {env}",
-                record.id
-            )
-        } else {
-            format!(
-                "continuation {} environment {env} is not an environment",
-                record.id
-            )
-        }));
     }
     match heap.get(record.async_promise) {
         Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending) => {}
