@@ -128,6 +128,8 @@ pub(crate) enum BuiltinCall {
     IsExtensible { reflect: bool },
     SetIntegrityLevel(IntegrityLevel),
     TestIntegrityLevel(IntegrityLevel),
+    ObjectAssign,
+    ObjectIs,
 }
 
 enum Dispatch<'a> {
@@ -172,6 +174,8 @@ impl Vm {
             )
             .expect("Object.prototype stores its constructor");
         for name in [
+            "assign",
+            "is",
             "keys",
             "create",
             "getPrototypeOf",
@@ -539,6 +543,11 @@ impl Vm {
             BuiltinCall::GetPrototypeOf { reflect } => self.get_prototype_of(&args, reflect),
             BuiltinCall::SetPrototypeOf { reflect } => self.set_prototype_of(&args, reflect),
             BuiltinCall::ObjectKeys => self.object_keys(&args),
+            BuiltinCall::ObjectAssign => self.object_assign(host, &args),
+            BuiltinCall::ObjectIs => Ok(Invocation::Value(Value::Bool(ops::same_value(
+                args.first().unwrap_or(&Value::Undefined),
+                args.get(1).unwrap_or(&Value::Undefined),
+            )))),
             BuiltinCall::ObjectGetOwnPropertyDescriptor => {
                 self.get_own_property_descriptor(host, &args)
             }
@@ -1193,6 +1202,41 @@ impl Vm {
             );
         }
         self.apply_property_update(*target, key, update)
+    }
+    fn object_assign(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error("Object.assign requires an object target");
+        };
+        let target = *target;
+        for source in args.iter().skip(1) {
+            let Value::Object(source_id) = source else {
+                // Primitive sources currently have no enumerable own keys.
+                continue;
+            };
+            let keys: Vec<_> = self.heap.get(*source_id)?.own_keys(false).collect();
+            for key in keys {
+                let Some(property) = self.heap.get(*source_id)?.own_property(key.borrowed()) else {
+                    continue;
+                };
+                if !property.attributes().enumerable {
+                    continue;
+                }
+                let value = match self.read_property(host, source, key.borrowed())? {
+                    Invocation::Value(value) => value,
+                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                };
+                let invocation =
+                    self.set_property(host, target, &Value::Object(target), key, value, true)?;
+                if let thrown @ Invocation::Thrown(_) = invocation {
+                    return Ok(thrown);
+                }
+            }
+        }
+        Ok(Invocation::Value(Value::Object(target)))
     }
 
     fn define_properties(
@@ -1905,6 +1949,9 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             })
         }
         ("Object", None) => Some(BuiltinCall::ObjectConstructor),
+        ("Object", Some("assign")) => Some(BuiltinCall::ObjectAssign),
+        ("Object", Some("is")) => Some(BuiltinCall::ObjectIs),
+
         ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
         ("Object", Some("create")) => Some(BuiltinCall::ObjectCreate),
         (owner @ ("Object" | "Reflect"), Some("getPrototypeOf")) => {
