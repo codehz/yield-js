@@ -33,6 +33,7 @@ pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
 pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
+pub(crate) const ROOT_REFLECT: &str = "reflect";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -47,6 +48,7 @@ pub(crate) struct BuiltinRoots {
     pub error: ObjectId,
     pub typeerror: ObjectId,
     pub symbol: ObjectId,
+    pub reflect: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -69,6 +71,7 @@ impl BuiltinRoots {
             (ROOT_ERROR.to_owned(), self.error),
             (ROOT_TYPEERROR.to_owned(), self.typeerror),
             (ROOT_SYMBOL.to_owned(), self.symbol),
+            (ROOT_REFLECT.to_owned(), self.reflect),
         ])
     }
 }
@@ -88,6 +91,7 @@ pub(crate) enum BuiltinCall {
     ArrayValues,
     ArrayIteratorNext,
     IteratorIdentity,
+    ReflectOwnKeys,
 }
 
 enum Dispatch<'a> {
@@ -183,6 +187,11 @@ impl Vm {
         self.heap
             .set_own_string(symbol, "iterator", Value::Symbol(ITERATOR_SYMBOL))
             .expect("Symbol constructor stores the iterator symbol");
+        let reflect = self.heap.alloc_plain();
+        let own_keys = self.heap.alloc_builtin("Reflect", Some("ownKeys"));
+        self.heap
+            .set_own_string(reflect, "ownKeys", Value::Object(own_keys))
+            .expect("Reflect stores ownKeys");
         self.builtins = BuiltinRoots {
             promise,
             promise_prototype: prototype,
@@ -195,6 +204,7 @@ impl Vm {
             error,
             typeerror,
             symbol,
+            reflect,
         };
     }
 
@@ -218,6 +228,7 @@ impl Vm {
             2 => Ok(self.builtins.error),
             3 => Ok(self.builtins.typeerror),
             4 => Ok(self.builtins.symbol),
+            5 => Ok(self.builtins.reflect),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -374,6 +385,23 @@ impl Vm {
             BuiltinCall::ArrayValues => self.array_values(receiver),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(receiver),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
+            BuiltinCall::ReflectOwnKeys => {
+                let Some(Value::Object(id)) = args.first() else {
+                    return self.throw_type_error("Reflect.ownKeys requires an object");
+                };
+                let keys = self
+                    .heap
+                    .get(*id)?
+                    .own_keys()
+                    .map(|key| match key {
+                        PropertyKey::String(key) => Value::String(key),
+                        PropertyKey::Symbol(id) => Value::Symbol(id),
+                    })
+                    .collect();
+                Ok(Invocation::Value(Value::Object(
+                    self.heap.alloc_array(keys),
+                )))
+            }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
             BuiltinCall::SymbolFor => {
@@ -413,11 +441,7 @@ impl Vm {
             }
         };
         let iterator = self.heap.alloc(Object::ArrayIterator {
-            object: PlainObject {
-                props: BTreeMap::new(),
-                symbol_props: BTreeMap::new(),
-                prototype: Some(self.builtins.array_iterator_prototype),
-            },
+            object: PlainObject::new(Some(self.builtins.array_iterator_prototype)),
             array: Some(id),
             next_index: 0,
         });
@@ -1041,6 +1065,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
+        ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
         }

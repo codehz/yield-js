@@ -49,13 +49,13 @@
 | 语义点 | design.md 目标 | 现状 |
 | --- | --- | --- |
 | `arguments` | 支持（严格模式 `arguments`） | 无任何绑定或降级；引用即"unknown binding"/未知名 |
-| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器的接收者语义、`hasOwnProperty` 与 `in`；快照保存内部原型。未实现 `writable` / `enumerable` / `configurable` 标志、标准枚举顺序及 `Object` 的原型和描述符 API。 |
-| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | `BUILTINS` 只有 `["Promise", "queueMicrotask", "Error", "TypeError", "Symbol"]` |
+| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器的接收者语义、`hasOwnProperty`、`in` 与 `Reflect.ownKeys`。快照保存内部原型和自有键创建顺序。未实现 `writable` / `enumerable` / `configurable` 标志或 `Object` 的原型和描述符 API。 |
+| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | 已有 `Promise`、`queueMicrotask`、`Error`、`TypeError`、`Symbol` 与 `Reflect`（仅 `ownKeys`）；仍无 `Object` / `Array` 等全局名。 |
 | 错误对象 | 标准错误类型 | `Error` / `TypeError` 可构造；VM 生成的 `TypeError` 同样是对象，提供 `name`、`message` 和简化的 `stack`。`Promise.any` 的 `AggregateError` 拒绝值仍为字符串。 |
 | 完整 ECMAScript TDZ | 明确不做 | `pending_lexicals` 仅本函数静态检查；闭包提前读得 `undefined` |
 | 循环每轮新绑定 | 明确不做 | 共享绑定 |
 | 名称策略例外 | — | `typeof` 对被局部遮蔽的 import/顶层函数报 `"function"`（有意保留，`names.rs`） |
-| Proxy / Reflect / Map / Set / WeakMap | Solid/React 验收前置 | 无 |
+| Proxy / Reflect / Map / Set / WeakMap | Solid/React 验收前置 | `Reflect.ownKeys` 已支持；其他 Reflect 操作、Proxy、Map、Set、WeakMap 未实现。 |
 | thenable 同化、Promise 组合子 | `all/allSettled/race/any` 等 | Promise 有基础 `then/catch/finally`；组合子未核对 |
 
 ## 4. 结构性缺口（影响后续所有语法特性）
@@ -64,7 +64,7 @@
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
 3. **迭代协议**：同步 `for…of` 与数组展开使用 `[Symbol.iterator]`，缓存 `next`。`for…of` 在循环提前退出时执行 `IteratorClose`；数组展开仅在 `next` 读取异常时关闭，自然耗尽不关闭。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照格式 v9 保存数组迭代器的源数组引用及游标。`for…in` 仍拒绝；数组仍为稠密存储，没有空洞语义。字节码 v10 增加 `ArrayAppend`。
 4. **解构与其余 spread 仍拒绝**：数组解构尚未接入迭代协议；实参展开与对象展开也未实现。
-5. **属性存在性与描述符**：`in`（字节码 v9，快照格式不变）与成员读取共用原型链查找；存在性检查不复制属性值。属性标志和按标准顺序枚举仍是 `Object`、`Reflect` 与 Proxy 不变量的缺口。
+5. **属性存在性、枚举与描述符**：`in` 与成员读取共用原型链查找，存在性检查不复制属性值。`Reflect.ownKeys` 先按数值升序返回数组索引键，再按创建顺序分别返回其余字符串键和 Symbol 键，不走原型链或调用 getter；稠密数组的自有键包含 `length`。快照格式 v10 保存创建顺序，字节码 v11 增加 `Reflect` 内建槽。属性标志仍是 `Object` 枚举、对象展开、`for…in` 及 Proxy 不变量的缺口。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 

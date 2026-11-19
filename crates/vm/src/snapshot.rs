@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
-    ROOT_QUEUE_MICROTASK, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
@@ -18,7 +18,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 9;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -425,9 +425,9 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 11 {
+    if roots.len() != 12 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 11",
+            "snapshot has {} builtin roots, expected 12",
             roots.len()
         )));
     }
@@ -518,6 +518,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         error: builtin_root(ROOT_ERROR, "Error")?,
         typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
         symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
+        reflect: plain_root(ROOT_REFLECT)?,
     })
 }
 

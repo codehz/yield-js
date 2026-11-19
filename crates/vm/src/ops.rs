@@ -121,10 +121,11 @@ pub(crate) fn array_index(key: &str) -> Option<usize> {
     if key == "0" {
         return Some(0);
     }
-    if key.starts_with('0') {
+    if !matches!(key.as_bytes().first(), Some(b'1'..=b'9')) {
         return None;
     }
-    key.parse().ok()
+    let index: u32 = key.parse().ok()?;
+    (index != u32::MAX).then_some(index as usize)
 }
 
 fn relational(

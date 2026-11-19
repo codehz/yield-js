@@ -7,6 +7,7 @@
 //! Array iterators share plain-object properties but keep their cursor internal.
 //! Bound functions have no own properties or internal prototype.
 
+use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -100,9 +101,9 @@ pub struct PromiseObject {
     /// Original settlement reapplied after a `finally` thenable. Distinct from
     /// the value currently being adopted.
     pub finally_settlement: Option<PromiseState>,
-    pub props: BTreeMap<String, Value>,
+    pub props: PropertyTable<String, Value>,
     /// Symbol-keyed own properties, kept beside the string table.
-    pub symbol_props: BTreeMap<SymbolId, Value>,
+    pub symbol_props: PropertyTable<SymbolId, Value>,
     /// Internal prototype. Promise instances share one identity.
     pub prototype: Option<ObjectId>,
 }
@@ -110,6 +111,86 @@ pub struct PromiseObject {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeObject {
     pub key: NativeKey,
+}
+
+/// Lookup stays keyed; the ordinal records creation order, not write order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct OrderedProperty<V> {
+    ordinal: usize,
+    value: V,
+}
+
+impl<K: Ord, V> PropertyTable<K, V> {
+    fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn get<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+    {
+        self.0.get(key).map(|property| &property.value)
+    }
+
+    pub fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+    {
+        self.0.get_mut(key).map(|property| &mut property.value)
+    }
+
+    /// Storage order, for internal traversal rather than script enumeration.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().map(|(key, property)| (key, &property.value))
+    }
+
+    fn update(&mut self, key: K, value: impl FnOnce(Option<&V>) -> V) {
+        let ordinal = self.0.len();
+        match self.0.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let property = entry.get_mut();
+                property.value = value(Some(&property.value));
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(OrderedProperty {
+                    ordinal,
+                    value: value(None),
+                });
+            }
+        }
+    }
+
+    fn valid_order(&self) -> bool {
+        let mut seen = vec![false; self.0.len()];
+        self.0.values().all(|property| {
+            seen.get_mut(property.ordinal)
+                .is_some_and(|seen| !std::mem::replace(seen, true))
+        })
+    }
+}
+
+fn collect_own_keys<'a, V>(
+    keys: &mut Vec<((u8, usize), PropertyKeyRef<'a>)>,
+    props: &'a PropertyTable<String, V>,
+    symbols: &'a PropertyTable<SymbolId, V>,
+) {
+    keys.reserve(props.0.len() + symbols.0.len());
+    keys.extend(props.0.iter().map(|(key, property)| {
+        let order = match array_index(key) {
+            Some(index) => (0, index),
+            None => (1, property.ordinal),
+        };
+        (order, PropertyKeyRef::String(key))
+    }));
+    keys.extend(
+        symbols
+            .0
+            .iter()
+            .map(|(&id, property)| ((2, property.ordinal), PropertyKeyRef::Symbol(id))),
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,18 +220,28 @@ impl OwnProperty<'_> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlainObject {
-    pub props: BTreeMap<String, Property>,
-    pub symbol_props: BTreeMap<SymbolId, Property>,
+    pub props: PropertyTable<String, Property>,
+    pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Literals use `None`.
     pub prototype: Option<ObjectId>,
+}
+
+impl PlainObject {
+    pub(crate) fn new(prototype: Option<ObjectId>) -> Self {
+        Self {
+            props: PropertyTable::new(),
+            symbol_props: PropertyTable::new(),
+            prototype,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayObject {
     pub elements: Vec<Value>,
     /// Own properties other than `length` and canonical indices.
-    pub props: BTreeMap<String, Value>,
-    pub symbol_props: BTreeMap<SymbolId, Value>,
+    pub props: PropertyTable<String, Value>,
+    pub symbol_props: PropertyTable<SymbolId, Value>,
     pub prototype: Option<ObjectId>,
 }
 
@@ -171,7 +262,7 @@ impl ArrayObject {
         self.props.get(key)
     }
 
-    fn set(&mut self, key: &str, value: Value) -> Result<(), VmError> {
+    fn set(&mut self, key: String, value: Value) -> Result<(), VmError> {
         if key == "length" {
             let Value::Number(length) = value else {
                 return Err(VmError::InvalidState(
@@ -186,14 +277,14 @@ impl ArrayObject {
             self.elements.resize(length as usize, Value::Undefined);
             return Ok(());
         }
-        if let Some(index) = array_index(key) {
+        if let Some(index) = array_index(&key) {
             if self.elements.len() <= index {
                 self.elements.resize(index + 1, Value::Undefined);
             }
             self.elements[index] = value;
             return Ok(());
         }
-        self.props.insert(key.to_owned(), value);
+        self.props.update(key, |_| value);
         Ok(())
     }
 }
@@ -204,8 +295,8 @@ impl ArrayObject {
 pub struct FunctionObject {
     pub func_id: u32,
     pub env: Option<ObjectId>,
-    pub props: BTreeMap<String, Value>,
-    pub symbol_props: BTreeMap<SymbolId, Value>,
+    pub props: PropertyTable<String, Value>,
+    pub symbol_props: PropertyTable<SymbolId, Value>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
 }
@@ -226,8 +317,8 @@ pub struct EnvironmentObject {
 pub struct BuiltinStatic {
     pub name: String,
     pub member: Option<String>,
-    pub props: BTreeMap<String, Value>,
-    pub symbol_props: BTreeMap<SymbolId, Value>,
+    pub props: PropertyTable<String, Value>,
+    pub symbol_props: PropertyTable<SymbolId, Value>,
     pub prototype: Option<ObjectId>,
 }
 
@@ -342,6 +433,65 @@ impl Object {
         }
     }
 
+    pub(crate) fn own_keys(&self) -> impl Iterator<Item = PropertyKey> + '_ {
+        let mut keys = Vec::new();
+        match self {
+            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
+                collect_own_keys(&mut keys, &plain.props, &plain.symbol_props);
+            }
+            Self::Array(array) => collect_own_keys(&mut keys, &array.props, &array.symbol_props),
+            Self::Function(function) => {
+                collect_own_keys(&mut keys, &function.props, &function.symbol_props)
+            }
+            Self::Promise(promise) => {
+                collect_own_keys(&mut keys, &promise.props, &promise.symbol_props)
+            }
+            Self::BuiltinStatic(builtin) => {
+                collect_own_keys(&mut keys, &builtin.props, &builtin.symbol_props)
+            }
+            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => {}
+        }
+        keys.sort_unstable_by_key(|&(order, _)| order);
+        let array_len = match self {
+            Self::Array(array) => Some(array.elements.len()),
+            _ => None,
+        };
+        (0..array_len.unwrap_or_default())
+            .map(|index| PropertyKey::String(index.to_string()))
+            .chain(array_len.map(|_| PropertyKey::String("length".to_owned())))
+            .chain(keys.into_iter().map(|(_, key)| match key {
+                PropertyKeyRef::String(key) => PropertyKey::String(key.to_owned()),
+                PropertyKeyRef::Symbol(id) => PropertyKey::Symbol(id),
+            }))
+    }
+
+    fn valid_property_tables(&self) -> bool {
+        match self {
+            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
+                plain.props.valid_order() && plain.symbol_props.valid_order()
+            }
+            Self::Array(array) => {
+                array.props.valid_order()
+                    && array.symbol_props.valid_order()
+                    && array
+                        .props
+                        .0
+                        .keys()
+                        .all(|key| key != "length" && array_index(key).is_none())
+            }
+            Self::Function(function) => {
+                function.props.valid_order() && function.symbol_props.valid_order()
+            }
+            Self::Promise(promise) => {
+                promise.props.valid_order() && promise.symbol_props.valid_order()
+            }
+            Self::BuiltinStatic(builtin) => {
+                builtin.props.valid_order() && builtin.symbol_props.valid_order()
+            }
+            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => true,
+        }
+    }
+
     fn prototype(&self) -> Option<ObjectId> {
         match self {
             Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => plain.prototype,
@@ -437,7 +587,7 @@ fn push_plain(out: &mut Vec<OwnedEdge>, plain: &PlainObject) {
     if let Some(id) = plain.prototype {
         out.push(OwnedEdge::Prototype(id));
     }
-    for property in plain.props.values() {
+    for (_, property) in plain.props.iter() {
         push_property(out, property);
     }
     push_symbol_properties(out, &plain.symbol_props);
@@ -445,26 +595,26 @@ fn push_plain(out: &mut Vec<OwnedEdge>, plain: &PlainObject) {
 
 fn push_script(
     out: &mut Vec<OwnedEdge>,
-    props: &BTreeMap<String, Value>,
+    props: &PropertyTable<String, Value>,
     prototype: Option<ObjectId>,
 ) {
     if let Some(id) = prototype {
         out.push(OwnedEdge::Prototype(id));
     }
-    for value in props.values() {
+    for (_, value) in props.iter() {
         push_value(out, value);
     }
 }
 
-fn push_symbol_values(out: &mut Vec<OwnedEdge>, table: &BTreeMap<SymbolId, Value>) {
-    for (key, value) in table {
+fn push_symbol_values(out: &mut Vec<OwnedEdge>, table: &PropertyTable<SymbolId, Value>) {
+    for (key, value) in table.iter() {
         out.push(OwnedEdge::Symbol(*key));
         push_value(out, value);
     }
 }
 
-fn push_symbol_properties(out: &mut Vec<OwnedEdge>, table: &BTreeMap<SymbolId, Property>) {
-    for (key, property) in table {
+fn push_symbol_properties(out: &mut Vec<OwnedEdge>, table: &PropertyTable<SymbolId, Property>) {
+    for (key, property) in table.iter() {
         out.push(OwnedEdge::Symbol(*key));
         push_property(out, property);
     }
@@ -623,8 +773,8 @@ impl Heap {
             locked: false,
             adopting: None,
             finally_settlement: None,
-            props: BTreeMap::new(),
-            symbol_props: BTreeMap::new(),
+            props: PropertyTable::new(),
+            symbol_props: PropertyTable::new(),
             prototype: self.promise_prototype,
         }))
     }
@@ -658,18 +808,14 @@ impl Heap {
     }
 
     pub(crate) fn alloc_plain_with(&mut self, prototype: Option<ObjectId>) -> ObjectId {
-        self.alloc(Object::Plain(PlainObject {
-            props: BTreeMap::new(),
-            symbol_props: BTreeMap::new(),
-            prototype,
-        }))
+        self.alloc(Object::Plain(PlainObject::new(prototype)))
     }
 
     pub(crate) fn alloc_array(&mut self, elements: Vec<Value>) -> ObjectId {
         self.alloc(Object::Array(ArrayObject {
             elements,
-            props: BTreeMap::new(),
-            symbol_props: BTreeMap::new(),
+            props: PropertyTable::new(),
+            symbol_props: PropertyTable::new(),
             prototype: self.array_prototype,
         }))
     }
@@ -678,8 +824,8 @@ impl Heap {
         self.alloc(Object::Function(FunctionObject {
             func_id,
             env,
-            props: BTreeMap::new(),
-            symbol_props: BTreeMap::new(),
+            props: PropertyTable::new(),
+            symbol_props: PropertyTable::new(),
             prototype: None,
         }))
     }
@@ -688,8 +834,8 @@ impl Heap {
         self.alloc(Object::BuiltinStatic(BuiltinStatic {
             name: name.to_owned(),
             member: member.map(str::to_owned),
-            props: BTreeMap::new(),
-            symbol_props: BTreeMap::new(),
+            props: PropertyTable::new(),
+            symbol_props: PropertyTable::new(),
             prototype: None,
         }))
     }
@@ -703,6 +849,11 @@ impl Heap {
     }
 
     pub(crate) fn insert_restore(&mut self, id: ObjectId, object: Object) -> Result<(), VmError> {
+        if !object.valid_property_tables() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "object {id} has invalid property tables"
+            )));
+        }
         if self.objects.insert(id, object).is_some() {
             return Err(VmError::InvalidSnapshot(format!(
                 "duplicate object id {id}"
@@ -872,30 +1023,33 @@ impl Heap {
     ) -> Result<(), VmError> {
         match self.get_mut(id)? {
             Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
-                insert_table(
-                    &mut plain.props,
-                    &mut plain.symbol_props,
-                    key,
-                    Property::Data(value),
-                );
+                insert_table(&mut plain.props, &mut plain.symbol_props, key, |_| {
+                    Property::Data(value)
+                });
                 Ok(())
             }
             Object::Function(function) => {
-                insert_table(&mut function.props, &mut function.symbol_props, key, value);
+                insert_table(&mut function.props, &mut function.symbol_props, key, |_| {
+                    value
+                });
                 Ok(())
             }
             Object::Promise(promise) => {
-                insert_table(&mut promise.props, &mut promise.symbol_props, key, value);
+                insert_table(&mut promise.props, &mut promise.symbol_props, key, |_| {
+                    value
+                });
                 Ok(())
             }
             Object::BuiltinStatic(builtin) => {
-                insert_table(&mut builtin.props, &mut builtin.symbol_props, key, value);
+                insert_table(&mut builtin.props, &mut builtin.symbol_props, key, |_| {
+                    value
+                });
                 Ok(())
             }
             Object::Array(array) => match key {
-                PropertyKey::String(key) => array.set(&key, value),
+                PropertyKey::String(key) => array.set(key, value),
                 PropertyKey::Symbol(id) => {
-                    array.symbol_props.insert(id, value);
+                    array.symbol_props.update(id, |_| value);
                     Ok(())
                 }
             },
@@ -919,12 +1073,19 @@ impl Heap {
                 ));
             }
         };
-        match key {
-            PropertyKey::String(key) => define_in_table(plain.props.entry(key.clone()), property),
-            PropertyKey::Symbol(id) => {
-                define_in_table(plain.symbol_props.entry(id), property);
+        insert_table(&mut plain.props, &mut plain.symbol_props, key, |old| {
+            let mut property = property;
+            if let Property::Accessor { get, set } = &mut property
+                && let Some(Property::Accessor {
+                    get: old_get,
+                    set: old_set,
+                }) = old
+            {
+                *get = get.or(*old_get);
+                *set = set.or(*old_set);
             }
-        }
+            property
+        });
         Ok(())
     }
 
@@ -986,8 +1147,8 @@ impl Heap {
 }
 
 fn lookup_tables<'m, V>(
-    props: &'m BTreeMap<String, V>,
-    symbol_props: &'m BTreeMap<SymbolId, V>,
+    props: &'m PropertyTable<String, V>,
+    symbol_props: &'m PropertyTable<SymbolId, V>,
     key: PropertyKeyRef<'_>,
 ) -> Option<&'m V> {
     match key {
@@ -996,36 +1157,16 @@ fn lookup_tables<'m, V>(
     }
 }
 
-fn define_in_table<K: Ord>(entry: Entry<'_, K, Property>, mut property: Property) {
-    match entry {
-        Entry::Occupied(mut own) => {
-            if let Property::Accessor { get, set } = &mut property
-                && let Property::Accessor {
-                    get: old_get,
-                    set: old_set,
-                } = own.get()
-            {
-                *get = get.or(*old_get);
-                *set = set.or(*old_set);
-            }
-            own.insert(property);
-        }
-        Entry::Vacant(own) => {
-            own.insert(property);
-        }
-    }
-}
-
 fn insert_table<V>(
-    props: &mut BTreeMap<String, V>,
-    symbol_props: &mut BTreeMap<SymbolId, V>,
+    props: &mut PropertyTable<String, V>,
+    symbol_props: &mut PropertyTable<SymbolId, V>,
     key: PropertyKey,
-    value: V,
+    value: impl FnOnce(Option<&V>) -> V,
 ) {
     match key {
-        PropertyKey::String(key) => props.insert(key, value),
-        PropertyKey::Symbol(id) => symbol_props.insert(id, value),
-    };
+        PropertyKey::String(key) => props.update(key, value),
+        PropertyKey::Symbol(id) => symbol_props.update(id, value),
+    }
 }
 
 pub(crate) fn object_id(value: &Value, what: &str) -> Result<ObjectId, VmError> {

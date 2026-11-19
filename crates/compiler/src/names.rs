@@ -81,9 +81,6 @@ impl Tables<'_> {
         if self.is_import_or_top_level(name) {
             return Some("function");
         }
-        if env.lookup(name).is_none() && builtin_index(name).is_some() {
-            return Some("function");
-        }
         None
     }
 

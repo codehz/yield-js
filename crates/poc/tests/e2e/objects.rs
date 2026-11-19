@@ -324,3 +324,30 @@ async function run() {
     s.complete("wait:a", Completion::Fulfilled(HostValue::Number(2.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(14.0)));
 }
+
+#[test]
+fn restore_rejects_invalid_property_ordinals() {
+    let source = r#"
+async function run() {
+  const obj = { z: 1, a: 2 };
+  await wait("a");
+  return Reflect.ownKeys(obj)[0];
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let index = snapshot.objects.iter().position(|record| {
+        matches!(&record.object, Object::Plain(plain) if plain.props.get("z").is_some())
+    }).expect("live object");
+    for invalid_ordinal in [0, 2] {
+        let mut corrupt = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        corrupt["objects"][index]["object"]["plain"]["props"]["a"]["ordinal"] =
+            serde_json::json!(invalid_ordinal);
+        let error = s
+            .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
+            .expect_err("invalid property ordinal");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
+        );
+    }
+}
