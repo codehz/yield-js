@@ -3,6 +3,7 @@
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
+use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::JumpTarget;
@@ -151,9 +152,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             )),
             Statement::SwitchStatement(statement) => self.compile_switch(statement),
             Statement::TryStatement(statement) => self.compile_try(statement),
-            Statement::ForInStatement(statement) => {
-                Err(unsupported(self.source_text(), statement.span, "for-in"))
-            }
+            Statement::ForInStatement(statement) => self.compile_for_in(statement),
             Statement::ForOfStatement(statement) => self.compile_for_of(statement),
             Statement::LabeledStatement(statement) => self.compile_labeled(statement),
             Statement::ExportNamedDeclaration(_) => Ok(()),
@@ -216,6 +215,47 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
     }
 
+    fn compile_for_in(
+        &mut self,
+        statement: &'ast ForInStatement<'ast>,
+    ) -> Result<(), CompileError> {
+        self.env.enter_block();
+        let binding = self.declare_iteration_binding(&statement.left, "for-in")?;
+        let source = self.compile_expression(&statement.right)?;
+        if let Some(binding) = binding {
+            self.env.clear_pending(binding);
+        }
+
+        let iterator = self.alloc_reg()?;
+        self.emit(Instr::GetForInIterator {
+            dst: self.slot(iterator),
+            source: self.slot(source),
+        });
+        let step_pc = self.pc();
+        let done = self.alloc_reg()?;
+        let value = self.alloc_reg()?;
+        self.emit(Instr::ForInNext {
+            done: self.slot(done),
+            value: self.slot(value),
+            iterator: self.slot(iterator),
+        });
+        let has_value = self.branch_false(done);
+        let exhausted = self.jump();
+        self.patch_jump(has_value, self.pc())?;
+
+        // Enumeration has no user-visible iterator to close on abrupt exit.
+        self.control.push_loop(Some(step_pc));
+        self.assign_iteration_value(&statement.left, binding, value, "for-in")?;
+        self.compile_statement(&statement.body)?;
+        let loop_context = self.control.pop_loop();
+        self.jump_to(step_pc);
+        let end = self.pc();
+        self.patch_jump(exhausted, end)?;
+        self.patch_loop(loop_context, end)?;
+        self.env.exit_block();
+        Ok(())
+    }
+
     fn compile_for_of(
         &mut self,
         statement: &'ast ForOfStatement<'ast>,
@@ -232,32 +272,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         self.env.enter_block();
-        let binding = if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
-            let [declarator] = declaration.declarations.as_slice() else {
-                return Err(unsupported(
-                    self.source_text(),
-                    declaration.span,
-                    "for-of declaration",
-                ));
-            };
-            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-                return Err(unsupported(
-                    self.source_text(),
-                    declarator.span,
-                    "for-of destructuring",
-                ));
-            };
-            self.predeclare_variable_list(declaration)?;
-            let (binding, _) =
-                self.declare(identifier.name.as_str(), declaration.kind, declarator.span)?;
-            // `var` exists even when the iterator yields nothing.
-            if declaration.kind == VariableDeclarationKind::Var {
-                self.emit(Instr::DeclareBinding { binding });
-            }
-            Some(binding)
-        } else {
-            None
-        };
+        let binding = self.declare_iteration_binding(&statement.left, "for-of")?;
 
         let iterable = self.compile_expression(&statement.right)?;
         if let Some(binding) = binding {
@@ -283,14 +298,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let exhausted = self.jump();
         self.patch_jump(has_value, self.pc())?;
         let loop_context = self.compile_iterator_body(iterator, step_pc, |this| {
-            if let Some(binding) = binding {
-                this.emit(Instr::SetBinding {
-                    binding,
-                    src: this.slot(value),
-                });
-            } else {
-                this.assign_iterator_value(&statement.left, value)?;
-            }
+            this.assign_iteration_value(&statement.left, binding, value, "for-of")?;
             this.compile_statement(&statement.body)
         })?;
 
@@ -301,13 +309,56 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    fn assign_iterator_value(
+    fn declare_iteration_binding(
         &mut self,
         target: &'ast ForStatementLeft<'ast>,
+        loop_kind: &str,
+    ) -> Result<Option<BindingId>, CompileError> {
+        let ForStatementLeft::VariableDeclaration(declaration) = target else {
+            return Ok(None);
+        };
+        let [declarator] = declaration.declarations.as_slice() else {
+            return Err(unsupported(
+                self.source_text(),
+                declaration.span,
+                &format!("{loop_kind} declaration"),
+            ));
+        };
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(unsupported(
+                self.source_text(),
+                declarator.span,
+                &format!("{loop_kind} destructuring"),
+            ));
+        };
+        if let Some(initializer) = &declarator.init {
+            return Err(unsupported(
+                self.source_text(),
+                initializer.span(),
+                &format!("{loop_kind} initializer"),
+            ));
+        }
+        self.predeclare_variable_list(declaration)?;
+        let (binding, _) =
+            self.declare(identifier.name.as_str(), declaration.kind, declarator.span)?;
+        // `var` exists even when the iteration yields nothing.
+        if declaration.kind == VariableDeclarationKind::Var {
+            self.emit(Instr::DeclareBinding { binding });
+        }
+        Ok(Some(binding))
+    }
+
+    fn assign_iteration_value(
+        &mut self,
+        target: &'ast ForStatementLeft<'ast>,
+        binding: Option<BindingId>,
         value: Reg,
+        loop_kind: &str,
     ) -> Result<(), CompileError> {
         let src = self.slot(value);
-        if let ForStatementLeft::AssignmentTargetIdentifier(identifier) = target {
+        if let Some(binding) = binding {
+            self.emit(Instr::SetBinding { binding, src });
+        } else if let ForStatementLeft::AssignmentTargetIdentifier(identifier) = target {
             let name = identifier.name.as_str();
             let binding = self.lookup(name).ok_or_else(|| {
                 CompileError::new(
@@ -329,7 +380,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return Err(unsupported(
                 self.source_text(),
                 target.span(),
-                "for-of destructuring",
+                &format!("{loop_kind} destructuring"),
             ));
         }
         Ok(())
@@ -359,6 +410,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         Statement::WhileStatement(_)
                         | Statement::DoWhileStatement(_)
                         | Statement::ForStatement(_)
+                        | Statement::ForInStatement(_)
                         | Statement::ForOfStatement(_) => Some(self.control.loops_len()),
                         _ => None,
                     };

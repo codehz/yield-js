@@ -24,7 +24,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ### 2.1 绑定与参数
 
 - 默认参数（`default parameter`）、rest（`rest parameter`）
-- 参数解构、变量声明解构、`catch` 参数解构、`for…of` 解构（`parameter destructuring`、`destructuring declaration`、`catch parameter destructuring`、`for-of destructuring`）
+- 参数解构、变量声明解构、`catch` 参数解构、`for…in` / `for…of` 解构（`parameter destructuring`、`destructuring declaration`、`catch parameter destructuring`、`for-in destructuring`、`for-of destructuring`）
 - `for…of` 多个声明（`for-of declaration`）
 - `arguments` 没有绑定。引用是 `unknown binding`，不是单独的 `unsupported syntax`
 - `const` 与 `let` 在绑定种类上不分。重复赋值 `const` 能编过，也不会在运行期拒绝
@@ -41,7 +41,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ### 2.3 控制流与顶层
 
-- `for…in`（`for-in`）
 - `class` 声明（`class declaration`）。首版约定由离线构建降级，编译器仍整段拒绝
 
 ## 3. 能编过，但语义不完整
@@ -86,7 +85,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
 2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构和 Promise 组合子尚未接入。
-3. **属性模型尚未接入代理和语法枚举。** `for…in` 和对象展开仍需实现各自的枚举语义；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
+3. **属性枚举尚未覆盖对象展开和代理。** 对象展开仍需按自有键顺序复制可枚举的字符串与 Symbol 属性；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
@@ -96,9 +95,7 @@ flowchart LR
   C[对象强制转换] --> S[String / Number / 模板]
   I[已有同步迭代] --> D[解构]
   I --> P[组合子接受任意可迭代]
-  E[自有键顺序与描述符] --> N[for-in]
   E --> O[对象展开]
-  K[已有原型查询与变更] --> N
   E --> R[Proxy 与其余 Reflect]
 ```
 

@@ -377,6 +377,42 @@ fn string_iterator_snapshot_rejects_invalid_offsets() {
 }
 
 #[test]
+fn for_in_snapshot_rejects_invalid_cursor_state() {
+    let source = include_str!("../cases/control/for_in_restore.js");
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let iterator = snapshot
+        .objects
+        .iter()
+        .position(|record| {
+            matches!(
+                record.object,
+                Object::ForInIterator {
+                    pending: Some(_),
+                    ..
+                }
+            )
+        })
+        .expect("live property enumeration cursor");
+
+    for target in [
+        None,
+        Some(snapshot.objects[iterator].id),
+        Some(yield_vm::value::ObjectId::MAX),
+    ] {
+        let mut invalid = snapshot.clone();
+        let Object::ForInIterator { current, .. } = &mut invalid.objects[iterator].object else {
+            unreachable!();
+        };
+        *current = target;
+        let error = s.restore(invalid).expect_err("invalid enumeration cursor");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("for-in iterator"))
+        );
+    }
+}
+
+#[test]
 fn symbols_never_reach_the_host_call() {
     let source = r#"
 export async function run() {

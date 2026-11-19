@@ -92,6 +92,79 @@ fn rejects_unsupported_for_of_forms_with_location() {
 }
 
 #[test]
+fn for_in_keeps_enumerator_live_across_await_without_iterator_close() {
+    let function = compile_run(
+        r#"
+async function run(source, target) {
+  outer: inner: for (target[seed()] in source) {
+    if (await wait(target.key)) continue outer;
+    break inner;
+  }
+}
+"#,
+    );
+    let iterator = function
+        .code
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instr::GetForInIterator { dst, .. } => Some(*dst),
+            _ => None,
+        })
+        .expect("missing for-in setup");
+    assert_eq!(iterator.kind, yield_vm::bytecode::SlotKind::Persistent);
+    assert!(function.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::ForInNext { iterator: step, .. } if *step == iterator
+    )));
+    assert!(function.resumes[0].saved_slots.contains(&iterator.index));
+    assert!(!function.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::GetIterator { .. } | Instr::IteratorNext { .. } | Instr::IteratorClose { .. }
+    )));
+}
+
+#[test]
+fn for_in_collects_vars_but_keeps_lexical_bindings_in_the_header_scope() {
+    compile_run(
+        r#"
+function run(source) {
+  inspect(key, fromBody);
+  for (var key in source) { var fromBody = key; }
+  for (key in source) {}
+  for (let source in {}) { inspect(source); }
+  for (const key in source) { inspect(key); }
+  return key;
+}
+"#,
+    );
+    compile(
+        "export { key }; for (var key in {}) {}",
+        &CompileOptions::default(),
+    )
+    .expect("script scan collects a for-in var");
+    for (statement, diagnostic) in [
+        ("for (let key in key) {}", "before initialization"),
+        ("for (const key in {}) {} return key;", "unknown binding"),
+        (
+            "for (let key in {}) { var key; }",
+            "duplicate lexical binding",
+        ),
+        ("for (missing in {}) {}", "assignment to unknown binding"),
+        (
+            "for (missing in {}) {} let missing;",
+            "before initialization",
+        ),
+        ("for (let [key] in {}) {}", "for-in destructuring"),
+        ("for ([key] in {}) {}", "for-in destructuring"),
+    ] {
+        let source = format!("function run() {{\n  {statement}\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(statement);
+        assert!(error.message().contains(diagnostic), "{statement}: {error}");
+        assert_eq!(error.line(), 2, "{statement}: {error}");
+    }
+}
+
+#[test]
 fn rejects_delete_of_identifier_in_strict_modules() {
     for operand in ["x", "((x))"] {
         let source = format!("function run(x) {{\n  return delete {operand};\n}}");

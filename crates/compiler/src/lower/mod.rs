@@ -178,7 +178,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         "declaration without body",
                     )
                 })?;
-                self.predeclare_scope(&body.statements)?;
+                self.predeclare_function_body(&body.statements)?;
                 for statement in &body.statements {
                     self.compile_statement(statement)?;
                 }
@@ -186,7 +186,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             FunctionSource::Arrow(arrow) => match &arrow.body {
                 ArrowFunctionBody::FunctionBody(body) => {
-                    self.predeclare_scope(&body.statements)?;
+                    self.predeclare_function_body(&body.statements)?;
                     for statement in &body.statements {
                         self.compile_statement(statement)?;
                     }
@@ -569,6 +569,21 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             )
         })?;
         self.session.insert_export(public, binding, public_span)
+    }
+
+    fn predeclare_function_body(
+        &mut self,
+        statements: &'ast [Statement<'ast>],
+    ) -> Result<(), CompileError> {
+        let vars = collect_list(self.source_text(), statements, false, &mut Vec::new())?;
+        for (name, span) in vars {
+            if let Some(binding) =
+                self.predeclare_name(&name, VariableDeclarationKind::Var, span)?
+            {
+                self.emit(Instr::DeclareBinding { binding });
+            }
+        }
+        self.predeclare_scope(statements)
     }
 
     pub(super) fn predeclare_scope(

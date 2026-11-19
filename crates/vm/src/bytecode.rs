@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 17;
+pub const BYTECODE_VERSION: u32 = 18;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -289,6 +289,17 @@ pub enum Instr {
     IteratorClose {
         iterator: Slot,
         preserve_throw: bool,
+    },
+    /// Creates an internal property enumeration cursor, independent of Symbol.iterator.
+    GetForInIterator {
+        dst: Slot,
+        source: Slot,
+    },
+    /// Advances the property enumeration cursor and yields a string key or undefined.
+    ForInNext {
+        done: Slot,
+        value: Slot,
+        iterator: Slot,
     },
 }
 
@@ -816,6 +827,24 @@ impl Build {
                 }
                 Instr::IteratorClose { iterator, .. } => {
                     check_slot(*iterator, "IteratorClose.iterator")?;
+                }
+                Instr::GetForInIterator { dst, source } => {
+                    check_slot(*dst, "GetForInIterator.dst")?;
+                    check_slot(*source, "GetForInIterator.source")?;
+                }
+                Instr::ForInNext {
+                    done,
+                    value,
+                    iterator,
+                } => {
+                    check_slot(*done, "ForInNext.done")?;
+                    check_slot(*value, "ForInNext.value")?;
+                    if done == value {
+                        return Err(format!(
+                            "{location}: ForInNext destinations overlap at pc {pc}"
+                        ));
+                    }
+                    check_slot(*iterator, "ForInNext.iterator")?;
                 }
                 Instr::SetMember { object, key, src } => {
                     check_slot(*object, "SetMember.object")?;

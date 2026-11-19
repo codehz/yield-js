@@ -7,7 +7,8 @@
 
 use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
@@ -578,6 +579,14 @@ pub enum Object {
         /// UTF-8 byte offset, always on a code point boundary.
         byte_offset: usize,
     },
+    /// Internal cursor: capture own keys per prototype, then recheck a key's
+    /// descriptor immediately before visiting it. No property stores or traps.
+    ForInIterator {
+        current: Option<ObjectId>,
+        pending: Option<VecDeque<String>>,
+        visited: BTreeSet<String>,
+        string_indices: Range<usize>,
+    },
     Function(FunctionObject),
     Bound(BoundObject),
     Environment(EnvironmentObject),
@@ -673,7 +682,7 @@ impl Object {
             Self::Function(o) => &mut o.extensible,
             Self::Promise(o) => &mut o.extensible,
             Self::BuiltinStatic(o) => &mut o.extensible,
-            Self::Native(_) | Self::Environment(_) => return None,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -689,7 +698,7 @@ impl Object {
             Self::Promise(o) => o.extensible,
             Self::BuiltinStatic(o) => o.extensible,
             // Opaque native handles have no script property storage.
-            Self::Native(_) | Self::Environment(_) => false,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => false,
         }
     }
 
@@ -746,7 +755,7 @@ impl Object {
             Self::Function(o) => (&o.props, &o.symbol_props),
             Self::Promise(o) => (&o.props, &o.symbol_props),
             Self::BuiltinStatic(o) => (&o.props, &o.symbol_props),
-            Self::Native(_) | Self::Environment(_) => return None,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -761,7 +770,7 @@ impl Object {
             Self::Function(o) => (&mut o.props, &mut o.symbol_props),
             Self::Promise(o) => (&mut o.props, &mut o.symbol_props),
             Self::BuiltinStatic(o) => (&mut o.props, &mut o.symbol_props),
-            Self::Native(_) | Self::Environment(_) => return None,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -850,7 +859,7 @@ impl Object {
             Self::BuiltinStatic(builtin) => builtin.prototype,
             Self::Bound(bound) => bound.object.prototype,
             Self::Resolution(resolution) => resolution.object.prototype,
-            Self::Native(_) | Self::Environment(_) => None,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => None,
         }
     }
 
@@ -865,7 +874,7 @@ impl Object {
             Self::Function(o) => &mut o.prototype,
             Self::Promise(o) => &mut o.prototype,
             Self::BuiltinStatic(o) => &mut o.prototype,
-            Self::Native(_) | Self::Environment(_) => return None,
+            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -914,6 +923,11 @@ impl Object {
             | Self::StringIterator { .. } => {}
             Self::ArrayIterator { array, .. } => {
                 if let Some(id) = array {
+                    out.push(OwnedEdge::Object(*id));
+                }
+            }
+            Self::ForInIterator { current, .. } => {
+                if let Some(id) = current {
                     out.push(OwnedEdge::Object(*id));
                 }
             }
@@ -1148,6 +1162,95 @@ impl Heap {
 
     pub(crate) fn alloc_plain_with(&mut self, prototype: Option<ObjectId>) -> ObjectId {
         self.alloc(Object::Plain(PlainObject::new(prototype)))
+    }
+
+    pub(crate) fn alloc_for_in_iterator(&mut self, source: &Value) -> ObjectId {
+        let current = match source {
+            Value::Undefined | Value::Null => None,
+            Value::Object(id) => Some(*id),
+            // The primitive wrapper prototypes do not exist in this subset.
+            _ => self.object_prototype,
+        };
+        let string_length = match source {
+            Value::String(string) => string.encode_utf16().count(),
+            _ => 0,
+        };
+        self.alloc(Object::ForInIterator {
+            current,
+            pending: None,
+            visited: BTreeSet::new(),
+            string_indices: 0..string_length,
+        })
+    }
+
+    pub(crate) fn for_in_next(&mut self, iterator: ObjectId) -> Result<Option<String>, VmError> {
+        loop {
+            let Object::ForInIterator {
+                current,
+                pending,
+                visited,
+                string_indices,
+            } = self.get_mut(iterator)?
+            else {
+                return Err(VmError::InvalidState("expected a for-in cursor".into()));
+            };
+            if let Some(index) = string_indices.next() {
+                return Ok(Some(index.to_string()));
+            }
+            let Some(id) = *current else {
+                return Ok(None);
+            };
+
+            if let Some(keys) = pending {
+                let key = keys.pop_front();
+                if let Some(key) = key.as_ref()
+                    && (visited.contains(key)
+                        || crate::ops::canonical_index(key)
+                            .is_some_and(|index| index < string_indices.end))
+                {
+                    continue;
+                }
+                let object = self.get(id)?;
+                if let Some(key) = key {
+                    // A deleted key was never visited; it may still occur on a prototype.
+                    let Some(property) = object.own_property(PropertyKeyRef::String(&key)) else {
+                        continue;
+                    };
+                    let enumerable = property.attributes().enumerable;
+                    let Object::ForInIterator { visited, .. } = self.get_mut(iterator)? else {
+                        unreachable!();
+                    };
+                    if enumerable {
+                        visited.insert(key.clone());
+                        return Ok(Some(key));
+                    }
+                    visited.insert(key);
+                } else {
+                    let prototype = object.prototype();
+                    let Object::ForInIterator {
+                        current, pending, ..
+                    } = self.get_mut(iterator)?
+                    else {
+                        unreachable!();
+                    };
+                    *current = prototype;
+                    *pending = None;
+                }
+            } else {
+                let keys = self
+                    .get(id)?
+                    .own_keys(false)
+                    .filter_map(|key| match key {
+                        PropertyKey::String(key) => Some(key),
+                        PropertyKey::Symbol(_) => None,
+                    })
+                    .collect();
+                let Object::ForInIterator { pending, .. } = self.get_mut(iterator)? else {
+                    unreachable!();
+                };
+                *pending = Some(keys);
+            }
+        }
     }
 
     pub(crate) fn alloc_array(&mut self, elements: Vec<Value>) -> ObjectId {

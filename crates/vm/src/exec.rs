@@ -286,6 +286,22 @@ impl Vm {
                 }
                 store_invocation(frame, dst, invocation)
             }
+            Instr::GetForInIterator { dst, source } => {
+                let iterator = self.heap.alloc_for_in_iterator(frame.read_ref(source)?);
+                frame.write(dst, Value::Object(iterator))?;
+                Ok(Step::Next)
+            }
+            Instr::ForInNext {
+                done,
+                value,
+                iterator,
+            } => {
+                let iterator = object_id(frame.read_ref(iterator)?, "for-in cursor")?;
+                let key = self.heap.for_in_next(iterator)?;
+                frame.write(done, Value::Bool(key.is_none()))?;
+                frame.write(value, key.map_or(Value::Undefined, Value::String))?;
+                Ok(Step::Next)
+            }
             Instr::GetIterator {
                 iterator,
                 next,

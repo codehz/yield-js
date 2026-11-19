@@ -20,8 +20,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// The serialized Object and Reflect builtin graph includes prototype APIs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 17;
+// In-flight property enumeration cursors are serialized heap objects.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 18;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -684,6 +684,25 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "string iterator {id} has an invalid byte offset"
+            )));
+        }
+        if let Object::ForInIterator {
+            current,
+            pending,
+            visited,
+            string_indices,
+        } = heap.get(id)?
+            && (current.is_some_and(|source| {
+                matches!(
+                    heap.get(source),
+                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                )
+            }) || (current.is_none() && pending.is_some())
+                || string_indices.start > string_indices.end
+                || (!string_indices.is_empty() && (pending.is_some() || !visited.is_empty())))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "for-in iterator {id} has invalid cursor state"
             )));
         }
         heap.write_edges(id, &mut edges)?;
