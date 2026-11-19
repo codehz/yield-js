@@ -3,7 +3,10 @@
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
-use oxc::syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
+use oxc::syntax::operator::{
+    AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
+};
+use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Constant, Instr, Slot, UnaryOp};
 
 use super::{FunctionSource, Lowerer};
@@ -98,6 +101,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Expression::CallExpression(expression) => self.compile_call(expression),
             Expression::AssignmentExpression(expression) => self.compile_assignment(expression),
+            Expression::UpdateExpression(expression) => self.compile_update(expression),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
             Expression::StaticMemberExpression(member) => {
@@ -538,6 +542,83 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             expression.span,
             "assignment to non-identifier/non-member target",
         ))
+    }
+
+    fn compile_update(
+        &mut self,
+        expression: &'ast UpdateExpression<'ast>,
+    ) -> Result<Reg, CompileError> {
+        enum Target {
+            Binding(BindingId),
+            Member(Reg, Reg),
+        }
+
+        let target = if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
+            &expression.argument
+        {
+            let name = identifier.name.as_str();
+            let binding = self.lookup(name).ok_or_else(|| {
+                CompileError::new(
+                    self.source_text(),
+                    identifier.span,
+                    format!("assignment to unknown binding {name:?}"),
+                )
+            })?;
+            self.check_tdz(binding, name, identifier.span)?;
+            Target::Binding(binding)
+        } else if let Some(member) = expression.argument.as_member_expression() {
+            let (object, key) = self.compile_member_parts(member)?;
+            Target::Member(object, key)
+        } else {
+            return Err(unsupported(
+                self.source_text(),
+                expression.argument.span(),
+                "update target outside the PoC subset",
+            ));
+        };
+
+        let old = self.alloc_reg()?;
+        match &target {
+            Target::Binding(binding) => self.emit(Instr::GetBinding {
+                dst: self.slot(old),
+                binding: *binding,
+            }),
+            Target::Member(object, key) => self.emit(Instr::GetMember {
+                dst: self.slot(old),
+                object: self.slot(*object),
+                key: self.slot(*key),
+            }),
+        };
+        let numeric = self.alloc_reg()?;
+        self.emit(Instr::Unary {
+            dst: self.slot(numeric),
+            op: UnaryOp::Pos,
+            src: self.slot(old),
+        });
+        let one = self.emit_constant(Constant::Number(1.0))?;
+        let op = match expression.operator {
+            UpdateOperator::Increment => BinaryOp::Add,
+            UpdateOperator::Decrement => BinaryOp::Sub,
+        };
+        let updated = self.alloc_reg()?;
+        self.emit(Instr::Binary {
+            dst: self.slot(updated),
+            op,
+            lhs: self.slot(numeric),
+            rhs: self.slot(one),
+        });
+        match &target {
+            Target::Binding(binding) => self.emit(Instr::SetBinding {
+                binding: *binding,
+                src: self.slot(updated),
+            }),
+            Target::Member(object, key) => self.emit(Instr::SetMember {
+                object: self.slot(*object),
+                key: self.slot(*key),
+                src: self.slot(updated),
+            }),
+        };
+        Ok(if expression.prefix { updated } else { numeric })
     }
 
     fn compile_member_parts(
