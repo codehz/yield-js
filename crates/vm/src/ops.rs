@@ -193,12 +193,14 @@ fn to_number_lossy(value: &Value) -> f64 {
     to_number(value).unwrap_or(f64::NAN)
 }
 
+pub(crate) fn is_js_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+
 fn parse_js_number(value: &str) -> Result<f64, VmError> {
-    let trimmed = value.trim_matches(|ch| {
-        matches!(ch, '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
-            | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
-            | '\u{205f}' | '\u{3000}' | '\u{feff}')
-    });
+    let trimmed = value.trim_matches(is_js_whitespace);
     if trimmed.is_empty() {
         return Ok(0.0);
     }

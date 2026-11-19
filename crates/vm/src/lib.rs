@@ -11,6 +11,7 @@ mod exec;
 mod frame;
 pub mod heap;
 pub mod host;
+mod number;
 mod ops;
 mod resolve;
 mod runtime;

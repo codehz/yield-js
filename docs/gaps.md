@@ -1,7 +1,7 @@
 # JS 基础语法特性实现缺口（现状盘点）
 
 > 基线：`docs/design.md` 的「首版 JavaScript 支持范围」，对照当前 `crates/compiler` + `crates/vm`。
-> 本文只记还缺什么，不记已经落地的语法和内建。已实现范围以 `README.md`「已实现」一节为准，语法子集与缺口对照本文。
+> 已实现范围见 [`implemented.md`](implemented.md)，语法子集与缺口对照本文。
 > 缺口有三类：编译期 `unsupported syntax: …`（带源码行号）；能编译但语义不完整；本应成为可捕获脚本异常、实际却是 `VmError`（`try`/`catch` 捕不到，VM 直接失败）。
 
 ## 1. 值、转换与全局名
@@ -12,8 +12,8 @@
 | --- | --- |
 | `RegExp` | 字面量与 `RegExp` 内建都没有。字面量落到泛化拒绝 `expression form outside the PoC subset` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。`NaN` / `Infinity` 作为全局原始值已提供，但仍是运行期值而非编译期常量。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
-| 数字和字符串转换 | 数字转字符串仍用 Rust 的有限数字格式，不完全符合 JS 的指数表示规则；超长非十进制字符串转数字未保证只舍入一次。函数转字符串有意使用通用文本而非源码 |
-| 原始值属性 | 字符串支持读取 `length`、索引和 `String.prototype` 上的属性；找不到的属性返回 `undefined`。严格模式下字符串成员写入抛出可捕获的 `TypeError`；其他原始值仍没有对应的包装原型。`Object()` 和 `new String()` 都不支持字符串装箱 |
+| 数字和字符串转换 | 默认十进制数字转字符串（含 `Number.prototype.toString()`）仍沿用现有格式，不完全符合 JS 的指数表示规则；`toFixed`、`toExponential`、`toPrecision` 依赖 Rust 格式化，舍入结果可能与 ECMAScript 不同。超长非十进制字符串转数字未保证只舍入一次。函数转字符串有意使用通用文本而非源码 |
+| 原始值属性 | 字符串与数字支持各自共享原型上的成员读取，但 `Object()` 不装箱，`new String()` 和 `new Number()` 不受支持。严格模式下写入字符串或数字成员会抛出可捕获的 `TypeError`；其他原始值仍没有对应的包装原型 |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
 Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与一元 `+`/`-`/`~` 和二元强制转换时的可捕获 `TypeError`，已经落地，不再列在这里。
@@ -52,7 +52,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分、填充或从码元/码点构造字符串时，若结果包含单独的代理码元，会抛出可捕获的 `TypeError`。字符串的对象展开也有这个限制。
 
-对象解构读取字符串索引和 rest 复制字符串时也受此限制；其他原始值没有对应的包装原型，命名属性查找从 `Object.prototype` 开始。
+对象解构读取字符串索引和 rest 复制字符串时也受此限制；除字符串与数字外，其他非空原始值没有对应的包装原型，命名属性查找从 `Object.prototype` 开始。
 
 名称策略里有一处有意偏差，先不要当疏漏改掉：`typeof` 对被局部遮蔽的 import 或顶层函数仍报 `"function"`（`names.rs`）。这和 design 里「未声明全局的 `typeof` 保持标准语义」不是同一条；未声明且不是 import/顶层函数的名字已经折叠为 `"undefined"`。
 
@@ -60,7 +60,7 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 
 ## 4. 首版内建还缺的表面
 
-已提供 `Promise`、`queueMicrotask`、`Error`（含标准子类及 `AggregateError`）、`Symbol`、`Reflect`、`Object`、`Array`、`String`，以及数值全局 `NaN` 和 `Infinity`。
+已提供 `Promise`、`queueMicrotask`、`Error`（含标准子类及 `AggregateError`）、`Symbol`、`Reflect`、`Object`、`Array`、`String`、`Number`，以及数值全局 `NaN` 和 `Infinity`。
 
 | 内建 | 已有 | 仍缺 |
 | --- | --- | --- |
@@ -70,7 +70,8 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 | `Array` | 构造与函数调用、`isArray` / `from` / `of`、稀疏索引和常用修改、切片、搜索、转换、回调与迭代方法 | 新增原型方法仅接受数组接收者；借用 `join` 时接收者须是对象；不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
 | `String` | 函数调用、`fromCharCode` / `fromCodePoint` / `raw`、UTF-16 长度与索引、常用搜索、切片、转换、填充、替换和共享原型上的 `[Symbol.iterator]` | 不支持 `new String()`、包装对象、单独的代理码元或正则匹配；可直接调用 `String.raw`，但编译器仍拒绝标签模板语法 |
 | 错误构造器 | `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError` 均可调用或构造；`AggregateError` 同步收集可迭代 `errors` | —
-| `Number` / `Math` / `JSON` / `RegExp` | 无全局，也无方法 | 对应的转换、数学运算、JSON 和正则 |
+| `Number` | 函数调用、非强制转换的数值判断、数值常量、`parseInt` / `parseFloat`、共享原型上的数值提取和格式化方法 | 无装箱，不支持 `new Number()`；非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置；指数格式和舍入偏差见第 1 节 |
+| `Math` / `JSON` / `RegExp` | 无全局，也无方法 | 数学运算、JSON 和正则 |
 | `Map` / `Set` / `WeakMap` | 无 | 集合、插入顺序、`WeakMap` 的弱键可达性都未做。快照格式也还没有这些边 |
 | `Proxy` | 无 | 普通对象/数组目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，以及不可扩展目标的不变量。快照不保存代理关系 |
 

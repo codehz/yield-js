@@ -17,6 +17,7 @@ use crate::heap::{
     Resolution, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
+use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::string::{StringMethod, StringStatic};
@@ -32,6 +33,8 @@ pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
 pub(crate) const ROOT_ARRAY_VALUES: &str = "array.values";
 pub(crate) const ROOT_STRING: &str = "string";
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
+pub(crate) const ROOT_NUMBER: &str = "number";
+pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
@@ -67,6 +70,8 @@ pub(crate) struct BuiltinRoots {
     pub array_values: ObjectId,
     pub string: ObjectId,
     pub string_prototype: ObjectId,
+    pub number: ObjectId,
+    pub number_prototype: ObjectId,
     pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
     pub string_iterator: ObjectId,
@@ -104,6 +109,8 @@ impl BuiltinRoots {
             (ROOT_ARRAY_VALUES.to_owned(), self.array_values),
             (ROOT_STRING.to_owned(), self.string),
             (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
+            (ROOT_NUMBER.to_owned(), self.number),
+            (ROOT_NUMBER_PROTOTYPE.to_owned(), self.number_prototype),
             (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
             (
                 ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
@@ -174,6 +181,9 @@ pub(crate) enum BuiltinCall {
     StringConstructor,
     StringMethod(StringMethod),
     StringStatic(StringStatic),
+    NumberConstructor,
+    NumberMethod(&'static str),
+    NumberStatic(&'static str),
     StringIterator,
     StringIteratorNext,
     ArrayJoin,
@@ -382,6 +392,8 @@ impl Vm {
         let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
         let string_prototype = self.heap.alloc_plain();
         let string = self.init_string_constructor(string_prototype, string_iterator);
+        let number_prototype = self.heap.alloc_plain();
+        let number = self.init_number_constructor(number_prototype);
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -569,6 +581,8 @@ impl Vm {
             array_values,
             string,
             string_prototype,
+            number,
+            number_prototype,
             function_prototype,
             array_iterator_prototype,
             string_iterator,
@@ -621,6 +635,7 @@ impl Vm {
             14 => Ok(Value::Object(self.builtins.evalerror)),
             15 => Ok(Value::Object(self.builtins.urierror)),
             16 => Ok(Value::Object(self.builtins.aggregateerror)),
+            17 => Ok(Value::Object(self.builtins.number)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -715,6 +730,9 @@ impl Vm {
             return match self.classify(callee)? {
                 Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
                     self.call_string(host, &args, true)
+                }
+                Some(Dispatch::Builtin(BuiltinCall::NumberConstructor)) => {
+                    self.throw_type_error("Number does not support primitive boxing")
                 }
                 Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
                     self.throw_type_error("Symbol is not a constructor")
@@ -973,6 +991,11 @@ impl Vm {
                 self.call_string_method(host, method, receiver, &args)
             }
             BuiltinCall::StringStatic(method) => self.call_string_static(host, method, &args),
+            BuiltinCall::NumberConstructor => self.call_number(host, &args),
+            BuiltinCall::NumberMethod(method) => {
+                self.call_number_method(host, method, receiver, &args)
+            }
+            BuiltinCall::NumberStatic(method) => self.call_number_static(host, method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
@@ -2504,6 +2527,17 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             Some(BuiltinCall::ArrayOperation(name.to_owned()))
         }
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
+        ("Number", None) => Some(BuiltinCall::NumberConstructor),
+        ("Number", Some(name)) => NUMBER_METHODS
+            .iter()
+            .find(|&&key| key == name)
+            .map(|&key| BuiltinCall::NumberMethod(key))
+            .or_else(|| {
+                NUMBER_STATICS
+                    .iter()
+                    .find(|&&key| key == name)
+                    .map(|&key| BuiltinCall::NumberStatic(key))
+            }),
         ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
         ("String", Some(name)) => STRING_METHODS

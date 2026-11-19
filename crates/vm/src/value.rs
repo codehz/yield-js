@@ -17,10 +17,48 @@ pub enum Value {
     Undefined,
     Null,
     Bool(bool),
-    Number(f64),
+    Number(#[serde(with = "number_serde")] f64),
     String(String),
     Symbol(SymbolId),
     Object(ObjectId),
+}
+
+// JSON serializes non-finite floats as null, which cannot deserialize as f64.
+// Keep finite numbers as numeric tokens and spell out the three special values.
+mod number_serde {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub(super) fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if value.is_finite() {
+            serializer.serialize_f64(*value)
+        } else {
+            serializer.serialize_str(if value.is_nan() {
+                "NaN"
+            } else if value.is_sign_negative() {
+                "-Infinity"
+            } else {
+                "Infinity"
+            })
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Number {
+            Finite(f64),
+            Special(String),
+        }
+        match Number::deserialize(deserializer)? {
+            Number::Finite(value) => Ok(value),
+            Number::Special(value) => match value.as_str() {
+                "NaN" => Ok(f64::NAN),
+                "Infinity" => Ok(f64::INFINITY),
+                "-Infinity" => Ok(f64::NEG_INFINITY),
+                _ => Err(D::Error::custom("invalid special number")),
+            },
+        }
+    }
 }
 
 impl Value {

@@ -33,6 +33,9 @@
 - `String()` 返回原始字符串：无实参返回空字符串，Symbol 沿用现有字符串转换并抛出可捕获的 `TypeError`；不支持 `new String()` 或其他字符串装箱。字符串的 `length` 和索引按 UTF-16 码元计算，其余属性从共享的 `String.prototype` 查找，找不到则返回 `undefined`。严格模式下写入字符串成员会抛出 `TypeError`。
 - `String.prototype` 提供 `charAt` / `charCodeAt` / `codePointAt` / `at`、`indexOf` / `lastIndexOf` / `includes` / `startsWith` / `endsWith`、`slice` / `substring`、`toUpperCase` / `toLowerCase`、`trim` / `trimStart` / `trimEnd`、`split` / `concat` / `repeat` / `padStart` / `padEnd` / `replace`，以及 `toString` / `valueOf`。`split` 使用字符串分隔符，`replace` 替换首个字符串匹配，支持替换文本中的 `$` 转义或可调用替换值，不支持正则匹配。
 - `String.fromCharCode` / `fromCodePoint` 从 UTF-16 码元或 Unicode 码点构造字符串；`String.raw` 可直接读取 `raw` 类数组并插入替换值。会生成单独代理码元的字符串操作抛出 `TypeError`，但数值访问方法仍可读取这些码元。`[Symbol.iterator]` 通过 `String.prototype` 查找并按码点迭代；内建身份、原型修改和迭代位置可跨 `await` 快照恢复。
+- `Number()` 无实参返回 `0`；有实参时执行现有 `ToNumber` 转换（Symbol 抛出可捕获的 `TypeError`）。`new Number()` 同样抛出 `TypeError`，不创建包装对象。数值原始值从共享的普通对象 `Number.prototype` 读取成员，保留原始值作为接收者；该原型的 `constructor` 指回 `Number`。原始数值不是 `Number` 的实例，严格模式下向其写入成员会抛出 `TypeError`。
+- `Number.isFinite` / `isInteger` / `isNaN` / `isSafeInteger` 不做强制转换；`Number.parseInt` / `parseFloat` 先做字符串转换，再解析有效前缀。数值常量包括 `EPSILON`、`MAX_SAFE_INTEGER` / `MIN_SAFE_INTEGER`、`MAX_VALUE` / `MIN_VALUE`、`POSITIVE_INFINITY` / `NEGATIVE_INFINITY` 和 `NaN`。
+- `Number.prototype` 提供 `valueOf`、`toString`（基数 `2..36`）、`toFixed` / `toExponential`（位数 `0..100`）、`toPrecision`（精度 `1..100`）和使用默认十进制输出的 `toLocaleString`。这些方法要求数值接收者；超出范围的基数、位数或精度会触发可捕获的 `RangeError`，但 `toExponential` 和 `toPrecision` 对非有限数先返回其文本。格式兼容性限制见 [`gaps.md`](gaps.md)。
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。
 - 数组解构复用同步迭代协议：省略项只推进，不读取 `value`；rest 收集至耗尽。正常提前结束或模式求值抛错时关闭尚未耗尽的迭代器；若模式已抛错，保留原异常。默认值或目标中的 `await` 可快照恢复，继续使用同一迭代器、已缓存的 `next` 与耗尽状态。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
@@ -47,4 +50,5 @@
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
 - 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型（含修改过的内建共享原型）按身份保存；恢复时拒绝悬空链接、环境对象、原型环和 `Object.prototype` 的非空原型。普通属性可以互相引用。
+- `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - 快照要求微任务队列已排空。

@@ -6,12 +6,12 @@ use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
-    ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK,
-    ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE,
-    ROOT_REFLECT, ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE,
-    ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE,
-    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE,
-    is_callable_object,
+    ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
+    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE,
+    ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT, ROOT_STRING,
+    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
+    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -24,8 +24,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Builtin roots include the original Array.prototype.values method.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 22;
+// Builtin roots include Number and Number.prototype.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 23;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -543,6 +543,18 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let string_prototype = plain_root(ROOT_STRING_PROTOTYPE)?;
     let string = builtin_root(ROOT_STRING, "String")?;
     require_fixed_prototype(heap, string, string_prototype, "String")?;
+    let number_prototype = plain_root(ROOT_NUMBER_PROTOTYPE)?;
+    let number = builtin_root(ROOT_NUMBER, "Number")?;
+    require_fixed_prototype(heap, number, number_prototype, "Number")?;
+    if !heap
+        .get(number_prototype)?
+        .own_property(PropertyKeyRef::String("constructor"))
+        .is_some_and(|property| property.into_owned() == Property::Data(Value::Object(number)))
+    {
+        return Err(VmError::InvalidSnapshot(
+            "Number prototype constructor is invalid".to_owned(),
+        ));
+    }
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
     let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
@@ -625,6 +637,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let mut prototypes = BTreeSet::from([object_prototype]);
     for (name, id) in [
         (ROOT_STRING_PROTOTYPE, string_prototype),
+        (ROOT_NUMBER_PROTOTYPE, number_prototype),
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
         (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
@@ -646,6 +659,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         array_values,
         string,
         string_prototype,
+        number,
+        number_prototype,
         array_iterator_prototype,
         string_iterator,
         string_iterator_prototype,

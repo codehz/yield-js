@@ -753,7 +753,10 @@ impl Vm {
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
-        if !matches!(object, Value::Object(_) | Value::String(_)) {
+        if !matches!(
+            object,
+            Value::Object(_) | Value::String(_) | Value::Number(_)
+        ) {
             return self.throw_type_error("property access on a non-object");
         }
         match key {
@@ -779,7 +782,7 @@ impl Vm {
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
         match object {
-            Value::Object(_) => return self.read_property(host, object, key),
+            Value::Object(_) | Value::Number(_) => return self.read_property(host, object, key),
             Value::Null | Value::Undefined => {
                 return self.throw_type_error("Cannot destructure null or undefined");
             }
@@ -846,6 +849,14 @@ impl Vm {
             return self.read_property_with_receiver(
                 host,
                 self.builtins.string_prototype,
+                object,
+                key,
+            );
+        }
+        if matches!(object, Value::Number(_)) {
+            return self.read_property_with_receiver(
+                host,
+                self.builtins.number_prototype,
                 object,
                 key,
             );
