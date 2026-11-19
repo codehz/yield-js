@@ -3,7 +3,7 @@
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
-use yield_vm::bytecode::Instr;
+use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::{FunctionSource, Lowerer};
 use crate::error::{CompileError, unsupported};
@@ -169,11 +169,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 statement.span,
                 "with statement",
             )),
-            Statement::SwitchStatement(statement) => Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "switch statement",
-            )),
+            Statement::SwitchStatement(statement) => self.compile_switch(statement),
             Statement::TryStatement(statement) => self.compile_try(statement),
             Statement::ForInStatement(statement) => {
                 Err(unsupported(self.source_text(), statement.span, "for-in"))
@@ -207,7 +203,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "labelled break",
             ));
         }
-        let Some(depth) = self.control.loop_finalizer_depth() else {
+        let Some((target, depth)) = self.control.innermost_break() else {
             return Err(CompileError::new(
                 self.source_text(),
                 statement.span,
@@ -222,7 +218,99 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         let jump = self.jump();
-        self.control.push_break(jump);
+        match target {
+            super::control::BreakTarget::Loop => self.control.push_break(jump),
+            super::control::BreakTarget::Switch => self.control.push_switch_break(jump),
+        }
+        Ok(())
+    }
+
+    /// Non-labelled `switch` lowering: strict-equality test chain in source
+    /// order, then the bodies, then patching. Fall-through is sequential
+    /// emission; all cases share one block scope.
+    fn compile_switch(
+        &mut self,
+        statement: &'ast SwitchStatement<'ast>,
+    ) -> Result<(), CompileError> {
+        let disc = self.compile_expression(&statement.discriminant)?;
+        self.env.enter_block();
+        for case in &statement.cases {
+            self.predeclare_scope(&case.consequent)?;
+        }
+        self.control.push_switch();
+
+        // Test chain: (branch_to_next_test, jump_to_body, case index).
+        let mut tests: Vec<(usize, usize, usize)> = Vec::new();
+        let mut default_index: Option<usize> = None;
+        for (index, case) in statement.cases.iter().enumerate() {
+            let Some(test) = &case.test else {
+                if default_index.is_some() {
+                    return Err(unsupported(
+                        self.source_text(),
+                        case.span,
+                        "duplicate default clause",
+                    ));
+                }
+                default_index = Some(index);
+                continue;
+            };
+            let test_reg = self.compile_expression(test)?;
+            let match_reg = self.alloc_reg()?;
+            self.emit(Instr::Binary {
+                dst: self.slot(match_reg),
+                op: BinaryOp::StrictEq,
+                lhs: self.slot(disc),
+                rhs: self.slot(test_reg),
+            });
+            let branch = self.branch_false(match_reg);
+            let entry = self.jump();
+            tests.push((branch, entry, index));
+        }
+        let default_jump = self.jump();
+
+        // Bodies in source order. A case with statements records the PC of
+        // its first instruction as its body entry.
+        let mut body_pcs: Vec<Option<usize>> = vec![None; statement.cases.len()];
+        for (index, case) in statement.cases.iter().enumerate() {
+            if !case.consequent.is_empty() {
+                body_pcs[index] = Some(self.pc());
+            }
+            for inner in &case.consequent {
+                self.compile_statement(inner)?;
+            }
+        }
+        let end = self.pc();
+
+        // An empty consequent falls through: its body entry is the next case
+        // with statements, or `end`.
+        let mut next_pc = end;
+        for slot in body_pcs.iter_mut().rev() {
+            if let Some(existing) = *slot {
+                next_pc = existing;
+            } else {
+                *slot = Some(next_pc);
+            }
+        }
+
+        let body_pc = |index: usize| body_pcs[index].expect("filled above");
+        // A false branch falls to the next test's first instruction, which is
+        // the instruction right after this segment's entry jump. For the last
+        // test that is exactly `default_jump`.
+        for (_, entry, _) in &tests {
+            self.patch_jump(*entry - 1, *entry + 1)?;
+        }
+        for (_, entry, index) in tests {
+            self.patch_jump(entry, body_pc(index))?;
+        }
+        match default_index {
+            Some(index) => self.patch_jump(default_jump, body_pc(index))?,
+            None => self.patch_jump(default_jump, end)?,
+        }
+        let switch_context = self.control.pop_switch();
+        for jump in switch_context.break_jumps {
+            self.patch_jump(jump, end)?;
+        }
+        self.env.exit_block();
         Ok(())
     }
 

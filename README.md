@@ -67,7 +67,7 @@ cargo run -p yield-poc
 
 - 对象方法/getter/setter、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - `this`、类、模板字符串、generator、async generator、顶层 `await`。
-- `switch`、`for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
+- `for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
 - Promise thenable 同化、`Promise.then` 等公开方法、`queueMicrotask`。

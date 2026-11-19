@@ -30,11 +30,23 @@ impl Completion {
     }
 }
 
+pub(super) enum BreakTarget {
+    Loop,
+    Switch,
+}
+
 pub(super) struct Loop {
     pub(super) break_jumps: Vec<usize>,
     pub(super) continue_jumps: Vec<usize>,
     pub(super) continue_target: Option<usize>,
     pub(super) finalizer_depth: usize,
+    pub(super) seq: usize,
+}
+
+pub(super) struct Switch {
+    pub(super) break_jumps: Vec<usize>,
+    pub(super) finalizer_depth: usize,
+    pub(super) seq: usize,
 }
 
 struct Finalizer {
@@ -46,18 +58,22 @@ struct Finalizer {
 
 pub(super) struct Control {
     loops: Vec<Loop>,
+    switches: Vec<Switch>,
     finalizers: Vec<Finalizer>,
     handlers: Vec<ExceptionHandler>,
     awaits: Vec<AwaitSite>,
+    seq: usize,
 }
 
 impl Control {
     pub(super) fn new() -> Self {
         Self {
             loops: Vec::new(),
+            switches: Vec::new(),
             finalizers: Vec::new(),
             handlers: Vec::new(),
             awaits: Vec::new(),
+            seq: 0,
         }
     }
 
@@ -69,12 +85,6 @@ impl Control {
         self.finalizers.len()
     }
 
-    pub(super) fn loop_finalizer_depth(&self) -> Option<usize> {
-        self.loops
-            .last()
-            .map(|loop_context| loop_context.finalizer_depth)
-    }
-
     pub(super) fn innermost_continue(&self) -> Option<(Option<usize>, usize)> {
         self.loops
             .last()
@@ -82,16 +92,58 @@ impl Control {
     }
 
     pub(super) fn push_loop(&mut self, continue_target: Option<usize>) {
+        let seq = self.seq;
+        self.seq += 1;
         self.loops.push(Loop {
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
             continue_target,
             finalizer_depth: self.finalizers.len(),
+            seq,
         });
     }
 
     pub(super) fn pop_loop(&mut self) -> Loop {
         self.loops.pop().expect("loop stack")
+    }
+
+    pub(super) fn push_switch(&mut self) {
+        let seq = self.seq;
+        self.seq += 1;
+        self.switches.push(Switch {
+            break_jumps: Vec::new(),
+            finalizer_depth: self.finalizers.len(),
+            seq,
+        });
+    }
+
+    pub(super) fn pop_switch(&mut self) -> Switch {
+        self.switches.pop().expect("switch stack")
+    }
+
+    pub(super) fn push_switch_break(&mut self, jump: usize) {
+        self.switches
+            .last_mut()
+            .expect("switch stack checked above")
+            .break_jumps
+            .push(jump);
+    }
+
+    /// Innermost breakable: the top of whichever stack has the larger
+    /// sequence number. Returns that frame's finalizer depth.
+    pub(super) fn innermost_break(&self) -> Option<(BreakTarget, usize)> {
+        let top_loop = self.loops.last().map(|l| (l.seq, l.finalizer_depth));
+        let top_switch = self.switches.last().map(|s| (s.seq, s.finalizer_depth));
+        match (top_loop, top_switch) {
+            (Some((loop_seq, depth)), Some((switch_seq, _))) if loop_seq > switch_seq => {
+                Some((BreakTarget::Loop, depth))
+            }
+            (Some(_), Some((_, depth))) | (None, Some((_, depth))) => {
+                Some((BreakTarget::Switch, depth))
+            }
+            (Some((_, depth)), None) => Some((BreakTarget::Loop, depth)),
+            (None, None) => None,
+        }
     }
 
     pub(super) fn push_break(&mut self, jump: usize) {
