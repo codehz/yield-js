@@ -30,7 +30,7 @@ cargo run -p yield-poc
 | --- | --- |
 | `crates/vm` | 字节码契约、加载校验、对象表/环境/闭包、Promise、微任务、async 续体、宿主协议、快照恢复 |
 | `crates/compiler` | Oxc 0.159.0 解析、严格模式子集、词法绑定、异常降低、CFG 活性分析、槽分配 |
-| `crates/poc` | 端到端测试与可运行示例 |
+| `crates/poc` | 端到端测试、`tests/cases` 语义用例与可运行示例 |
 
 ## 已实现
 

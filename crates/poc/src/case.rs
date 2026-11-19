@@ -1,0 +1,508 @@
+use yield_compiler::compile;
+use yield_vm::{Completion, HostValue, PromiseState, Snapshot, Value, Vm};
+
+use crate::{TestHost, compile_options};
+
+/// Runs one directive-headed JavaScript case against a fresh [`TestHost`].
+///
+/// The header is the leading run of blank lines and `// @` directives. The
+/// whole source, header included, is compiled unchanged so diagnostics keep
+/// the file's line numbers.
+pub fn run_case(name: &str, source: &str) -> Result<(), String> {
+    let mut steps = parse_header(source).map_err(|error| prefix_file(name, &error))?;
+    let args = match steps.first() {
+        Some(Step {
+            kind: Directive::Args(values),
+            ..
+        }) => {
+            let values = values.clone();
+            steps.remove(0);
+            values
+        }
+        _ => Vec::new(),
+    };
+
+    let build =
+        compile(source, &compile_options()).map_err(|error| format!("{name}: compile: {error}"))?;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &host).map_err(|error| format!("{name}: vm: {error}"))?;
+    let result = vm
+        .start(&mut host, "run", args)
+        .map_err(|error| format!("{name}: start: {error}"))?;
+    vm.run_until_idle(&mut host)
+        .map_err(|error| format!("{name}: drain: {error}"))?;
+
+    for step in steps {
+        match step.kind {
+            Directive::Args(_) => {
+                return Err(format!(
+                    "{name}:{}: @args: must be the first directive",
+                    step.line
+                ));
+            }
+            Directive::Restore => restore(name, step.line, &mut vm, &build, &mut host, &result)?,
+            Directive::Fulfill(id, value) => {
+                complete(
+                    name,
+                    step.line,
+                    "@fulfill",
+                    &mut vm,
+                    &mut host,
+                    &id,
+                    Completion::Fulfilled(value),
+                )?;
+            }
+            Directive::Reject(id, value) => {
+                complete(
+                    name,
+                    step.line,
+                    "@reject",
+                    &mut vm,
+                    &mut host,
+                    &id,
+                    Completion::Rejected(value),
+                )?;
+            }
+            Directive::Pending(expected) => {
+                assert_pending(name, step.line, &vm, &expected)?;
+            }
+            Directive::Returns(expected) => {
+                assert_value(name, step.line, "@returns", &expected, &result)?;
+            }
+            Directive::Fulfilled(expected) => {
+                assert_settled(name, step.line, "@fulfilled", &vm, &result, true, &expected)?;
+            }
+            Directive::Rejected(expected) => {
+                assert_settled(name, step.line, "@rejected", &vm, &result, false, &expected)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct Step {
+    line: usize,
+    kind: Directive,
+}
+
+enum Directive {
+    Args(Vec<HostValue>),
+    Restore,
+    Fulfill(String, HostValue),
+    Reject(String, HostValue),
+    Pending(Vec<String>),
+    Returns(Expected),
+    Fulfilled(Expected),
+    Rejected(Expected),
+}
+
+enum Expected {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
+fn parse_header(source: &str) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
+    for (index, raw) in source.split('\n').enumerate() {
+        let line_no = index + 1;
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some(body) = line.trim_start().strip_prefix("// @") else {
+            break;
+        };
+        steps.push(parse_directive(line_no, body)?);
+    }
+    validate(&steps)?;
+    Ok(steps)
+}
+
+fn parse_directive(line: usize, body: &str) -> Result<Step, String> {
+    let body = body.trim();
+    let (name, args) = split_command(body);
+    if name.is_empty() {
+        return Err(format!("{line}: unknown directive"));
+    }
+    let kind = match name {
+        "args" => Directive::Args(parse_args(line, args)?),
+        "restore" => {
+            require_no_args(line, "@restore", args)?;
+            Directive::Restore
+        }
+        "fulfill" => {
+            let (id, value) = parse_completion(line, "@fulfill", args)?;
+            Directive::Fulfill(id, value)
+        }
+        "reject" => {
+            let (id, value) = parse_completion(line, "@reject", args)?;
+            Directive::Reject(id, value)
+        }
+        "pending" => Directive::Pending(parse_pending(line, args)?),
+        "returns" => Directive::Returns(parse_expected(line, "@returns", args)?),
+        "fulfilled" => Directive::Fulfilled(parse_expected(line, "@fulfilled", args)?),
+        "rejected" => Directive::Rejected(parse_expected(line, "@rejected", args)?),
+        other => return Err(format!("{line}: unknown directive `{other}`")),
+    };
+    Ok(Step { line, kind })
+}
+
+fn split_command(body: &str) -> (&str, &str) {
+    match body.find(char::is_whitespace) {
+        Some(index) => {
+            let (name, rest) = body.split_at(index);
+            (name, rest.trim())
+        }
+        None => (body, ""),
+    }
+}
+
+fn validate(steps: &[Step]) -> Result<(), String> {
+    if steps.is_empty() {
+        return Err("missing terminal assertion".to_owned());
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if matches!(step.kind, Directive::Args(_)) && index != 0 {
+            return Err(format!("{}: @args: must be the first directive", step.line));
+        }
+        if is_terminal(&step.kind) && index + 1 != steps.len() {
+            return Err(format!(
+                "{}: {}: terminal assertion must be the last directive",
+                step.line,
+                directive_name(&step.kind)
+            ));
+        }
+    }
+    let last = steps.last().expect("non-empty");
+    if !is_terminal(&last.kind) {
+        return Err(format!(
+            "{}: {}: missing terminal assertion",
+            last.line,
+            directive_name(&last.kind)
+        ));
+    }
+    Ok(())
+}
+
+fn is_terminal(kind: &Directive) -> bool {
+    matches!(
+        kind,
+        Directive::Returns(_) | Directive::Fulfilled(_) | Directive::Rejected(_)
+    )
+}
+
+fn directive_name(kind: &Directive) -> &'static str {
+    match kind {
+        Directive::Args(_) => "@args",
+        Directive::Restore => "@restore",
+        Directive::Fulfill(_, _) => "@fulfill",
+        Directive::Reject(_, _) => "@reject",
+        Directive::Pending(_) => "@pending",
+        Directive::Returns(_) => "@returns",
+        Directive::Fulfilled(_) => "@fulfilled",
+        Directive::Rejected(_) => "@rejected",
+    }
+}
+
+fn require_no_args(line: usize, directive: &str, args: &str) -> Result<(), String> {
+    if args.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{line}: {directive}: unexpected argument"))
+    }
+}
+
+fn require_args<'a>(line: usize, directive: &str, args: &'a str) -> Result<&'a str, String> {
+    if args.is_empty() {
+        Err(format!("{line}: {directive}: missing argument"))
+    } else {
+        Ok(args)
+    }
+}
+
+fn parse_args(line: usize, args: &str) -> Result<Vec<HostValue>, String> {
+    let items = parse_array(line, "@args", args)?;
+    items
+        .iter()
+        .map(|item| host_scalar(line, "@args", item))
+        .collect()
+}
+
+fn parse_pending(line: usize, args: &str) -> Result<Vec<String>, String> {
+    let items = parse_array(line, "@pending", args)?;
+    items
+        .into_iter()
+        .map(|item| match item {
+            serde_json::Value::String(id) => Ok(id),
+            _ => Err(format!(
+                "{line}: @pending: expected a string, found {}",
+                json_kind(&item)
+            )),
+        })
+        .collect()
+}
+
+fn parse_completion(
+    line: usize,
+    directive: &str,
+    args: &str,
+) -> Result<(String, HostValue), String> {
+    let items = parse_array(line, directive, args)?;
+    if items.len() != 2 {
+        return Err(format!(
+            "{line}: {directive}: expected exactly two items, found {}",
+            items.len()
+        ));
+    }
+    let id = match &items[0] {
+        serde_json::Value::String(id) => id.clone(),
+        other => {
+            return Err(format!(
+                "{line}: {directive}: operation id must be a string, found {}",
+                json_kind(other)
+            ));
+        }
+    };
+    let value = host_scalar(line, directive, &items[1])?;
+    Ok((id, value))
+}
+
+fn parse_array(line: usize, directive: &str, args: &str) -> Result<Vec<serde_json::Value>, String> {
+    let args = require_args(line, directive, args)?;
+    let value: serde_json::Value = serde_json::from_str(args)
+        .map_err(|error| format!("{line}: {directive}: invalid argument: {error}"))?;
+    match value {
+        serde_json::Value::Array(items) => Ok(items),
+        other => Err(format!(
+            "{line}: {directive}: expected a JSON array, found {}",
+            json_kind(&other)
+        )),
+    }
+}
+
+fn parse_expected(line: usize, directive: &str, args: &str) -> Result<Expected, String> {
+    let args = require_args(line, directive, args)?;
+    if args == "undefined" {
+        return Ok(Expected::Undefined);
+    }
+    let value: serde_json::Value = serde_json::from_str(args)
+        .map_err(|error| format!("{line}: {directive}: invalid argument: {error}"))?;
+    json_scalar(line, directive, &value)
+}
+
+fn host_scalar(
+    line: usize,
+    directive: &str,
+    value: &serde_json::Value,
+) -> Result<HostValue, String> {
+    Ok(match json_scalar(line, directive, value)? {
+        Expected::Undefined => HostValue::Undefined,
+        Expected::Null => HostValue::Null,
+        Expected::Bool(value) => HostValue::Bool(value),
+        Expected::Number(value) => HostValue::Number(value),
+        Expected::String(value) => HostValue::String(value),
+    })
+}
+
+fn json_scalar(
+    line: usize,
+    directive: &str,
+    value: &serde_json::Value,
+) -> Result<Expected, String> {
+    match value {
+        serde_json::Value::Null => Ok(Expected::Null),
+        serde_json::Value::Bool(value) => Ok(Expected::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            let number = value
+                .as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| {
+                    format!("{line}: {directive}: non-finite numbers are not allowed")
+                })?;
+            Ok(Expected::Number(number))
+        }
+        serde_json::Value::String(value) => Ok(Expected::String(value.clone())),
+        serde_json::Value::Array(_) => Err(format!(
+            "{line}: {directive}: nested arrays are not allowed"
+        )),
+        serde_json::Value::Object(_) => {
+            Err(format!("{line}: {directive}: objects are not allowed"))
+        }
+    }
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn restore(
+    name: &str,
+    line: usize,
+    vm: &mut Vm,
+    build: &yield_vm::bytecode::Build,
+    host: &mut TestHost,
+    result: &Value,
+) -> Result<(), String> {
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(result))
+        .map_err(|error| located(name, line, "@restore", error))?;
+    // Round-trip the codec. Restoring the in-memory snapshot would skip it.
+    let json = snapshot
+        .to_json()
+        .map_err(|error| located(name, line, "@restore", error))?;
+    let snapshot =
+        Snapshot::from_json(&json).map_err(|error| located(name, line, "@restore", error))?;
+    *vm = Vm::restore(snapshot, build.clone(), host)
+        .map_err(|error| located(name, line, "@restore", error))?;
+    Ok(())
+}
+
+fn complete(
+    name: &str,
+    line: usize,
+    directive: &str,
+    vm: &mut Vm,
+    host: &mut TestHost,
+    id: &str,
+    completion: Completion,
+) -> Result<(), String> {
+    vm.complete_operation(id, completion)
+        .map_err(|error| located(name, line, directive, error))?;
+    vm.run_until_idle(host)
+        .map_err(|error| located(name, line, directive, error))?;
+    Ok(())
+}
+
+fn assert_pending(name: &str, line: usize, vm: &Vm, expected: &[String]) -> Result<(), String> {
+    let mut expected = expected.to_vec();
+    let mut actual = vm.pending_operation_ids();
+    expected.sort();
+    actual.sort();
+    if expected != actual {
+        return Err(format!(
+            "{name}:{line}: @pending: expected {expected:?}, actual {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn assert_settled(
+    name: &str,
+    line: usize,
+    directive: &str,
+    vm: &Vm,
+    result: &Value,
+    fulfilled: bool,
+    expected: &Expected,
+) -> Result<(), String> {
+    let state = vm
+        .promise_state(result)
+        .map_err(|error| located(name, line, directive, error))?;
+    let payload = match (fulfilled, &state) {
+        (true, PromiseState::Fulfilled(value)) => value,
+        (false, PromiseState::Rejected(value)) => value,
+        _ => {
+            return Err(format!(
+                "{name}:{line}: {directive}: expected {}, actual {}",
+                if fulfilled { "fulfilled" } else { "rejected" },
+                format_state(&state)
+            ));
+        }
+    };
+    assert_value(name, line, directive, expected, payload)
+}
+
+fn assert_value(
+    name: &str,
+    line: usize,
+    directive: &str,
+    expected: &Expected,
+    actual: &Value,
+) -> Result<(), String> {
+    if values_equal(expected, actual) {
+        return Ok(());
+    }
+    Err(format!(
+        "{name}:{line}: {directive}: expected {}, actual {}",
+        format_expected(expected),
+        format_value(actual)
+    ))
+}
+
+fn values_equal(expected: &Expected, actual: &Value) -> bool {
+    match (expected, actual) {
+        (Expected::Undefined, Value::Undefined) => true,
+        (Expected::Null, Value::Null) => true,
+        (Expected::Bool(expected), Value::Bool(actual)) => expected == actual,
+        (Expected::Number(expected), Value::Number(actual)) => expected == actual,
+        (Expected::String(expected), Value::String(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+fn format_state(state: &PromiseState) -> String {
+    match state {
+        PromiseState::Pending => "pending".to_owned(),
+        PromiseState::Fulfilled(value) => format!("fulfilled {}", format_value(value)),
+        PromiseState::Rejected(value) => format!("rejected {}", format_value(value)),
+    }
+}
+
+fn format_expected(value: &Expected) -> String {
+    match value {
+        Expected::Undefined => "undefined".to_owned(),
+        Expected::Null => "null".to_owned(),
+        Expected::Bool(value) => value.to_string(),
+        Expected::Number(value) => format_number(*value),
+        Expected::String(value) => format!("{value:?}"),
+    }
+}
+
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::Undefined => "undefined".to_owned(),
+        Value::Null => "null".to_owned(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => format_number(*value),
+        Value::String(value) => format!("{value:?}"),
+        Value::Object(_) => "object".to_owned(),
+    }
+}
+
+fn format_number(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_sign_positive() {
+        "Infinity".to_owned()
+    } else {
+        "-Infinity".to_owned()
+    }
+}
+
+fn located(name: &str, line: usize, directive: &str, error: impl std::fmt::Display) -> String {
+    format!("{name}:{line}: {directive}: {error}")
+}
+
+fn prefix_file(name: &str, error: &str) -> String {
+    if error
+        .chars()
+        .next()
+        .is_some_and(|char| char.is_ascii_digit())
+    {
+        format!("{name}:{error}")
+    } else {
+        format!("{name}: {error}")
+    }
+}

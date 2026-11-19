@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 yield-compiler = { path = "../compiler" }
 yield-vm = { path = "../vm" }
+serde_json.workspace = true

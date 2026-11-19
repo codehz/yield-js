@@ -824,6 +824,7 @@ dependencies = [
 name = "yield-poc"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "yield-compiler",
  "yield-vm",
 ]

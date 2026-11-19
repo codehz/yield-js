@@ -1,13 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use yield_compiler::{CompileOptions, compile};
-use yield_vm::bytecode::{Build, Instr, Slot};
+use yield_poc::{TestHost, build, number};
+use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
-use yield_vm::{
-    Completion, Host, HostReply, HostValue, NativeKey, Object, PendingOperationMeta, PromiseState,
-    Value, Vm, VmError,
-};
+use yield_vm::{Completion, HostValue, Object, PromiseState, Value, Vm, VmError};
 
 const RUN: &str = r#"
 async function run(input) {
@@ -19,98 +14,6 @@ async function run(input) {
   return sum + y;
 }
 "#;
-
-#[derive(Default)]
-struct TestHost {
-    calls: Vec<(String, Vec<HostValue>)>,
-    operations: BTreeMap<String, PendingOperationMeta>,
-    natives: BTreeSet<NativeKey>,
-    reject_restore_operation: bool,
-    reject_native: bool,
-    fail_import: bool,
-}
-
-impl TestHost {
-    fn imported(name: &str) -> bool {
-        matches!(name, "inspect" | "seed" | "wait" | "bind" | "setLabel")
-    }
-
-    fn count(&self, name: &str) -> usize {
-        self.calls.iter().filter(|(call, _)| call == name).count()
-    }
-}
-
-impl Host for TestHost {
-    fn has_import(&self, name: &str) -> bool {
-        Self::imported(name) && !self.fail_import
-    }
-
-    fn call(&mut self, import: &str, args: &[HostValue]) -> Result<HostReply, String> {
-        self.calls.push((import.to_owned(), args.to_vec()));
-        match import {
-            "inspect" => Ok(HostReply::Value(HostValue::Undefined)),
-            "seed" => Ok(HostReply::Value(HostValue::Number(10.0))),
-            "wait" => {
-                let label = match args {
-                    [HostValue::String(label)] => label.clone(),
-                    _ => return Err("wait expects one string".to_owned()),
-                };
-                let id = format!("wait:{label}");
-                self.operations.insert(
-                    id.clone(),
-                    PendingOperationMeta {
-                        id: id.clone(),
-                        import: import.to_owned(),
-                    },
-                );
-                Ok(HostReply::Operation { operation_id: id })
-            }
-            "bind" => {
-                let id = match args {
-                    [HostValue::String(id)] => id.clone(),
-                    _ => return Err("bind expects one string".to_owned()),
-                };
-                let key = NativeKey {
-                    type_name: "Node".to_owned(),
-                    id,
-                };
-                self.natives.insert(key.clone());
-                Ok(HostReply::Value(HostValue::Native(key)))
-            }
-            "setLabel" => Ok(HostReply::Value(HostValue::Undefined)),
-            _ => Err(format!("unknown import {import}")),
-        }
-    }
-
-    fn has_native(&self, key: &NativeKey) -> bool {
-        !self.reject_native && self.natives.contains(key)
-    }
-
-    fn rebuild_operation(&mut self, operation: &PendingOperationMeta) -> bool {
-        !self.reject_restore_operation
-            && self
-                .operations
-                .get(&operation.id)
-                .is_some_and(|known| known == operation)
-    }
-}
-
-fn build(source: &str) -> Build {
-    compile(
-        source,
-        &CompileOptions {
-            imports: ["inspect", "seed", "wait", "bind", "setLabel"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        },
-    )
-    .expect("source compiles")
-}
-
-fn number(value: f64) -> HostValue {
-    HostValue::Number(value)
-}
 
 #[test]
 fn snapshot_and_restore_across_two_awaits() {
@@ -184,32 +87,6 @@ fn snapshot_and_restore_across_two_awaits() {
 }
 
 #[test]
-fn rejection_resumes_at_the_reject_landing_point() {
-    let build = build(RUN);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm
-        .start(&mut host, "run", vec![HostValue::String("input".into())])
-        .expect("start");
-    vm.run_until_idle(&mut host).expect("first await");
-    let snapshot = vm
-        .snapshot(std::slice::from_ref(&result))
-        .expect("snapshot");
-    let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    vm.complete_operation(
-        "wait:a",
-        Completion::Rejected(HostValue::String("boom".into())),
-    )
-    .expect("reject a");
-    vm.run_until_idle(&mut host).expect("rejection resumes");
-    assert_eq!(
-        vm.promise_state(&result).expect("result"),
-        PromiseState::Rejected(Value::String("boom".into()))
-    );
-    assert_eq!(vm.pending_operation_ids(), Vec::<String>::new());
-}
-
-#[test]
 fn missing_bindings_and_mismatched_builds_are_rejected_before_execution() {
     let source = r#"
 async function run() {
@@ -275,33 +152,6 @@ async function run() {
         .snapshot(&[result])
         .expect_err("await on a plain value queues a resume microtask");
     assert!(matches!(error, VmError::InvalidState(message) if message.contains("microtask")));
-}
-
-#[test]
-fn sync_throw_after_resume_rejects_the_async_result() {
-    let source = r#"
-function fail() {
-  throw "sync boom";
-}
-async function run() {
-  await wait("a");
-  fail();
-  return 1;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("first await");
-    vm.complete_operation("wait:a", Completion::Fulfilled(number(1.0)))
-        .expect("complete");
-    vm.run_until_idle(&mut host)
-        .expect("resume drains and rejects the async result");
-    assert_eq!(
-        vm.promise_state(&result).expect("result"),
-        PromiseState::Rejected(Value::String("sync boom".into()))
-    );
 }
 
 #[test]
@@ -399,74 +249,6 @@ async function run() {
 }
 
 #[test]
-fn settled_async_promises_resume_through_the_microtask_queue() {
-    let source = r#"
-async function inner() {
-  return 5;
-}
-async function run() {
-  const x = await inner();
-  return x + 1;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("drain");
-    assert_eq!(
-        vm.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Number(6.0))
-    );
-}
-
-#[test]
-fn closures_mutate_captured_bindings() {
-    let source = r#"
-function run() {
-  let x = 1;
-  function inc() {
-    x = x + 2;
-    return x;
-  }
-  const first = inc();
-  inc();
-  return first * 10 + x;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(35.0));
-}
-
-#[test]
-fn function_expressions_escape_with_independent_environments() {
-    let source = r#"
-function make() {
-  let n = 0;
-  return function() {
-    n = n + 1;
-    return n;
-  };
-}
-function run() {
-  const a = make();
-  a();
-  a();
-  const b = make();
-  return a() * 10 + b();
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(31.0));
-}
-
-#[test]
 fn closures_and_their_environment_survive_snapshot() {
     let source = r#"
 async function run() {
@@ -516,25 +298,6 @@ async function run() {
 }
 
 #[test]
-fn object_and_array_literals_support_member_access() {
-    let source = r#"
-function run() {
-  const obj = { a: 1, nested: { b: 2 }, list: [3, 4] };
-  obj.a = obj.a + obj.nested.b;
-  obj.list[1] += 5;
-  const key = "computed";
-  const extra = { [key]: 7 };
-  return obj.a + obj.list.length + obj.list[0] + extra[key];
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(15.0));
-}
-
-#[test]
 fn object_identity_survives_snapshot() {
     let source = r#"
 async function run() {
@@ -575,52 +338,6 @@ async function run() {
         restored.promise_state(&result).expect("result"),
         PromiseState::Fulfilled(Value::Number(11.0))
     );
-}
-
-#[test]
-fn try_catch_finally_runs_in_order() {
-    let source = r#"
-function run() {
-  let out = 0;
-  try {
-    out = 1;
-    throw 7;
-  } catch (e) {
-    out = out + e;
-  } finally {
-    out = out + 100;
-  }
-  return out;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(108.0));
-}
-
-#[test]
-fn nested_finally_propagates_a_throw_to_the_outer_catch() {
-    let source = r#"
-function run() {
-  let side = 0;
-  try {
-    try {
-      throw 4;
-    } finally {
-      side = 9;
-    }
-  } catch (e) {
-    return side * 10 + e;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(94.0));
 }
 
 #[test]
@@ -671,38 +388,6 @@ function run() {
         .start(&mut host, "run", Vec::new())
         .expect_err("finally throw wins");
     assert!(matches!(error, VmError::Thrown(Value::Number(3.0))));
-}
-
-#[test]
-fn async_try_catch_handles_operation_rejection_after_restore() {
-    let source = r#"
-async function run() {
-  let base = 10;
-  try {
-    await wait("a");
-    return 0;
-  } catch (e) {
-    return base + e;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("await");
-    let snapshot = vm
-        .snapshot(std::slice::from_ref(&result))
-        .expect("snapshot");
-    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
-    restored
-        .complete_operation("wait:a", Completion::Rejected(number(5.0)))
-        .expect("reject");
-    restored.run_until_idle(&mut host).expect("catch");
-    assert_eq!(
-        restored.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Number(15.0))
-    );
 }
 
 #[test]
@@ -842,23 +527,6 @@ fn loader_rejects_handler_target_inside_its_protected_range() {
 }
 
 #[test]
-fn arrows_capture_mutable_outer_bindings() {
-    let source = r#"
-function run() {
-  let n = 3;
-  const add = (x) => x + n;
-  n = 4;
-  return add(1);
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(5.0));
-}
-
-#[test]
 fn hoisted_functions_can_capture_later_bindings() {
     let source = r#"
 function run() {
@@ -874,167 +542,6 @@ function run() {
     let mut vm = Vm::new(build, &host).expect("bindings");
     let error = vm.start(&mut host, "run", Vec::new()).expect_err("read");
     assert!(matches!(error, VmError::InvalidState(message) if message.contains("binding")));
-}
-
-#[test]
-fn hoisted_functions_can_be_called_before_their_declaration() {
-    let source = r#"
-function run() {
-  return read();
-  function read() {
-    return 4;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(4.0));
-}
-
-#[test]
-fn hoisted_functions_run_after_later_bindings_initialize() {
-    let source = r#"
-function run() {
-  function read() {
-    return x;
-  }
-  let x = 4;
-  return read();
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(4.0));
-}
-
-#[test]
-fn function_values_stored_in_objects_are_callable() {
-    let source = r#"
-function run() {
-  const obj = {
-    f: function(x) {
-      return x + 1;
-    }
-  };
-  return obj.f(4);
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(5.0));
-}
-
-#[test]
-fn catch_without_binding_and_call_exceptions_work() {
-    let source = r#"
-function boom() {
-  throw 6;
-}
-function run() {
-  try {
-    boom();
-  } catch {
-    return 2;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(2.0));
-}
-
-#[test]
-fn return_propagates_through_nested_finalizers() {
-    let source = r#"
-function run() {
-  let log = 0;
-  try {
-    try {
-      return 1;
-    } finally {
-      log = log + 10;
-    }
-  } finally {
-    log = log + 100;
-    return log;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(110.0));
-}
-
-#[test]
-fn recursive_arrow_functions_use_the_captured_binding() {
-    let source = r#"
-function run() {
-  const fact = (n) => n <= 1 ? 1 : n * fact(n - 1);
-  return fact(5);
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(120.0));
-}
-
-#[test]
-fn typeof_reports_function_values() {
-    let source = r#"
-function run() {
-  function f() {}
-  const g = () => 1;
-  return typeof f + ":" + typeof g;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::String("function:function".into()));
-}
-
-#[test]
-fn async_closures_survive_snapshot_and_resume() {
-    let source = r#"
-async function run() {
-  const f = async () => {
-    const x = await wait("a");
-    return x + 1;
-  };
-  return await f();
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
-    assert_eq!(vm.pending_operation_ids(), vec!["wait:a".to_owned()]);
-    let snapshot = vm
-        .snapshot(std::slice::from_ref(&result))
-        .expect("snapshot");
-    let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
-    restored
-        .complete_operation("wait:a", Completion::Fulfilled(number(4.0)))
-        .expect("complete");
-    restored.run_until_idle(&mut host).expect("finish");
-    assert_eq!(
-        restored.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Number(5.0))
-    );
 }
 
 #[test]
@@ -1105,7 +612,9 @@ async function run() {
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     assert!(
-        !plain_tags(&snapshot).iter().any(|tag| tag == "discard-only"),
+        !plain_tags(&snapshot)
+            .iter()
+            .any(|tag| tag == "discard-only"),
         "dead must not remain reachable through a call environment or saved slot"
     );
     assert!(!has_environment(&snapshot));
@@ -1118,7 +627,11 @@ async function run() {
             _ => None,
         })
         .collect();
-    assert_eq!(saved_objects.len(), 1, "only live is saved across the await");
+    assert_eq!(
+        saved_objects.len(),
+        1,
+        "only live is saved across the await"
+    );
     assert!(snapshot.objects.iter().any(|record| {
         record.id == saved_objects[0]
             && matches!(&record.object, Object::Plain(plain) if plain.props.get("n") == Some(&Value::Number(7.0)))
@@ -1154,7 +667,11 @@ async function run() {
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
-    assert!(!plain_tags(&snapshot).iter().any(|tag| tag == "discard-only"));
+    assert!(
+        !plain_tags(&snapshot)
+            .iter()
+            .any(|tag| tag == "discard-only")
+    );
     assert!(has_environment(&snapshot));
     assert!(snapshot.continuations[0].env.is_some());
 
@@ -1187,7 +704,9 @@ async function run() {
     let mut vm = Vm::new(build.clone(), &host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     vm.run_until_idle(&mut host).expect("await");
-    let snapshot = vm.snapshot(std::slice::from_ref(&result)).expect("snapshot");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot");
     assert!(plain_tags(&snapshot).iter().any(|tag| tag == "kept"));
     let mut restored = Vm::restore(snapshot, build, &mut host).expect("restore");
     restored
@@ -1200,89 +719,6 @@ async function run() {
     assert_eq!(
         restored.promise_state(&result).expect("result"),
         PromiseState::Fulfilled(Value::String("kept".into()))
-    );
-}
-
-#[test]
-fn var_redeclaration_of_a_parameter_does_not_clear_it() {
-    let source = r#"
-async function run(x) {
-  var x;
-  await wait("a");
-  return x;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm
-        .start(&mut host, "run", vec![HostValue::Number(5.0)])
-        .expect("start");
-    vm.run_until_idle(&mut host).expect("await");
-    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
-        .expect("restore");
-    restored
-        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
-        .expect("complete");
-    restored.run_until_idle(&mut host).expect("finish");
-    assert_eq!(
-        restored.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Number(5.0))
-    );
-}
-
-#[test]
-fn same_name_inner_and_outer_bindings_stay_independent() {
-    let source = r#"
-async function run() {
-  const x = {n: 1};
-  const inner = () => x;
-  await wait("a");
-  {
-    const x = {n: 2};
-    return inner().n;
-  }
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("await");
-    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
-        .expect("restore");
-    restored
-        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
-        .expect("complete");
-    restored.run_until_idle(&mut host).expect("finish");
-    assert_eq!(
-        restored.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Number(1.0))
-    );
-}
-
-#[test]
-fn missing_parameter_stays_undefined_across_await() {
-    let source = r#"
-async function run(x) {
-  await wait("a");
-  return x;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    vm.run_until_idle(&mut host).expect("await");
-    let mut restored = Vm::restore(vm.snapshot(std::slice::from_ref(&result)).expect("snapshot"), build, &mut host)
-        .expect("restore");
-    restored
-        .complete_operation("wait:a", Completion::Fulfilled(number(0.0)))
-        .expect("complete");
-    restored.run_until_idle(&mut host).expect("finish");
-    assert_eq!(
-        restored.promise_state(&result).expect("result"),
-        PromiseState::Fulfilled(Value::Undefined)
     );
 }
 
