@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::VmError;
 use crate::ops::array_index;
-use crate::value::{BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, SymbolId, Value};
+use crate::value::{
+    BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
+};
 
 /// Reserved `Symbol.iterator`. Ordinary symbols allocate from 1 and are never
 /// interned by description; only the registry interns by key.
@@ -138,13 +140,11 @@ pub struct ArrayObject {
 
 impl ArrayObject {
     /// `Some` is an own hit, including an explicit `undefined`.
-    fn own(&self, key: &PropertyKey) -> Option<Value> {
-        if key.as_string() == Some("length") {
-            return Some(Value::Number(self.elements.len() as f64));
-        }
+    fn own(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
         match key {
-            PropertyKey::String(key) => self.own_value(key).cloned(),
-            PropertyKey::Symbol(id) => self.symbol_props.get(id).cloned(),
+            PropertyKeyRef::String("length") => Some(Value::Number(self.elements.len() as f64)),
+            PropertyKeyRef::String(key) => self.own_value(key).cloned(),
+            PropertyKeyRef::Symbol(id) => self.symbol_props.get(&id).cloned(),
         }
     }
 
@@ -750,7 +750,7 @@ impl Heap {
     pub(crate) fn lookup_property(
         &self,
         id: ObjectId,
-        key: &PropertyKey,
+        key: PropertyKeyRef<'_>,
     ) -> Result<Option<Property>, VmError> {
         let mut current = id;
         let mut previous = None;
@@ -815,11 +815,14 @@ impl Heap {
     }
 
     pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
+        let key = key.borrowed();
         Ok(match self.get(id)? {
             Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
                 lookup_tables(&plain.props, &plain.symbol_props, key).is_some()
             }
-            Object::Array(array) => key.as_string() == Some("length") || array.own(key).is_some(),
+            Object::Array(array) => {
+                matches!(key, PropertyKeyRef::String("length")) || array.own(key).is_some()
+            }
             Object::Function(function) => {
                 lookup_tables(&function.props, &function.symbol_props, key).is_some()
             }
@@ -971,11 +974,11 @@ impl Heap {
 fn lookup_tables<'m, V>(
     props: &'m BTreeMap<String, V>,
     symbol_props: &'m BTreeMap<SymbolId, V>,
-    key: &PropertyKey,
+    key: PropertyKeyRef<'_>,
 ) -> Option<&'m V> {
     match key {
-        PropertyKey::String(key) => props.get(key),
-        PropertyKey::Symbol(id) => symbol_props.get(id),
+        PropertyKeyRef::String(key) => props.get(key),
+        PropertyKeyRef::Symbol(id) => symbol_props.get(&id),
     }
 }
 

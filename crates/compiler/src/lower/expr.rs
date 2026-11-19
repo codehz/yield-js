@@ -924,7 +924,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(if expression.prefix { updated } else { numeric })
     }
 
-    fn compile_member_parts(
+    pub(super) fn compile_member_parts(
         &mut self,
         member: &'ast MemberExpression<'ast>,
     ) -> Result<(Reg, Reg), CompileError> {

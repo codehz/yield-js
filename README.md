@@ -42,7 +42,7 @@ cargo run -p yield-poc
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this` 与预置参数可跨 `await` 快照恢复；绑定函数不支持 `new`，没有自有属性或原型。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
-- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Object` / `Array` 全局名；`for…of`、解构与展开仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
+- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Object` / `Array` 全局名；解构与展开仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
@@ -65,6 +65,7 @@ cargo run -p yield-poc
 - 赋值、算术复合赋值、逻辑赋值（`&&=`、`||=`、`??=`）、前后缀 `++` / `--`、`typeof` / `void`、普通函数调用、函数值调用、导入调用、`new`、`this`。
 - 可选链 `?.` 支持静态成员、计算成员和调用；遇到 `null` 或 `undefined` 时跳过链中剩余的求值，方法调用仍保留接收者。
 - `if`、`while`、`do...while`、`for`、`switch`、语句标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。`break` / `continue`（含带标签的跳转）可穿越 `finally`。
+- 同步 `for…of` 支持数组及实现 `[Symbol.iterator]` 的对象，循环头可用简单声明、绑定或成员赋值。退出循环时按迭代协议调用可选的 `return`；继续同一循环或自然耗尽不调用。迭代器与缓存的 `next` 可跨 `await` 快照恢复。
 
 不支持或尚未精确实现的语法在编译期报告 `unsupported syntax: ...` 与源码行列。
 
@@ -72,7 +73,7 @@ cargo run -p yield-poc
 
 - `super`、展开属性/元素；对象/数组跨宿主边界（当前只在 VM 内使用）。
 - 类、模板字符串、generator、async generator、顶层 `await`。
-- `for...in`、`for...of`。
+- `for…in`、`for await…of`、字符串迭代和 `for…of` 解构目标。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
 - `Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。Symbol 不能 `new`、不能跨宿主边界，参与强制数值/字符串转换时抛可捕获的 `TypeError` 对象。没有 `Date`、`RegExp`、`JSON` 和 `Math`。

@@ -7,6 +7,7 @@ use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::JumpTarget;
 use super::{FunctionSource, Lowerer};
+use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
@@ -175,9 +176,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::ForInStatement(statement) => {
                 Err(unsupported(self.source_text(), statement.span, "for-in"))
             }
-            Statement::ForOfStatement(statement) => {
-                Err(unsupported(self.source_text(), statement.span, "for-of"))
-            }
+            Statement::ForOfStatement(statement) => self.compile_for_of(statement),
             Statement::LabeledStatement(statement) => self.compile_labeled(statement),
             Statement::ClassDeclaration(statement) => Err(unsupported(
                 self.source_text(),
@@ -192,10 +191,124 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
     }
 
-    /// Label chain lowering. Only a chain ending in `while`, `do…while`, or a
-    /// plain `for` binds its names to the loop (for `continue`); any other
-    /// terminal statement makes the names plain `break` targets. Each name in
-    /// the chain must be unique among currently active labels. The terminal
+    fn compile_for_of(
+        &mut self,
+        statement: &'ast ForOfStatement<'ast>,
+    ) -> Result<(), CompileError> {
+        if statement.r#await {
+            return Err(unsupported(
+                self.source_text(),
+                statement.span,
+                "for-await-of",
+            ));
+        }
+        self.env.enter_block();
+        let binding = if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
+            let [declarator] = declaration.declarations.as_slice() else {
+                return Err(unsupported(
+                    self.source_text(),
+                    declaration.span,
+                    "for-of declaration",
+                ));
+            };
+            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                return Err(unsupported(
+                    self.source_text(),
+                    declarator.span,
+                    "for-of destructuring",
+                ));
+            };
+            self.predeclare_variable_list(declaration)?;
+            let (binding, _) =
+                self.declare(identifier.name.as_str(), declaration.kind, declarator.span)?;
+            // `var` exists even when the iterator yields nothing.
+            if declaration.kind == VariableDeclarationKind::Var {
+                self.emit(Instr::DeclareBinding { binding });
+            }
+            Some(binding)
+        } else {
+            None
+        };
+
+        let iterable = self.compile_expression(&statement.right)?;
+        if let Some(binding) = binding {
+            self.env.clear_pending(binding);
+        }
+        let iterator = self.alloc_reg()?;
+        let next = self.alloc_reg()?;
+        self.emit(Instr::GetIterator {
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+            iterable: self.slot(iterable),
+        });
+        let step_pc = self.pc();
+        let done = self.alloc_reg()?;
+        let value = self.alloc_reg()?;
+        self.emit(Instr::IteratorNext {
+            done: self.slot(done),
+            value: self.slot(value),
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+        });
+        let has_value = self.branch_false(done);
+        let exhausted = self.jump();
+        self.patch_jump(has_value, self.pc())?;
+        let loop_context = self.compile_iterator_body(iterator, step_pc, |this| {
+            if let Some(binding) = binding {
+                this.emit(Instr::SetBinding {
+                    binding,
+                    src: this.slot(value),
+                });
+            } else {
+                this.assign_iterator_value(&statement.left, value)?;
+            }
+            this.compile_statement(&statement.body)
+        })?;
+
+        let end = self.pc();
+        self.patch_jump(exhausted, end)?;
+        self.patch_loop(loop_context, end)?;
+        self.env.exit_block();
+        Ok(())
+    }
+
+    fn assign_iterator_value(
+        &mut self,
+        target: &'ast ForStatementLeft<'ast>,
+        value: Reg,
+    ) -> Result<(), CompileError> {
+        let src = self.slot(value);
+        if let ForStatementLeft::AssignmentTargetIdentifier(identifier) = target {
+            let name = identifier.name.as_str();
+            let binding = self.lookup(name).ok_or_else(|| {
+                CompileError::new(
+                    self.source_text(),
+                    identifier.span,
+                    format!("assignment to unknown binding {name:?}"),
+                )
+            })?;
+            self.check_tdz(binding, name, identifier.span)?;
+            self.emit(Instr::SetBinding { binding, src });
+        } else if let Some(member) = target.as_member_expression() {
+            let (object, key) = self.compile_member_parts(member)?;
+            self.emit(Instr::SetMember {
+                object: self.slot(object),
+                key: self.slot(key),
+                src,
+            });
+        } else {
+            return Err(unsupported(
+                self.source_text(),
+                target.span(),
+                "for-of destructuring",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Label chain lowering. A chain ending in a loop binds its names to the
+    /// loop (for `continue`); any other terminal makes them plain `break` targets.
+    /// Active label names must be unique. The terminal
     /// statement is compiled once; after it, every break jump recorded on the
     /// chain's frames targets the instruction after it, which is exactly the
     /// loop exit for loop labels.
@@ -216,7 +329,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     let loop_index = match other {
                         Statement::WhileStatement(_)
                         | Statement::DoWhileStatement(_)
-                        | Statement::ForStatement(_) => Some(self.control.loops_len()),
+                        | Statement::ForStatement(_)
+                        | Statement::ForOfStatement(_) => Some(self.control.loops_len()),
                         _ => None,
                     };
                     let base = self.control.labels_len();
@@ -378,7 +492,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "continue label is not a loop",
                 ));
             };
-            let depth = self.control.label_finalizer_depth(index);
+            let depth = self.control.loop_continue_depth(loop_index);
             return self.emit_control_jump(JumpTarget::LoopContinue(loop_index), depth);
         }
         let Some((target, depth)) = self.control.innermost_continue() else {

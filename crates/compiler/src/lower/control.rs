@@ -46,6 +46,7 @@ pub(super) struct Loop {
     pub(super) continue_target: Option<usize>,
     pub(super) finalizer_depth: usize,
     pub(super) seq: usize,
+    break_depth: usize,
 }
 
 pub(super) struct Switch {
@@ -119,8 +120,15 @@ impl<'ast> Control<'ast> {
             continue_jumps: Vec::new(),
             continue_target,
             finalizer_depth: self.finalizers.len(),
+            break_depth: self.finalizers.len(),
             seq,
         });
+    }
+
+    fn push_iterator_loop(&mut self, continue_target: usize) {
+        self.push_loop(Some(continue_target));
+        // Continuing this loop keeps its iterator open; breaking exits it.
+        self.loops.last_mut().expect("loop stack").break_depth -= 1;
     }
 
     pub(super) fn pop_loop(&mut self) -> Loop {
@@ -149,10 +157,7 @@ impl<'ast> Control<'ast> {
                 JumpTarget::SwitchBreak(self.switches.len() - 1),
                 s.finalizer_depth,
             )),
-            (Some(l), _) => Some((
-                JumpTarget::LoopBreak(self.loops.len() - 1),
-                l.finalizer_depth,
-            )),
+            (Some(l), _) => Some((JumpTarget::LoopBreak(self.loops.len() - 1), l.break_depth)),
             (None, _) => None,
         }
     }
@@ -192,6 +197,10 @@ impl<'ast> Control<'ast> {
 
     pub(super) fn label_loop_index(&self, index: usize) -> Option<usize> {
         self.labels[index].loop_index
+    }
+
+    pub(super) fn loop_continue_depth(&self, index: usize) -> usize {
+        self.loops[index].finalizer_depth
     }
 
     fn push_continue_to(&mut self, index: usize, jump: usize) {
@@ -299,6 +308,64 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
+    fn push_finalizer(&mut self) -> Result<(), CompileError> {
+        let kind = self.alloc_reg()?;
+        let payload = self.alloc_reg()?;
+        self.control.finalizers.push(Finalizer {
+            kind,
+            payload,
+            entry: None,
+            entry_jumps: Vec::new(),
+            jump_routes: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Protect assignment and the body, not `next`, `done` or `value` reads.
+    pub(super) fn compile_iterator_body(
+        &mut self,
+        iterator: Reg,
+        step_pc: usize,
+        body: impl FnOnce(&mut Self) -> Result<(), CompileError>,
+    ) -> Result<Loop, CompileError> {
+        let exception = self.alloc_reg()?;
+        self.push_finalizer()?;
+        self.control.push_iterator_loop(step_pc);
+        let start = self.pc();
+        body(self)?;
+        let end = self.pc();
+        self.jump_to(step_pc);
+
+        let throw_pc = self.pc();
+        self.emit(Instr::IteratorClose {
+            iterator: self.slot(iterator),
+            preserve_throw: true,
+        });
+        self.emit(Instr::Throw {
+            src: self.slot(exception),
+        });
+        self.control.push_handler(ExceptionHandler {
+            start_pc: start as u32,
+            end_pc: end as u32,
+            target_pc: throw_pc as u32,
+            dst: self.slot(exception),
+        });
+
+        // The loop must stay on the control stack until pending breaks have
+        // been dispatched. The close itself must not re-enter this finalizer.
+        let context = self.control.finalizers.pop().expect("iterator finalizer");
+        let close_pc = self.pc();
+        for &jump in &context.entry_jumps {
+            self.patch_jump(jump, close_pc)?;
+        }
+        self.emit(Instr::IteratorClose {
+            iterator: self.slot(iterator),
+            preserve_throw: false,
+        });
+        self.dispatch_finally(&context)?;
+        Ok(self.control.pop_loop())
+    }
+
     pub(super) fn compile_try(
         &mut self,
         statement: &'ast TryStatement<'ast>,
@@ -306,15 +373,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let has_finalizer = statement.finalizer.is_some();
         let exception = self.alloc_reg()?;
         if has_finalizer {
-            let kind = self.alloc_reg()?;
-            let payload = self.alloc_reg()?;
-            self.control.finalizers.push(Finalizer {
-                kind,
-                payload,
-                entry: None,
-                entry_jumps: Vec::new(),
-                jump_routes: Vec::new(),
-            });
+            self.push_finalizer()?;
         }
 
         let try_start = self.pc();

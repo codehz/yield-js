@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 7;
+pub const BYTECODE_VERSION: u32 = 8;
 
 /// VM-provided callable names, in builtin-index order.
 ///
@@ -225,6 +225,24 @@ pub enum Instr {
     GetTopFunction {
         dst: Slot,
         function: u32,
+    },
+    /// Calls the intrinsic `Symbol.iterator` method and caches the result's `next` method.
+    GetIterator {
+        iterator: Slot,
+        next: Slot,
+        iterable: Slot,
+    },
+    /// Calls cached `next` and reads `done`, then `value` only when not done.
+    IteratorNext {
+        done: Slot,
+        value: Slot,
+        iterator: Slot,
+        next: Slot,
+    },
+    /// Calls the optional `return` method. A pending throw takes precedence over script errors.
+    IteratorClose {
+        iterator: Slot,
+        preserve_throw: bool,
     },
 }
 
@@ -615,6 +633,39 @@ impl Build {
                     check_slot(*dst, "GetMember.dst")?;
                     check_slot(*object, "GetMember.object")?;
                     check_slot(*key, "GetMember.key")?;
+                }
+                Instr::GetIterator {
+                    iterator,
+                    next,
+                    iterable,
+                } => {
+                    check_slot(*iterator, "GetIterator.iterator")?;
+                    check_slot(*next, "GetIterator.next")?;
+                    if iterator == next {
+                        return Err(format!(
+                            "{location}: GetIterator destinations overlap at pc {pc}"
+                        ));
+                    }
+                    check_slot(*iterable, "GetIterator.iterable")?;
+                }
+                Instr::IteratorNext {
+                    done,
+                    value,
+                    iterator,
+                    next,
+                } => {
+                    check_slot(*done, "IteratorNext.done")?;
+                    check_slot(*value, "IteratorNext.value")?;
+                    if done == value {
+                        return Err(format!(
+                            "{location}: IteratorNext destinations overlap at pc {pc}"
+                        ));
+                    }
+                    check_slot(*iterator, "IteratorNext.iterator")?;
+                    check_slot(*next, "IteratorNext.next")?;
+                }
+                Instr::IteratorClose { iterator, .. } => {
+                    check_slot(*iterator, "IteratorClose.iterator")?;
                 }
                 Instr::SetMember { object, key, src } => {
                     check_slot(*object, "SetMember.object")?;

@@ -25,6 +25,12 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::CallValue { .. }
         | Instr::Construct { .. }
         | Instr::GetMember { .. }
+        | Instr::GetIterator { .. }
+        | Instr::IteratorNext { .. }
+        | Instr::IteratorClose {
+            preserve_throw: false,
+            ..
+        }
         | Instr::SetMember { .. } => true,
         Instr::Binary { op, .. } => !matches!(
             *op,
@@ -40,6 +46,10 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Closure { .. }
         | Instr::NewObject { .. }
         | Instr::NewArray { .. }
+        | Instr::IteratorClose {
+            preserve_throw: true,
+            ..
+        }
         | Instr::GetBuiltin { .. }
         | Instr::GetTopFunction { .. }
         | Instr::DefineProperty { .. }
@@ -118,6 +128,26 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(object.index);
             uses.insert(key.index);
             defs.insert(dst.index);
+        }
+        Instr::GetIterator {
+            iterator,
+            next,
+            iterable,
+        } => {
+            uses.insert(iterable.index);
+            defs.extend([iterator.index, next.index]);
+        }
+        Instr::IteratorNext {
+            done,
+            value,
+            iterator,
+            next,
+        } => {
+            uses.extend([iterator.index, next.index]);
+            defs.extend([done.index, value.index]);
+        }
+        Instr::IteratorClose { iterator, .. } => {
+            uses.insert(iterator.index);
         }
         Instr::SetMember { object, key, src }
         | Instr::DefineProperty {
@@ -211,6 +241,33 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             object: remap(object),
             key: remap(key),
+        },
+        Instr::GetIterator {
+            iterator,
+            next,
+            iterable,
+        } => Instr::GetIterator {
+            iterator: remap(iterator),
+            next: remap(next),
+            iterable: remap(iterable),
+        },
+        Instr::IteratorNext {
+            done,
+            value,
+            iterator,
+            next,
+        } => Instr::IteratorNext {
+            done: remap(done),
+            value: remap(value),
+            iterator: remap(iterator),
+            next: remap(next),
+        },
+        Instr::IteratorClose {
+            iterator,
+            preserve_throw,
+        } => Instr::IteratorClose {
+            iterator: remap(iterator),
+            preserve_throw,
         },
         Instr::SetMember { object, key, src } => Instr::SetMember {
             object: remap(object),

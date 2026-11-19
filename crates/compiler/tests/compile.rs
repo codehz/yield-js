@@ -73,6 +73,25 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
+fn rejects_unsupported_for_of_forms_with_location() {
+    for (statement, syntax) in [
+        ("for await (const x of []) {}", "for-await-of"),
+        ("for (const [x] of []) {}", "for-of destructuring"),
+        ("for ([x] of []) {}", "for-of destructuring"),
+    ] {
+        let source = format!("async function run() {{\n  {statement}\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(syntax);
+        assert!(
+            error
+                .message()
+                .contains(&format!("unsupported syntax: {syntax}")),
+            "{error}"
+        );
+        assert_eq!(error.line(), 2);
+    }
+}
+
+#[test]
 fn rejects_delete_of_property_with_location() {
     let error = compile(
         "function run(o) { return delete ((o.x)); }",

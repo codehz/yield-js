@@ -6,12 +6,12 @@ use crate::bytecode::{
 };
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{Property, object_id};
+use crate::heap::{ITERATOR_SYMBOL, Property, object_id};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
-use crate::value::{ObjectId, PropertyKey, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 /// What one instruction did. `Throw` has not been caught yet.
@@ -192,6 +192,65 @@ impl Vm {
                 let invocation = self.read_member(host, &frame.read(object)?, &frame.read(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::GetIterator {
+                iterator,
+                next,
+                iterable,
+            } => {
+                let value = match self.get_iterator(host, &frame.read(iterable)?)? {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                };
+                let next_method =
+                    match self.read_property(host, &value, PropertyKeyRef::String("next"))? {
+                        Invocation::Value(value) => value,
+                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                    };
+                frame.write(iterator, value)?;
+                frame.write(next, next_method)?;
+                Ok(Step::Next)
+            }
+            Instr::IteratorNext {
+                done,
+                value,
+                iterator,
+                next,
+            } => {
+                let result =
+                    self.invoke(host, &frame.read(next)?, Vec::new(), &frame.read(iterator)?)?;
+                let result = match self
+                    .require_iterator_object(result, "iterator next must return an object")?
+                {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                };
+                let is_done =
+                    match self.read_property(host, &result, PropertyKeyRef::String("done"))? {
+                        Invocation::Value(value) => value.truthy(),
+                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                    };
+                let item = if is_done {
+                    Value::Undefined
+                } else {
+                    match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
+                        Invocation::Value(value) => value,
+                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                    }
+                };
+                frame.write(done, Value::Bool(is_done))?;
+                frame.write(value, item)?;
+                Ok(Step::Next)
+            }
+            Instr::IteratorClose {
+                iterator,
+                preserve_throw,
+            } => {
+                let invocation = self.close_iterator(host, &frame.read(iterator)?)?;
+                match invocation {
+                    Invocation::Thrown(value) if !preserve_throw => Ok(Step::Throw(value)),
+                    _ => Ok(Step::Next),
+                }
+            }
             Instr::GetBuiltin { dst, builtin } => {
                 let id = self.builtin_id(builtin)?;
                 frame.write(dst, Value::Object(id))?;
@@ -286,6 +345,54 @@ impl Vm {
         store_invocation(frame, dst, invocation)
     }
 
+    fn get_iterator(
+        &mut self,
+        host: &mut dyn Host,
+        iterable: &Value,
+    ) -> Result<Invocation, VmError> {
+        if !matches!(iterable, Value::Object(_)) {
+            return self.throw_type_error("value is not iterable");
+        }
+        let method =
+            match self.read_property(host, iterable, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))? {
+                Invocation::Value(method) => method,
+                thrown => return Ok(thrown),
+            };
+        let invocation = self.invoke(host, &method, Vec::new(), iterable)?;
+        self.require_iterator_object(invocation, "Symbol.iterator must return an object")
+    }
+
+    fn close_iterator(
+        &mut self,
+        host: &mut dyn Host,
+        iterator: &Value,
+    ) -> Result<Invocation, VmError> {
+        // Valid bytecode produced by the compiler only supplies a GetIterator result.
+        if !matches!(iterator, Value::Object(_)) {
+            return self.throw_type_error("iterator must be an object");
+        }
+        let method = match self.read_property(host, iterator, PropertyKeyRef::String("return"))? {
+            Invocation::Value(Value::Undefined | Value::Null) => {
+                return Ok(Invocation::Value(Value::Undefined));
+            }
+            Invocation::Value(method) => method,
+            thrown => return Ok(thrown),
+        };
+        let invocation = self.invoke(host, &method, Vec::new(), iterator)?;
+        self.require_iterator_object(invocation, "iterator return must return an object")
+    }
+
+    fn require_iterator_object(
+        &mut self,
+        invocation: Invocation,
+        message: &str,
+    ) -> Result<Invocation, VmError> {
+        match invocation {
+            Invocation::Value(Value::Object(_)) | Invocation::Thrown(_) => Ok(invocation),
+            Invocation::Value(_) => self.throw_type_error(message),
+        }
+    }
+
     pub(crate) fn read_member(
         &mut self,
         host: &mut dyn Host,
@@ -293,15 +400,26 @@ impl Vm {
         key: &Value,
     ) -> Result<Invocation, VmError> {
         let key = ops::property_key(key)?;
-        let id = object_id(object, "property access on a non-object")?;
-        match self.heap.lookup_property(id, &key)? {
+        self.read_property(host, object, key.borrowed())
+    }
+
+    fn read_property(
+        &mut self,
+        host: &mut dyn Host,
+        object: &Value,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Invocation, VmError> {
+        let Value::Object(id) = *object else {
+            return self.throw_type_error("property access on a non-object");
+        };
+        match self.heap.lookup_property(id, key)? {
             Some(Property::Data(value)) => Ok(Invocation::Value(value)),
             Some(Property::Accessor { get: Some(get), .. }) => {
                 self.invoke(host, &Value::Object(get), Vec::new(), object)
             }
-            None if let PropertyKey::String(key) = &key
+            None if let PropertyKeyRef::String(key) = key
                 && self.heap.function(id).is_some()
-                && matches!(key.as_str(), "call" | "apply" | "bind") =>
+                && matches!(key, "call" | "apply" | "bind") =>
             {
                 let method = self.heap.alloc_builtin("Function", Some(key));
                 Ok(Invocation::Value(Value::Object(method)))
@@ -318,13 +436,15 @@ impl Vm {
         value: Value,
     ) -> Result<Invocation, VmError> {
         let key = ops::property_key(key)?;
-        let id = object_id(object, "property write on a non-object")?;
+        let Value::Object(id) = *object else {
+            return self.throw_type_error("property write on a non-object");
+        };
         if let PropertyKey::String(key) = &key
             && self.prototype_write_rejected(object, key)
         {
             return self.throw_type_error("Cannot assign to read only property 'prototype'");
         }
-        match self.heap.lookup_property(id, &key)? {
+        match self.heap.lookup_property(id, key.borrowed())? {
             Some(Property::Accessor { set: Some(set), .. }) => {
                 if let Invocation::Thrown(error) =
                     self.invoke(host, &Value::Object(set), vec![value], object)?

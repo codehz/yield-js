@@ -56,7 +56,20 @@ pub enum PropertyKey {
     Symbol(SymbolId),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PropertyKeyRef<'a> {
+    String(&'a str),
+    Symbol(SymbolId),
+}
+
 impl PropertyKey {
+    pub(crate) fn borrowed(&self) -> PropertyKeyRef<'_> {
+        match self {
+            Self::String(key) => PropertyKeyRef::String(key),
+            Self::Symbol(id) => PropertyKeyRef::Symbol(*id),
+        }
+    }
+
     /// The string form, for paths that only apply to string keys.
     pub fn as_string(&self) -> Option<&str> {
         match self {

@@ -35,7 +35,7 @@
 - **非有限数字字面量**（"non-finite numeric literal"，`Build::validate` 双保险）
 
 ### 2.3 控制流
-- **`for…in` / `for…of`**（同步 for…of 在设计目标内，当前无实现）
+- **`for…in`**；同步 `for…of` 已支持数组及自定义可迭代对象（含提前退出时的 `IteratorClose`）。字符串迭代和解构循环头仍未实现。
 - **`with`、`debugger`**
 - **`class` 声明**（整个类语法拒绝）
 - **`switch` 重复 default**（编译期拒绝，正确但属于实现限制的下游）
@@ -62,7 +62,7 @@
 
 1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **`for…in`/`for…of` 仍拒绝**：数组已能通过 `values()` 或 `[Symbol.iterator]()` 创建实时值迭代器；快照 v9 保存源数组引用及游标。编译器仍不消费迭代协议，提前退出时的 `IteratorClose` 未实现。
+3. **迭代协议**：同步 `for…of` 使用 `[Symbol.iterator]`，缓存 `next`，并在循环提前退出时执行 `IteratorClose`。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照 v9 已能保存数组迭代器的源数组引用及游标，本次仅将字节码升级至 v8。`for…in` 仍拒绝。
 4. **解构与 rest/spread 仍拒绝**：数组解构与展开尚未接入迭代协议；对象解构与展开也未实现。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
