@@ -92,28 +92,18 @@ fn rejects_unsupported_for_of_forms_with_location() {
 }
 
 #[test]
-fn rejects_delete_of_property_with_location() {
-    let error = compile(
-        "function run(o) { return delete ((o.x)); }",
-        &CompileOptions::default(),
-    )
-    .expect_err("property delete is outside the PoC subset");
-    assert!(
-        error.message().contains("unsupported syntax: delete"),
-        "{error}"
-    );
-    assert_eq!(error.line(), 1);
-    assert!(error.column() > 1);
+fn rejects_delete_of_identifier_in_strict_modules() {
+    for operand in ["x", "((x))"] {
+        let source = format!("function run(x) {{\n  return delete {operand};\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        assert_eq!(error.line(), 2);
+        assert!(error.message().contains("delete"), "{error}");
+    }
 }
 
 #[test]
 fn rejects_unsupported_optional_chain_syntax_with_location() {
     for (source, message, column) in [
-        (
-            "function run(x){\n  return delete x?.p;\n}",
-            "unsupported syntax: delete",
-            10,
-        ),
         (
             "function run(){ return null?.[missing]; }",
             "unknown binding \"missing\"",

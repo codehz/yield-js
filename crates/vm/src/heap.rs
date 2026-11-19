@@ -121,6 +121,10 @@ type PropertyTables<'a> = (
     &'a PropertyTable<String, Property>,
     &'a PropertyTable<SymbolId, Property>,
 );
+type PropertyTablesMut<'a> = (
+    &'a mut PropertyTable<String, Property>,
+    &'a mut PropertyTable<SymbolId, Property>,
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct OrderedProperty<V> {
@@ -215,6 +219,30 @@ impl<K: Ord, V> PropertyTable<K, V> {
                 });
             }
         }
+    }
+
+    fn remove_configurable<Q: Ord + ?Sized>(&mut self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
+        let Some(property) = self.0.get(key) else {
+            return true;
+        };
+        if !property.attributes.configurable {
+            return false;
+        }
+        let ordinal = property.ordinal;
+        self.0.remove(key);
+        // Keep ordinals dense so reinsertion appends and snapshots keep the
+        // same validation rules, without adding an ordering counter.
+        if ordinal < self.0.len() {
+            for property in self.0.values_mut() {
+                if property.ordinal > ordinal {
+                    property.ordinal -= 1;
+                }
+            }
+        }
+        true
     }
 
     fn valid_order(&self) -> bool {
@@ -609,6 +637,21 @@ impl Object {
             Self::Function(o) => (&o.props, &o.symbol_props),
             Self::Promise(o) => (&o.props, &o.symbol_props),
             Self::BuiltinStatic(o) => (&o.props, &o.symbol_props),
+            Self::Native(_) | Self::Environment(_) => return None,
+        })
+    }
+
+    fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
+        Some(match self {
+            Self::Plain(o)
+            | Self::ArrayIterator { object: o, .. }
+            | Self::StringIterator { object: o, .. }
+            | Self::Bound(BoundObject { object: o, .. })
+            | Self::Resolution(Resolution { object: o, .. }) => (&mut o.props, &mut o.symbol_props),
+            Self::Array(o) => (&mut o.props, &mut o.symbol_props),
+            Self::Function(o) => (&mut o.props, &mut o.symbol_props),
+            Self::Promise(o) => (&mut o.props, &mut o.symbol_props),
+            Self::BuiltinStatic(o) => (&mut o.props, &mut o.symbol_props),
             Self::Native(_) | Self::Environment(_) => return None,
         })
     }
@@ -1173,6 +1216,36 @@ impl Heap {
         Ok(self.get(id)?.own_property(key.borrowed()).is_some())
     }
 
+    pub(crate) fn delete_own(
+        &mut self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<bool, VmError> {
+        let object = self.get_mut(id)?;
+        if let (Object::Array(array), PropertyKeyRef::String(name)) = (&mut *object, key) {
+            if name == "length" {
+                return Ok(false);
+            }
+            if let Some(index) = array_index(name) {
+                if let Entry::Occupied(entry) = array.elements.entry(index) {
+                    if !entry.get().1.configurable {
+                        return Ok(false);
+                    }
+                    entry.remove();
+                }
+                return Ok(true);
+            }
+        }
+        let Some((props, symbols)) = object.tables_mut() else {
+            // Opaque objects expose no own script properties.
+            return Ok(true);
+        };
+        Ok(match key {
+            PropertyKeyRef::String(key) => props.remove_configurable(key),
+            PropertyKeyRef::Symbol(id) => symbols.remove_configurable(&id),
+        })
+    }
+
     /// String-keyed convenience for internal builtin setup.
     pub(crate) fn set_own_string(
         &mut self,
@@ -1256,24 +1329,9 @@ impl Heap {
             array.length = array.length.max(index + 1);
             return Ok(());
         }
-        let (props, symbols) = match object {
-            Object::Plain(o)
-            | Object::ArrayIterator { object: o, .. }
-            | Object::StringIterator { object: o, .. }
-            | Object::Bound(BoundObject { object: o, .. })
-            | Object::Resolution(Resolution { object: o, .. }) => {
-                (&mut o.props, &mut o.symbol_props)
-            }
-            Object::Array(o) => (&mut o.props, &mut o.symbol_props),
-            Object::Function(o) => (&mut o.props, &mut o.symbol_props),
-            Object::Promise(o) => (&mut o.props, &mut o.symbol_props),
-            Object::BuiltinStatic(o) => (&mut o.props, &mut o.symbol_props),
-            _ => {
-                return Err(VmError::InvalidState(format!(
-                    "object {id} does not expose script properties"
-                )));
-            }
-        };
+        let (props, symbols) = object.tables_mut().ok_or_else(|| {
+            VmError::InvalidState(format!("object {id} does not expose script properties"))
+        })?;
         insert_table(props, symbols, key, attributes, |_| property);
         Ok(())
     }

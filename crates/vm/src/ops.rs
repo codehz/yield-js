@@ -111,14 +111,17 @@ pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
 }
 
 pub(crate) fn array_index(key: &str) -> Option<usize> {
+    canonical_index(key).filter(|&index| index < u32::MAX as usize)
+}
+
+pub(crate) fn canonical_index(key: &str) -> Option<usize> {
     if key == "0" {
         return Some(0);
     }
     if !matches!(key.as_bytes().first(), Some(b'1'..=b'9')) {
         return None;
     }
-    let index: u32 = key.parse().ok()?;
-    (index != u32::MAX).then_some(index as usize)
+    key.parse().ok()
 }
 
 fn relational(

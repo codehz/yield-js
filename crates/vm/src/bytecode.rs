@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 16;
+pub const BYTECODE_VERSION: u32 = 17;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -215,6 +215,12 @@ pub enum Instr {
     },
     /// Tests property presence without reading the property value.
     HasProperty {
+        dst: Slot,
+        object: Slot,
+        key: Slot,
+    },
+    /// Deletes an own property through a strict-mode member reference.
+    DeleteMember {
         dst: Slot,
         object: Slot,
         key: Slot,
@@ -772,6 +778,11 @@ impl Build {
                     check_slot(*dst, "HasProperty.dst")?;
                     check_slot(*object, "HasProperty.object")?;
                     check_slot(*key, "HasProperty.key")?;
+                }
+                Instr::DeleteMember { dst, object, key } => {
+                    check_slot(*dst, "DeleteMember.dst")?;
+                    check_slot(*object, "DeleteMember.object")?;
+                    check_slot(*key, "DeleteMember.key")?;
                 }
                 Instr::GetIterator {
                     iterator,

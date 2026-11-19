@@ -111,6 +111,7 @@ pub(crate) enum BuiltinCall {
     ArrayToString,
     IteratorIdentity,
     ReflectOwnKeys,
+    ReflectDeleteProperty,
     ObjectConstructor,
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
@@ -313,15 +314,12 @@ impl Vm {
             )
             .expect("Symbol constructor stores the toPrimitive symbol");
         let reflect = self.heap.alloc_plain();
-        let own_keys = self.heap.alloc_builtin("Reflect", Some("ownKeys"));
-        self.heap
-            .define_data(
-                reflect,
-                "ownKeys",
-                Value::Object(own_keys),
-                Attributes::METHOD,
-            )
-            .expect("Reflect stores ownKeys");
+        for name in ["ownKeys", "deleteProperty"] {
+            let method = self.heap.alloc_builtin("Reflect", Some(name));
+            self.heap
+                .define_data(reflect, name, Value::Object(method), Attributes::METHOD)
+                .expect("Reflect stores methods");
+        }
         self.builtins = BuiltinRoots {
             promise,
             promise_prototype: prototype,
@@ -576,6 +574,12 @@ impl Vm {
                 Ok(Invocation::Value(Value::Object(
                     self.heap.alloc_array(keys),
                 )))
+            }
+            BuiltinCall::ReflectDeleteProperty => {
+                let Some(target @ Value::Object(_)) = args.first() else {
+                    return self.throw_type_error("Reflect.deleteProperty requires an object");
+                };
+                self.delete_property(host, target, args.get(1).unwrap_or(&Value::Undefined))
             }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
@@ -1701,6 +1705,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
         ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
+        ("Reflect", Some("deleteProperty")) => Some(BuiltinCall::ReflectDeleteProperty),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
         }

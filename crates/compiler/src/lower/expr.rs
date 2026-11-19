@@ -392,25 +392,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         expression: &'ast UnaryExpression<'ast>,
     ) -> Result<Reg, CompileError> {
         if matches!(expression.operator, UnaryOperator::Delete) {
-            // `delete` as a value operator: the operand is evaluated for side
-            // effects only. Property removal is not supported, so the result
-            // is always `true` after the operand completes normally.
-            let mut argument = &expression.argument;
-            while let Expression::ParenthesizedExpression(paren) = argument {
-                argument = &paren.expression;
-            }
-            match argument {
-                Expression::Identifier(_)
-                | Expression::StaticMemberExpression(_)
-                | Expression::ComputedMemberExpression(_)
-                | Expression::PrivateFieldExpression(_)
-                | Expression::ChainExpression(_) => {
-                    return Err(unsupported(self.source_text(), expression.span, "delete"));
-                }
-                _ => {}
-            }
-            self.compile_expression(&expression.argument)?;
-            return self.emit_constant(Constant::Bool(true));
+            return self.compile_delete(&expression.argument);
         }
         if matches!(expression.operator, UnaryOperator::Typeof)
             && let Expression::Identifier(identifier) = &expression.argument
@@ -438,6 +420,59 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             dst: self.slot(dst),
             op,
             src: self.slot(src),
+        });
+        Ok(dst)
+    }
+
+    fn compile_delete(
+        &mut self,
+        mut argument: &'ast Expression<'ast>,
+    ) -> Result<Reg, CompileError> {
+        while let Expression::ParenthesizedExpression(paren) = argument {
+            argument = &paren.expression;
+        }
+        if let Expression::Identifier(identifier) = argument {
+            return Err(CompileError::new(
+                self.source_text(),
+                identifier.span,
+                "cannot delete an unqualified identifier in strict mode",
+            ));
+        }
+        if let Some(member) = argument.as_member_expression() {
+            let (object, key) = self.compile_member_parts(member)?;
+            return self.emit_delete_member(object, key);
+        }
+        if let Expression::ChainExpression(chain) = argument
+            && let Some(member) = chain.expression.as_member_expression()
+        {
+            let mut exits = Vec::new();
+            let (object, key) = self.compile_chain_member_parts(member, &mut exits)?;
+            let result = self.emit_delete_member(object, key)?;
+            if !exits.is_empty() {
+                let end = self.jump();
+                let short_circuit = self.pc();
+                for exit in exits {
+                    self.patch_jump(exit, short_circuit)?;
+                }
+                let success = self.emit_constant(Constant::Bool(true))?;
+                self.emit(Instr::Move {
+                    dst: self.slot(result),
+                    src: self.slot(success),
+                });
+                self.patch_jump(end, self.pc())?;
+            }
+            return Ok(result);
+        }
+        self.compile_expression(argument)?;
+        self.emit_constant(Constant::Bool(true))
+    }
+
+    fn emit_delete_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::DeleteMember {
+            dst: self.slot(dst),
+            object: self.slot(object),
+            key: self.slot(key),
         });
         Ok(dst)
     }
@@ -523,6 +558,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         member: &'ast MemberExpression<'ast>,
         exits: &mut Vec<usize>,
     ) -> Result<(Reg, Reg), CompileError> {
+        let (object, key) = self.compile_chain_member_parts(member, exits)?;
+        Ok((self.emit_get_member(object, key)?, object))
+    }
+
+    fn compile_chain_member_parts(
+        &mut self,
+        member: &'ast MemberExpression<'ast>,
+        exits: &mut Vec<usize>,
+    ) -> Result<(Reg, Reg), CompileError> {
         let (base, optional) = match member {
             MemberExpression::StaticMemberExpression(member) => (&member.object, member.optional),
             MemberExpression::ComputedMemberExpression(member) => (&member.object, member.optional),
@@ -547,7 +591,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             MemberExpression::PrivateFieldExpression(_) => unreachable!(),
         };
-        Ok((self.emit_get_member(object, key)?, object))
+        Ok((object, key))
     }
 
     fn emit_get_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {

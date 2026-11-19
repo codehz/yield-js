@@ -276,6 +276,16 @@ impl Vm {
                     self.has_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::DeleteMember { dst, object, key } => {
+                let invocation =
+                    self.delete_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
+                if matches!(invocation, Invocation::Value(Value::Bool(false))) {
+                    return Ok(Step::Throw(
+                        self.type_error("cannot delete a non-configurable property")?,
+                    ));
+                }
+                store_invocation(frame, dst, invocation)
+            }
             Instr::GetIterator {
                 iterator,
                 next,
@@ -689,6 +699,41 @@ impl Vm {
         let present = self.heap.has_property(id, key)?
             || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key));
         Ok(Invocation::Value(Value::Bool(present)))
+    }
+
+    pub(crate) fn delete_property(
+        &mut self,
+        host: &mut dyn Host,
+        target: &Value,
+        key: &Value,
+    ) -> Result<Invocation, VmError> {
+        if matches!(target, Value::Null | Value::Undefined) {
+            return self.throw_type_error("cannot delete a property of null or undefined");
+        }
+        let coerced;
+        let key = match key {
+            Value::String(key) => PropertyKeyRef::String(key),
+            Value::Symbol(id) => PropertyKeyRef::Symbol(*id),
+            _ => {
+                coerced = match self.coerce_property_key(host, key)? {
+                    Ok(key) => key,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                coerced.borrowed()
+            }
+        };
+        let deleted = match (target, key) {
+            (Value::Object(id), key) => self.heap.delete_own(*id, key)?,
+            // ToObject on a string would expose fixed UTF-16 indices and length.
+            (Value::String(string), PropertyKeyRef::String(key)) => {
+                key != "length"
+                    && !ops::canonical_index(key).is_some_and(|index| {
+                        index < string.len() && string.encode_utf16().nth(index).is_some()
+                    })
+            }
+            _ => true,
+        };
+        Ok(Invocation::Value(Value::Bool(deleted)))
     }
 
     fn has_virtual_function_method(&self, id: ObjectId, key: &str) -> bool {
