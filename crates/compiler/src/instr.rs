@@ -25,6 +25,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetMember { .. }
         | Instr::GetDestructuredMember { .. }
         | Instr::HasProperty { .. }
+        | Instr::InstanceOf { .. }
         | Instr::DeleteMember { .. }
         | Instr::GetIterator { .. }
         | Instr::IteratorNext { .. }
@@ -82,6 +83,15 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Binary { dst, lhs, rhs, .. } => {
             uses.insert(lhs.index);
             uses.insert(rhs.index);
+            defs.insert(dst.index);
+        }
+        Instr::InstanceOf {
+            dst,
+            value,
+            constructor,
+        } => {
+            uses.insert(value.index);
+            uses.insert(constructor.index);
             defs.insert(dst.index);
         }
         Instr::Unary { dst, src, .. } => {
@@ -236,6 +246,15 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             op,
             lhs: remap(lhs),
             rhs: remap(rhs),
+        },
+        Instr::InstanceOf {
+            dst,
+            value,
+            constructor,
+        } => Instr::InstanceOf {
+            dst: remap(dst),
+            value: remap(value),
+            constructor: remap(constructor),
         },
         Instr::Unary { dst, op, src } => Instr::Unary {
             dst: remap(dst),

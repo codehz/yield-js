@@ -28,7 +28,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ### 2.2 表达式
 
-- `instanceof`
 - `++` / `--` 只接受绑定或成员（`update target outside the PoC subset`）；解构赋值只支持 `=`
 - 私有字段（`private field access`）
 - 标签模板。非标签模板已支持

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 21;
+pub const BYTECODE_VERSION: u32 = 22;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -158,6 +158,11 @@ pub enum Instr {
         op: BinaryOp,
         lhs: Slot,
         rhs: Slot,
+    },
+    InstanceOf {
+        dst: Slot,
+        value: Slot,
+        constructor: Slot,
     },
     Unary {
         dst: Slot,
@@ -745,6 +750,15 @@ impl Build {
                     check_slot(*dst, "Binary.dst")?;
                     check_slot(*lhs, "Binary.lhs")?;
                     check_slot(*rhs, "Binary.rhs")?;
+                }
+                Instr::InstanceOf {
+                    dst,
+                    value,
+                    constructor,
+                } => {
+                    check_slot(*dst, "InstanceOf.dst")?;
+                    check_slot(*value, "InstanceOf.value")?;
+                    check_slot(*constructor, "InstanceOf.constructor")?;
                 }
                 Instr::Unary { dst, src, .. } => {
                     check_slot(*dst, "Unary.dst")?;

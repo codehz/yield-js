@@ -316,6 +316,17 @@ impl Vm {
             .expect("Error.prototype stores message");
         let error = self.heap.alloc_builtin("Error", None);
         let typeerror = self.heap.alloc_builtin("TypeError", None);
+        for (constructor, prototype) in [(error, error_prototype), (typeerror, typeerror_prototype)]
+        {
+            self.heap
+                .define_data(
+                    constructor,
+                    "prototype",
+                    Value::Object(prototype),
+                    Attributes::FIXED,
+                )
+                .expect("error constructor stores its prototype");
+        }
         let symbol = self.heap.alloc_builtin("Symbol", None);
         for name in ["for", "keyFor"] {
             let id = self.heap.alloc_builtin("Symbol", Some(name));

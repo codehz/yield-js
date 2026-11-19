@@ -340,11 +340,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 return Ok(dst);
             }
             BinaryOperator::Instanceof => {
-                return Err(unsupported(
-                    self.source_text(),
-                    expression.span,
-                    "instanceof operator",
-                ));
+                let value = self.compile_expression(&expression.left)?;
+                let constructor = self.compile_expression(&expression.right)?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::InstanceOf {
+                    dst: self.slot(dst),
+                    value: self.slot(value),
+                    constructor: self.slot(constructor),
+                });
+                return Ok(dst);
             }
         };
         let lhs = self.compile_expression(&expression.left)?;

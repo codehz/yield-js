@@ -1329,6 +1329,10 @@ impl Heap {
         self.objects.contains_key(&id)
     }
 
+    pub(crate) fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
     pub(crate) fn get(&self, id: ObjectId) -> Result<&Object, VmError> {
         self.objects.get(&id).ok_or_else(|| missing_object(id))
     }

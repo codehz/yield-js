@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use crate::builtins::is_callable_object;
 use crate::bytecode::{
     BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
     UnaryOp,
@@ -283,6 +284,15 @@ impl Vm {
             Instr::HasProperty { dst, object, key } => {
                 let invocation =
                     self.has_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
+                store_invocation(frame, dst, invocation)
+            }
+            Instr::InstanceOf {
+                dst,
+                value,
+                constructor,
+            } => {
+                let invocation =
+                    self.instance_of(host, frame.read_ref(value)?, frame.read_ref(constructor)?)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::DeleteMember { dst, object, key } => {
@@ -861,6 +871,59 @@ impl Vm {
             }
             Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::Undefined)),
         }
+    }
+
+    fn instance_of(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+        constructor: &Value,
+    ) -> Result<Invocation, VmError> {
+        let not_callable = "right-hand side of 'instanceof' is not callable";
+        let Value::Object(mut target) = *constructor else {
+            return self.throw_type_error(not_callable);
+        };
+        let mut remaining = self.heap.object_count();
+        loop {
+            let object = self.heap.get(target)?;
+            if !is_callable_object(object) {
+                return self.throw_type_error(not_callable);
+            }
+            let Object::Bound(bound) = object else {
+                break;
+            };
+            remaining -= 1;
+            if remaining == 0 {
+                return Err(VmError::InvalidState(
+                    "cyclic bound function target chain".into(),
+                ));
+            }
+            target = bound.target;
+        }
+
+        let Value::Object(mut current) = *value else {
+            return Ok(Invocation::Value(Value::Bool(false)));
+        };
+        let prototype = match self.read_property(
+            host,
+            &Value::Object(target),
+            PropertyKeyRef::String("prototype"),
+        )? {
+            Invocation::Value(Value::Object(id)) => id,
+            Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+            Invocation::Value(_) => {
+                return self
+                    .throw_type_error("'instanceof' constructor prototype is not an object");
+            }
+        };
+        // Prototype links are kept acyclic by set_prototype and snapshot restore.
+        while let Some(parent) = self.heap.get(current)?.prototype() {
+            if parent == prototype {
+                return Ok(Invocation::Value(Value::Bool(true)));
+            }
+            current = parent;
+        }
+        Ok(Invocation::Value(Value::Bool(false)))
     }
 
     fn has_property(
