@@ -5,8 +5,12 @@
 
 pub mod bytecode;
 pub mod error;
+mod exec;
+mod frame;
 pub mod heap;
 pub mod host;
+mod ops;
+mod runtime;
 pub mod snapshot;
 pub mod value;
 mod vm;
@@ -19,4 +23,4 @@ pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host, HostReply, PendingOperationMeta};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, HostValue, NativeKey, ObjectId, Value};
-pub use vm::{PromiseStateView, Vm};
+pub use vm::Vm;

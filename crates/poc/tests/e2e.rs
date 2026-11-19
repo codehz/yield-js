@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::{Build, Instr, Slot};
 use yield_vm::{
-    Completion, Host, HostReply, HostValue, NativeKey, Object, PendingOperationMeta,
-    PromiseStateView, Value, Vm, VmError,
+    Completion, Host, HostReply, HostValue, NativeKey, Object, PendingOperationMeta, PromiseState,
+    Value, Vm, VmError,
 };
 
 const RUN: &str = r#"
@@ -172,7 +172,7 @@ fn snapshot_and_restore_across_two_awaits() {
     restored.run_until_idle(&mut host).expect("finish");
     assert_eq!(
         restored.promise_state(&result).expect("result promise"),
-        PromiseStateView::Fulfilled(Value::Number(15.0))
+        PromiseState::Fulfilled(Value::Number(15.0))
     );
     assert_eq!(host.count("inspect"), 1);
     assert_eq!(host.count("seed"), 1);
@@ -200,7 +200,7 @@ fn rejection_resumes_at_the_reject_landing_point() {
     vm.run_until_idle(&mut host).expect("rejection resumes");
     assert_eq!(
         vm.promise_state(&result).expect("result"),
-        PromiseStateView::Rejected(Value::String("boom".into()))
+        PromiseState::Rejected(Value::String("boom".into()))
     );
     assert_eq!(vm.pending_operation_ids(), Vec::<String>::new());
 }
@@ -296,7 +296,7 @@ async function run() {
         .expect("resume drains and rejects the async result");
     assert_eq!(
         vm.promise_state(&result).expect("result"),
-        PromiseStateView::Rejected(Value::String("sync boom".into()))
+        PromiseState::Rejected(Value::String("sync boom".into()))
     );
 }
 
@@ -412,7 +412,7 @@ async function run() {
     vm.run_until_idle(&mut host).expect("drain");
     assert_eq!(
         vm.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(6.0))
+        PromiseState::Fulfilled(Value::Number(6.0))
     );
 }
 
@@ -507,7 +507,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("finish");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(23.0))
+        PromiseState::Fulfilled(Value::Number(23.0))
     );
 }
 
@@ -569,7 +569,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("finish");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(11.0))
+        PromiseState::Fulfilled(Value::Number(11.0))
     );
 }
 
@@ -697,7 +697,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("catch");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(15.0))
+        PromiseState::Fulfilled(Value::Number(15.0))
     );
 }
 
@@ -743,7 +743,7 @@ async function run() {
     assert_eq!(host.count("setLabel"), 1);
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(7.0))
+        PromiseState::Fulfilled(Value::Number(7.0))
     );
 }
 
@@ -785,7 +785,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("rethrow");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Rejected(Value::Number(5.0))
+        PromiseState::Rejected(Value::Number(5.0))
     );
 }
 
@@ -819,7 +819,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("finish");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(9.0))
+        PromiseState::Fulfilled(Value::Number(9.0))
     );
 }
 
@@ -1029,7 +1029,7 @@ async function run() {
     restored.run_until_idle(&mut host).expect("finish");
     assert_eq!(
         restored.promise_state(&result).expect("result"),
-        PromiseStateView::Fulfilled(Value::Number(5.0))
+        PromiseState::Fulfilled(Value::Number(5.0))
     );
 }
 

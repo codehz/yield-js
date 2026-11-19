@@ -3,7 +3,7 @@ use std::error::Error;
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::{
-    Completion, Host, HostReply, HostValue, NativeKey, PendingOperationMeta, PromiseStateView, Vm,
+    Completion, Host, HostReply, HostValue, NativeKey, PendingOperationMeta, PromiseState, Vm,
 };
 
 const SOURCE: &str = r#"
@@ -150,11 +150,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     vm.complete_operation("wait:b", Completion::Fulfilled(HostValue::Number(3.0)))?;
     vm.run_until_idle(&mut host)?;
     match vm.promise_state(&result)? {
-        PromiseStateView::Pending => println!("result: pending (unexpected)"),
-        PromiseStateView::Fulfilled(value) => {
+        PromiseState::Pending => println!("result: pending (unexpected)"),
+        PromiseState::Fulfilled(value) => {
             println!("result: {}", render_value(&vm.to_host_value(&value)?))
         }
-        PromiseStateView::Rejected(value) => {
+        PromiseState::Rejected(value) => {
             println!(
                 "result: rejected {}",
                 render_value(&vm.to_host_value(&value)?)
