@@ -6,7 +6,7 @@ use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
-    ROOT_MATH, ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
+    ROOT_JSON, ROOT_MATH, ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
     ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
     ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
@@ -25,7 +25,7 @@ use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 // Math is a builtin root and its PRNG state is persisted.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 24;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 25;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -533,6 +533,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             "Object.prototype must have a null prototype".to_owned(),
         ));
     }
+    let json = plain_root(ROOT_JSON)?;
     let object = builtin_root(ROOT_OBJECT, "Object")?;
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
     let array_prototype = required_root(roots, ROOT_ARRAY_PROTOTYPE)?;
@@ -695,6 +696,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         reflect: plain_root(ROOT_REFLECT)?,
         object,
         math: plain_root(ROOT_MATH)?,
+        json,
     })
 }
 

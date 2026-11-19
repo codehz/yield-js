@@ -60,7 +60,7 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 
 ## 4. 首版内建还缺的表面
 
-已提供 `Promise`、`queueMicrotask`、`Error`（含标准子类及 `AggregateError`）、`Symbol`、`Reflect`、`Object`、`Array`、`String`、`Number`、`Math`，以及数值全局 `NaN` 和 `Infinity`。
+已提供 `Promise`、`queueMicrotask`、`Error`（含标准子类及 `AggregateError`）、`Symbol`、`Reflect`、`Object`、`Array`、`String`、`Number`、`Math`、`JSON`，以及数值全局 `NaN` 和 `Infinity`。
 
 | 内建 | 已有 | 仍缺 |
 | --- | --- | --- |
@@ -72,7 +72,8 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 | 错误构造器 | `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError` 均可调用或构造；`AggregateError` 同步收集可迭代 `errors` | —
 | `Number` | 函数调用、非强制转换的数值判断、数值常量、`parseInt` / `parseFloat`、共享原型上的数值提取和格式化方法 | 无装箱，不支持 `new Number()`；非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置；指数格式和舍入偏差见第 1 节 |
 | `Math` | 数学常量、数值方法及可快照恢复的 `random` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
-| `JSON` / `RegExp` | 无全局，也无方法 | JSON 和正则 |
+| `JSON` | `parse` / `stringify`：普通对象与数组、可枚举自有字符串键、`toJSON`、replacer、`space`、循环检测 | 不支持 `BigInt`；单独代理码元不能表示为 VM 字符串，解析或序列化时抛可捕获异常 |
+| `RegExp` | 无全局，也无字面量 | 正则 |
 | `Map` / `Set` / `WeakMap` | 无 | 集合、插入顺序、`WeakMap` 的弱键可达性都未做。快照格式也还没有这些边 |
 | `Proxy` | 无 | 普通对象/数组目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，以及不可扩展目标的不变量。快照不保存代理关系 |
 

@@ -60,6 +60,7 @@ pub(crate) const ROOT_SYMBOL: &str = "symbol";
 pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
 pub(crate) const ROOT_MATH: &str = "math";
+pub(crate) const ROOT_JSON: &str = "json";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -98,6 +99,7 @@ pub(crate) struct BuiltinRoots {
     pub reflect: ObjectId,
     pub object: ObjectId,
     pub math: ObjectId,
+    pub json: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -162,6 +164,7 @@ impl BuiltinRoots {
             (ROOT_REFLECT.to_owned(), self.reflect),
             (ROOT_OBJECT.to_owned(), self.object),
             (ROOT_MATH.to_owned(), self.math),
+            (ROOT_JSON.to_owned(), self.json),
         ])
     }
 }
@@ -217,6 +220,7 @@ pub(crate) enum BuiltinCall {
     TestIntegrityLevel(IntegrityLevel),
     ObjectAssign,
     ObjectIs,
+    JsonStatic(String),
 }
 
 enum Dispatch<'a> {
@@ -310,6 +314,16 @@ impl Vm {
         constructor
     }
 
+    fn init_json(&mut self) -> ObjectId {
+        let json = self.heap.alloc_plain();
+        for name in ["parse", "stringify"] {
+            let method = self.heap.alloc_builtin("JSON", Some(name));
+            self.heap
+                .define_data(json, name, Value::Object(method), Attributes::METHOD)
+                .expect("JSON stores methods");
+        }
+        json
+    }
     pub(crate) fn init_builtins(&mut self) {
         let object_prototype = self.heap.alloc_plain();
         self.heap.object_prototype = Some(object_prototype);
@@ -400,6 +414,7 @@ impl Vm {
         let number_prototype = self.heap.alloc_plain();
         let number = self.init_number_constructor(number_prototype);
         let math = self.init_math();
+        let json = self.init_json();
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -613,6 +628,7 @@ impl Vm {
             symbol,
             reflect,
             object,
+            json,
         };
     }
 
@@ -644,6 +660,7 @@ impl Vm {
             16 => Ok(Value::Object(self.builtins.aggregateerror)),
             17 => Ok(Value::Object(self.builtins.number)),
             18 => Ok(Value::Object(self.builtins.math)),
+            19 => Ok(Value::Object(self.builtins.json)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -1009,6 +1026,7 @@ impl Vm {
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
+            BuiltinCall::JsonStatic(method) => self.call_json(host, &method, &args),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::ReflectApply => self.reflect_call(host, &args, false),
             BuiltinCall::ReflectConstruct => self.reflect_call(host, &args, true),
@@ -2571,6 +2589,9 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Reflect", Some("get")) => Some(BuiltinCall::ReflectGet),
         ("Reflect", Some("set")) => Some(BuiltinCall::ReflectSet),
         ("Reflect", Some("has")) => Some(BuiltinCall::ReflectHas),
+        ("JSON", Some(name @ ("parse" | "stringify"))) => {
+            Some(BuiltinCall::JsonStatic(name.to_owned()))
+        }
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
         }

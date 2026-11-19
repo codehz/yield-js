@@ -11,6 +11,7 @@ mod exec;
 mod frame;
 pub mod heap;
 pub mod host;
+mod json;
 mod math;
 mod number;
 mod ops;

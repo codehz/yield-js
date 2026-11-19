@@ -37,6 +37,7 @@
 - `Number.isFinite` / `isInteger` / `isNaN` / `isSafeInteger` 不做强制转换；`Number.parseInt` / `parseFloat` 先做字符串转换，再解析有效前缀。数值常量包括 `EPSILON`、`MAX_SAFE_INTEGER` / `MIN_SAFE_INTEGER`、`MAX_VALUE` / `MIN_VALUE`、`POSITIVE_INFINITY` / `NEGATIVE_INFINITY` 和 `NaN`。
 - `Number.prototype` 提供 `valueOf`、`toString`（基数 `2..36`）、`toFixed` / `toExponential`（位数 `0..100`）、`toPrecision`（精度 `1..100`）和使用默认十进制输出的 `toLocaleString`。这些方法要求数值接收者；超出范围的基数、位数或精度会触发可捕获的 `RangeError`，但 `toExponential` 和 `toPrecision` 对非有限数先返回其文本。格式兼容性限制见 [`gaps.md`](gaps.md)。
 - `Math` 是不可调用、不可构造的普通对象。八个标准数值常量是不可写、不可枚举、不可配置的自有属性。数值方法按从左到右的顺序使用现有 `ToNumber`；`max`、`min` 和 `hypot` 转换所有实参，其他数值方法只转换所需实参。`Math.random()` 使用 VM 自有的固定种子 PRNG，返回 `[0, 1)` 中的数值；快照保留 `Math` 根及 PRNG 状态，恢复后接续原序列。
+- `JSON` 是不可调用、不可构造的普通对象，提供 `parse` 与 `stringify`。`stringify` 处理 `null`、布尔值、有限数字、字符串、数组和普通对象的可枚举自有字符串键；非有限数字写成 `null`，顶层 `undefined`、函数和 Symbol 返回 `undefined`，对象中省略这些值，数组中写成 `null`。它按现有自有键顺序输出，调用对象上的 `toJSON`，支持函数或数组 `replacer` 以及 `space` 缩进；循环抛出可捕获的 `TypeError`。`parse` 只接受 JSON 语法，`__proto__` 只是普通自有属性；无效文本抛出可捕获的 `SyntaxError`。可选 `reviver` 自底向上调用，返回 `undefined` 时删除属性。VM 字符串不能表示单独代理码元，这类 JSON 转义被拒绝。
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。
 - 数组解构复用同步迭代协议：省略项只推进，不读取 `value`；rest 收集至耗尽。正常提前结束或模式求值抛错时关闭尚未耗尽的迭代器；若模式已抛错，保留原异常。默认值或目标中的 `await` 可快照恢复，继续使用同一迭代器、已缓存的 `next` 与耗尽状态。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
