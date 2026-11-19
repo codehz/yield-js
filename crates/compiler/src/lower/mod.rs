@@ -101,7 +101,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     is_method: bool,
     env: Env,
     emit: Emitter<'src>,
-    control: Control,
+    control: Control<'ast>,
     param_bindings: Vec<BindingId>,
     this_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,

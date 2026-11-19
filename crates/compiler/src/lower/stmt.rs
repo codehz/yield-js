@@ -177,11 +177,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::ForOfStatement(statement) => {
                 Err(unsupported(self.source_text(), statement.span, "for-of"))
             }
-            Statement::LabeledStatement(statement) => Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "labelled statement",
-            )),
+            Statement::LabeledStatement(statement) => self.compile_labeled(statement),
             Statement::ClassDeclaration(statement) => Err(unsupported(
                 self.source_text(),
                 statement.span,
@@ -195,13 +191,85 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
     }
 
+    /// Label chain lowering. Only a chain ending in `while`, `do…while`, or a
+    /// plain `for` binds its names to the loop (for `continue`); any other
+    /// terminal statement makes the names plain `break` targets. Each name in
+    /// the chain must be unique among currently active labels. The terminal
+    /// statement is compiled once; after it, every break jump recorded on the
+    /// chain's frames targets the instruction after it, which is exactly the
+    /// loop exit for loop labels.
+    fn compile_labeled<'node>(
+        &mut self,
+        statement: &'node LabeledStatement<'node>,
+    ) -> Result<(), CompileError>
+    where
+        'node: 'ast,
+    {
+        let mut chain = Vec::new();
+        let mut current = statement;
+        loop {
+            chain.push(current);
+            match &current.body {
+                Statement::LabeledStatement(inner) => current = inner,
+                other => {
+                    let loop_index = match other {
+                        Statement::WhileStatement(_)
+                        | Statement::DoWhileStatement(_)
+                        | Statement::ForStatement(_) => Some(self.control.loops_len()),
+                        _ => None,
+                    };
+                    let base = self.control.labels_len();
+                    for labelled in chain {
+                        let name = labelled.label.name.as_str();
+                        if self.control.find_label(name).is_some() {
+                            return Err(CompileError::new(
+                                self.source_text(),
+                                labelled.label.span(),
+                                "duplicate label",
+                            ));
+                        }
+                        self.control.push_label(name, loop_index);
+                    }
+                    match self.compile_statement(&current.body) {
+                        Ok(()) => {
+                            let end = self.pc();
+                            for frame in self.control.pop_labels_to(base) {
+                                for jump in frame.break_jumps {
+                                    self.patch_jump(jump, end)?;
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            self.control.pop_labels_to(base);
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn compile_break(&mut self, statement: &BreakStatement<'_>) -> Result<(), CompileError> {
-        if statement.label.is_some() {
-            return Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "labelled break",
-            ));
+        if let Some(label) = &statement.label {
+            let Some(index) = self.control.find_label(label.name.as_str()) else {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    label.span(),
+                    "unknown label",
+                ));
+            };
+            let depth = self.control.label_finalizer_depth(index);
+            if self.control.finalizer_depth() > depth {
+                return Err(unsupported(
+                    self.source_text(),
+                    statement.span,
+                    "break across finally",
+                ));
+            }
+            let jump = self.jump();
+            self.control.push_label_break(index, jump);
+            return Ok(());
         }
         let Some((target, depth)) = self.control.innermost_break() else {
             return Err(CompileError::new(
@@ -315,12 +383,36 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_continue(&mut self, statement: &ContinueStatement<'_>) -> Result<(), CompileError> {
-        if statement.label.is_some() {
-            return Err(unsupported(
-                self.source_text(),
-                statement.span,
-                "labelled continue",
-            ));
+        if let Some(label) = &statement.label {
+            let Some(index) = self.control.find_label(label.name.as_str()) else {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    label.span(),
+                    "unknown label",
+                ));
+            };
+            let Some(loop_index) = self.control.label_loop_index(index) else {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    statement.span,
+                    "continue label is not a loop",
+                ));
+            };
+            let depth = self.control.label_finalizer_depth(index);
+            if self.control.finalizer_depth() > depth {
+                return Err(unsupported(
+                    self.source_text(),
+                    statement.span,
+                    "continue across finally",
+                ));
+            }
+            if let Some(target) = self.control.loop_continue_target(loop_index) {
+                self.jump_to(target);
+            } else {
+                let jump = self.jump();
+                self.control.push_continue_to(loop_index, jump);
+            }
+            return Ok(());
         }
         let Some((continue_target, loop_depth)) = self.control.innermost_continue() else {
             return Err(CompileError::new(

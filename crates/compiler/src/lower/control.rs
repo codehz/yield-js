@@ -56,20 +56,32 @@ struct Finalizer {
     entry_jumps: Vec<usize>,
 }
 
-pub(super) struct Control {
+/// One active statement label. `loop_index` is the position in `loops` the
+/// labelled loop occupies (or will occupy) while this frame is active;
+/// `None` for labels on plain blocks, whose only use is `break`.
+pub(super) struct LabelFrame<'ast> {
+    name: &'ast str,
+    finalizer_depth: usize,
+    loop_index: Option<usize>,
+    pub(super) break_jumps: Vec<usize>,
+}
+
+pub(super) struct Control<'ast> {
     loops: Vec<Loop>,
     switches: Vec<Switch>,
+    labels: Vec<LabelFrame<'ast>>,
     finalizers: Vec<Finalizer>,
     handlers: Vec<ExceptionHandler>,
     awaits: Vec<AwaitSite>,
     seq: usize,
 }
 
-impl Control {
+impl<'ast> Control<'ast> {
     pub(super) fn new() -> Self {
         Self {
             loops: Vec::new(),
             switches: Vec::new(),
+            labels: Vec::new(),
             finalizers: Vec::new(),
             handlers: Vec::new(),
             awaits: Vec::new(),
@@ -160,6 +172,55 @@ impl Control {
             .expect("loop stack checked above")
             .continue_jumps
             .push(jump);
+    }
+
+    pub(super) fn loops_len(&self) -> usize {
+        self.loops.len()
+    }
+
+    pub(super) fn labels_len(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// Innermost active frame with this name.
+    pub(super) fn find_label(&self, name: &str) -> Option<usize> {
+        self.labels.iter().rposition(|frame| frame.name == name)
+    }
+
+    /// Pushes one label frame. Duplicate detection is the caller's job.
+    pub(super) fn push_label(&mut self, name: &'ast str, loop_index: Option<usize>) {
+        self.labels.push(LabelFrame {
+            name,
+            finalizer_depth: self.finalizers.len(),
+            loop_index,
+            break_jumps: Vec::new(),
+        });
+    }
+
+    /// Pops label frames down to `len`, returning the removed frames so the
+    /// caller can patch their break jumps.
+    pub(super) fn pop_labels_to(&mut self, len: usize) -> Vec<LabelFrame<'ast>> {
+        self.labels.split_off(len)
+    }
+
+    pub(super) fn label_finalizer_depth(&self, index: usize) -> usize {
+        self.labels[index].finalizer_depth
+    }
+
+    pub(super) fn label_loop_index(&self, index: usize) -> Option<usize> {
+        self.labels[index].loop_index
+    }
+
+    pub(super) fn push_label_break(&mut self, index: usize, jump: usize) {
+        self.labels[index].break_jumps.push(jump);
+    }
+
+    pub(super) fn loop_continue_target(&self, index: usize) -> Option<usize> {
+        self.loops[index].continue_target
+    }
+
+    pub(super) fn push_continue_to(&mut self, index: usize, jump: usize) {
+        self.loops[index].continue_jumps.push(jump);
     }
 
     pub(super) fn take_awaits(&mut self) -> Vec<AwaitSite> {

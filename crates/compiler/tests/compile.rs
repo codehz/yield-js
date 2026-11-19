@@ -49,6 +49,38 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
+fn rejects_labelled_jump_across_finally() {
+    for keyword in ["break", "continue"] {
+        let source = format!(
+            "function run(){{ outer: while(true){{ try {{\n    {keyword} outer;\n}} finally {{}} }} }}"
+        );
+        let error = compile(&source, &CompileOptions::default()).expect_err(keyword);
+        assert!(
+            error.message().contains("across finally"),
+            "{keyword}: {error}"
+        );
+        assert_eq!(error.line(), 2, "{keyword}");
+        assert_eq!(error.column(), 5, "{keyword}");
+    }
+}
+
+#[test]
+fn rejects_invalid_label_uses_with_location() {
+    let cases = [
+        "function run() { break missing; }",
+        "function run() { continue missing; }",
+        "function run() { continue notaloop; notaloop: { } }",
+        "function run() { same: same: while (true) { break same; } }",
+        "function run() { outer: while (true) { function inner() { break outer; } } }",
+    ];
+    for source in cases {
+        let error =
+            compile(source, &CompileOptions::default()).expect_err("label misuse must be rejected");
+        assert!(error.line() >= 1, "{source}: {error}");
+    }
+}
+
+#[test]
 fn rejects_unsupported_object_member_syntax_with_location() {
     for (member, message) in [
         ("...other", "object spread"),
