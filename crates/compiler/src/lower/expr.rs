@@ -976,6 +976,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Member(Reg, Reg),
         }
 
+        // The parser normalizes parenthesized simple assignment targets, so
+        // `(x)++`, `++(obj.x)` and `((obj.x))--` arrive here as plain
+        // identifier/member targets; no paren unwrapping is needed.
         let target = if let SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
             &expression.argument
         {

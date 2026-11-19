@@ -26,7 +26,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ### 2.2 表达式
 
-- `++` / `--` 只接受绑定或成员（`update target outside the PoC subset`）；解构赋值只支持 `=`
+- `++` / `--` 只接受绑定或成员目标，包括括号括起的绑定/成员目标如 `(x)++`、`++(obj.x)`、`((obj.x))--`（非左值目标仍拒绝：`update target outside the PoC subset`）；解构赋值只支持 `=`
 - 私有字段（`private field access`）
 - 标签模板。非标签模板已支持
 - lone surrogate 字符串字面量与属性名（`string with a lone surrogate`、`property key with a lone surrogate`）
