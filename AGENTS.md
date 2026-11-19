@@ -163,7 +163,7 @@ async function run() {
 }
 ```
 
-Add a behavior case by dropping `snake_case.js` in `crates/poc/tests/cases/` (or one of its category subdirectories: `async`, `closures`, `control`, `functions`, `objects`, `promise`, `strings`). `build.rs` walks the directory recursively; the generated test is `case_<stem>` at top level or `case_<category>_<stem>` in a subdirectory. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
+Add a behavior case by dropping `snake_case.js` into a category subdirectory of `crates/poc/tests/cases/` (`async`, `closures`, `control`, `functions`, `objects`, `promise`, `strings`, `symbols`). Do not add cases at the top level of `tests/cases/`; keep every fixture in the matching category. `build.rs` walks the directory recursively; the generated test is `case_<category>_<stem>`. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
 
 ## Commit Workflow
 
