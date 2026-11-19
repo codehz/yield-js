@@ -6,12 +6,12 @@ use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR, ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE,
-    ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
-    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE,
-    ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT, ROOT_STRING,
-    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
-    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
-    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, is_callable_object,
+    ROOT_MATH, ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
+    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
+    ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
+    ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
+    ROOT_SYMBOL, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
+    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -24,8 +24,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Builtin roots include Number and Number.prototype.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 23;
+// Math is a builtin root and its PRNG state is persisted.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 24;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -71,6 +71,7 @@ pub struct Snapshot {
     pub roots: BTreeMap<String, ObjectId>,
     pub script_env: Option<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
+    pub random_state: u64,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
     pub symbols: BTreeMap<SymbolId, Option<String>>,
     /// `Symbol.for` registry entries kept alive by the snapshot.
@@ -92,6 +93,7 @@ impl Snapshot {
             roots: BTreeMap::new(),
             script_env: None,
             combines: BTreeMap::new(),
+            random_state: crate::math::RANDOM_SEED,
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: 0,
@@ -201,6 +203,7 @@ impl Vm {
             }
         }
         snapshot.next_symbol_id = self.heap.next_symbol_id();
+        snapshot.random_state = self.random_state;
         snapshot.symbol_registry = self.heap.symbol_registry.clone();
         let mut symbol_ids = tracer.symbols;
         symbol_ids.insert(ITERATOR_SYMBOL);
@@ -216,6 +219,11 @@ impl Vm {
 
     pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         check_versions(&snapshot)?;
+        if snapshot.random_state == 0 {
+            return Err(VmError::InvalidSnapshot(
+                "invalid Math.random state".to_owned(),
+            ));
+        }
         build.validate().map_err(VmError::InvalidBuild)?;
         if snapshot.build_id != build.build_id {
             return Err(VmError::InvalidSnapshot(format!(
@@ -247,7 +255,7 @@ impl Vm {
         let builtins = load_roots(&heap, &snapshot.roots)?;
         validate_jobs(&heap)?;
         validate_combines(&heap)?;
-        Ok(Self::restored(
+        let mut vm = Self::restored(
             build,
             heap,
             continuations,
@@ -255,7 +263,9 @@ impl Vm {
             snapshot.globals,
             builtins,
             script_env,
-        ))
+        );
+        vm.random_state = snapshot.random_state;
+        Ok(vm)
     }
 }
 
@@ -684,6 +694,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
         reflect: plain_root(ROOT_REFLECT)?,
         object,
+        math: plain_root(ROOT_MATH)?,
     })
 }
 

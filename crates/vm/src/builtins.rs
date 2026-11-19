@@ -17,6 +17,7 @@ use crate::heap::{
     Resolution, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
+use crate::math::MATH_METHODS;
 use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
@@ -58,6 +59,7 @@ pub(crate) const ROOT_AGGREGATEERROR_PROTOTYPE: &str = "aggregateerror.prototype
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
 pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
+pub(crate) const ROOT_MATH: &str = "math";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -95,6 +97,7 @@ pub(crate) struct BuiltinRoots {
     pub symbol: ObjectId,
     pub reflect: ObjectId,
     pub object: ObjectId,
+    pub math: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -158,6 +161,7 @@ impl BuiltinRoots {
             (ROOT_SYMBOL.to_owned(), self.symbol),
             (ROOT_REFLECT.to_owned(), self.reflect),
             (ROOT_OBJECT.to_owned(), self.object),
+            (ROOT_MATH.to_owned(), self.math),
         ])
     }
 }
@@ -184,6 +188,7 @@ pub(crate) enum BuiltinCall {
     NumberConstructor,
     NumberMethod(&'static str),
     NumberStatic(&'static str),
+    MathMethod(String),
     StringIterator,
     StringIteratorNext,
     ArrayJoin,
@@ -394,6 +399,7 @@ impl Vm {
         let string = self.init_string_constructor(string_prototype, string_iterator);
         let number_prototype = self.heap.alloc_plain();
         let number = self.init_number_constructor(number_prototype);
+        let math = self.init_math();
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -582,6 +588,7 @@ impl Vm {
             string,
             string_prototype,
             number,
+            math,
             number_prototype,
             function_prototype,
             array_iterator_prototype,
@@ -636,6 +643,7 @@ impl Vm {
             15 => Ok(Value::Object(self.builtins.urierror)),
             16 => Ok(Value::Object(self.builtins.aggregateerror)),
             17 => Ok(Value::Object(self.builtins.number)),
+            18 => Ok(Value::Object(self.builtins.math)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -996,6 +1004,7 @@ impl Vm {
                 self.call_number_method(host, method, receiver, &args)
             }
             BuiltinCall::NumberStatic(method) => self.call_number_static(host, method, &args),
+            BuiltinCall::MathMethod(method) => self.call_math_method(host, &method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
@@ -2538,6 +2547,9 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                     .find(|&&key| key == name)
                     .map(|&key| BuiltinCall::NumberStatic(key))
             }),
+        ("Math", Some(name)) if MATH_METHODS.contains(&name) => {
+            Some(BuiltinCall::MathMethod(name.to_owned()))
+        }
         ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
         ("String", Some(name)) => STRING_METHODS

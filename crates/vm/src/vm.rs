@@ -20,6 +20,7 @@ pub struct Vm {
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
     pub(crate) builtins: BuiltinRoots,
+    pub(crate) random_state: u64,
     /// Live environment of the script, present exactly when the script needs one.
     pub(crate) script_env: Option<ObjectId>,
 }
@@ -46,6 +47,7 @@ impl Vm {
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
+            random_state: crate::math::RANDOM_SEED,
             script_env: None,
         }
     }
@@ -459,6 +461,7 @@ impl Vm {
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             builtins,
+            random_state: crate::math::RANDOM_SEED,
             script_env,
         }
     }

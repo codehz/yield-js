@@ -99,3 +99,34 @@ export function run(n) {
     ));
     assert_eq!(result, Value::Number(6.0));
 }
+
+#[test]
+fn math_random_continues_after_snapshot_restore() {
+    let build = build("export function run() { return Math.random(); }");
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let first = vm.start(&mut host, "run", vec![]).unwrap();
+    let snapshot = vm.snapshot(&[]).unwrap();
+    let expected = vm.start(&mut host, "run", vec![]).unwrap();
+    assert_ne!(first, expected);
+    let decoded = yield_vm::Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
+    let mut restored = Vm::restore(decoded, build.clone(), &mut host).unwrap();
+    assert_eq!(restored.start(&mut host, "run", vec![]).unwrap(), expected);
+    assert_eq!(
+        restored.start(&mut host, "run", vec![]).unwrap(),
+        vm.start(&mut host, "run", vec![]).unwrap()
+    );
+
+    let mut missing_root = snapshot.clone();
+    missing_root.roots.remove("math");
+    assert!(matches!(
+        Vm::restore(missing_root, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut zero_state = snapshot;
+    zero_state.random_state = 0;
+    assert!(matches!(
+        Vm::restore(zero_state, build, &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+}
