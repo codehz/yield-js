@@ -49,8 +49,8 @@
 | 语义点 | design.md 目标 | 现状 |
 | --- | --- | --- |
 | `arguments` | 支持（严格模式 `arguments`） | 无任何绑定或降级；引用即"unknown binding"/未知名 |
-| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器、`hasOwnProperty`、`in`、`Reflect.ownKeys`、`Object.keys`、`Object.defineProperty` 和对象目标的 `Object.getOwnPropertyDescriptor`。定义可读取继承的描述符字段，遵守只读和不可配置限制；键转换仍沿用成员访问的子集语义。宿主原生句柄不开放属性定义。仍缺 `Object.defineProperties`、删除、原型查询和修改、冻结及冻结检查。 |
-| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | 已有 `Promise`、`queueMicrotask`、`Error`、`TypeError`、`Symbol`、`Reflect`（仅 `ownKeys`）与 `Object`（`keys`、`getOwnPropertyDescriptor`、`defineProperty`；调用或构造接受对象或空值，不实现原始值包装）。仍无 `Array` 等全局名。 |
+| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器、`hasOwnProperty`、`in`、`Reflect.ownKeys`、`Object.keys`、`Object.defineProperty`、`Object.defineProperties` 和对象目标的 `Object.getOwnPropertyDescriptor`。定义可读取继承的描述符字段，遵守只读和不可配置限制；批量定义先转换全部可枚举自有键对应的描述符，再按序应用，不回滚已成功的定义。单键转换仍沿用成员访问的子集语义。宿主原生句柄不开放属性定义。仍缺删除、原型查询和修改、冻结及冻结检查。 |
+| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | 已有 `Promise`、`queueMicrotask`、`Error`、`TypeError`、`Symbol`、`Reflect`（仅 `ownKeys`）与 `Object`（`keys`、`getOwnPropertyDescriptor`、`defineProperty`、`defineProperties`；调用或构造接受对象或空值，不实现原始值包装）。仍无 `Array` 等全局名。 |
 | 错误对象 | 标准错误类型 | `Error` / `TypeError` 可构造；VM 生成的 `TypeError` 同样是对象，提供 `name`、`message` 和简化的 `stack`。`Promise.any` 的 `AggregateError` 拒绝值仍为字符串。 |
 | 完整 ECMAScript TDZ | 明确不做 | `pending_lexicals` 仅本函数静态检查；闭包提前读得 `undefined` |
 | 循环每轮新绑定 | 明确不做 | 共享绑定 |

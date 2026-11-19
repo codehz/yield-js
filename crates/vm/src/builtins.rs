@@ -98,6 +98,7 @@ pub(crate) enum BuiltinCall {
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
     ObjectDefineProperty,
+    ObjectDefineProperties,
 }
 
 enum Dispatch<'a> {
@@ -130,7 +131,12 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Object.prototype stores its constructor");
-        for name in ["keys", "getOwnPropertyDescriptor", "defineProperty"] {
+        for name in [
+            "keys",
+            "getOwnPropertyDescriptor",
+            "defineProperty",
+            "defineProperties",
+        ] {
             let method = self.heap.alloc_builtin("Object", Some(name));
             self.heap
                 .define_data(object, name, Value::Object(method), Attributes::METHOD)
@@ -439,6 +445,7 @@ impl Vm {
             BuiltinCall::ObjectKeys => self.object_keys(&args),
             BuiltinCall::ObjectGetOwnPropertyDescriptor => self.get_own_property_descriptor(&args),
             BuiltinCall::ObjectDefineProperty => self.object_define_property(host, &args),
+            BuiltinCall::ObjectDefineProperties => self.object_define_properties(host, &args),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -717,8 +724,74 @@ impl Vm {
             return self.throw_type_error("Object.defineProperty requires an object target");
         };
         let key = ops::property_key(args.get(1).unwrap_or(&Value::Undefined))?;
-        let Some(descriptor @ Value::Object(id)) = args.get(2) else {
-            return self.throw_type_error("property descriptor must be an object");
+        let update =
+            match self.read_property_descriptor(host, args.get(2).unwrap_or(&Value::Undefined))? {
+                Ok(update) => update,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        self.apply_property_update(*target, key, update)
+    }
+
+    fn object_define_properties(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error("Object.defineProperties requires an object target");
+        };
+        let (properties, source) = match args.get(1) {
+            Some(properties @ Value::Object(source)) => (properties, *source),
+            None | Some(Value::Undefined | Value::Null) => {
+                return self
+                    .throw_type_error("Object.defineProperties requires non-nullish properties");
+            }
+            Some(Value::String(text)) if !text.is_empty() => {
+                // A boxed nonempty string has enumerable indices whose values are strings.
+                return self.throw_type_error("property descriptor must be an object");
+            }
+            // The other primitive wrappers have no enumerable own properties.
+            _ => return Ok(Invocation::Value(Value::Object(*target))),
+        };
+        let keys: Vec<_> = self.heap.get(source)?.own_keys(false).collect();
+        let mut updates = Vec::new();
+        for key in keys {
+            // Getters can change the enumerability of keys still to be visited.
+            let Some(property) = self.heap.get(source)?.own_property(key.borrowed()) else {
+                continue;
+            };
+            if !property.attributes().enumerable {
+                continue;
+            }
+            let descriptor = match self.read_property(host, properties, key.borrowed())? {
+                Invocation::Value(value) => value,
+                thrown => return Ok(thrown),
+            };
+            match self.read_property_descriptor(host, &descriptor)? {
+                Ok(update) => updates.push((key, update)),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        }
+        // Conversion errors precede all definitions; application errors keep earlier writes.
+        for (key, update) in updates {
+            if let thrown @ Invocation::Thrown(_) =
+                self.apply_property_update(*target, key, update)?
+            {
+                return Ok(thrown);
+            }
+        }
+        Ok(Invocation::Value(Value::Object(*target)))
+    }
+
+    fn read_property_descriptor(
+        &mut self,
+        host: &mut dyn Host,
+        descriptor: &Value,
+    ) -> Result<Result<DescriptorUpdate, Value>, VmError> {
+        let Value::Object(id) = *descriptor else {
+            return Ok(Err(
+                self.type_error("property descriptor must be an object")?
+            ));
         };
         let mut update = DescriptorUpdate::default();
         // ToPropertyDescriptor observes inherited fields, and checks/reads each
@@ -732,12 +805,12 @@ impl Vm {
             "set",
         ] {
             let key = PropertyKeyRef::String(name);
-            if !self.heap.has_property(*id, key)? {
+            if !self.heap.has_property(id, key)? {
                 continue;
             }
             let value = match self.read_property(host, descriptor, key)? {
                 Invocation::Value(value) => value,
-                thrown => return Ok(thrown),
+                Invocation::Thrown(error) => return Ok(Err(error)),
             };
             match name {
                 "enumerable" => update.enumerable = Some(value.truthy()),
@@ -749,9 +822,9 @@ impl Vm {
                         Value::Undefined => None,
                         Value::Object(id) if self.is_callable(&value) => Some(id),
                         _ => {
-                            return self.throw_type_error(
+                            return Ok(Err(self.type_error(
                                 "descriptor accessor must be callable or undefined",
-                            );
+                            )?));
                         }
                     };
                     if name == "get" {
@@ -764,9 +837,11 @@ impl Vm {
             }
         }
         if update.is_data() && update.is_accessor() {
-            return self.throw_type_error("descriptor cannot mix data and accessor fields");
+            return Ok(Err(
+                self.type_error("descriptor cannot mix data and accessor fields")?
+            ));
         }
-        self.apply_property_update(*target, key, update)
+        Ok(Ok(update))
     }
 
     pub(crate) fn apply_property_update(
@@ -1361,6 +1436,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
         }
         ("Object", Some("defineProperty")) => Some(BuiltinCall::ObjectDefineProperty),
+        ("Object", Some("defineProperties")) => Some(BuiltinCall::ObjectDefineProperties),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
