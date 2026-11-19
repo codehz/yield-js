@@ -59,8 +59,9 @@ Suspend/resume invariants (do not weaken these):
 | `crates/poc/src` | `TestHost`, directive case runner, demo binary |
 | `crates/poc/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
 | `crates/poc/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |
-| `docs/design.md` | Target design, Chinese. Not a status report |
-| `docs/gaps.md` | Current JS-subset implementation gap inventory (what is rejected/missing today, derived from code). Status report; refresh after behavior changes. |
+- `docs/design.md`|Target design, Chinese. Not a status report|
+- `docs/gaps.md`|Current JS-subset implementation gap inventory (what is rejected/missing today, derived from code). Status report; refresh after behavior changes.|
+- `docs/implemented.md`|Derived inventory of what the current JS-subset does implement. Status report; refresh after behavior changes.|
 
 There is no `scripts/` directory and no CI.
 
@@ -173,7 +174,7 @@ Before committing, verify in order:
 
 1. `cargo fmt --check` and `cargo clippy --workspace --all-targets` pass (run `cargo fmt` first if they report changes).
 2. `cargo test --workspace` passes; for contract-related changes also run the matching layer (see Testing & QA).
-3. If behavior changed, update docs in sync: refresh `docs/gaps.md` (current-gap inventory); update `README.md` / `docs/design.md` when the target design is affected, and fix any outdated statements in this file.
+3. If behavior changed, update docs in sync: refresh `docs/gaps.md` (current-gap inventory) and `docs/implemented.md` (implemented inventory); update `README.md` / `docs/design.md` when the target design is affected, and fix any outdated statements in this file.
 4. If bytecode or snapshot record shape changed, check whether `BYTECODE_VERSION` / `SNAPSHOT_FORMAT_VERSION` need a bump (see Code Conventions).
 
 Commit messages are a single imperative sentence in English describing the behavior change itself, e.g. `snapshot: reject restore when natives are missing`. Docs and tests land in the same commit, never split out separately.
