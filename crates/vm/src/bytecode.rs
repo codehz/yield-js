@@ -9,13 +9,13 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 6;
+pub const BYTECODE_VERSION: u32 = 7;
 
 /// VM-provided callable names, in builtin-index order.
 ///
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
 /// The compiler and `Build::validate` both use this table; do not reorder it.
-pub const BUILTINS: [&str; 4] = ["Promise", "queueMicrotask", "Error", "TypeError"];
+pub const BUILTINS: [&str; 5] = ["Promise", "queueMicrotask", "Error", "TypeError", "Symbol"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

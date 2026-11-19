@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use yield_vm::bytecode::{Instr, Slot};
+use yield_vm::bytecode::{BinaryOp, Instr, Slot, UnaryOp};
 
 use crate::emit::Reg;
 
@@ -14,6 +14,10 @@ use crate::emit::Reg;
 /// handler at this PC. `VmError` is not that control flow, and `Await`'s
 /// rejection path has its own resume entry, so neither counts. Exhaustive so a
 /// new opcode forces an explicit classification.
+///
+/// Arithmetic and relational operators coerce operands, and a Symbol operand
+/// throws a catchable `TypeError` there. Equality and `typeof`/`!`/`void`
+/// never coerce, so those instructions stay non-throwing.
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
     match instruction {
         Instr::Throw { .. }
@@ -22,11 +26,16 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Construct { .. }
         | Instr::GetMember { .. }
         | Instr::SetMember { .. } => true,
+        Instr::Binary { op, .. } => !matches!(
+            *op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+        ),
+        Instr::Unary { op, .. } => {
+            matches!(*op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+        }
         Instr::Const { .. }
         | Instr::Undefined { .. }
         | Instr::Move { .. }
-        | Instr::Binary { .. }
-        | Instr::Unary { .. }
         | Instr::CallImport { .. }
         | Instr::Closure { .. }
         | Instr::NewObject { .. }

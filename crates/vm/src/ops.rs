@@ -4,15 +4,6 @@ use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
 use crate::value::{PropertyKey, Value};
 
-/// Operators that coerce operands to number or string. A Symbol operand
-/// reaches the throw path instead of the lossy helpers.
-pub(crate) fn binary_coerces(operator: BinaryOp) -> bool {
-    !matches!(
-        operator,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
-    )
-}
-
 pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
     matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
 }
