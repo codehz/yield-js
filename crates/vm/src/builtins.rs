@@ -29,6 +29,8 @@ pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
+pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
+pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
 pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
@@ -46,6 +48,8 @@ pub(crate) struct BuiltinRoots {
     pub array_prototype: ObjectId,
     pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
+    pub string_iterator: ObjectId,
+    pub string_iterator_prototype: ObjectId,
     pub error_prototype: ObjectId,
     pub typeerror_prototype: ObjectId,
     pub error: ObjectId,
@@ -67,6 +71,11 @@ impl BuiltinRoots {
             (
                 ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
                 self.array_iterator_prototype,
+            ),
+            (ROOT_STRING_ITERATOR.to_owned(), self.string_iterator),
+            (
+                ROOT_STRING_ITERATOR_PROTOTYPE.to_owned(),
+                self.string_iterator_prototype,
             ),
             (ROOT_ERROR_PROTOTYPE.to_owned(), self.error_prototype),
             (
@@ -96,6 +105,8 @@ pub(crate) enum BuiltinCall {
     SymbolKeyFor,
     ArrayValues,
     ArrayIteratorNext,
+    StringIterator,
+    StringIteratorNext,
     ArrayJoin,
     ArrayToString,
     IteratorIdentity,
@@ -183,7 +194,8 @@ impl Vm {
             .define_data(array_prototype, "toString", to_string, Attributes::METHOD)
             .expect("Array.prototype stores toString");
         let values = Value::Object(self.heap.alloc_builtin("Array", Some("values")));
-        let next = Value::Object(self.heap.alloc_builtin("ArrayIterator", Some("next")));
+        let string_iterator_prototype = self.heap.alloc_plain();
+        let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -201,17 +213,23 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Array.prototype stores Symbol.iterator");
-        self.heap
-            .define_data(array_iterator_prototype, "next", next, Attributes::METHOD)
-            .expect("Array iterator prototype stores next");
-        self.heap
-            .define_data(
-                array_iterator_prototype,
-                PropertyKey::Symbol(ITERATOR_SYMBOL),
-                identity,
-                Attributes::METHOD,
-            )
-            .expect("Array iterator prototype stores Symbol.iterator");
+        for (prototype, kind) in [
+            (array_iterator_prototype, "ArrayIterator"),
+            (string_iterator_prototype, "StringIterator"),
+        ] {
+            let next = Value::Object(self.heap.alloc_builtin(kind, Some("next")));
+            self.heap
+                .define_data(prototype, "next", next, Attributes::METHOD)
+                .expect("iterator prototype stores next");
+            self.heap
+                .define_data(
+                    prototype,
+                    PropertyKey::Symbol(ITERATOR_SYMBOL),
+                    identity.clone(),
+                    Attributes::METHOD,
+                )
+                .expect("iterator prototype stores Symbol.iterator");
+        }
 
         let prototype = self.heap.alloc_plain();
         let promise = self.heap.alloc_builtin("Promise", None);
@@ -312,6 +330,8 @@ impl Vm {
             array_prototype,
             function_prototype,
             array_iterator_prototype,
+            string_iterator,
+            string_iterator_prototype,
             error_prototype,
             typeerror_prototype,
             error,
@@ -535,6 +555,8 @@ impl Vm {
             },
             BuiltinCall::ArrayValues => self.array_values(receiver),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
+            BuiltinCall::StringIterator => self.string_iterator(host, receiver),
+            BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
@@ -741,6 +763,55 @@ impl Vm {
         } else {
             Value::Undefined
         };
+        self.iterator_result(value, done)
+    }
+
+    fn string_iterator(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
+        }
+        let string = match self.string_value(host, receiver)? {
+            Invocation::Value(Value::String(string)) => string,
+            Invocation::Value(_) => unreachable!(),
+            thrown => return Ok(thrown),
+        };
+        let iterator = self.heap.alloc(Object::StringIterator {
+            object: PlainObject::new(Some(self.builtins.string_iterator_prototype)),
+            string,
+            byte_offset: 0,
+        });
+        Ok(Invocation::Value(Value::Object(iterator)))
+    }
+
+    fn string_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let invalid_receiver = "StringIterator.next requires a string iterator";
+        let Value::Object(id) = *receiver else {
+            return self.throw_type_error(invalid_receiver);
+        };
+        let Object::StringIterator {
+            string,
+            byte_offset,
+            ..
+        } = self.heap.get_mut(id)?
+        else {
+            return self.throw_type_error(invalid_receiver);
+        };
+        let Some(code_point) = string[*byte_offset..].chars().next() else {
+            return self.iterator_result(Value::Undefined, true);
+        };
+        *byte_offset += code_point.len_utf8();
+        if *byte_offset == string.len() {
+            *string = String::new();
+            *byte_offset = 0;
+        }
+        self.iterator_result(Value::String(code_point.to_string()), false)
+    }
+
+    fn iterator_result(&mut self, value: Value, done: bool) -> Result<Invocation, VmError> {
         let result = self.heap.alloc_plain();
         self.heap.set_own_string(result, "value", value)?;
         self.heap
@@ -1626,6 +1697,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
+        ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
+        ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
         ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {

@@ -267,7 +267,8 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetMember { dst, object, key } => {
-                let invocation = self.read_member(host, &frame.read(object)?, &frame.read(key)?)?;
+                let invocation =
+                    self.read_member(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::HasProperty { dst, object, key } => {
@@ -280,7 +281,7 @@ impl Vm {
                 next,
                 iterable,
             } => {
-                let value = match self.get_iterator(host, &frame.read(iterable)?)? {
+                let value = match self.get_iterator(host, frame.read_ref(iterable)?)? {
                     Invocation::Value(value) => value,
                     Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                 };
@@ -441,7 +442,7 @@ impl Vm {
         host: &mut dyn Host,
         iterable: &Value,
     ) -> Result<Invocation, VmError> {
-        if !matches!(iterable, Value::Object(_)) {
+        if !matches!(iterable, Value::Object(_) | Value::String(_)) {
             return self.throw_type_error("value is not iterable");
         }
         let method =
@@ -587,7 +588,7 @@ impl Vm {
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
-        if !matches!(object, Value::Object(_)) {
+        if !matches!(object, Value::Object(_) | Value::String(_)) {
             return self.throw_type_error("property access on a non-object");
         }
         match key {
@@ -612,6 +613,14 @@ impl Vm {
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
+        // The string iterator is exposed without implementing primitive boxing.
+        if matches!(object, Value::String(_))
+            && matches!(key, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))
+        {
+            return Ok(Invocation::Value(Value::Object(
+                self.builtins.string_iterator,
+            )));
+        }
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
         };

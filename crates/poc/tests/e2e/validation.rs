@@ -353,6 +353,30 @@ fn array_iterator_snapshot_tampering_is_rejected() {
 }
 
 #[test]
+fn string_iterator_snapshot_rejects_invalid_offsets() {
+    let source = include_str!("../cases/strings/string_iteration_restore.js");
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let iterator = snapshot
+        .objects
+        .iter()
+        .position(|record| matches!(record.object, Object::StringIterator { .. }))
+        .expect("live string iterator");
+    for offset in [1, usize::MAX] {
+        let mut invalid = snapshot.clone();
+        let Object::StringIterator { byte_offset, .. } = &mut invalid.objects[iterator].object
+        else {
+            unreachable!();
+        };
+        *byte_offset = offset;
+        let error = s.restore(invalid).expect_err("invalid string cursor");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid byte offset"))
+        );
+    }
+}
+
+#[test]
 fn symbols_never_reach_the_host_call() {
     let source = r#"
 async function run() {

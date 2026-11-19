@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
-    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL,
-    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, is_callable_object,
+    ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_STRING_ITERATOR,
+    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -19,7 +20,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 14;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 15;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -458,9 +459,10 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 14 {
+    const ROOT_COUNT: usize = 16;
+    if roots.len() != ROOT_COUNT {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 14",
+            "snapshot has {} builtin roots, expected {ROOT_COUNT}",
             roots.len()
         )));
     }
@@ -515,23 +517,27 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
     let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
-    let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
-    if array_prototype == array_iterator_prototype
-        || array_prototype == object_prototype
-        || array_iterator_prototype == object_prototype
-        || [array_prototype, array_iterator_prototype, object_prototype]
-            .contains(&function_prototype)
+    let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
+    let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
+    if !matches!(heap.get(string_iterator), Ok(Object::BuiltinStatic(f)) if f.name == "String" && f.member.as_deref() == Some("iterator"))
     {
         return Err(VmError::InvalidSnapshot(
-            "array, array iterator, function, and object prototype roots must be distinct"
-                .to_owned(),
+            "string.iterator root is not the builtin".to_owned(),
         ));
     }
+    let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
+    let mut prototypes = BTreeSet::from([object_prototype]);
     for (name, id) in [
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
+        (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
         (ROOT_FUNCTION_PROTOTYPE, function_prototype),
     ] {
+        if !prototypes.insert(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "{name} aliases another prototype root"
+            )));
+        }
         if !matches!(heap.get(id)?, Object::Plain(plain) if plain.prototype == Some(object_prototype))
         {
             return Err(VmError::InvalidSnapshot(format!(
@@ -546,6 +552,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         object_prototype,
         array_prototype,
         array_iterator_prototype,
+        string_iterator,
+        string_iterator_prototype,
         function_prototype,
         error_prototype: plain_root(ROOT_ERROR_PROTOTYPE)?,
         typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
@@ -665,6 +673,17 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "array iterator {id} references missing or non-array source {array}"
+            )));
+        }
+        if let Object::StringIterator {
+            string,
+            byte_offset,
+            ..
+        } = heap.get(id)?
+            && !string.is_char_boundary(*byte_offset)
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "string iterator {id} has an invalid byte offset"
             )));
         }
         heap.write_edges(id, &mut edges)?;

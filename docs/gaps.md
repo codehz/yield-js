@@ -14,7 +14,7 @@
 | `NaN` / `Infinity` 全局 | 不是内建。裸引用是 `unknown binding`；`typeof NaN` / `typeof Infinity` 在编译期折叠成 `"undefined"` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
 | `ToPrimitive` | 运算、计算属性键及非标签模板使用相应 hint，优先检查 `[Symbol.toPrimitive]`，也支持 `valueOf` / `toString` 回退。函数有意使用通用字符串而非源码；部分内建参数（如 `Error` 消息）仍走简化转换 |
-| 原始值属性 | 对字符串、数字、布尔、`null`、`undefined` 做成员读写，抛可捕获的 `property access on a non-object` / `property write on a non-object`。`Object()` 拒绝装箱。`Object.keys("ab")` 会按 UTF-16 码元枚举索引，但不能用下标读出字符 |
+| 原始值属性 | 除读取字符串的 `[Symbol.iterator]` 外，原始值成员读写仍抛可捕获的 `property access on a non-object` / `property write on a non-object`。`Object()` 拒绝装箱。`Object.keys("ab")` 会按 UTF-16 码元枚举索引，但不能用下标读出字符 |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
 Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与一元 `+`/`-`/`~` 和二元强制转换时的可捕获 `TypeError`，已经落地，不再列在这里。
@@ -57,7 +57,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length` 或越界写索引可以形成真正的洞 |
-| 字符串迭代 | `for…of`、数组展开和实参展开对字符串抛可捕获的 `value is not iterable`。字符串没有迭代器 |
 | 迭代关闭 | `for…of` 提前退出会 `IteratorClose`；继续同一循环或自然耗尽不调用 `return`。数组展开只在 `next` 抛错时关闭，自然耗尽不关闭 |
 | 原型与描述符 | 查找、继承访问器、`in`、`hasOwnProperty`、`Object.keys`、`Reflect.ownKeys`、`Object.getOwnPropertyDescriptor`、`Object.defineProperty` / `defineProperties` 已有。定义可读取继承描述符，遵守只读和不可配置限制。批量定义先转换全部可枚举自有键，再按序应用，失败不回滚。仍没有 `delete`、原型查询和修改、`Object.create` / `assign` / `is`、冻结、密封、扩展检查。宿主原生句柄不开放属性定义。键转换沿用第 1 节的子集语义 |
 | 错误对象 | `Error` / `TypeError` 可调用或 `new`，含 `name`、`message` 和简化 `stack`。没有 `RangeError`、`ReferenceError`、`SyntaxError`、`AggregateError` 等其它标准错误类型 |
@@ -77,7 +76,8 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | `Reflect` | `ownKeys` | design 点名的 `get`、`set`、`has`、`deleteProperty`、`getOwnPropertyDescriptor`，以及其余 Reflect 操作 |
 | `Function` | 共享内部原型上的 `toString`；虚拟的 `call` / `apply` / `bind` | `Function` 全局、函数的 `name` / `length` |
 | `Array` | 数组对象、`length`、稀疏索引、共享的 `values` / `[Symbol.iterator]` / `join` / `toString` | `Array` 全局及其静态方法；`push` / `pop` / `map` / `filter` 等；借用 `join` 时 array-like 的 `length` 转换仍简化 |
-| `String` / `Number` / `Math` / `JSON` / `RegExp` | 无全局，也无方法 | design 要求的访问、转换、搜索、切片、迭代，以及 `Math` / `JSON` / 正则 |
+| `String` | 字符串原始值上的 `[Symbol.iterator]` | `String` 全局及 design 要求的常用访问、转换、搜索、切片 |
+| `Number` / `Math` / `JSON` / `RegExp` | 无全局，也无方法 | 对应的转换、数学运算、JSON 和正则 |
 | `Map` / `Set` / `WeakMap` | 无 | 集合、插入顺序、`WeakMap` 的弱键可达性都未做。快照格式也还没有这些边 |
 | `Proxy` | 无 | 普通对象/数组目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，以及不可扩展目标的不变量。快照不保存代理关系 |
 
@@ -86,7 +86,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ## 5. 结构性缺口
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
-2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构、字符串迭代和 Promise 组合子尚未接入。
+2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构和 Promise 组合子尚未接入。
 3. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
@@ -95,7 +95,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ```mermaid
 flowchart LR
   C[对象强制转换] --> S[String / Number / 模板]
-  I[已有同步迭代] --> D[解构 / 字符串迭代]
+  I[已有同步迭代] --> D[解构]
   I --> P[组合子接受任意可迭代]
   K[删除 / 原型 / 冻结] --> N[for-in / 对象展开]
   K --> R[Proxy 与其余 Reflect]

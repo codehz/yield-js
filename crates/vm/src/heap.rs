@@ -531,6 +531,12 @@ pub enum Object {
         array: Option<ObjectId>,
         next_index: usize,
     },
+    StringIterator {
+        object: PlainObject,
+        string: String,
+        /// UTF-8 byte offset, always on a code point boundary.
+        byte_offset: usize,
+    },
     Function(FunctionObject),
     Bound(BoundObject),
     Environment(EnvironmentObject),
@@ -596,6 +602,7 @@ impl Object {
         Some(match self {
             Self::Plain(o)
             | Self::ArrayIterator { object: o, .. }
+            | Self::StringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::Resolution(Resolution { object: o, .. }) => (&o.props, &o.symbol_props),
             Self::Array(o) => (&o.props, &o.symbol_props),
@@ -682,7 +689,9 @@ impl Object {
 
     fn prototype(&self) -> Option<ObjectId> {
         match self {
-            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => plain.prototype,
+            Self::Plain(plain)
+            | Self::ArrayIterator { object: plain, .. }
+            | Self::StringIterator { object: plain, .. } => plain.prototype,
             Self::Array(array) => array.prototype,
             Self::Function(function) => function.prototype,
             Self::Promise(promise) => promise.prototype,
@@ -732,7 +741,10 @@ impl Object {
                     out.push(OwnedEdge::Object(resolution.pair));
                 }
             }
-            Self::Native(_) | Self::Plain(_) | Self::BuiltinStatic(_) => {}
+            Self::Native(_)
+            | Self::Plain(_)
+            | Self::BuiltinStatic(_)
+            | Self::StringIterator { .. } => {}
             Self::ArrayIterator { array, .. } => {
                 if let Some(id) = array {
                     out.push(OwnedEdge::Object(*id));
@@ -1247,6 +1259,7 @@ impl Heap {
         let (props, symbols) = match object {
             Object::Plain(o)
             | Object::ArrayIterator { object: o, .. }
+            | Object::StringIterator { object: o, .. }
             | Object::Bound(BoundObject { object: o, .. })
             | Object::Resolution(Resolution { object: o, .. }) => {
                 (&mut o.props, &mut o.symbol_props)
@@ -1272,7 +1285,9 @@ impl Heap {
         property: Property,
     ) -> Result<(), VmError> {
         let plain = match self.get_mut(id)? {
-            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => plain,
+            Object::Plain(plain)
+            | Object::ArrayIterator { object: plain, .. }
+            | Object::StringIterator { object: plain, .. } => plain,
             _ => {
                 return Err(VmError::InvalidState(
                     "property definition requires a plain object".to_owned(),
