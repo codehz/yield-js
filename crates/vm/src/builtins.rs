@@ -142,15 +142,17 @@ impl Vm {
                 .define_data(object, name, Value::Object(method), Attributes::METHOD)
                 .expect("Object stores statics");
         }
-        let has_own = self.heap.alloc_builtin("Object", Some("hasOwnProperty"));
-        self.heap
-            .define_data(
-                object_prototype,
-                "hasOwnProperty",
-                Value::Object(has_own),
-                Attributes::METHOD,
-            )
-            .expect("Object.prototype stores methods");
+        for name in ["hasOwnProperty", "valueOf", "toString"] {
+            let method = self.heap.alloc_builtin("Object", Some(name));
+            self.heap
+                .define_data(
+                    object_prototype,
+                    name,
+                    Value::Object(method),
+                    Attributes::METHOD,
+                )
+                .expect("Object.prototype stores methods");
+        }
 
         let array_prototype = self.heap.alloc_plain();
         let array_iterator_prototype = self.heap.alloc_plain();
@@ -468,6 +470,20 @@ impl Vm {
                     let key = ops::property_key(args.first().unwrap_or(&Value::Undefined))?;
                     Ok(Invocation::Value(Value::Bool(self.heap.has_own(id, &key)?)))
                 }
+                "valueOf" => match *receiver {
+                    Value::Object(id) if self.heap.is_environment(id) == Some(false) => {
+                        Ok(Invocation::Value(Value::Object(id)))
+                    }
+                    _ => self.throw_type_error("incompatible Object.prototype receiver"),
+                },
+                "toString" => match *receiver {
+                    Value::Object(id) if self.heap.is_environment(id) != Some(false) => {
+                        self.throw_type_error("incompatible Object.prototype receiver")
+                    }
+                    _ => Ok(Invocation::Value(Value::String(ops::to_js_string(
+                        receiver,
+                    )))),
+                },
                 _ => Err(VmError::InvalidState(format!(
                     "unknown Object method {name}"
                 ))),
@@ -1434,9 +1450,11 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                 name: name.to_owned(),
             })
         }
-        ("Object", Some(name @ "hasOwnProperty")) => Some(BuiltinCall::ObjectMethod {
-            name: name.to_owned(),
-        }),
+        ("Object", Some(name @ ("hasOwnProperty" | "valueOf" | "toString"))) => {
+            Some(BuiltinCall::ObjectMethod {
+                name: name.to_owned(),
+            })
+        }
         ("Object", None) => Some(BuiltinCall::ObjectConstructor),
         ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
         ("Object", Some("getOwnPropertyDescriptor")) => {

@@ -131,7 +131,27 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Binary { dst, op, lhs, rhs } => {
-                let value = match ops::binary_op(op, frame.read(lhs)?, frame.read(rhs)?) {
+                let mut lhs = frame.read(lhs)?;
+                let mut rhs = frame.read(rhs)?;
+                let should_convert =
+                    !matches!(
+                        op,
+                        crate::bytecode::BinaryOp::StrictEq | crate::bytecode::BinaryOp::StrictNe
+                    ) && !(matches!(
+                        op,
+                        crate::bytecode::BinaryOp::Eq | crate::bytecode::BinaryOp::Ne
+                    ) && matches!((&lhs, &rhs), (Value::Object(_), Value::Object(_))));
+                if should_convert {
+                    for value in [&mut lhs, &mut rhs] {
+                        if matches!(value, Value::Object(_)) {
+                            match self.primitive_from_object(host, value)? {
+                                Invocation::Value(primitive) => *value = primitive,
+                                Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                            }
+                        }
+                    }
+                }
+                let value = match ops::binary_op(op, lhs, rhs) {
                     Ok(value) => value,
                     Err(BinaryError::TypeError(message)) => {
                         return Ok(Step::Throw(self.type_error(message)?));
@@ -142,9 +162,15 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Unary { dst, op, src } => {
-                let value = frame.read(src)?;
+                let mut value = frame.read(src)?;
                 if ops::unary_coerces(op) && matches!(value, Value::Symbol(_)) {
                     return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+                }
+                if ops::unary_coerces(op) && matches!(value, Value::Object(_)) {
+                    match self.primitive_from_object(host, &value)? {
+                        Invocation::Value(primitive) => value = primitive,
+                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                    }
                 }
                 frame.write(dst, self.unary(op, value))?;
                 Ok(Step::Next)
@@ -384,6 +410,27 @@ impl Vm {
         };
         let invocation = self.invoke(host, &method, Vec::new(), iterator)?;
         self.require_iterator_object(invocation, "iterator return must return an object")
+    }
+    fn primitive_from_object(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Invocation, VmError> {
+        for name in ["valueOf", "toString"] {
+            let method = match self.read_property(host, value, PropertyKeyRef::String(name))? {
+                Invocation::Value(method) => method,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            };
+            if !self.is_callable(&method) {
+                continue;
+            }
+            match self.invoke(host, &method, Vec::new(), value)? {
+                Invocation::Value(Value::Object(_)) => {}
+                Invocation::Value(primitive) => return Ok(Invocation::Value(primitive)),
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            }
+        }
+        self.throw_type_error("Cannot convert object to primitive value")
     }
 
     fn require_iterator_object(
