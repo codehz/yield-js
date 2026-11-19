@@ -20,7 +20,7 @@ pub const BYTECODE_VERSION: u32 = 22;
 /// Entries `7` (`NaN`) and `8` (`Infinity`) are primitive number values, not
 /// objects; they load via [`Instr::GetBuiltin`]
 /// The compiler and `Build::validate` both use this table; do not reorder it.
-pub const BUILTINS: [&str; 9] = [
+pub const BUILTINS: [&str; 10] = [
     "Promise",
     "queueMicrotask",
     "Error",
@@ -30,6 +30,7 @@ pub const BUILTINS: [&str; 9] = [
     "Object",
     "NaN",
     "Infinity",
+    "Array",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

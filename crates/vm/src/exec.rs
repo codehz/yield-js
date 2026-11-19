@@ -521,17 +521,26 @@ impl Vm {
         host: &mut dyn Host,
         iterable: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
-        let iterator = if matches!(iterable, Value::Object(_) | Value::String(_)) {
+        let method = if matches!(iterable, Value::Object(_) | Value::String(_)) {
             match self.read_property(host, iterable, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))? {
-                Invocation::Value(method) => {
-                    let result = self.invoke(host, &method, Vec::new(), iterable)?;
-                    self.require_iterator_object(result, "Symbol.iterator must return an object")?
-                }
-                thrown => thrown,
+                Invocation::Value(method) => method,
+                Invocation::Thrown(error) => return Ok(Err(error)),
             }
         } else {
-            self.throw_type_error("value is not iterable")?
+            return Ok(Err(self.type_error("value is not iterable")?));
         };
+        self.get_iterator_from_method(host, iterable, &method)
+    }
+
+    pub(crate) fn get_iterator_from_method(
+        &mut self,
+        host: &mut dyn Host,
+        iterable: &Value,
+        method: &Value,
+    ) -> Result<Result<(Value, Value), Value>, VmError> {
+        let result = self.invoke(host, method, Vec::new(), iterable)?;
+        let iterator =
+            self.require_iterator_object(result, "Symbol.iterator must return an object")?;
         let iterator = match iterator {
             Invocation::Value(iterator) => iterator,
             Invocation::Thrown(error) => return Ok(Err(error)),
@@ -588,7 +597,7 @@ impl Vm {
         array.append(value.clone())
     }
 
-    fn close_iterator(
+    pub(crate) fn close_iterator(
         &mut self,
         host: &mut dyn Host,
         iterator: &Value,

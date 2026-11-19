@@ -26,6 +26,7 @@ pub(crate) const ROOT_PROMISE: &str = "promise";
 pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
+pub(crate) const ROOT_ARRAY: &str = "array";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
@@ -45,6 +46,7 @@ pub(crate) struct BuiltinRoots {
     pub promise_prototype: ObjectId,
     pub queue_microtask: ObjectId,
     pub object_prototype: ObjectId,
+    pub array: ObjectId,
     pub array_prototype: ObjectId,
     pub function_prototype: ObjectId,
     pub array_iterator_prototype: ObjectId,
@@ -66,6 +68,7 @@ impl BuiltinRoots {
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
+            (ROOT_ARRAY.to_owned(), self.array),
             (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
             (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
             (
@@ -103,6 +106,8 @@ pub(crate) enum BuiltinCall {
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
+    ArrayConstructor,
+    ArrayOperation(String),
     ArrayValues,
     ArrayIteratorNext,
     StringIterator,
@@ -209,7 +214,11 @@ impl Vm {
                 .expect("Object.prototype stores methods");
         }
 
-        let array_prototype = self.heap.alloc_plain();
+        let array_prototype = self.heap.alloc_array(Vec::new());
+        self.heap
+            .set_prototype(array_prototype, Some(object_prototype))
+            .expect("Array.prototype inherits Object.prototype");
+        let array = self.init_array_constructor(array_prototype);
         let array_iterator_prototype = self.heap.alloc_plain();
         self.heap.array_prototype = Some(array_prototype);
         let join = Value::Object(self.heap.alloc_builtin("Array", Some("join")));
@@ -374,6 +383,7 @@ impl Vm {
             promise_prototype: prototype,
             queue_microtask: queue,
             object_prototype,
+            array,
             array_prototype,
             function_prototype,
             array_iterator_prototype,
@@ -407,6 +417,7 @@ impl Vm {
             6 => Ok(Value::Object(self.builtins.object)),
             7 => Ok(Value::Number(f64::NAN)),
             8 => Ok(Value::Number(f64::INFINITY)),
+            9 => Ok(Value::Object(self.builtins.array)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -516,6 +527,7 @@ impl Vm {
             }
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => self.construct_object(&args),
+            Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => self.construct_array(args),
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 self.construct_error(host, &name, args)
             }
@@ -662,6 +674,8 @@ impl Vm {
                 ))),
             },
             BuiltinCall::ArrayValues => self.array_values(receiver),
+            BuiltinCall::ArrayConstructor => self.construct_array(args),
+            BuiltinCall::ArrayOperation(name) => self.array_operation(host, &name, receiver, args),
             BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
@@ -2092,6 +2106,10 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Array", Some("join")) => Some(BuiltinCall::ArrayJoin),
         ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
+        ("Array", None) => Some(BuiltinCall::ArrayConstructor),
+        ("Array", Some(name)) if crate::array::is_array_operation(name) => {
+            Some(BuiltinCall::ArrayOperation(name.to_owned()))
+        }
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),

@@ -295,8 +295,13 @@ fn builtin_roots_and_function_identity_survive_restore() {
 export async function run() {
   const then = Promise.prototype.then;
   const fn = demo;
+  const arrayConstructor = Array;
+  const copied = Array.from([8, 4]).slice(1);
   await wait("a");
-  return then === Promise.prototype.then && fn === demo && new demo().n;
+  return then === Promise.prototype.then && fn === demo && new demo().n === copied[0]
+    && arrayConstructor === Array && Array.prototype.constructor === Array
+    && Object.getPrototypeOf(copied) === Array.prototype
+    && Object.getPrototypeOf([]) === Array.prototype && copied[0];
 }
 function demo() {
   this.n = 4;
@@ -312,7 +317,7 @@ function demo() {
     );
 
     let mut missing = snapshot.clone();
-    missing.roots.pop_first();
+    missing.roots.remove("array").expect("Array root");
     let error = s.restore(missing).expect_err("missing root");
     assert!(matches!(error, VmError::InvalidSnapshot(_)));
 
@@ -422,7 +427,8 @@ fn restore_rejects_array_index_past_length() {
         .as_array_mut()
         .expect("object records")
         .iter_mut()
-        .find_map(|record| record["object"].get_mut("array"))
+        .filter_map(|record| record["object"].get_mut("array"))
+        .find(|array| array["length"] == 10)
         .expect("sparse array in snapshot");
     array["length"] = serde_json::json!(9);
     let error = s

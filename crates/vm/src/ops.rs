@@ -138,7 +138,7 @@ fn relational(
     Ok(Value::Bool(lhs.partial_cmp(&rhs).is_some_and(predicate)))
 }
 
-fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
+pub(crate) fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
     match (lhs, rhs) {
         (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
         (Value::Bool(lhs), Value::Bool(rhs)) => lhs == rhs,

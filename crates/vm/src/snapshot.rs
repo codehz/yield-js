@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
-    BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
+    BuiltinRoots, ROOT_ARRAY, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE,
     ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_STRING_ITERATOR,
     ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
@@ -20,8 +20,8 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// In-flight property enumeration cursors are serialized heap objects.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 18;
+// The builtin root table includes the Array constructor.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 19;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -460,10 +460,10 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    const ROOT_COUNT: usize = 16;
-    if roots.len() != ROOT_COUNT {
+    let expected = BuiltinRoots::default().to_map().len();
+    if roots.len() != expected {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected {ROOT_COUNT}",
+            "snapshot has {} builtin roots, expected {expected}",
             roots.len()
         )));
     }
@@ -521,7 +521,14 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     }
     let object = builtin_root(ROOT_OBJECT, "Object")?;
     require_fixed_prototype(heap, object, object_prototype, "Object")?;
-    let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
+    let array_prototype = required_root(roots, ROOT_ARRAY_PROTOTYPE)?;
+    if !matches!(heap.get(array_prototype)?, Object::Array(_)) {
+        return Err(VmError::InvalidSnapshot(
+            "Array.prototype root is not an array".to_owned(),
+        ));
+    }
+    let array = builtin_root(ROOT_ARRAY, "Array")?;
+    require_fixed_prototype(heap, array, array_prototype, "Array")?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
     let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
@@ -550,6 +557,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         promise_prototype: prototype,
         queue_microtask: queue,
         object_prototype,
+        array,
         array_prototype,
         array_iterator_prototype,
         string_iterator,

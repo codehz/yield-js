@@ -25,7 +25,8 @@
 - `Object.getOwnPropertyDescriptors(obj)` 按自有键顺序返回字符串键与 Symbol 键对应的完整数据/访问器描述符，不执行属性 getter；每个描述符和结果表都是独立普通对象。
 - `delete` 支持成员、计算键和可选链；只移除可配置的自有属性，不调用被删除属性的 getter，也不修改原型。不可配置键在严格模式下抛 `TypeError`，`Reflect.deleteProperty` 则返回 `false`。删除数组索引留下空洞，不改变 `length`；删除后重新添加的非索引键排在同类键末尾。删除结果和属性顺序可跨快照恢复。
 - `Object.preventExtensions` / `isExtensible`、`seal` / `isSealed`、`freeze` / `isFrozen` 控制及查询对象的扩展性和自有描述符。密封使自有属性不可配置；冻结还使自有数据属性（含数组 `length`）不可写，但保留访问器的 getter/setter，不递归处理属性值。不可扩展对象不能新增字符串键、Symbol 键或数组索引，但仍可调用继承的 setter；可写的数组 `length` 可以增长而不创建索引。`Reflect.preventExtensions` 返回布尔值，与 `Reflect.isExtensible` 一样要求对象参数。宿主原生句柄始终不可扩展。扩展性和描述符限制均跨快照恢复。
-- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Array` 全局名。数组字面量展开和实参展开复用该迭代协议，已求值的元素或实参可跨 `await` 保存。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
+- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。数组字面量展开和实参展开复用该迭代协议，已求值的元素或实参可跨 `await` 保存。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
+- `Array` 可调用或构造；数值长度创建稀疏数组，无效长度沿用 VM 的 `TypeError`。`isArray` 识别真实数组，`of` 和 `from` 创建稠密数组；`from` 优先使用同步迭代器，也可读取类数组对象。数组原型支持 `push` / `pop` / `shift` / `unshift` / `splice` / `slice` / `fill`、`map` / `filter` / `reduce` / `forEach` / `some` / `every`、`flat` / `flatMap` / `concat` 及 `indexOf` / `lastIndexOf` / `includes` / `find` / `findIndex`。`map` 和切片保留空洞，`flat` 跳过遍历层中的空洞。
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。
 - 数组解构复用同步迭代协议：省略项只推进，不读取 `value`；rest 收集至耗尽。正常提前结束或模式求值抛错时关闭尚未耗尽的迭代器；若模式已抛错，保留原异常。默认值或目标中的 `await` 可快照恢复，继续使用同一迭代器、已缓存的 `next` 与耗尽状态。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。

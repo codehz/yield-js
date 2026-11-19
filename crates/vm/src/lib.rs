@@ -3,6 +3,7 @@
 //! The VM consumes only a validated bytecode build. It never parses source,
 //! imports the compiler, or stores host-native pointers in snapshots.
 
+mod array;
 mod builtins;
 pub mod bytecode;
 pub mod error;
