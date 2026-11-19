@@ -12,7 +12,7 @@ use yield_vm::bytecode::{BinaryOp, Constant, Instr, Slot, UnaryOp};
 use super::{FunctionSource, Lowerer};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
-use crate::names::{Callee, ValueName};
+use crate::names::{Callee, ValueName, builtin_index};
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_expression<'node>(
@@ -104,17 +104,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::UpdateExpression(expression) => self.compile_update(expression),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
-            Expression::StaticMemberExpression(member) => {
-                let (object, key) = self.compile_static_member(member)?;
-                let dst = self.alloc_reg()?;
-                self.emit(Instr::GetMember {
-                    dst: self.slot(dst),
-                    object: self.slot(object),
-                    key: self.slot(key),
-                });
-                Ok(dst)
-            }
+            Expression::StaticMemberExpression(member) => self.compile_static_member_value(member),
             Expression::ComputedMemberExpression(member) => {
+                if self.builtin_object(&member.object) {
+                    return Err(unsupported(
+                        self.source_text(),
+                        member.span,
+                        "computed member on a builtin",
+                    ));
+                }
                 let (object, key) = self.compile_computed_member(member)?;
                 let dst = self.alloc_reg()?;
                 self.emit(Instr::GetMember {
@@ -124,6 +122,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
+            Expression::NewExpression(expression) => self.compile_new(expression),
             Expression::FunctionExpression(function) => {
                 let hint = function
                     .id
@@ -165,6 +164,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(dst)
             }
             ValueName::Undefined => self.emit_undefined(),
+            ValueName::Builtin(index) => {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetBuiltin {
+                    dst: self.slot(dst),
+                    builtin: index as u32,
+                });
+                Ok(dst)
+            }
             ValueName::NotFirstClass => Err(CompileError::new(
                 self.source_text(),
                 identifier.span,
@@ -376,6 +383,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     });
                     return Ok(dst);
                 }
+                Callee::Builtin(index) => {
+                    let args = self.compile_argument_slice(&expression.arguments)?;
+                    let dst = self.alloc_reg()?;
+                    self.emit(Instr::CallBuiltin {
+                        dst: self.slot(dst),
+                        builtin: index as u32,
+                        args,
+                    });
+                    return Ok(dst);
+                }
                 Callee::Unknown => {
                     return Err(CompileError::new(
                         self.source_text(),
@@ -398,12 +415,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
-    fn compile_arguments(
+    fn compile_argument_slice(
         &mut self,
-        expression: &'ast CallExpression<'ast>,
+        arguments: &'ast [Argument<'ast>],
     ) -> Result<Vec<Slot>, CompileError> {
-        let mut args = Vec::with_capacity(expression.arguments.len());
-        for argument in &expression.arguments {
+        let mut args = Vec::with_capacity(arguments.len());
+        for argument in arguments {
             let Some(expression) = argument.as_expression() else {
                 return Err(unsupported(
                     self.source_text(),
@@ -415,6 +432,92 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             args.push(self.slot(reg));
         }
         Ok(args)
+    }
+
+    fn compile_arguments(
+        &mut self,
+        expression: &'ast CallExpression<'ast>,
+    ) -> Result<Vec<Slot>, CompileError> {
+        self.compile_argument_slice(&expression.arguments)
+    }
+
+    fn compile_new(&mut self, expression: &'ast NewExpression<'ast>) -> Result<Reg, CompileError> {
+        if let Expression::Identifier(identifier) = &expression.callee
+            && identifier.name.as_str() == "Promise"
+            && matches!(
+                self.session.names().callee(&self.env, "Promise"),
+                Callee::Builtin(0)
+            )
+        {
+            let args = self.compile_argument_slice(&expression.arguments)?;
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::CallBuiltin {
+                dst: self.slot(dst),
+                builtin: 0,
+                args,
+            });
+            return Ok(dst);
+        }
+        let name = match &expression.callee {
+            Expression::Identifier(identifier) => identifier.name.as_str(),
+            _ => "expression",
+        };
+        Err(CompileError::new(
+            self.source_text(),
+            expression.span,
+            format!("unsupported syntax: 'new' {name}"),
+        ))
+    }
+
+    fn builtin_object(&self, object: &Expression<'_>) -> bool {
+        let Expression::Identifier(identifier) = object else {
+            return false;
+        };
+        matches!(
+            self.session
+                .names()
+                .value(&self.env, identifier.name.as_str()),
+            ValueName::Builtin(_)
+        )
+    }
+
+    fn compile_static_member_value(
+        &mut self,
+        member: &'ast StaticMemberExpression<'ast>,
+    ) -> Result<Reg, CompileError> {
+        if member.optional {
+            return Err(unsupported(
+                self.source_text(),
+                member.span,
+                "optional member access",
+            ));
+        }
+        if let Expression::Identifier(object) = &member.object
+            && let Some(index) = builtin_index(object.name.as_str())
+            && matches!(
+                self.session.names().value(&self.env, object.name.as_str()),
+                ValueName::Builtin(_)
+            )
+        {
+            let key = self
+                .session
+                .intern(Constant::String(member.property.name.as_str().to_owned()));
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::GetBuiltinMember {
+                dst: self.slot(dst),
+                builtin: index as u32,
+                key,
+            });
+            return Ok(dst);
+        }
+        let (object, key) = self.compile_static_member(member)?;
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::GetMember {
+            dst: self.slot(dst),
+            object: self.slot(object),
+            key: self.slot(key),
+        });
+        Ok(dst)
     }
 
     fn compile_assignment(

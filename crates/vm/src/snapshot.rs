@@ -4,13 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
-use crate::heap::{EnvRole, Heap, Object, OwnedEdge, PromiseState};
+use crate::heap::{CombineState, EnvRole, Heap, Object, OwnedEdge, PromiseState, ReactionJob};
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -53,6 +53,7 @@ pub struct Snapshot {
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
     pub globals: BTreeMap<String, Value>,
+    pub combines: BTreeMap<ObjectId, CombineState>,
 }
 
 impl Snapshot {
@@ -65,6 +66,7 @@ impl Snapshot {
             continuations: Vec::new(),
             operations: Vec::new(),
             globals: BTreeMap::new(),
+            combines: BTreeMap::new(),
         }
     }
 
@@ -96,13 +98,23 @@ impl Vm {
             tracer.mark_object(operation.promise)?;
         }
         tracer.drain()?;
+        if self
+            .heap
+            .resolutions
+            .iter()
+            .any(|id| !tracer.objects.contains(id))
+        {
+            return Err(VmError::InvalidState(
+                "snapshot during pending thenable assimilation".to_owned(),
+            ));
+        }
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.globals = self.globals.clone();
-        for id in tracer.objects {
+        for id in &tracer.objects {
             snapshot.objects.push(ObjectRecord {
-                id,
-                object: self.heap.cloned(id)?,
+                id: *id,
+                object: self.heap.cloned(*id)?,
             });
         }
         for id in tracer.continuations_seen {
@@ -131,6 +143,11 @@ impl Vm {
                 promise: operation.promise,
             });
         }
+        for (id, state) in &self.heap.combines {
+            if tracer.objects.contains(id) {
+                snapshot.combines.insert(*id, state.clone());
+            }
+        }
         Ok(snapshot)
     }
 
@@ -156,6 +173,10 @@ impl Vm {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let operations = load_operations(&build, &heap, &snapshot.operations, host)?;
+        heap.combines = snapshot.combines.clone();
+        check_heap_edges(&heap, host)?;
+        validate_jobs(&heap)?;
+        validate_combines(&heap)?;
         Ok(Self::restored(
             build,
             heap,
@@ -240,7 +261,7 @@ impl<'a> Tracer<'a> {
 
     fn walk_object(&mut self, id: ObjectId) -> Result<(), VmError> {
         let mut edges = std::mem::take(&mut self.edges);
-        self.heap.get(id)?.write_edges(&mut edges);
+        self.heap.write_edges(id, &mut edges)?;
         for edge in &edges {
             match *edge {
                 OwnedEdge::Object(target) | OwnedEdge::Environment { id: target, .. } => {
@@ -296,7 +317,7 @@ fn check_heap_edges(heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
         {
             return Err(VmError::MissingNative(native.key.clone()));
         }
-        heap.get(id)?.write_edges(&mut edges);
+        heap.write_edges(id, &mut edges)?;
         for edge in edges.drain(..) {
             match edge {
                 OwnedEdge::Object(target) => {
@@ -378,8 +399,11 @@ fn load_continuations(
         let Object::Promise(promise) = object else {
             continue;
         };
-        for continuation in &promise.reactions {
-            let Some(record) = indexed.get(continuation) else {
+        for job in &promise.reactions {
+            let Some(continuation) = job.await_id() else {
+                continue;
+            };
+            let Some(record) = indexed.get(&continuation) else {
                 return Err(VmError::InvalidSnapshot(format!(
                     "Promise {id} references missing continuation {continuation}"
                 )));
@@ -492,12 +516,119 @@ fn validate_continuation(
     let occurrences = waiting
         .reactions
         .iter()
-        .filter(|continuation| **continuation == record.id)
+        .filter(|job| job.await_id() == Some(record.id))
         .count();
     if occurrences != 1 {
         return Err(VmError::InvalidSnapshot(format!(
             "continuation {} must appear exactly once in Promise {} reactions, found {occurrences}",
             record.id, record.waiting_on
+        )));
+    }
+    Ok(())
+}
+
+fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
+    let mut adopts: BTreeMap<ObjectId, usize> = BTreeMap::new();
+    for (id, object) in heap.iter() {
+        match object {
+            Object::Promise(promise) => {
+                for job in &promise.reactions {
+                    match job {
+                        ReactionJob::Await(_) => {}
+                        ReactionJob::Script { result, .. }
+                        | ReactionJob::Finalize { result, .. }
+                        | ReactionJob::Adopt { result }
+                        | ReactionJob::Combine { result, .. } => {
+                            require_promise(heap, *result, &format!("Promise {id} reaction"))?;
+                        }
+                    }
+                    if let ReactionJob::Adopt { result } = job {
+                        *adopts.entry(*result).or_default() += 1;
+                    }
+                }
+            }
+            Object::Resolution(resolution) => {
+                require_promise(heap, resolution.promise, &format!("Resolution {id}"))?;
+                if !matches!(heap.get(resolution.pair), Ok(Object::Resolution(_))) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "Resolution {id} pair {} is not a resolution function",
+                        resolution.pair
+                    )));
+                }
+            }
+            Object::BuiltinMethod(method) => {
+                require_promise(heap, method.receiver, &format!("builtin method {id}"))?;
+            }
+            _ => {}
+        }
+    }
+    for (id, object) in heap.iter() {
+        let Object::Promise(promise) = object else {
+            continue;
+        };
+        if promise.locked && matches!(promise.state, PromiseState::Pending) {
+            let count = adopts.get(&id).copied().unwrap_or(0);
+            if count != 1 {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "locked Promise {id} must have exactly one Adopt reaction, found {count}"
+                )));
+            }
+        }
+        if let Some(source) = promise.adopting {
+            require_promise(heap, source, &format!("Promise {id} adopting"))?;
+            let linked = heap
+                .promise(source)?
+                .reactions
+                .iter()
+                .any(|job| matches!(job, ReactionJob::Adopt { result } if *result == id));
+            if !linked && matches!(heap.promise(source)?.state, PromiseState::Pending) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "Promise {id} adopts pending Promise {source} without an Adopt reaction"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_combines(heap: &Heap) -> Result<(), VmError> {
+    for (id, state) in &heap.combines {
+        let promise = heap.promise(*id).map_err(|_| {
+            VmError::InvalidSnapshot(format!("combine key {id} is not a pending Promise"))
+        })?;
+        if !matches!(promise.state, PromiseState::Pending) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine key {id} is not a pending Promise"
+            )));
+        }
+        if state.remaining > state.count
+            || state.results.len() != state.count
+            || state.elements.len() != state.count
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine {id} has inconsistent remaining/count/results"
+            )));
+        }
+        let states_ok = match state.kind {
+            crate::heap::CombineKind::AllSettled => state.states.len() == state.count,
+            _ => state.states.is_empty(),
+        };
+        if !states_ok {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine {id} has inconsistent state records"
+            )));
+        }
+        for element in &state.elements {
+            require_promise(heap, *element, &format!("combine {id} element"))?;
+        }
+    }
+    Ok(())
+}
+
+fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(), VmError> {
+    if heap.promise(id).is_err() {
+        return Err(VmError::InvalidSnapshot(format!(
+            "{what} references non-Promise object {id}"
         )));
     }
     Ok(())

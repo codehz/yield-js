@@ -3,6 +3,7 @@
 //! The VM consumes only a validated bytecode build. It never parses source,
 //! imports the compiler, or stores host-native pointers in snapshots.
 
+mod builtins;
 pub mod bytecode;
 pub mod error;
 mod exec;
@@ -10,6 +11,7 @@ mod frame;
 pub mod heap;
 pub mod host;
 mod ops;
+mod resolve;
 mod runtime;
 pub mod snapshot;
 pub mod value;

@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
+use crate::builtins::BuiltinCacheKey;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{Heap, PromiseState};
+use crate::heap::{Heap, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
 use crate::runtime::{ExecOutcome, Invocation, Microtask, PendingOperation, Settlement};
 use crate::value::{ContinuationId, HostValue, ObjectId, Value};
@@ -17,6 +18,7 @@ pub struct Vm {
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<String, Value>,
     next_continuation_id: ContinuationId,
+    pub(crate) builtins: BTreeMap<BuiltinCacheKey, ObjectId>,
 }
 
 impl Vm {
@@ -35,6 +37,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
             next_continuation_id: 1,
+            builtins: BTreeMap::new(),
         }
     }
 
@@ -82,6 +85,27 @@ impl Vm {
                     continuation,
                     settlement,
                 } => self.resume_continuation(host, continuation, settlement)?,
+                Microtask::CallHandler {
+                    handler,
+                    argument,
+                    result,
+                    rejected,
+                } => self.run_call_handler(host, handler, argument, result, rejected)?,
+                Microtask::Finalize {
+                    result,
+                    on_finally,
+                    settlement,
+                } => self.run_finalize(host, result, on_finally, settlement)?,
+                Microtask::Adopt { result, settlement } => {
+                    self.run_adopt(host, result, settlement)?
+                }
+                Microtask::Combine {
+                    result,
+                    index,
+                    kind,
+                    settlement,
+                } => self.run_combine(result, index, kind, settlement)?,
+                Microtask::Call { function, args } => self.run_queue_call(host, function, args)?,
             }
         }
         Ok(())
@@ -195,8 +219,71 @@ impl Vm {
             promise_object.state = settlement.to_state();
             std::mem::take(&mut promise_object.reactions)
         };
-        for continuation in reactions {
-            self.enqueue(continuation, settlement.clone());
+        for job in reactions {
+            self.enqueue_job(job, settlement.clone())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn react(&mut self, promise: ObjectId, job: ReactionJob) -> Result<(), VmError> {
+        let settlement = Settlement::from_state(&self.heap.promise(promise)?.state);
+        match settlement {
+            None => {
+                self.heap.promise_mut(promise)?.reactions.push(job);
+                Ok(())
+            }
+            Some(settlement) => self.enqueue_job(job, settlement),
+        }
+    }
+
+    pub(crate) fn enqueue_job(
+        &mut self,
+        job: ReactionJob,
+        settlement: Settlement,
+    ) -> Result<(), VmError> {
+        match job {
+            ReactionJob::Await(continuation) => {
+                self.enqueue(continuation, settlement);
+            }
+            ReactionJob::Script {
+                result,
+                on_fulfilled,
+                on_rejected,
+            } => {
+                let (handler, argument, rejected) = match settlement {
+                    Settlement::Fulfilled(value) => (on_fulfilled, value, false),
+                    Settlement::Rejected(value) => (on_rejected, value, true),
+                };
+                self.microtasks.push_back(Microtask::CallHandler {
+                    handler,
+                    argument,
+                    result,
+                    rejected,
+                });
+            }
+            ReactionJob::Finalize { result, on_finally } => {
+                self.microtasks.push_back(Microtask::Finalize {
+                    result,
+                    on_finally,
+                    settlement,
+                });
+            }
+            ReactionJob::Adopt { result } => {
+                self.microtasks
+                    .push_back(Microtask::Adopt { result, settlement });
+            }
+            ReactionJob::Combine {
+                result,
+                index,
+                kind,
+            } => {
+                self.microtasks.push_back(Microtask::Combine {
+                    result,
+                    index,
+                    kind,
+                    settlement,
+                });
+            }
         }
         Ok(())
     }
@@ -280,6 +367,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals,
             next_continuation_id,
+            builtins: BTreeMap::new(),
         }
     }
 }

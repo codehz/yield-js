@@ -8,9 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use yield_vm::BindingId;
-
 use crate::env::Env;
+use yield_vm::BindingId;
+use yield_vm::bytecode::BUILTINS;
 
 pub(crate) struct Tables<'a> {
     pub(crate) imports: &'a BTreeMap<String, u32>,
@@ -22,6 +22,8 @@ pub(crate) enum ValueName {
     Undefined,
     /// Import or top-level function. The PoC rejects reading it as a value.
     NotFirstClass,
+    /// Index into [`BUILTINS`]. Locals shadow this; the builtin shadows imports.
+    Builtin(usize),
     Unknown,
 }
 
@@ -29,6 +31,7 @@ pub(crate) enum Callee {
     Binding(BindingId),
     Import(u32),
     Function(u32),
+    Builtin(usize),
     Unknown,
 }
 
@@ -38,6 +41,8 @@ impl Tables<'_> {
             ValueName::Binding(binding)
         } else if name == "undefined" {
             ValueName::Undefined
+        } else if let Some(index) = builtin_index(name) {
+            ValueName::Builtin(index)
         } else if self.is_import_or_top_level(name) {
             ValueName::NotFirstClass
         } else {
@@ -48,6 +53,8 @@ impl Tables<'_> {
     pub(crate) fn callee(&self, env: &Env, name: &str) -> Callee {
         if let Some(binding) = env.lookup(name) {
             Callee::Binding(binding)
+        } else if let Some(index) = builtin_index(name) {
+            Callee::Builtin(index)
         } else if let Some(import) = self.imports.get(name).copied() {
             Callee::Import(import)
         } else if let Some(function) = self.top_level.get(name).copied() {
@@ -60,12 +67,17 @@ impl Tables<'_> {
     /// `Some(folded)` when `typeof name` must not evaluate `name`.
     /// `None` means lower the operand and emit `UnaryOp::TypeOf`.
     pub(crate) fn typeof_fold(&self, env: &Env, name: &str) -> Option<&'static str> {
-        let known =
-            name == "undefined" || env.lookup(name).is_some() || self.is_import_or_top_level(name);
+        let known = name == "undefined"
+            || env.lookup(name).is_some()
+            || self.is_import_or_top_level(name)
+            || builtin_index(name).is_some();
         if !known {
             return Some("undefined");
         }
         if self.is_import_or_top_level(name) {
+            return Some("function");
+        }
+        if env.lookup(name).is_none() && builtin_index(name).is_some() {
             return Some("function");
         }
         None
@@ -74,4 +86,8 @@ impl Tables<'_> {
     fn is_import_or_top_level(&self, name: &str) -> bool {
         self.imports.contains_key(name) || self.top_level.contains_key(name)
     }
+}
+
+pub(crate) fn builtin_index(name: &str) -> Option<usize> {
+    BUILTINS.iter().position(|builtin| *builtin == name)
 }

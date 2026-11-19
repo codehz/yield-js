@@ -1,11 +1,13 @@
 //! Interpreter. A step either continues, leaves the frame, or throws.
 //! Handlers run in one place; call sites do not each reimplement catch.
 
+use crate::builtins::BuiltinCall;
 use crate::bytecode::{ExceptionHandler, Instr, Slot, SlotKind, UnaryOp};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::host::{Host, HostReply};
-use crate::ops::{self, unary_op};
+use crate::ops::{self, property_key, unary_op};
+use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
 use crate::value::{ObjectId, Value};
 use crate::vm::Vm;
@@ -165,10 +167,40 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetMember { dst, object, key } => {
-                let value = self
-                    .heap
-                    .get_member(&frame.read(object)?, &frame.read(key)?)?;
+                let value = self.read_member(&frame.read(object)?, &frame.read(key)?)?;
                 frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
+            Instr::GetBuiltin { dst, builtin } => {
+                let id = self.ensure_top(builtin)?;
+                frame.write(dst, Value::Object(id))?;
+                Ok(Step::Next)
+            }
+            Instr::CallBuiltin { dst, builtin, args } => {
+                let args = frame.read_list(&args)?;
+                let call = match builtin {
+                    0 => BuiltinCall::Constructor,
+                    1 => BuiltinCall::QueueMicrotask,
+                    _ => {
+                        return Err(VmError::InvalidState(format!(
+                            "builtin {builtin} does not exist"
+                        )));
+                    }
+                };
+                let invocation = self.call_builtin(host, call, args)?;
+                store_invocation(frame, dst, invocation)
+            }
+            Instr::GetBuiltinMember { dst, builtin, key } => {
+                let Value::String(name) = self.constant(key)? else {
+                    return Err(VmError::InvalidState(
+                        "GetBuiltinMember key is not a string".to_owned(),
+                    ));
+                };
+                if let Err(thrown) = Self::known_static_member(builtin, &name) {
+                    return Ok(Step::Throw(thrown));
+                }
+                let id = self.ensure_static(builtin, Some(&name))?;
+                frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
             Instr::SetMember { object, key, src } => {
@@ -198,7 +230,7 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Await { input, resume, .. } => {
-                self.suspend(frame, input, resume)?;
+                self.suspend(host, frame, input, resume)?;
                 Ok(Step::Suspend)
             }
             Instr::Jump { target } => {
@@ -226,22 +258,23 @@ impl Vm {
     ) -> Result<Step, VmError> {
         let args = frame.read_list(&args)?;
         let callee = frame.read(callee)?;
-        let Some((func_id, env)) = self.callee(&callee) else {
-            return Ok(Step::Throw(Value::String(
-                "TypeError: value is not a function".into(),
-            )));
-        };
-        let invocation = self.call_function(host, func_id, env, args)?;
+        let invocation = self.invoke(host, &callee, args)?;
         store_invocation(frame, dst, invocation)
     }
 
-    fn callee(&self, value: &Value) -> Option<(u32, Option<ObjectId>)> {
-        let Value::Object(id) = value else {
-            return None;
-        };
-        self.heap
-            .function(*id)
-            .map(|function| (function.func_id, function.env))
+    fn read_member(&mut self, object: &Value, key: &Value) -> Result<Value, VmError> {
+        if let Value::Object(id) = object
+            && self.heap.get(*id)?.as_promise().is_some()
+        {
+            let name = property_key(key)?;
+            return match name.as_str() {
+                "then" | "catch" | "finally" => Ok(Value::Object(self.ensure_method(*id, name)?)),
+                _ => Err(VmError::InvalidState(format!(
+                    "object {id} does not expose script properties"
+                ))),
+            };
+        }
+        self.heap.get_member(object, key)
     }
 
     fn make_closure(
@@ -306,7 +339,13 @@ impl Vm {
         Ok(Value::Object(promise))
     }
 
-    fn suspend(&mut self, frame: &Frame, input: Slot, resume: u32) -> Result<(), VmError> {
+    fn suspend(
+        &mut self,
+        host: &mut dyn Host,
+        frame: &Frame,
+        input: Slot,
+        resume: u32,
+    ) -> Result<(), VmError> {
         let input_value = frame.read(input)?;
         let async_promise = frame
             .async_promise
@@ -318,7 +357,11 @@ impl Vm {
             .cloned()
             .ok_or_else(|| VmError::InvalidState(format!("resume {resume} does not exist")))?;
         let values = frame.read_saved(&resume_entry.saved_slots)?;
-        let waiting_on = self.await_target(&input_value)?;
+        let prepared = self.prepare_await(host, input_value)?;
+        let (waiting_on, plain) = match prepared {
+            AwaitPrepared::Promise(id) => (Some(id), Value::Undefined),
+            AwaitPrepared::Plain(value) => (None, value),
+        };
         let continuation_id = self.alloc_continuation();
         self.continuations.insert(
             continuation_id,
@@ -331,19 +374,7 @@ impl Vm {
                 values,
             },
         );
-        self.schedule_resume(continuation_id, waiting_on, input_value)
-    }
-
-    fn await_target(&self, input: &Value) -> Result<Option<ObjectId>, VmError> {
-        let Value::Object(id) = input else {
-            return Ok(None);
-        };
-        if self.heap.get(*id)?.as_promise().is_none() {
-            return Err(VmError::InvalidState(
-                "await only supports VM promises and plain values in this PoC".to_owned(),
-            ));
-        }
-        Ok(Some(*id))
+        self.schedule_resume(continuation_id, waiting_on, plain)
     }
 
     fn schedule_resume(
@@ -356,19 +387,11 @@ impl Vm {
             self.enqueue(continuation, Settlement::Fulfilled(plain));
             return Ok(());
         };
-        let settlement = Settlement::from_state(&self.heap.promise(promise)?.state);
-        match settlement {
-            None => self.heap.promise_mut(promise)?.reactions.push(continuation),
-            Some(settlement) => self.enqueue(continuation, settlement),
-        }
-        Ok(())
+        self.react(promise, crate::heap::ReactionJob::Await(continuation))
     }
 
     fn unary(&self, operator: UnaryOp, value: Value) -> Value {
-        if matches!(operator, UnaryOp::TypeOf)
-            && let Value::Object(id) = value
-            && self.heap.function(id).is_some()
-        {
+        if matches!(operator, UnaryOp::TypeOf) && self.is_callable(&value) {
             return Value::String("function".to_owned());
         }
         unary_op(operator, value)

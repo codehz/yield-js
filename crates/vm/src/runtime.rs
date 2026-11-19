@@ -2,7 +2,7 @@
 //! [`Settlement`], not a VM failure. [`Invocation`] is the same split for a call.
 
 use crate::error::VmError;
-use crate::heap::PromiseState;
+use crate::heap::{CombineKind, PromiseState};
 use crate::host::PendingOperationMeta;
 use crate::value::{ContinuationId, ObjectId, Value};
 
@@ -95,4 +95,31 @@ pub(crate) enum Microtask {
         continuation: ContinuationId,
         settlement: Settlement,
     },
+    /// Run one `then` / `catch` handler, or pass the settlement through.
+    CallHandler {
+        handler: Option<Value>,
+        argument: Value,
+        result: ObjectId,
+        rejected: bool,
+    },
+    /// Run `finally`, then reapply `settlement` unless the callback rejects
+    /// or returns a thenable that rejects.
+    Finalize {
+        result: ObjectId,
+        on_finally: Value,
+        settlement: Settlement,
+    },
+    Adopt {
+        result: ObjectId,
+        settlement: Settlement,
+    },
+    Combine {
+        result: ObjectId,
+        index: usize,
+        kind: CombineKind,
+        settlement: Settlement,
+    },
+    /// `queueMicrotask`. A throw has no result promise and is not reported:
+    /// this slice does not track unhandled rejections.
+    Call { function: Value, args: Vec<Value> },
 }

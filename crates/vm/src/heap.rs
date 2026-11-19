@@ -1,7 +1,14 @@
-//! Object table. Every heap edge is listed by [`Object::write_edges`]; snapshot
-//! capture and restore both consume that list instead of re-matching object kinds.
+//! Object table. Every heap edge is listed by [`Object::write_edges`] plus
+//! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
+//! restore consume that combined list instead of re-matching object kinds.
+//!
+//! Builtin function objects are ordinary heap objects so a suspended script can
+//! point at `then` or `Promise.resolve`. Their identity cache lives on the VM
+//! and is not snapshotted: `Promise.resolve === Promise.resolve` holds for one
+//! run, not across restore. Restore rebuilds the cache on demand; a restored
+//! object still dispatches from its own fields.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,12 +24,73 @@ pub enum PromiseState {
     Rejected(Value),
 }
 
+/// One waiter on a promise. `Await` is the original continuation reaction.
+/// The other variants are script handlers, adoption, and combinators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionJob {
+    Await(ContinuationId),
+    /// `then` / `catch`. A missing handler passes the settlement through.
+    Script {
+        result: ObjectId,
+        on_fulfilled: Option<Value>,
+        on_rejected: Option<Value>,
+    },
+    /// `finally`. The saved settlement is captured when the source settles,
+    /// not stored on the pending job.
+    Finalize {
+        result: ObjectId,
+        on_finally: Value,
+    },
+    /// Copy `source`'s settlement onto `result` (thenable promise adoption,
+    /// including a `finally` tail). `result.adopting` points back here.
+    Adopt {
+        result: ObjectId,
+    },
+    Combine {
+        result: ObjectId,
+        index: usize,
+        kind: CombineKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombineKind {
+    All,
+    AllSettled,
+    Race,
+    Any,
+}
+
+/// In-progress `Promise.all` / `allSettled` / `race` / `any`. Keyed by the
+/// result promise. `elements` keeps each slot promise reachable from that
+/// result so a snapshot does not drop a still-pending input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CombineState {
+    pub kind: CombineKind,
+    pub count: usize,
+    pub remaining: usize,
+    pub results: Vec<Value>,
+    pub states: Vec<PromiseState>,
+    pub first: Option<Value>,
+    pub elements: Vec<ObjectId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromiseObject {
     pub state: PromiseState,
-    /// Continuations waiting for settlement. The waiting relation is stored on
-    /// the Promise, not duplicated in the continuation record.
-    pub reactions: Vec<ContinuationId>,
+    pub reactions: Vec<ReactionJob>,
+    /// Resolution has started (adoption or a fulfilled value) and must not
+    /// start again. Distinct from [`PromiseState::Pending`]: a locked promise
+    /// can still be pending while it waits on another promise.
+    pub locked: bool,
+    /// Promise whose settlement this one is adopting, when `locked`.
+    pub adopting: Option<ObjectId>,
+    /// When set, an `Adopt` fulfillment reapplies this settlement instead of
+    /// the source value. `finally` uses it so a returned thenable only delays
+    /// the original settlement, unless that thenable rejects.
+    pub finally_settlement: Option<PromiseState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,6 +172,33 @@ pub struct EnvironmentObject {
     pub bindings: BTreeMap<BindingId, Value>,
 }
 
+/// `promise.then` / `catch` / `finally`, bound to `receiver`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuiltinMethod {
+    pub receiver: ObjectId,
+    pub name: String,
+}
+
+/// Top-level `Promise` / `queueMicrotask`, or a static such as `Promise.resolve`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuiltinStatic {
+    pub name: String,
+    pub member: Option<String>,
+}
+
+/// One-shot `resolve` or `reject` passed to an executor or a thenable `then`.
+///
+/// The pair shares the once-flag: calling either marks both `called`. An
+/// uncalled capability that no root can reach cannot be snapshotted; the VM
+/// rejects that capture instead of dropping the in-flight assimilation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Resolution {
+    pub promise: ObjectId,
+    pub pair: ObjectId,
+    pub resolve: bool,
+    pub called: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -113,6 +208,9 @@ pub enum Object {
     Array(ArrayObject),
     Function(FunctionObject),
     Environment(EnvironmentObject),
+    BuiltinMethod(BuiltinMethod),
+    BuiltinStatic(BuiltinStatic),
+    Resolution(Resolution),
 }
 
 /// Why an object id must be an environment. The role selects the restore error.
@@ -177,8 +275,24 @@ impl Object {
                 {
                     push_value(out, value);
                 }
-                for continuation in &promise.reactions {
-                    out.push(OwnedEdge::Continuation(*continuation));
+                if let Some(id) = promise.adopting {
+                    out.push(OwnedEdge::Object(id));
+                }
+                if let Some(state) = &promise.finally_settlement {
+                    push_state(out, state);
+                }
+                for job in &promise.reactions {
+                    job.write_edges(out);
+                }
+            }
+            Self::BuiltinMethod(method) => {
+                out.push(OwnedEdge::Object(method.receiver));
+            }
+            Self::BuiltinStatic(_) => {}
+            Self::Resolution(resolution) => {
+                out.push(OwnedEdge::Object(resolution.promise));
+                if resolution.pair != 0 {
+                    out.push(OwnedEdge::Object(resolution.pair));
                 }
             }
             Self::Native(_) => {}
@@ -221,10 +335,56 @@ fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
     }
 }
 
+fn push_state(out: &mut Vec<OwnedEdge>, state: &PromiseState) {
+    if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) = state {
+        push_value(out, value);
+    }
+}
+
+impl ReactionJob {
+    pub(crate) fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
+        match self {
+            Self::Await(id) => out.push(OwnedEdge::Continuation(*id)),
+            Self::Script {
+                result,
+                on_fulfilled,
+                on_rejected,
+            } => {
+                out.push(OwnedEdge::Object(*result));
+                if let Some(value) = on_fulfilled {
+                    push_value(out, value);
+                }
+                if let Some(value) = on_rejected {
+                    push_value(out, value);
+                }
+            }
+            Self::Finalize { result, on_finally } => {
+                out.push(OwnedEdge::Object(*result));
+                push_value(out, on_finally);
+            }
+            Self::Adopt { result } | Self::Combine { result, .. } => {
+                out.push(OwnedEdge::Object(*result));
+            }
+        }
+    }
+
+    pub(crate) fn await_id(&self) -> Option<ContinuationId> {
+        match self {
+            Self::Await(id) => Some(*id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Heap {
     objects: BTreeMap<ObjectId, Object>,
     next_id: ObjectId,
+    pub(crate) combines: BTreeMap<ObjectId, CombineState>,
+    /// Uncalled [`Resolution`] objects. Capture rejects any id in this set that
+    /// the tracer did not reach: that capability is only held by an in-flight
+    /// `then` call, which is not a snapshot root.
+    pub(crate) resolutions: BTreeSet<ObjectId>,
 }
 
 impl Heap {
@@ -232,6 +392,8 @@ impl Heap {
         Self {
             objects: BTreeMap::new(),
             next_id: 1,
+            combines: BTreeMap::new(),
+            resolutions: BTreeSet::new(),
         }
     }
 
@@ -249,7 +411,34 @@ impl Heap {
         self.alloc(Object::Promise(PromiseObject {
             state: PromiseState::Pending,
             reactions: Vec::new(),
+            locked: false,
+            adopting: None,
+            finally_settlement: None,
         }))
+    }
+
+    /// Object edges plus combine-state edges. This is the reachability list.
+    pub(crate) fn write_edges(
+        &self,
+        id: ObjectId,
+        out: &mut Vec<OwnedEdge>,
+    ) -> Result<(), VmError> {
+        self.get(id)?.write_edges(out);
+        if let Some(state) = self.combines.get(&id) {
+            for element in &state.elements {
+                out.push(OwnedEdge::Object(*element));
+            }
+            for value in &state.results {
+                push_value(out, value);
+            }
+            for recorded in &state.states {
+                push_state(out, recorded);
+            }
+            if let Some(value) = &state.first {
+                push_value(out, value);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn alloc_plain(&mut self) -> ObjectId {
@@ -285,6 +474,14 @@ impl Heap {
 
     pub(crate) fn finish_restore(&mut self) {
         self.next_id = self.objects.keys().next_back().map_or(1, |id| id + 1);
+        self.resolutions = self
+            .objects
+            .iter()
+            .filter_map(|(id, object)| match object {
+                Object::Resolution(resolution) if !resolution.called => Some(*id),
+                _ => None,
+            })
+            .collect();
     }
 
     pub(crate) fn contains(&self, id: ObjectId) -> bool {

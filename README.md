@@ -43,7 +43,8 @@ cargo run -p yield-poc
 - 对象/数组字面量、计算属性键、成员读写、数组 `length` 与索引、复合成员赋值。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
-- async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。
+- async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
+- 内建只有 `Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及实例 `then` / `catch` / `finally`）和 `queueMicrotask`。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境和脚本根出发。
@@ -70,6 +71,6 @@ cargo run -p yield-poc
 - `for...in`、`for...of`、标签；跨 finally 的 `break/continue`（编译期拒绝）。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。
 - Proxy、Map/Set/WeakMap、完整内建对象与标准库。
-- Promise thenable 同化、`Promise.then` 等公开方法、`queueMicrotask`。
+- 没有 `Error` 对象。`Promise.any` 全拒绝时拒绝值为字符串 `AggregateError: All promises were rejected`。`catch` 仍是方法，不是语法。没有 `Symbol`、`Proxy`、`WeakMap`、`Map`、`Set`、`Date`、`RegExp`、`JSON` 和 `Math`。
 - 运行期 tracing GC（目前有对象表与快照可达性遍历，没有回收器）。
 - C ABI、Apple/Android 宿主适配器、React/Solid 验收。

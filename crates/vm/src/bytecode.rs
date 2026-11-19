@@ -9,7 +9,13 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 3;
+pub const BYTECODE_VERSION: u32 = 4;
+
+/// VM-provided callable names, in builtin-index order.
+///
+/// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
+/// The compiler and `Build::validate` both use this table; do not reorder it.
+pub const BUILTINS: [&str; 2] = ["Promise", "queueMicrotask"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -185,6 +191,23 @@ pub enum Instr {
     },
     Throw {
         src: Slot,
+    },
+    /// Loads a cached builtin function value (`Promise` or `queueMicrotask`).
+    GetBuiltin {
+        dst: Slot,
+        builtin: u32,
+    },
+    /// Calls a top-level builtin. `builtin` is an index into [`BUILTINS`].
+    CallBuiltin {
+        dst: Slot,
+        builtin: u32,
+        args: Vec<Slot>,
+    },
+    /// Loads a static method such as `Promise.resolve`. `key` is a string constant.
+    GetBuiltinMember {
+        dst: Slot,
+        builtin: u32,
+        key: u32,
     },
 }
 
@@ -373,6 +396,20 @@ impl Build {
         }
         Ok(())
     }
+    fn check_builtin(
+        &self,
+        builtin: u32,
+        location: &str,
+        pc: usize,
+        what: &str,
+    ) -> Result<(), String> {
+        if builtin as usize >= BUILTINS.len() {
+            return Err(format!(
+                "{location}: {what} at pc {pc} references builtin {builtin}"
+            ));
+        }
+        Ok(())
+    }
 
     fn validate_function(&self, function: &Function) -> Result<(), String> {
         let location = format!("function {} ({})", function.func_id, function.name);
@@ -406,17 +443,13 @@ impl Build {
             match param {
                 ParamTarget::Binding(binding) => {
                     if !seen_bindings.insert(*binding) {
-                        return Err(format!(
-                            "{location}: duplicate parameter binding {binding}"
-                        ));
+                        return Err(format!("{location}: duplicate parameter binding {binding}"));
                     }
                 }
                 ParamTarget::Slot(slot) => {
                     check_slot(*slot, "parameter")?;
                     if seen_slots.contains(slot) {
-                        return Err(format!(
-                            "{location}: duplicate parameter slot {slot:?}"
-                        ));
+                        return Err(format!("{location}: duplicate parameter slot {slot:?}"));
                     }
                     seen_slots.push(*slot);
                 }
@@ -539,6 +572,34 @@ impl Build {
                 }
                 Instr::Return { src } => check_slot(*src, "Return.src")?,
                 Instr::Throw { src } => check_slot(*src, "Throw.src")?,
+                Instr::GetBuiltin { dst, builtin } => {
+                    check_slot(*dst, "GetBuiltin.dst")?;
+                    self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
+                }
+                Instr::CallBuiltin { dst, builtin, args } => {
+                    check_slot(*dst, "CallBuiltin.dst")?;
+                    self.check_builtin(*builtin, &location, pc, "CallBuiltin")?;
+                    for arg in args {
+                        check_slot(*arg, "CallBuiltin.arg")?;
+                    }
+                }
+                Instr::GetBuiltinMember { dst, builtin, key } => {
+                    check_slot(*dst, "GetBuiltinMember.dst")?;
+                    self.check_builtin(*builtin, &location, pc, "GetBuiltinMember")?;
+                    match self.constants.get(*key as usize) {
+                        Some(Constant::String(_)) => {}
+                        Some(_) => {
+                            return Err(format!(
+                                "{location}: GetBuiltinMember at pc {pc} key {key} is not a string constant"
+                            ));
+                        }
+                        None => {
+                            return Err(format!(
+                                "{location}: GetBuiltinMember at pc {pc} references constant {key}"
+                            ));
+                        }
+                    }
+                }
             }
         }
 

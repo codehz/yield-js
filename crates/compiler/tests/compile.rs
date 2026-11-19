@@ -48,6 +48,46 @@ fn rejects_unsupported_syntax_with_location() {
     assert!(error.column() > 1);
 }
 
+#[test]
+fn lowers_promise_member_call_and_constructor() {
+    let source = r#"
+function run() {
+  const then = Promise.then;
+  return new Promise(function (resolve) { return then(resolve); });
+}
+"#;
+    let build = compile(source, &CompileOptions::default()).expect("promise syntax compiles");
+    let code: Vec<_> = build
+        .functions
+        .iter()
+        .flat_map(|function| &function.code)
+        .collect();
+    assert!(
+        code.iter()
+            .any(|instruction| matches!(instruction, Instr::GetBuiltinMember { .. })),
+        "Promise.then lowers to GetBuiltinMember"
+    );
+    assert!(
+        code.iter()
+            .any(|instruction| matches!(instruction, Instr::CallValue { .. })),
+        "calling the loaded member lowers to CallValue"
+    );
+    assert!(
+        code.iter()
+            .any(|instruction| matches!(instruction, Instr::CallBuiltin { builtin: 0, .. })),
+        "new Promise lowers to CallBuiltin"
+    );
+
+    let error = compile(
+        "function run() {\n  return new Foo();\n}\n",
+        &CompileOptions::default(),
+    )
+    .expect_err("new Foo is outside the subset");
+    assert!(error.message().contains("unsupported syntax: 'new' Foo"));
+    assert_eq!(error.line(), 2);
+    assert!(error.column() > 1);
+}
+
 struct TdzCase {
     source: &'static str,
     name: &'static str,

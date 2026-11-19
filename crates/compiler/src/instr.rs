@@ -13,7 +13,11 @@ use crate::emit::Reg;
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
     matches!(
         instruction,
-        Instr::Throw { .. } | Instr::CallFunction { .. } | Instr::CallValue { .. }
+        Instr::Throw { .. }
+            | Instr::CallFunction { .. }
+            | Instr::CallValue { .. }
+            | Instr::CallBuiltin { .. }
+            | Instr::GetBuiltinMember { .. }
     )
 }
 
@@ -80,6 +84,15 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Jump { .. } => {}
         Instr::BranchFalse { cond, .. } => {
             uses.insert(cond.index);
+        }
+        Instr::GetBuiltin { dst, .. } | Instr::GetBuiltinMember { dst, .. } => {
+            defs.insert(dst.index);
+        }
+        Instr::CallBuiltin { dst, args, .. } => {
+            for arg in args {
+                uses.insert(arg.index);
+            }
+            defs.insert(dst.index);
         }
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
@@ -169,5 +182,19 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         },
         Instr::Return { src } => Instr::Return { src: remap(src) },
         Instr::Throw { src } => Instr::Throw { src: remap(src) },
+        Instr::GetBuiltin { dst, builtin } => Instr::GetBuiltin {
+            dst: remap(dst),
+            builtin,
+        },
+        Instr::CallBuiltin { dst, builtin, args } => Instr::CallBuiltin {
+            dst: remap(dst),
+            builtin,
+            args: args.into_iter().map(remap).collect(),
+        },
+        Instr::GetBuiltinMember { dst, builtin, key } => Instr::GetBuiltinMember {
+            dst: remap(dst),
+            builtin,
+            key,
+        },
     }
 }
