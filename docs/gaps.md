@@ -23,8 +23,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ### 2.1 绑定与参数
 
-- 默认参数（`default parameter`）、rest（`rest parameter`）
-- 参数解构、变量声明解构、`catch` 参数解构、`for…in` / `for…of` 解构（`parameter destructuring`、`destructuring declaration`、`catch parameter destructuring`、`for-in destructuring`、`for-of destructuring`）
+- 形参 rest（`rest parameter`），包括 `function f(...[x]) {}`；解构模式内部的 rest 已支持
 - `for…of` 多个声明（`for-of declaration`）
 - `arguments` 没有绑定。引用是 `unknown binding`，不是单独的 `unsupported syntax`
 - `const` 与 `let` 在绑定种类上不分。重复赋值 `const` 能编过，也不会在运行期拒绝
@@ -32,7 +31,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ### 2.2 表达式
 
 - `instanceof`
-- 赋值或 `++`/`--` 的目标不是简单绑定或成员（`assignment to non-identifier/non-member target`、`update target outside the PoC subset`）
+- `++` / `--` 只接受绑定或成员（`update target outside the PoC subset`）；解构赋值只支持 `=`
 - 私有字段（`private field access`）
 - 标签模板。非标签模板已支持
 - lone surrogate 字符串字面量与属性名（`string with a lone surrogate`、`property key with a lone surrogate`）
@@ -59,6 +58,8 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 对象展开字符串时，若 UTF-16 索引值是单独的代理码元（例如展开含补充平面字符的字符串），会抛出可捕获的 `TypeError`：VM 字符串目前只能存储有效 UTF-8。
 
+对象解构读取字符串索引和 rest 复制字符串时也受此限制；其他原始值没有对应的包装原型，命名属性查找从 `Object.prototype` 开始。
+
 名称策略里有一处有意偏差，先不要当疏漏改掉：`typeof` 对被局部遮蔽的 import 或顶层函数仍报 `"function"`（`names.rs`）。这和 design 里「未声明全局的 `typeof` 保持标准语义」不是同一条；未声明且不是 import/顶层函数的名字已经折叠为 `"undefined"`。
 
 宿主 import 目前只能调用，不能当值读取（`import value … is not first-class`）。若验收包要把宿主函数存进变量或传给其它函数，这是阻断项；当前是明确的名称策略，不是漏实现的语法。
@@ -83,16 +84,14 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ## 5. 结构性缺口
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
-2. **同步迭代协议尚未覆盖解构**。`for…of`、数组展开、实参展开和 Promise 组合子共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；数组解构尚未接入。
-3. **属性操作尚未覆盖代理。** 对象展开已复用自有键顺序；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
-4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+2. **属性操作尚未覆盖代理。** 对象展开和 rest 已复用自有键顺序；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
+3. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
 
 ```mermaid
 flowchart LR
   C[对象强制转换] --> S[String / Number / 模板]
-  I[已有同步迭代] --> D[解构]
   E[属性操作] --> R[Proxy]
 ```
 

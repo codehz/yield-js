@@ -220,6 +220,39 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
+    pub(super) fn compile_property_key(
+        &mut self,
+        key: &'ast PropertyKey<'ast>,
+        computed: bool,
+    ) -> Result<Reg, CompileError> {
+        if computed {
+            let expression = key.as_expression().ok_or_else(|| {
+                unsupported(
+                    self.source_text(),
+                    key.span(),
+                    "unsupported computed property key",
+                )
+            })?;
+            let value = self.compile_expression(expression)?;
+            self.emit_to_property_key(value, None)
+        } else if let Some(name) = key.static_name() {
+            let name = name.into_cow_str().ok_or_else(|| {
+                unsupported(
+                    self.source_text(),
+                    key.span(),
+                    "property key with a lone surrogate",
+                )
+            })?;
+            self.emit_constant(Constant::String(name.into_owned()))
+        } else {
+            Err(unsupported(
+                self.source_text(),
+                key.span(),
+                "unsupported property key",
+            ))
+        }
+    }
+
     fn emit_string_add(&mut self, lhs: Reg, rhs: Reg) -> Result<Reg, CompileError> {
         let dst = self.alloc_reg()?;
         self.emit(Instr::Binary {
@@ -917,6 +950,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return Ok(result);
         }
 
+        if expression.operator == AssignmentOperator::Assign
+            && matches!(
+                expression.left,
+                AssignmentTarget::ArrayAssignmentTarget(_)
+                    | AssignmentTarget::ObjectAssignmentTarget(_)
+            )
+        {
+            let value = self.compile_expression(&expression.right)?;
+            self.compile_assignment_pattern(&expression.left, value)?;
+            return Ok(value);
+        }
+
         Err(unsupported(
             self.source_text(),
             expression.span,
@@ -1075,32 +1120,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 continue;
             };
-            let key = if property.computed {
-                let key = property.key.as_expression().ok_or_else(|| {
-                    unsupported(
-                        self.source_text(),
-                        property.key.span(),
-                        "unsupported computed property key",
-                    )
-                })?;
-                let key = self.compile_expression(key)?;
-                self.emit_to_property_key(key, None)?
-            } else if let Some(name) = property.key.static_name() {
-                let name = name.into_cow_str().ok_or_else(|| {
-                    unsupported(
-                        self.source_text(),
-                        property.key.span(),
-                        "property key with a lone surrogate",
-                    )
-                })?;
-                self.emit_constant(Constant::String(name.into_owned()))?
-            } else {
-                return Err(unsupported(
-                    self.source_text(),
-                    property.key.span(),
-                    "unsupported property key",
-                ));
-            };
+            let key = self.compile_property_key(&property.key, property.computed)?;
             let kind = match property.kind {
                 PropertyKind::Init => PropertyDefinition::Data,
                 PropertyKind::Get => PropertyDefinition::Get,

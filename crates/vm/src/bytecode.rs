@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 19;
+pub const BYTECODE_VERSION: u32 = 20;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -305,6 +305,28 @@ pub enum Instr {
         done: Slot,
         value: Slot,
         iterator: Slot,
+    },
+    /// Throws a TypeError for null or undefined without otherwise converting the value.
+    AssertObjectCoercible {
+        src: Slot,
+    },
+    /// Reads a property, projecting primitive sources as needed. The key is already converted.
+    GetDestructuredMember {
+        dst: Slot,
+        object: Slot,
+        key: Slot,
+    },
+    /// Copies own enumerable properties into a new object, excluding converted keys.
+    ObjectRest {
+        dst: Slot,
+        src: Slot,
+        excluded: Vec<Slot>,
+    },
+    /// Calls cached `next` and reads only `done`, without accessing `value`.
+    IteratorSkip {
+        done: Slot,
+        iterator: Slot,
+        next: Slot,
     },
 }
 
@@ -783,6 +805,16 @@ impl Build {
                     check_slot(*target, "CopyDataProperties.target")?;
                     check_slot(*source, "CopyDataProperties.source")?;
                 }
+                Instr::AssertObjectCoercible { src } => {
+                    check_slot(*src, "AssertObjectCoercible.src")?;
+                }
+                Instr::ObjectRest { dst, src, excluded } => {
+                    check_slot(*dst, "ObjectRest.dst")?;
+                    check_slot(*src, "ObjectRest.src")?;
+                    for key in excluded {
+                        check_slot(*key, "ObjectRest.excluded")?;
+                    }
+                }
                 Instr::NewArray { dst, elements } => {
                     check_slot(*dst, "NewArray.dst")?;
                     for element in elements {
@@ -797,6 +829,11 @@ impl Build {
                     check_slot(*dst, "GetMember.dst")?;
                     check_slot(*object, "GetMember.object")?;
                     check_slot(*key, "GetMember.key")?;
+                }
+                Instr::GetDestructuredMember { dst, object, key } => {
+                    check_slot(*dst, "GetDestructuredMember.dst")?;
+                    check_slot(*object, "GetDestructuredMember.object")?;
+                    check_slot(*key, "GetDestructuredMember.key")?;
                 }
                 Instr::HasProperty { dst, object, key } => {
                     check_slot(*dst, "HasProperty.dst")?;
@@ -837,6 +874,15 @@ impl Build {
                     }
                     check_slot(*iterator, "IteratorNext.iterator")?;
                     check_slot(*next, "IteratorNext.next")?;
+                }
+                Instr::IteratorSkip {
+                    done,
+                    iterator,
+                    next,
+                } => {
+                    check_slot(*done, "IteratorSkip.done")?;
+                    check_slot(*iterator, "IteratorSkip.iterator")?;
+                    check_slot(*next, "IteratorSkip.next")?;
                 }
                 Instr::IteratorClose { iterator, .. } => {
                     check_slot(*iterator, "IteratorClose.iterator")?;

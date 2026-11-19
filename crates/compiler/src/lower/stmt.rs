@@ -3,11 +3,10 @@
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
-use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::JumpTarget;
-use super::{FunctionSource, Lowerer, local_declaration};
+use super::{FunctionSource, Lowerer, for_each_binding_name, local_declaration};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 
@@ -220,11 +219,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         statement: &'ast ForInStatement<'ast>,
     ) -> Result<(), CompileError> {
         self.env.enter_block();
-        let binding = self.declare_iteration_binding(&statement.left, "for-in")?;
+        self.declare_iteration_bindings(&statement.left, "for-in")?;
         let source = self.compile_expression(&statement.right)?;
-        if let Some(binding) = binding {
-            self.env.clear_pending(binding);
-        }
 
         let iterator = self.alloc_reg()?;
         self.emit(Instr::GetForInIterator {
@@ -245,7 +241,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         // Enumeration has no user-visible iterator to close on abrupt exit.
         self.control.push_loop(Some(step_pc));
-        self.assign_iteration_value(&statement.left, binding, value, "for-in")?;
+        self.assign_iteration_value(&statement.left, value)?;
         self.compile_statement(&statement.body)?;
         let loop_context = self.control.pop_loop();
         self.jump_to(step_pc);
@@ -272,12 +268,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         self.env.enter_block();
-        let binding = self.declare_iteration_binding(&statement.left, "for-of")?;
+        self.declare_iteration_bindings(&statement.left, "for-of")?;
 
         let iterable = self.compile_expression(&statement.right)?;
-        if let Some(binding) = binding {
-            self.env.clear_pending(binding);
-        }
         let iterator = self.alloc_reg()?;
         let next = self.alloc_reg()?;
         self.emit(Instr::GetIterator {
@@ -298,7 +291,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let exhausted = self.jump();
         self.patch_jump(has_value, self.pc())?;
         let loop_context = self.compile_iterator_body(iterator, step_pc, |this| {
-            this.assign_iteration_value(&statement.left, binding, value, "for-of")?;
+            this.assign_iteration_value(&statement.left, value)?;
             this.compile_statement(&statement.body)
         })?;
 
@@ -309,26 +302,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    fn declare_iteration_binding(
+    fn declare_iteration_bindings(
         &mut self,
         target: &'ast ForStatementLeft<'ast>,
         loop_kind: &str,
-    ) -> Result<Option<BindingId>, CompileError> {
+    ) -> Result<(), CompileError> {
         let ForStatementLeft::VariableDeclaration(declaration) = target else {
-            return Ok(None);
+            return Ok(());
         };
         let [declarator] = declaration.declarations.as_slice() else {
             return Err(unsupported(
                 self.source_text(),
                 declaration.span,
                 &format!("{loop_kind} declaration"),
-            ));
-        };
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-            return Err(unsupported(
-                self.source_text(),
-                declarator.span,
-                &format!("{loop_kind} destructuring"),
             ));
         };
         if let Some(initializer) = &declarator.init {
@@ -339,51 +325,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         self.predeclare_variable_list(declaration)?;
-        let (binding, _) =
-            self.declare(identifier.name.as_str(), declaration.kind, declarator.span)?;
         // `var` exists even when the iteration yields nothing.
         if declaration.kind == VariableDeclarationKind::Var {
-            self.emit(Instr::DeclareBinding { binding });
+            for_each_binding_name(&declarator.id, &mut |identifier| {
+                let (binding, _) =
+                    self.declare(identifier.name.as_str(), declaration.kind, identifier.span)?;
+                self.emit(Instr::DeclareBinding { binding });
+                Ok::<(), CompileError>(())
+            })?;
         }
-        Ok(Some(binding))
+        Ok(())
     }
 
     fn assign_iteration_value(
         &mut self,
         target: &'ast ForStatementLeft<'ast>,
-        binding: Option<BindingId>,
         value: Reg,
-        loop_kind: &str,
     ) -> Result<(), CompileError> {
-        let src = self.slot(value);
-        if let Some(binding) = binding {
-            self.emit(Instr::SetBinding { binding, src });
-        } else if let ForStatementLeft::AssignmentTargetIdentifier(identifier) = target {
-            let name = identifier.name.as_str();
-            let binding = self.lookup(name).ok_or_else(|| {
-                CompileError::new(
-                    self.source_text(),
-                    identifier.span,
-                    format!("assignment to unknown binding {name:?}"),
-                )
-            })?;
-            self.check_tdz(binding, name, identifier.span)?;
-            self.emit(Instr::SetBinding { binding, src });
-        } else if let Some(member) = target.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            self.emit(Instr::SetMember {
-                object: self.slot(object),
-                key: self.slot(key),
-                src,
-            });
+        if let ForStatementLeft::VariableDeclaration(declaration) = target {
+            let declarator = &declaration.declarations[0];
+            self.compile_binding_pattern(&declarator.id, value)
         } else {
-            return Err(unsupported(
-                self.source_text(),
-                target.span(),
-                &format!("{loop_kind} destructuring"),
-            ));
+            self.compile_assignment_pattern(target.to_assignment_target(), value)
         }
-        Ok(())
     }
 
     /// Label chain lowering. A chain ending in a loop binds its names to the

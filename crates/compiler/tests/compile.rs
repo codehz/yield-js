@@ -73,22 +73,14 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
-fn rejects_unsupported_for_of_forms_with_location() {
-    for (statement, syntax) in [
-        ("for await (const x of []) {}", "for-await-of"),
-        ("for (const [x] of []) {}", "for-of destructuring"),
-        ("for ([x] of []) {}", "for-of destructuring"),
-    ] {
-        let source = format!("async function run() {{\n  {statement}\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(syntax);
-        assert!(
-            error
-                .message()
-                .contains(&format!("unsupported syntax: {syntax}")),
-            "{error}"
-        );
-        assert_eq!(error.line(), 2);
-    }
+fn rejects_for_await_of_with_location() {
+    let source = "async function run() {\n  for await (const x of []) {}\n}";
+    let error = compile(source, &CompileOptions::default()).unwrap_err();
+    assert!(
+        error.message().contains("unsupported syntax: for-await-of"),
+        "{error}"
+    );
+    assert_eq!(error.line(), 2);
 }
 
 #[test]
@@ -154,8 +146,6 @@ function run(source) {
             "for (missing in {}) {} let missing;",
             "before initialization",
         ),
-        ("for (let [key] in {}) {}", "for-in destructuring"),
-        ("for ([key] in {}) {}", "for-in destructuring"),
     ] {
         let source = format!("function run() {{\n  {statement}\n}}");
         let error = compile(&source, &CompileOptions::default()).expect_err(statement);
@@ -607,7 +597,6 @@ fn rejects_unsupported_module_syntax() {
         ("export * from 'dep';", "re-export"),
         ("export * as ns from 'dep';", "re-export"),
         ("export class C {}", "class declaration"),
-        ("export const { x } = {};", "destructuring"),
     ] {
         let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
@@ -627,4 +616,17 @@ fn exported_lexical_declarations_keep_the_tdz() {
         assert!(error.message().contains("before initialization"), "{error}");
         assert_eq!((error.line(), error.column()), (2, 3), "{error}");
     }
+}
+
+#[test]
+fn names_nested_in_exported_patterns_are_public() {
+    let build = compile(
+        "export const { x: [a], ...rest } = { x: [1] };",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        build.exports.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["a", "rest"]
+    );
 }

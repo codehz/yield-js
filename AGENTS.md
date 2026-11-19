@@ -56,7 +56,7 @@ Suspend/resume invariants (do not weaken these):
 | --- | --- |
 | `crates/vm/src` | Bytecode contract, loader checks, interpreter, heap/object table, Promise/microtasks, host protocol, snapshot |
 | `crates/compiler/src` | Oxc frontend, lowering, liveness, slot allocation |
-| `crates/compiler/src/lower` | Only body walker: `stmt`, `expr`, `control` |
+| `crates/compiler/src/lower` | Only body walker: `stmt`, `expr`, `control`, `pattern` |
 | `crates/poc/src` | `TestHost`, directive case runner, demo binary |
 | `crates/poc/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
 | `crates/poc/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |

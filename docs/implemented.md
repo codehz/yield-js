@@ -9,12 +9,13 @@
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
 - 未导出且未跨函数共享的绑定在帧槽中；导出和闭包共享的绑定仍在堆环境，快照保留环境、闭包与对象身份。没有共享绑定且不创建闭包的调用不分配环境。
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
+- 变量声明（含命名导出）、函数与箭头函数形参、`catch`、`for…in` / `for…of` 左侧和 `=` 赋值均支持嵌套的对象与数组解构。默认值仅在读到 `undefined` 时求值，形参从左到右初始化。对象 rest 复制未匹配的自有可枚举键（含 Symbol），与对象展开共用复制规则；计算键只求值和转换一次。解构 `null` / `undefined` 抛出可捕获的 `TypeError`。
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this`、预置参数及脚本定义的自有属性可跨 `await` 快照恢复；绑定函数不支持 `new`，不自动创建 `prototype` 属性。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - 对象字面量支持展开：按自有键顺序复制可枚举的字符串键和 Symbol 键，每次复制前重查描述符。来源 getter 以来源对象为 `this`，异常可捕获；结果总是自有数据属性，不调用目标 setter。跳过空值和无可枚举键的原始值；字符串按 UTF-16 索引复制可表示的码元（单独的代理码元仍不支持）。字面量在展开表达式中挂起时，已构建的属性可跨快照恢复。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。
 - `Reflect.get` / `set` 从目标查找属性，可显式指定接收者；省略时使用目标。访问器以接收者为 `this`，数据写入只更新或创建接收者的自有属性。对只读属性、缺少 setter 或不可扩展接收者的写入拒绝返回 `false`（同样的拒绝在严格成员赋值中抛出 `TypeError`）；键转换、访问器及数组长度检查的异常仍会抛出。`Reflect.has` 沿原型链检查而不调用 getter，`Reflect.getOwnPropertyDescriptor` 只检查自有属性。这四种操作都要求目标是对象。
-- `for…in` 支持简单声明、已有绑定或成员作为目标。按每层自有键顺序枚举对象及其原型的可枚举字符串键，不读取属性值；尚存在的不可枚举自有键会遮蔽继承的同名键。进入每层时记录键，访问前重查描述符，跳过已删除的键；不会枚举进入该层后新增的键。字符串原始值按 UTF-16 码元给出索引，其他非空原始值没有自有键；因包装原型未实现，原始值的原型枚举从 `Object.prototype` 开始。`null` 和 `undefined` 不迭代。枚举位置和访问记录跨 `await` 及快照恢复，不走 `Symbol.iterator` 或 `IteratorClose`。
+- `for…in` 支持声明、已有绑定、成员或解构模式作为目标。按每层自有键顺序枚举对象及其原型的可枚举字符串键，不读取属性值；尚存在的不可枚举自有键会遮蔽继承的同名键。进入每层时记录键，访问前重查描述符，跳过已删除的键；不会枚举进入该层后新增的键。字符串原始值按 UTF-16 码元给出索引，其他非空原始值没有自有键；因包装原型未实现，原始值的原型枚举从 `Object.prototype` 开始。`null` 和 `undefined` 不迭代。枚举位置和访问记录跨 `await` 及快照恢复；枚举本身不走 `Symbol.iterator` 或 `IteratorClose`，左侧的数组解构仍走同步迭代协议。
 - `Object.create(proto, descriptors?)` 用对象或 `null` 作为原型，复用 `Object.defineProperties` 的描述符转换。`Object` / `Reflect` 的 `getPrototypeOf` / `setPrototypeOf` 查询或修改内部原型，不调用 getter。成环、改变不可扩展对象的原型，或把 `Object.prototype` 的原型改为非 `null` 时，`Object` 抛出可捕获的 `TypeError`，`Reflect` 返回 `false`；把原型设为其当前值仍成功。`Reflect` 要求对象目标；`Object.getPrototypeOf` 暂不装箱，`Object.setPrototypeOf` 验证新原型后原样返回 `null` / `undefined` 之外的原始值。宿主原生句柄的原型固定为 `null`。
 - `Reflect.ownKeys(obj)` 返回全部自有键：数组索引键按数值升序，其余字符串键及 Symbol 键分别按创建顺序。`Object.keys(value)` 复用该顺序，仅返回可枚举的自有字符串键；字符串原始值按 UTF-16 索引枚举。两者都不遍历原型链或调用 getter。
 - `Object.defineProperty(obj, key, descriptor)` 定义或重定义自有数据或访问器属性，遵守不可扩展、不可配置和只读限制；`Reflect.defineProperty` 对定义被拒绝返回 `false`，参数转换异常仍会抛出。`Object.defineProperties(obj, descriptors)` 按自有键顺序转换描述符映射中可枚举的字符串键和 Symbol 键，全部转换成功后才开始定义；若定义中途失败，已定义的属性不会回滚。`Object.getOwnPropertyDescriptor` 查询属性而不调用其 getter。描述符可跨快照恢复。数组索引支持描述符和稀疏存储；`length` 不可枚举，缩短时不会删除不可配置的元素。原始值包装对象尚未实现。
@@ -22,6 +23,7 @@
 - `Object.preventExtensions` / `isExtensible`、`seal` / `isSealed`、`freeze` / `isFrozen` 控制及查询对象的扩展性和自有描述符。密封使自有属性不可配置；冻结还使自有数据属性（含数组 `length`）不可写，但保留访问器的 getter/setter，不递归处理属性值。不可扩展对象不能新增字符串键、Symbol 键或数组索引，但仍可调用继承的 setter；可写的数组 `length` 可以增长而不创建索引。`Reflect.preventExtensions` 返回布尔值，与 `Reflect.isExtensible` 一样要求对象参数。宿主原生句柄始终不可扩展。扩展性和描述符限制均跨快照恢复。
 - 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Array` 全局名。数组字面量展开和实参展开复用该迭代协议，已求值的元素或实参可跨 `await` 保存。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。
+- 数组解构复用同步迭代协议：省略项只推进，不读取 `value`；rest 收集至耗尽。正常提前结束或模式求值抛错时关闭尚未耗尽的迭代器；若模式已抛错，保留原异常。默认值或目标中的 `await` 可快照恢复，继续使用同一迭代器、已缓存的 `next` 与耗尽状态。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复。`await` 已结算 Promise 或没有可调用 `then` 的值（包括普通对象、数组、函数与宿主原生句柄）也经微任务恢复，并保留兑现值的身份。async 返回值走共享的 Promise 决议流程：对一般 thenable，同步读取一次 `then`，在微任务里以原对象为接收者调用；getter 或调用抛错走拒绝路径。Promise 直接以自身决议会拒绝为脚本可捕获的 `TypeError`。

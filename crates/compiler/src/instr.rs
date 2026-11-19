@@ -22,10 +22,12 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::CallValue { .. }
         | Instr::Construct { .. }
         | Instr::GetMember { .. }
+        | Instr::GetDestructuredMember { .. }
         | Instr::HasProperty { .. }
         | Instr::DeleteMember { .. }
         | Instr::GetIterator { .. }
         | Instr::IteratorNext { .. }
+        | Instr::IteratorSkip { .. }
         | Instr::IteratorClose {
             preserve_throw: false,
             ..
@@ -38,6 +40,8 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::ToString { .. }
         | Instr::ToPropertyKey { .. }
         | Instr::DefineProperty { .. }
+        | Instr::AssertObjectCoercible { .. }
+        | Instr::ObjectRest { .. }
         | Instr::CopyDataProperties { .. } => true,
         Instr::Const { .. }
         | Instr::Undefined { .. }
@@ -133,7 +137,16 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::CopyDataProperties { target, source } => {
             uses.extend([target.index, source.index]);
         }
+        Instr::AssertObjectCoercible { src } => {
+            uses.insert(src.index);
+        }
+        Instr::ObjectRest { dst, src, excluded } => {
+            uses.insert(src.index);
+            uses.extend(excluded.iter().map(|key| key.index));
+            defs.insert(dst.index);
+        }
         Instr::GetMember { dst, object, key }
+        | Instr::GetDestructuredMember { dst, object, key }
         | Instr::HasProperty { dst, object, key }
         | Instr::DeleteMember { dst, object, key } => {
             uses.insert(object.index);
@@ -156,6 +169,14 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         } => {
             uses.extend([iterator.index, next.index]);
             defs.extend([done.index, value.index]);
+        }
+        Instr::IteratorSkip {
+            done,
+            iterator,
+            next,
+        } => {
+            uses.extend([iterator.index, next.index]);
+            defs.insert(done.index);
         }
         Instr::GetForInIterator { dst, source } => {
             uses.insert(source.index);
@@ -269,6 +290,17 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             object: remap(object),
             key: remap(key),
         },
+        Instr::AssertObjectCoercible { src } => Instr::AssertObjectCoercible { src: remap(src) },
+        Instr::GetDestructuredMember { dst, object, key } => Instr::GetDestructuredMember {
+            dst: remap(dst),
+            object: remap(object),
+            key: remap(key),
+        },
+        Instr::ObjectRest { dst, src, excluded } => Instr::ObjectRest {
+            dst: remap(dst),
+            src: remap(src),
+            excluded: excluded.into_iter().map(remap).collect(),
+        },
         Instr::HasProperty { dst, object, key } => Instr::HasProperty {
             dst: remap(dst),
             object: remap(object),
@@ -296,6 +328,15 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         } => Instr::IteratorNext {
             done: remap(done),
             value: remap(value),
+            iterator: remap(iterator),
+            next: remap(next),
+        },
+        Instr::IteratorSkip {
+            done,
+            iterator,
+            next,
+        } => Instr::IteratorSkip {
+            done: remap(done),
             iterator: remap(iterator),
             next: remap(next),
         },

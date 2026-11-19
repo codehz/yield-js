@@ -6,6 +6,7 @@
 
 mod control;
 mod expr;
+mod pattern;
 mod stmt;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -159,8 +160,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn compile(&mut self) -> Result<LoweredFunction, CompileError> {
         let source = self.source;
-        self.compile_parameters(source)?;
         self.install_this_binding(source);
+        self.compile_parameters(source)?;
         match source {
             FunctionSource::Script(statements) => {
                 self.hoist_script(statements)?;
@@ -256,7 +257,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn compile_parameter_list(
         &mut self,
-        params: &FormalParameters<'_>,
+        params: &'ast FormalParameters<'ast>,
     ) -> Result<(), CompileError> {
         if params.rest.is_some() {
             return Err(unsupported(
@@ -265,32 +266,50 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "rest parameter",
             ));
         }
+        let needs_prologue = params.items.iter().any(|parameter| {
+            parameter.initializer.is_some()
+                || !matches!(&parameter.pattern, BindingPattern::BindingIdentifier(_))
+        });
+        let mut pending = Vec::new();
         for parameter in &params.items {
-            if parameter.initializer.is_some() {
-                return Err(unsupported(
-                    self.source_text(),
-                    parameter.span,
-                    "default parameter",
-                ));
+            for_each_binding_name(&parameter.pattern, &mut |identifier| {
+                let name = identifier.name.as_str();
+                if self.env.has_function_binding(name) {
+                    return Err(CompileError::new(
+                        self.source_text(),
+                        identifier.span,
+                        format!("duplicate parameter {name:?}"),
+                    ));
+                }
+                let binding = self.alloc_binding();
+                self.env.insert_function(name.to_owned(), binding);
+                if needs_prologue {
+                    pending.push(binding);
+                } else {
+                    self.param_bindings.push(binding);
+                }
+                Ok::<(), CompileError>(())
+            })?;
+        }
+        if needs_prologue {
+            // Keep incoming arguments separate from the names initialized by
+            // patterns, so a default can see earlier but not later bindings.
+            self.open_pending(pending)?;
+            for parameter in &params.items {
+                let binding = self.alloc_binding();
+                self.param_bindings.push(binding);
+                let value = self.alloc_reg()?;
+                self.emit(Instr::GetBinding {
+                    dst: self.slot(value),
+                    binding,
+                });
+                let value = if let Some(initializer) = &parameter.initializer {
+                    self.compile_pattern_default(value, initializer)?
+                } else {
+                    value
+                };
+                self.compile_binding_pattern(&parameter.pattern, value)?;
             }
-            let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-                return Err(unsupported(
-                    self.source_text(),
-                    parameter.span,
-                    "parameter destructuring",
-                ));
-            };
-            let name = identifier.name.as_str().to_owned();
-            if self.env.has_function_binding(&name) {
-                return Err(CompileError::new(
-                    self.source_text(),
-                    parameter.span,
-                    format!("duplicate parameter {name:?}"),
-                ));
-            }
-            let binding = self.alloc_binding();
-            self.env.insert_function(name, binding);
-            self.param_bindings.push(binding);
         }
         Ok(())
     }
@@ -519,14 +538,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     }
                     Declaration::VariableDeclaration(declaration) => {
                         for declarator in &declaration.declarations {
-                            if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                            for_each_binding_name(&declarator.id, &mut |id| {
                                 self.export_binding(
                                     id.name.as_str(),
                                     id.span,
                                     id.name.as_str(),
                                     id.span,
-                                )?;
-                            }
+                                )
+                            })?;
                         }
                     }
                     _ => {}
@@ -660,17 +679,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             VariableDeclarationKind::Let | VariableDeclarationKind::Const
         );
         for declarator in &declaration.declarations {
-            let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-                continue;
-            };
-            let name = identifier.name.as_str();
-            let Some(binding) = self.predeclare_name(name, declaration.kind, declarator.span)?
-            else {
-                continue;
-            };
-            if is_lexical {
-                lexical.push((binding, name.to_owned()));
-            }
+            for_each_binding_name(&declarator.id, &mut |identifier| {
+                let name = identifier.name.as_str();
+                if let Some(binding) =
+                    self.predeclare_name(name, declaration.kind, identifier.span)?
+                    && is_lexical
+                {
+                    lexical.push((binding, name.to_owned()));
+                }
+                Ok::<(), CompileError>(())
+            })?;
         }
         Ok(lexical)
     }
@@ -735,17 +753,31 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         declaration: &'ast VariableDeclaration<'ast>,
     ) -> Result<(), CompileError> {
+        as_binding_kind(self.source_text(), declaration.kind, declaration.span)?;
         let lexical = matches!(
             declaration.kind,
             VariableDeclarationKind::Let | VariableDeclarationKind::Const
         );
         for declarator in &declaration.declarations {
             let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-                return Err(unsupported(
-                    self.source_text(),
-                    declarator.span,
-                    "destructuring declaration",
-                ));
+                for_each_binding_name(&declarator.id, &mut |identifier| {
+                    let (binding, _) =
+                        self.declare(identifier.name.as_str(), declaration.kind, identifier.span)?;
+                    if !lexical {
+                        self.emit(Instr::DeclareBinding { binding });
+                    }
+                    Ok::<(), CompileError>(())
+                })?;
+                let expression = declarator.init.as_ref().ok_or_else(|| {
+                    CompileError::new(
+                        self.source_text(),
+                        declarator.span,
+                        "destructuring declaration requires an initializer",
+                    )
+                })?;
+                let value = self.compile_expression(expression)?;
+                self.compile_binding_pattern(&declarator.id, value)?;
+                continue;
             };
             let name = identifier.name.as_str();
             let (binding, _) = self.declare(name, declaration.kind, declarator.span)?;
@@ -804,11 +836,11 @@ fn function_uses_this(source: FunctionSource<'_>) -> bool {
     let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
         return false;
     };
-    let Some(body) = &function.body else {
-        return false;
-    };
     let mut scan = ThisScan { found: false };
-    scan.visit_function_body(body);
+    scan.visit_formal_parameters(&function.params);
+    if let Some(body) = &function.body {
+        scan.visit_function_body(body);
+    }
     scan.found
 }
 
@@ -1022,18 +1054,20 @@ fn bind_declaration(
     lexical: &mut BTreeMap<String, Span>,
     vars: &mut BTreeMap<String, Span>,
 ) -> Result<(), CompileError> {
-    match declaration.kind {
-        VariableDeclarationKind::Var => {
-            for (name, span) in declarator_names(declaration) {
-                vars.entry(name).or_insert(span);
+    for declarator in &declaration.declarations {
+        for_each_binding_name(&declarator.id, &mut |identifier| {
+            let name = identifier.name.as_str();
+            match declaration.kind {
+                VariableDeclarationKind::Var => {
+                    vars.entry(name.to_owned()).or_insert(identifier.span);
+                }
+                VariableDeclarationKind::Let | VariableDeclarationKind::Const => {
+                    add_lexical(source, lexical, name, identifier.span)?;
+                }
+                _ => {}
             }
-        }
-        VariableDeclarationKind::Let | VariableDeclarationKind::Const => {
-            for (name, span) in declarator_names(declaration) {
-                add_lexical(source, lexical, &name, span)?;
-            }
-        }
-        _ => {}
+            Ok::<(), CompileError>(())
+        })?;
     }
     Ok(())
 }
@@ -1044,35 +1078,50 @@ fn bind_for_header(
     body_vars: &BTreeMap<String, Span>,
     vars: &mut BTreeMap<String, Span>,
 ) -> Result<(), CompileError> {
-    if matches!(declaration.kind, VariableDeclarationKind::Var) {
-        for (name, span) in declarator_names(declaration) {
-            vars.entry(name).or_insert(span);
-        }
-        return Ok(());
-    }
-    for (name, span) in declarator_names(declaration) {
-        if body_vars.contains_key(&name) {
-            return Err(CompileError::new(
-                source,
-                span,
-                format!("duplicate lexical binding {name:?}"),
-            ));
-        }
+    for declarator in &declaration.declarations {
+        for_each_binding_name(&declarator.id, &mut |identifier| {
+            let name = identifier.name.as_str();
+            if declaration.kind == VariableDeclarationKind::Var {
+                vars.entry(name.to_owned()).or_insert(identifier.span);
+            } else if body_vars.contains_key(name) {
+                return Err(CompileError::new(
+                    source,
+                    identifier.span,
+                    format!("duplicate lexical binding {name:?}"),
+                ));
+            }
+            Ok(())
+        })?;
     }
     Ok(())
 }
 
-fn declarator_names(declaration: &VariableDeclaration<'_>) -> Vec<(String, Span)> {
-    declaration
-        .declarations
-        .iter()
-        .filter_map(|declarator| match &declarator.id {
-            BindingPattern::BindingIdentifier(identifier) => {
-                Some((identifier.name.as_str().to_owned(), declarator.span))
+/// Visit only bound identifiers, in the order in which the pattern binds them.
+pub(super) fn for_each_binding_name<E>(
+    pattern: &BindingPattern<'_>,
+    visit: &mut impl FnMut(&BindingIdentifier<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => visit(identifier)?,
+        BindingPattern::AssignmentPattern(pattern) => for_each_binding_name(&pattern.left, visit)?,
+        BindingPattern::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                for_each_binding_name(&property.value, visit)?;
             }
-            _ => None,
-        })
-        .collect()
+            if let Some(rest) = &pattern.rest {
+                for_each_binding_name(&rest.argument, visit)?;
+            }
+        }
+        BindingPattern::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                for_each_binding_name(element, visit)?;
+            }
+            if let Some(rest) = &pattern.rest {
+                for_each_binding_name(&rest.argument, visit)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn function_name<'ast>(

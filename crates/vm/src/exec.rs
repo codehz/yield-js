@@ -1,6 +1,8 @@
 //! Interpreter. A step either continues, leaves the frame, or throws.
 //! Handlers run in one place; call sites do not each reimplement catch.
 
+use std::collections::BTreeSet;
+
 use crate::bytecode::{
     BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
     UnaryOp,
@@ -271,6 +273,12 @@ impl Vm {
                     self.read_member(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::GetDestructuredMember { dst, object, key } => {
+                let key = converted_property_key(frame.read_ref(key)?)?;
+                let invocation =
+                    self.read_destructured_member(host, frame.read_ref(object)?, key)?;
+                store_invocation(frame, dst, invocation)
+            }
             Instr::HasProperty { dst, object, key } => {
                 let invocation =
                     self.has_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
@@ -334,6 +342,22 @@ impl Vm {
                 frame.write(value, item.unwrap_or(Value::Undefined))?;
                 Ok(Step::Next)
             }
+            Instr::IteratorSkip {
+                done,
+                iterator,
+                next,
+            } => {
+                let done_value = match self.iterator_step_result(
+                    host,
+                    frame.read_ref(iterator)?,
+                    frame.read_ref(next)?,
+                )? {
+                    Ok(result) => result.is_none(),
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
+                frame.write(done, Value::Bool(done_value))?;
+                Ok(Step::Next)
+            }
             Instr::IteratorClose {
                 iterator,
                 preserve_throw,
@@ -375,10 +399,41 @@ impl Vm {
             }
             Instr::CopyDataProperties { target, source } => {
                 let target = object_id(frame.read_ref(target)?, "spread target must be an object")?;
-                match self.copy_data_properties(host, target, frame.read_ref(source)?)? {
+                match self.copy_data_properties(
+                    host,
+                    target,
+                    frame.read_ref(source)?,
+                    &BTreeSet::new(),
+                )? {
                     Invocation::Value(_) => Ok(Step::Next),
                     Invocation::Thrown(error) => Ok(Step::Throw(error)),
                 }
+            }
+            Instr::AssertObjectCoercible { src } => {
+                if matches!(frame.read_ref(src)?, Value::Null | Value::Undefined) {
+                    return Ok(Step::Throw(
+                        self.type_error("Cannot destructure null or undefined")?,
+                    ));
+                }
+                Ok(Step::Next)
+            }
+            Instr::ObjectRest { dst, src, excluded } => {
+                let source = frame.read_ref(src)?;
+                if matches!(source, Value::Null | Value::Undefined) {
+                    return Ok(Step::Throw(
+                        self.type_error("Cannot destructure null or undefined")?,
+                    ));
+                }
+                let excluded = excluded
+                    .into_iter()
+                    .map(|slot| converted_property_key(frame.read_ref(slot)?))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                let target = self.heap.alloc_plain();
+                match self.copy_data_properties(host, target, source, &excluded)? {
+                    Invocation::Value(_) => frame.write(dst, Value::Object(target))?,
+                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                }
+                Ok(Step::Next)
             }
             Instr::GetBinding { dst, binding } => {
                 let env = frame
@@ -486,6 +541,22 @@ impl Vm {
         iterator: &Value,
         next: &Value,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
+        let result = match self.iterator_step_result(host, iterator, next)? {
+            Ok(Some(result)) => result,
+            other => return Ok(other),
+        };
+        match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
+            Invocation::Value(value) => Ok(Ok(Some(value))),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
+    }
+
+    fn iterator_step_result(
+        &mut self,
+        host: &mut dyn Host,
+        iterator: &Value,
+        next: &Value,
+    ) -> Result<Result<Option<Value>, Value>, VmError> {
         let result = self.invoke(host, next, Vec::new(), iterator)?;
         let result =
             match self.require_iterator_object(result, "iterator next must return an object")? {
@@ -493,12 +564,8 @@ impl Vm {
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
         match self.read_property(host, &result, PropertyKeyRef::String("done"))? {
-            Invocation::Value(done) if done.truthy() => return Ok(Ok(None)),
-            Invocation::Thrown(error) => return Ok(Err(error)),
-            _ => {}
-        }
-        match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
-            Invocation::Value(value) => Ok(Ok(Some(value))),
+            Invocation::Value(done) if done.truthy() => Ok(Ok(None)),
+            Invocation::Value(_) => Ok(Ok(Some(result))),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
     }
@@ -654,6 +721,44 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         self.read_property(host, object, key.borrowed())
+    }
+
+    fn read_destructured_member(
+        &mut self,
+        host: &mut dyn Host,
+        object: &Value,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Invocation, VmError> {
+        match object {
+            Value::Object(_) => return self.read_property(host, object, key),
+            Value::Null | Value::Undefined => {
+                return self.throw_type_error("Cannot destructure null or undefined");
+            }
+            Value::String(text) => match key {
+                PropertyKeyRef::Symbol(ITERATOR_SYMBOL) => {
+                    return self.read_property(host, object, key);
+                }
+                PropertyKeyRef::String("length") => {
+                    let length = text.encode_utf16().count();
+                    return Ok(Invocation::Value(Value::Number(length as f64)));
+                }
+                PropertyKeyRef::String(key) => {
+                    if let Some(unit) =
+                        ops::canonical_index(key).and_then(|index| text.encode_utf16().nth(index))
+                    {
+                        let Some(ch) = char::from_u32(u32::from(unit)) else {
+                            return self.throw_type_error(
+                                "string index cannot represent a lone surrogate",
+                            );
+                        };
+                        return Ok(Invocation::Value(Value::String(ch.to_string())));
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        self.read_property_with_receiver(host, self.builtins.object_prototype, object, key)
     }
 
     pub(crate) fn read_property(
@@ -908,6 +1013,7 @@ impl Vm {
         host: &mut dyn Host,
         target: ObjectId,
         source: &Value,
+        excluded: &BTreeSet<PropertyKeyRef<'_>>,
     ) -> Result<Invocation, VmError> {
         match source {
             Value::Object(id) => {
@@ -915,6 +1021,9 @@ impl Vm {
                 // or change its enumerability before it is visited.
                 let keys: Vec<_> = self.heap.get(*id)?.own_keys(false).collect();
                 for key in keys {
+                    if excluded.contains(&key.borrowed()) {
+                        continue;
+                    }
                     let Some(property) = self.heap.get(*id)?.own_property(key.borrowed()) else {
                         continue;
                     };
@@ -933,13 +1042,17 @@ impl Vm {
             }
             Value::String(text) => {
                 for (index, unit) in text.encode_utf16().enumerate() {
+                    let key = index.to_string();
+                    if excluded.contains(&PropertyKeyRef::String(&key)) {
+                        continue;
+                    }
                     let Some(ch) = char::from_u32(u32::from(unit)) else {
                         return self
                             .throw_type_error("object spread cannot represent a lone surrogate");
                     };
                     self.heap.define_property(
                         target,
-                        PropertyKey::String(index.to_string()),
+                        PropertyKey::String(key),
                         Property::Data(Value::String(ch.to_string())),
                     )?;
                 }
@@ -1125,6 +1238,16 @@ impl Vm {
         frame.write(dst, value)?;
         frame.pc = target as usize;
         Ok(true)
+    }
+}
+
+fn converted_property_key(value: &Value) -> Result<PropertyKeyRef<'_>, VmError> {
+    match value {
+        Value::String(key) => Ok(PropertyKeyRef::String(key)),
+        Value::Symbol(id) => Ok(PropertyKeyRef::Symbol(*id)),
+        _ => Err(VmError::InvalidState(
+            "destructuring requires an already converted property key".to_owned(),
+        )),
     }
 }
 

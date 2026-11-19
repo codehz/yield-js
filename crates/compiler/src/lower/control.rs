@@ -8,9 +8,9 @@
 use oxc::ast::ast::*;
 use yield_vm::bytecode::{ExceptionHandler, Instr};
 
-use super::Lowerer;
+use super::{Lowerer, for_each_binding_name};
 use crate::emit::Reg;
-use crate::error::{CompileError, unsupported};
+use crate::error::CompileError;
 use crate::ir::AwaitSite;
 
 #[derive(Clone, Copy)]
@@ -215,7 +215,7 @@ impl<'ast> Control<'ast> {
         std::mem::take(&mut self.handlers)
     }
 
-    fn push_handler(&mut self, handler: ExceptionHandler) {
+    pub(super) fn push_handler(&mut self, handler: ExceptionHandler) {
         self.handlers.push(handler);
     }
 }
@@ -388,32 +388,27 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         let mut catch_body = None;
         if let Some(handler) = &statement.handler {
-            let catch_stub = self.pc();
+            // Parameter initialization can throw too: the finalizer's handler
+            // must cover the entire catch clause, not just its body.
+            let catch_start = self.pc();
             self.env.enter_block();
             if let Some(parameter) = &handler.param {
-                let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-                    return Err(unsupported(
-                        self.source_text(),
-                        parameter.span,
-                        "catch parameter destructuring",
-                    ));
-                };
-                let (binding, _) = self.declare(
-                    identifier.name.as_str(),
-                    VariableDeclarationKind::Let,
-                    parameter.span,
-                )?;
-                self.emit(Instr::DeclareBinding { binding });
-                self.emit(Instr::SetBinding {
-                    binding,
-                    src: self.slot(exception),
-                });
+                let mut bindings = Vec::new();
+                for_each_binding_name(&parameter.pattern, &mut |identifier| {
+                    if let Some(binding) = self.predeclare_name(
+                        identifier.name.as_str(),
+                        VariableDeclarationKind::Let,
+                        identifier.span,
+                    )? {
+                        bindings.push(binding);
+                    }
+                    Ok::<(), CompileError>(())
+                })?;
+                self.open_pending(bindings)?;
+                self.compile_binding_pattern(&parameter.pattern, exception)?;
             }
-            let catch_start = self.pc();
-            self.predeclare_scope(&handler.body.body)?;
-            for statement in &handler.body.body {
-                self.compile_statement(statement)?;
-            }
+            // Body declarations are not in scope in parameter initializers.
+            self.compile_block(&handler.body)?;
             if has_finalizer {
                 self.route_completion(Completion::Normal, None)?;
             } else {
@@ -421,7 +416,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             let catch_region_end = self.pc();
             self.env.exit_block();
-            catch_body = Some((catch_stub, catch_start, catch_region_end));
+            catch_body = Some((catch_start, catch_region_end));
         }
 
         if has_finalizer {
@@ -440,7 +435,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let jump = self.jump();
             context.entry_jumps.push(jump);
 
-            if let Some((catch_stub, catch_start, catch_region_end)) = catch_body {
+            if let Some((catch_start, catch_region_end)) = catch_body {
                 self.control.push_handler(ExceptionHandler {
                     start_pc: catch_start as u32,
                     end_pc: catch_region_end as u32,
@@ -450,7 +445,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.control.push_handler(ExceptionHandler {
                     start_pc: try_start as u32,
                     end_pc: try_end as u32,
-                    target_pc: catch_stub as u32,
+                    target_pc: catch_start as u32,
                     dst: self.slot(exception),
                 });
             } else {
@@ -469,11 +464,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             self.compile_block(statement.finalizer.as_ref().expect("finalizer"))?;
             self.dispatch_finally(&context)?;
         } else {
-            if let Some((catch_stub, _, _)) = catch_body {
+            if let Some((catch_start, _)) = catch_body {
                 self.control.push_handler(ExceptionHandler {
                     start_pc: try_start as u32,
                     end_pc: try_end as u32,
-                    target_pc: catch_stub as u32,
+                    target_pc: catch_start as u32,
                     dst: self.slot(exception),
                 });
             }
