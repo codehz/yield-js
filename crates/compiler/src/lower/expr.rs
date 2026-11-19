@@ -273,15 +273,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             BinaryOperator::ShiftLeft => BinaryOp::Shl,
             BinaryOperator::ShiftRight => BinaryOp::Shr,
             BinaryOperator::ShiftRightZeroFill => BinaryOp::UShr,
-            BinaryOperator::In | BinaryOperator::Instanceof => {
+            BinaryOperator::In => {
+                let key = self.compile_expression(&expression.left)?;
+                let object = self.compile_expression(&expression.right)?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::HasProperty {
+                    dst: self.slot(dst),
+                    object: self.slot(object),
+                    key: self.slot(key),
+                });
+                return Ok(dst);
+            }
+            BinaryOperator::Instanceof => {
                 return Err(unsupported(
                     self.source_text(),
                     expression.span,
-                    if matches!(expression.operator, BinaryOperator::In) {
-                        "in operator"
-                    } else {
-                        "instanceof operator"
-                    },
+                    "instanceof operator",
                 ));
             }
         };

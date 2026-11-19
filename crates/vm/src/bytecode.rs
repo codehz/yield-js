@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 8;
+pub const BYTECODE_VERSION: u32 = 9;
 
 /// VM-provided callable names, in builtin-index order.
 ///
@@ -169,6 +169,12 @@ pub enum Instr {
         elements: Vec<Slot>,
     },
     GetMember {
+        dst: Slot,
+        object: Slot,
+        key: Slot,
+    },
+    /// Tests property presence without reading the property value.
+    HasProperty {
         dst: Slot,
         object: Slot,
         key: Slot,
@@ -633,6 +639,11 @@ impl Build {
                     check_slot(*dst, "GetMember.dst")?;
                     check_slot(*object, "GetMember.object")?;
                     check_slot(*key, "GetMember.key")?;
+                }
+                Instr::HasProperty { dst, object, key } => {
+                    check_slot(*dst, "HasProperty.dst")?;
+                    check_slot(*object, "HasProperty.object")?;
+                    check_slot(*key, "HasProperty.key")?;
                 }
                 Instr::GetIterator {
                     iterator,

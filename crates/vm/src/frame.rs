@@ -16,9 +16,9 @@ impl SlotFile {
         }
     }
 
-    fn read(&self, index: u16, kind: SlotKind) -> Result<Value, VmError> {
+    fn read(&self, index: u16, kind: SlotKind) -> Result<&Value, VmError> {
         match self.slots.get(index as usize) {
-            Some(Some(value)) => Ok(value.clone()),
+            Some(Some(value)) => Ok(value),
             Some(None) | None => Err(VmError::InvalidState(format!(
                 "read of uninitialized {kind:?} slot {index}"
             ))),
@@ -63,6 +63,10 @@ impl Frame {
     }
 
     pub(crate) fn read(&self, slot: Slot) -> Result<Value, VmError> {
+        self.read_ref(slot).cloned()
+    }
+
+    pub(crate) fn read_ref(&self, slot: Slot) -> Result<&Value, VmError> {
         self.file(slot.kind).read(slot.index, slot.kind)
     }
 
@@ -77,7 +81,7 @@ impl Frame {
     pub(crate) fn read_saved(&self, slots: &[u16]) -> Result<Vec<Value>, VmError> {
         slots
             .iter()
-            .map(|index| self.persistent.read(*index, SlotKind::Persistent))
+            .map(|index| self.persistent.read(*index, SlotKind::Persistent).cloned())
             .collect()
     }
 

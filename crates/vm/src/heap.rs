@@ -121,6 +121,22 @@ pub enum Property {
     },
 }
 
+enum OwnProperty<'a> {
+    Plain(&'a Property),
+    Data(&'a Value),
+    ArrayLength(usize),
+}
+
+impl OwnProperty<'_> {
+    fn into_owned(self) -> Property {
+        match self {
+            Self::Plain(property) => property.clone(),
+            Self::Data(value) => Property::Data(value.clone()),
+            Self::ArrayLength(length) => Property::Data(Value::Number(length as f64)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlainObject {
     pub props: BTreeMap<String, Property>,
@@ -140,11 +156,11 @@ pub struct ArrayObject {
 
 impl ArrayObject {
     /// `Some` is an own hit, including an explicit `undefined`.
-    fn own(&self, key: PropertyKeyRef<'_>) -> Option<Value> {
+    fn own(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
         match key {
-            PropertyKeyRef::String("length") => Some(Value::Number(self.elements.len() as f64)),
-            PropertyKeyRef::String(key) => self.own_value(key).cloned(),
-            PropertyKeyRef::Symbol(id) => self.symbol_props.get(&id).cloned(),
+            PropertyKeyRef::String("length") => Some(OwnProperty::ArrayLength(self.elements.len())),
+            PropertyKeyRef::String(key) => self.own_value(key).map(OwnProperty::Data),
+            PropertyKeyRef::Symbol(id) => self.symbol_props.get(&id).map(OwnProperty::Data),
         }
     }
 
@@ -304,6 +320,36 @@ impl Object {
         match self {
             Self::Environment(environment) => Some(environment),
             _ => None,
+        }
+    }
+
+    fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
+        match self {
+            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
+                lookup_tables(&plain.props, &plain.symbol_props, key).map(OwnProperty::Plain)
+            }
+            Self::Array(array) => array.own(key),
+            Self::Function(function) => {
+                lookup_tables(&function.props, &function.symbol_props, key).map(OwnProperty::Data)
+            }
+            Self::Promise(promise) => {
+                lookup_tables(&promise.props, &promise.symbol_props, key).map(OwnProperty::Data)
+            }
+            Self::BuiltinStatic(builtin) => {
+                lookup_tables(&builtin.props, &builtin.symbol_props, key).map(OwnProperty::Data)
+            }
+            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => None,
+        }
+    }
+
+    fn prototype(&self) -> Option<ObjectId> {
+        match self {
+            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => plain.prototype,
+            Self::Array(array) => array.prototype,
+            Self::Function(function) => function.prototype,
+            Self::Promise(promise) => promise.prototype,
+            Self::BuiltinStatic(builtin) => builtin.prototype,
+            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => None,
         }
     }
 
@@ -752,6 +798,22 @@ impl Heap {
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<Option<Property>, VmError> {
+        Ok(self.find_property(id, key)?.map(OwnProperty::into_owned))
+    }
+
+    pub(crate) fn has_property(
+        &self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<bool, VmError> {
+        Ok(self.find_property(id, key)?.is_some())
+    }
+
+    fn find_property(
+        &self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Option<OwnProperty<'_>>, VmError> {
         let mut current = id;
         let mut previous = None;
         let mut remaining = self.objects.len();
@@ -776,37 +838,10 @@ impl Heap {
                 )));
             }
             remaining -= 1;
-            let (own, prototype) = match object {
-                Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => (
-                    lookup_tables(&plain.props, &plain.symbol_props, key).cloned(),
-                    plain.prototype,
-                ),
-                Object::Array(array) => (array.own(key).map(Property::Data), array.prototype),
-                Object::Function(function) => (
-                    lookup_tables(&function.props, &function.symbol_props, key)
-                        .cloned()
-                        .map(Property::Data),
-                    function.prototype,
-                ),
-                Object::Promise(promise) => (
-                    lookup_tables(&promise.props, &promise.symbol_props, key)
-                        .cloned()
-                        .map(Property::Data),
-                    promise.prototype,
-                ),
-                Object::BuiltinStatic(builtin) => (
-                    lookup_tables(&builtin.props, &builtin.symbol_props, key)
-                        .cloned()
-                        .map(Property::Data),
-                    builtin.prototype,
-                ),
-                Object::Native(_) | Object::Resolution(_) | Object::Bound(_) => (None, None),
-                Object::Environment(_) => unreachable!(),
-            };
-            if let Some(value) = own {
-                return Ok(Some(value));
+            if let Some(property) = object.own_property(key) {
+                return Ok(Some(property));
             }
-            let Some(next) = prototype else {
+            let Some(next) = object.prototype() else {
                 return Ok(None);
             };
             previous = Some(current);
@@ -815,28 +850,7 @@ impl Heap {
     }
 
     pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
-        let key = key.borrowed();
-        Ok(match self.get(id)? {
-            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
-                lookup_tables(&plain.props, &plain.symbol_props, key).is_some()
-            }
-            Object::Array(array) => {
-                matches!(key, PropertyKeyRef::String("length")) || array.own(key).is_some()
-            }
-            Object::Function(function) => {
-                lookup_tables(&function.props, &function.symbol_props, key).is_some()
-            }
-            Object::Promise(promise) => {
-                lookup_tables(&promise.props, &promise.symbol_props, key).is_some()
-            }
-            Object::BuiltinStatic(builtin) => {
-                lookup_tables(&builtin.props, &builtin.symbol_props, key).is_some()
-            }
-            Object::Native(_)
-            | Object::Resolution(_)
-            | Object::Environment(_)
-            | Object::Bound(_) => false,
-        })
+        Ok(self.get(id)?.own_property(key.borrowed()).is_some())
     }
 
     /// String-keyed convenience for internal builtin setup.

@@ -25,7 +25,7 @@
 - **匿名顶层/嵌套函数声明**（"anonymous declaration"）
 
 ### 2.2 表达式
-- **`in` / `instanceof` 运算符**
+- **`instanceof` 运算符**；`in` 已支持，沿原型链检查属性是否存在，不读取属性或调用 getter。键转换沿用成员访问的子集语义（Symbol 保留身份，对象键不走完整 `ToPrimitive`）；右操作数不是对象时抛出可捕获的 `TypeError`。
 - **`delete`**：仅当操作数为标识符/成员/可选链时拒绝；`delete` 属性删除无实现
 - **实参展开、数组展开、对象展开**（"spread argument" / "array spread" / "object spread"）
 - **自增/自减**：目标仅限简单绑定或成员（"update target outside the PoC subset"），其余赋值目标拒绝（"assignment to non-identifier/non-member target"）。算术复合赋值与逻辑赋值（`||=`/`&&=`/`??=`）已支持
@@ -49,7 +49,7 @@
 | 语义点 | design.md 目标 | 现状 |
 | --- | --- | --- |
 | `arguments` | 支持（严格模式 `arguments`） | 无任何绑定或降级；引用即"unknown binding"/未知名 |
-| 原型链、属性描述符、getter/setter 运行时 | 支持 | 堆只有对象/数组/闭包/promise 等，无 `GetMember` 的原型查找语义说明；getter/setter 仅编译期存在（`DefineProperty` 带种类），行为依赖堆实现 |
+| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器的接收者语义、`hasOwnProperty` 与 `in`；快照保存内部原型。未实现 `writable` / `enumerable` / `configurable` 标志、标准枚举顺序及 `Object` 的原型和描述符 API。 |
 | 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | `BUILTINS` 只有 `["Promise", "queueMicrotask", "Error", "TypeError", "Symbol"]` |
 | 错误对象 | 标准错误类型 | `Error` / `TypeError` 可构造；VM 生成的 `TypeError` 同样是对象，提供 `name`、`message` 和简化的 `stack`。`Promise.any` 的 `AggregateError` 拒绝值仍为字符串。 |
 | 完整 ECMAScript TDZ | 明确不做 | `pending_lexicals` 仅本函数静态检查；闭包提前读得 `undefined` |
@@ -62,8 +62,9 @@
 
 1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **迭代协议**：同步 `for…of` 使用 `[Symbol.iterator]`，缓存 `next`，并在循环提前退出时执行 `IteratorClose`。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照 v9 已能保存数组迭代器的源数组引用及游标，本次仅将字节码升级至 v8。`for…in` 仍拒绝。
+3. **迭代协议**：同步 `for…of` 使用 `[Symbol.iterator]`，缓存 `next`，并在循环提前退出时执行 `IteratorClose`。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照格式 v9 保存数组迭代器的源数组引用及游标。`for…in` 仍拒绝；数组仍为稠密存储，没有空洞语义。
 4. **解构与 rest/spread 仍拒绝**：数组解构与展开尚未接入迭代协议；对象解构与展开也未实现。
+5. **属性存在性与描述符**：`in`（字节码 v9，快照格式不变）与成员读取共用原型链查找；存在性检查不复制属性值。属性标志和按标准顺序枚举仍是 `Object`、`Reflect` 与 Proxy 不变量的缺口。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 

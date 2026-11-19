@@ -192,6 +192,11 @@ impl Vm {
                 let invocation = self.read_member(host, &frame.read(object)?, &frame.read(key)?)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::HasProperty { dst, object, key } => {
+                let invocation =
+                    self.has_property(frame.read_ref(object)?, frame.read_ref(key)?)?;
+                store_invocation(frame, dst, invocation)
+            }
             Instr::GetIterator {
                 iterator,
                 next,
@@ -418,14 +423,33 @@ impl Vm {
                 self.invoke(host, &Value::Object(get), Vec::new(), object)
             }
             None if let PropertyKeyRef::String(key) = key
-                && self.heap.function(id).is_some()
-                && matches!(key, "call" | "apply" | "bind") =>
+                && self.has_virtual_function_method(id, key) =>
             {
                 let method = self.heap.alloc_builtin("Function", Some(key));
                 Ok(Invocation::Value(Value::Object(method)))
             }
             _ => Ok(Invocation::Value(Value::Undefined)),
         }
+    }
+
+    fn has_property(&mut self, object: &Value, key: &Value) -> Result<Invocation, VmError> {
+        let Value::Object(id) = *object else {
+            return self.throw_type_error("right-hand side of 'in' is not an object");
+        };
+        let converted;
+        let key = if let Value::String(key) = key {
+            PropertyKeyRef::String(key)
+        } else {
+            converted = ops::property_key(key)?;
+            converted.borrowed()
+        };
+        let present = self.heap.has_property(id, key)?
+            || matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key));
+        Ok(Invocation::Value(Value::Bool(present)))
+    }
+
+    fn has_virtual_function_method(&self, id: ObjectId, key: &str) -> bool {
+        matches!(key, "call" | "apply" | "bind") && self.heap.function(id).is_some()
     }
 
     fn write_member(
