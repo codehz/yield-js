@@ -132,12 +132,72 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     self.enqueue_function(FunctionSource::Arrow(arrow), "arrow", arrow.span)?;
                 self.emit_function_value(func_id)
             }
+            Expression::TemplateLiteral(template) => self.compile_template_literal(template),
             other => Err(unsupported(
                 self.source_text(),
                 other.span(),
                 "expression form outside the PoC subset",
             )),
         }
+    }
+
+    /// Lower a non-tagged template literal by interleaving fixed text with
+    /// interpolated expressions in source order, accumulating through
+    /// `BinaryOp::Add` so each expression is evaluated immediately before the
+    /// next piece of text is appended.
+    fn compile_template_literal(
+        &mut self,
+        template: &'ast TemplateLiteral<'ast>,
+    ) -> Result<Reg, CompileError> {
+        // n expressions means n + 1 text chunks; the first chunk seeds the
+        // accumulator, even when its text is empty.
+        let first = template.quasis.first().ok_or_else(|| {
+            unsupported(
+                self.source_text(),
+                template.span,
+                "template literal without text chunks",
+            )
+        })?;
+        let first_text = self.template_element_text(first)?;
+        let mut acc = self.emit_constant(Constant::String(first_text.to_owned()))?;
+        for (index, expression) in template.expressions.iter().enumerate() {
+            let value = self.compile_expression(expression)?;
+            acc = self.emit_string_add(acc, value)?;
+            // Text after expression i is quasi i + 1; skip appending it when
+            // empty so the accumulator stays a plain value.
+            let tail = &template.quasis[index + 1];
+            let tail_text = self.template_element_text(tail)?;
+            if !tail_text.is_empty() {
+                let text = self.emit_constant(Constant::String(tail_text.to_owned()))?;
+                acc = self.emit_string_add(acc, text)?;
+            }
+        }
+        Ok(acc)
+    }
+
+    /// `cooked` is the only accepted text source: no slicing the raw source,
+    /// no re-decoding of escapes.
+    fn template_element_text(
+        &self,
+        element: &'ast TemplateElement<'ast>,
+    ) -> Result<&'ast str, CompileError> {
+        element
+            .value
+            .cooked
+            .as_ref()
+            .and_then(|cooked| cooked.as_str())
+            .ok_or_else(|| unsupported(self.source_text(), element.span, "invalid template escape"))
+    }
+
+    fn emit_string_add(&mut self, lhs: Reg, rhs: Reg) -> Result<Reg, CompileError> {
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::Binary {
+            dst: self.slot(dst),
+            op: BinaryOp::Add,
+            lhs: self.slot(lhs),
+            rhs: self.slot(rhs),
+        });
+        Ok(dst)
     }
 
     fn compile_identifier(
