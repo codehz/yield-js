@@ -58,7 +58,7 @@ cargo run -p yield-poc
 - `var` / `let` / `const`（无 TDZ 精确保留）、块作用域、简单参数。
 - 字面量、对象/数组字面量（Init 属性、静态/计算键、数组空洞按 `undefined`）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
-- 赋值与算术复合赋值、`typeof` / `void`、普通函数调用、函数值调用、导入调用。
+- 赋值、算术复合赋值与逻辑赋值（`&&=`、`||=`、`??=`）、`typeof` / `void`、普通函数调用、函数值调用、导入调用。
 - `if`、`while`、`do...while`、`for`、`break`、`continue`、`return`、`throw`、`try/catch/finally`。
 
 不支持或尚未精确实现的语法在编译期报告 `unsupported syntax: ...` 与源码行列。

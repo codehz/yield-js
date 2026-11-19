@@ -230,29 +230,26 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             dst: self.slot(result),
             src: self.slot(left),
         });
-        match expression.operator {
+        let end = self.begin_logical_rhs(expression.operator, left)?;
+        let right = self.compile_expression(&expression.right)?;
+        self.emit(Instr::Move {
+            dst: self.slot(result),
+            src: self.slot(right),
+        });
+        self.patch_jump(end, self.pc())?;
+        Ok(result)
+    }
+
+    /// Emits the short-circuit test. The returned jump lands after the RHS;
+    /// the instruction stream is already at the RHS entry.
+    fn begin_logical_rhs(&mut self, op: LogicalOperator, left: Reg) -> Result<usize, CompileError> {
+        match op {
+            LogicalOperator::And => Ok(self.branch_false(left)),
             LogicalOperator::Or => {
                 let right_branch = self.branch_false(left);
                 let end = self.jump();
-                let right_pc = self.pc();
-                self.patch_jump(right_branch, right_pc)?;
-                let right = self.compile_expression(&expression.right)?;
-                self.emit(Instr::Move {
-                    dst: self.slot(result),
-                    src: self.slot(right),
-                });
-                let end_pc = self.pc();
-                self.patch_jump(end, end_pc)?;
-            }
-            LogicalOperator::And => {
-                let end = self.branch_false(left);
-                let right = self.compile_expression(&expression.right)?;
-                self.emit(Instr::Move {
-                    dst: self.slot(result),
-                    src: self.slot(right),
-                });
-                let end_pc = self.pc();
-                self.patch_jump(end, end_pc)?;
+                self.patch_jump(right_branch, self.pc())?;
+                Ok(end)
             }
             LogicalOperator::Coalesce => {
                 let null_value = self.emit_constant(Constant::Null)?;
@@ -265,8 +262,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 let check_undefined = self.branch_false(is_null);
                 let right_jump = self.jump();
-                let undefined_pc = self.pc();
-                self.patch_jump(check_undefined, undefined_pc)?;
+                self.patch_jump(check_undefined, self.pc())?;
                 let undefined_reg = self.alloc_reg()?;
                 self.emit(Instr::Undefined {
                     dst: self.slot(undefined_reg),
@@ -279,18 +275,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     rhs: self.slot(undefined_reg),
                 });
                 let end = self.branch_false(is_undefined);
-                let right_pc = self.pc();
-                self.patch_jump(right_jump, right_pc)?;
-                let right = self.compile_expression(&expression.right)?;
-                self.emit(Instr::Move {
-                    dst: self.slot(result),
-                    src: self.slot(right),
-                });
-                let end_pc = self.pc();
-                self.patch_jump(end, end_pc)?;
+                self.patch_jump(right_jump, self.pc())?;
+                Ok(end)
             }
         }
-        Ok(result)
     }
 
     fn compile_unary(
@@ -431,6 +419,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     format!("assignment to unknown binding {name:?}"),
                 )
             })?;
+            if let Some(op) = logical_assignment_operator(expression.operator) {
+                let result = self.alloc_reg()?;
+                self.emit(Instr::GetBinding {
+                    dst: self.slot(result),
+                    binding,
+                });
+                let end = self.begin_logical_rhs(op, result)?;
+                let right = self.compile_expression(&expression.right)?;
+                self.emit(Instr::SetBinding {
+                    binding,
+                    src: self.slot(right),
+                });
+                self.emit(Instr::Move {
+                    dst: self.slot(result),
+                    src: self.slot(right),
+                });
+                self.patch_jump(end, self.pc())?;
+                return Ok(result);
+            }
             let value = if matches!(expression.operator, AssignmentOperator::Assign) {
                 self.compile_expression(&expression.right)?
             } else {
@@ -440,7 +447,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     binding,
                 });
                 let right = self.compile_expression(&expression.right)?;
-                let op = binary_assignment_operator(self.source_text(), expression)?;
+                let op = binary_assignment_operator(expression.operator);
                 let value = self.alloc_reg()?;
                 self.emit(Instr::Binary {
                     dst: self.slot(value),
@@ -464,6 +471,27 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         if let Some(member) = expression.left.as_member_expression() {
             let (object, key) = self.compile_member_parts(member)?;
+            if let Some(op) = logical_assignment_operator(expression.operator) {
+                let result = self.alloc_reg()?;
+                self.emit(Instr::GetMember {
+                    dst: self.slot(result),
+                    object: self.slot(object),
+                    key: self.slot(key),
+                });
+                let end = self.begin_logical_rhs(op, result)?;
+                let right = self.compile_expression(&expression.right)?;
+                self.emit(Instr::SetMember {
+                    object: self.slot(object),
+                    key: self.slot(key),
+                    src: self.slot(right),
+                });
+                self.emit(Instr::Move {
+                    dst: self.slot(result),
+                    src: self.slot(right),
+                });
+                self.patch_jump(end, self.pc())?;
+                return Ok(result);
+            }
             let value = if matches!(expression.operator, AssignmentOperator::Assign) {
                 self.compile_expression(&expression.right)?
             } else {
@@ -474,7 +502,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     key: self.slot(key),
                 });
                 let right = self.compile_expression(&expression.right)?;
-                let op = binary_assignment_operator(self.source_text(), expression)?;
+                let op = binary_assignment_operator(expression.operator);
                 let value = self.alloc_reg()?;
                 self.emit(Instr::Binary {
                     dst: self.slot(value),
@@ -648,28 +676,32 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 }
 
-fn binary_assignment_operator(
-    source: &str,
-    expression: &AssignmentExpression<'_>,
-) -> Result<BinaryOp, CompileError> {
-    match expression.operator {
-        AssignmentOperator::Assign => unreachable!(),
-        AssignmentOperator::Addition => Ok(BinaryOp::Add),
-        AssignmentOperator::Subtraction => Ok(BinaryOp::Sub),
-        AssignmentOperator::Multiplication => Ok(BinaryOp::Mul),
-        AssignmentOperator::Division => Ok(BinaryOp::Div),
-        AssignmentOperator::Remainder => Ok(BinaryOp::Rem),
-        AssignmentOperator::Exponential => Ok(BinaryOp::Exp),
-        AssignmentOperator::ShiftLeft => Ok(BinaryOp::Shl),
-        AssignmentOperator::ShiftRight => Ok(BinaryOp::Shr),
-        AssignmentOperator::ShiftRightZeroFill => Ok(BinaryOp::UShr),
-        AssignmentOperator::BitwiseOR => Ok(BinaryOp::BitOr),
-        AssignmentOperator::BitwiseXOR => Ok(BinaryOp::BitXor),
-        AssignmentOperator::BitwiseAnd => Ok(BinaryOp::BitAnd),
-        AssignmentOperator::LogicalOr
+fn logical_assignment_operator(op: AssignmentOperator) -> Option<LogicalOperator> {
+    match op {
+        AssignmentOperator::LogicalAnd => Some(LogicalOperator::And),
+        AssignmentOperator::LogicalOr => Some(LogicalOperator::Or),
+        AssignmentOperator::LogicalNullish => Some(LogicalOperator::Coalesce),
+        _ => None,
+    }
+}
+
+fn binary_assignment_operator(op: AssignmentOperator) -> BinaryOp {
+    match op {
+        AssignmentOperator::Assign
+        | AssignmentOperator::LogicalOr
         | AssignmentOperator::LogicalAnd
-        | AssignmentOperator::LogicalNullish => {
-            Err(unsupported(source, expression.span, "logical assignment"))
-        }
+        | AssignmentOperator::LogicalNullish => unreachable!(),
+        AssignmentOperator::Addition => BinaryOp::Add,
+        AssignmentOperator::Subtraction => BinaryOp::Sub,
+        AssignmentOperator::Multiplication => BinaryOp::Mul,
+        AssignmentOperator::Division => BinaryOp::Div,
+        AssignmentOperator::Remainder => BinaryOp::Rem,
+        AssignmentOperator::Exponential => BinaryOp::Exp,
+        AssignmentOperator::ShiftLeft => BinaryOp::Shl,
+        AssignmentOperator::ShiftRight => BinaryOp::Shr,
+        AssignmentOperator::ShiftRightZeroFill => BinaryOp::UShr,
+        AssignmentOperator::BitwiseOR => BinaryOp::BitOr,
+        AssignmentOperator::BitwiseXOR => BinaryOp::BitXor,
+        AssignmentOperator::BitwiseAnd => BinaryOp::BitAnd,
     }
 }
