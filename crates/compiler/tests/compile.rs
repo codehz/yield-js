@@ -671,6 +671,34 @@ fn rejects_unsupported_module_syntax() {
 }
 
 #[test]
+fn regexp_literal_lowers_without_reading_the_constructor_binding() {
+    let function = compile_run(r"function run(RegExp) { return /a\/b/ig; }");
+    assert!(function.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::NewRegExp { source, flags, .. } if source == r"a\/b" && flags == "gi"
+    )));
+    assert!(!function.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::GetBuiltin { .. } | Instr::Construct { .. }
+    )));
+}
+
+#[test]
+fn rejects_unsupported_regexp_literals_at_the_literal_span() {
+    for literal in [r"/(a)\1/", "/(?=a)a/", "/a/d"] {
+        let source = format!("\n  {literal};");
+        let error = compile(&source, &CompileOptions::default()).unwrap_err();
+        assert_eq!((error.line(), error.column()), (2, 3), "{error}");
+        assert!(
+            error
+                .message()
+                .starts_with("unsupported syntax: RegExp literal:"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn exported_lexical_declarations_keep_the_tdz() {
     for declaration in ["let", "const"] {
         let source = format!("\n  x;\nexport {declaration} x = 1;");

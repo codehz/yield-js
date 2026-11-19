@@ -23,6 +23,7 @@ use crate::host::Host;
 use crate::math::MATH_METHODS;
 use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
 use crate::ops;
+use crate::regexp_runtime::{REGEXP_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::string::{StringMethod, StringStatic};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
@@ -38,6 +39,8 @@ pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
 pub(crate) const ROOT_ARRAY_VALUES: &str = "array.values";
 pub(crate) const ROOT_STRING: &str = "string";
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
+pub(crate) const ROOT_REGEXP: &str = "regexp";
+pub(crate) const ROOT_REGEXP_PROTOTYPE: &str = "regexp.prototype";
 pub(crate) const ROOT_NUMBER: &str = "number";
 pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
 pub(crate) const ROOT_BOOLEAN: &str = "boolean";
@@ -84,6 +87,8 @@ pub(crate) struct BuiltinRoots {
     pub array_values: ObjectId,
     pub string: ObjectId,
     pub string_prototype: ObjectId,
+    pub regexp: ObjectId,
+    pub regexp_prototype: ObjectId,
     pub number: ObjectId,
     pub number_prototype: ObjectId,
     pub boolean_constructor: ObjectId,
@@ -153,6 +158,8 @@ impl BuiltinRoots {
             (ROOT_ARRAY_VALUES.to_owned(), self.array_values),
             (ROOT_STRING.to_owned(), self.string),
             (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
+            (ROOT_REGEXP.to_owned(), self.regexp),
+            (ROOT_REGEXP_PROTOTYPE.to_owned(), self.regexp_prototype),
             (ROOT_NUMBER.to_owned(), self.number),
             (ROOT_NUMBER_PROTOTYPE.to_owned(), self.number_prototype),
             (ROOT_BOOLEAN.to_owned(), self.boolean_constructor),
@@ -240,6 +247,8 @@ pub(crate) enum BuiltinCall {
     StringConstructor,
     StringMethod(StringMethod),
     StringStatic(StringStatic),
+    RegExpConstructor,
+    RegExpMethod(RegExpMethod),
     NumberConstructor,
     NumberMethod(&'static str),
     NumberStatic(&'static str),
@@ -287,6 +296,7 @@ enum Constructor {
     Promise,
     Object,
     String,
+    RegExp,
     Number,
     Boolean,
     Proxy,
@@ -502,6 +512,7 @@ impl Vm {
         let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
         let string_prototype = self.heap.alloc_plain();
         let string = self.init_string_constructor(string_prototype, string_iterator);
+        let (regexp, regexp_prototype) = self.init_regexp();
         let number_prototype = self.heap.alloc_plain();
         let number = self.init_number_constructor(number_prototype);
         let boolean_constructor = self.heap.alloc_builtin("Boolean", None);
@@ -749,6 +760,8 @@ impl Vm {
             array_values,
             string,
             string_prototype,
+            regexp,
+            regexp_prototype,
             number,
             math,
             number_prototype,
@@ -831,6 +844,7 @@ impl Vm {
             23 => Ok(Value::Object(self.builtins.proxy)),
             24 => Ok(Value::Object(self.builtins.boolean_constructor)),
             25 => Ok(Value::Object(self.builtins.global_this)),
+            26 => Ok(Value::Object(self.builtins.regexp)),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -907,6 +921,7 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
             Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => Some(Constructor::String),
+            Some(Dispatch::Builtin(BuiltinCall::RegExpConstructor)) => Some(Constructor::RegExp),
             Some(Dispatch::Builtin(BuiltinCall::NumberConstructor)) => Some(Constructor::Number),
             Some(Dispatch::Builtin(BuiltinCall::BooleanConstructor)) => Some(Constructor::Boolean),
             Some(Dispatch::Builtin(BuiltinCall::ProxyConstructor)) => Some(Constructor::Proxy),
@@ -992,6 +1007,7 @@ impl Vm {
                 }
                 return self.construct_object(&args);
             }
+            Constructor::RegExp => return self.construct_regexp(host, &args, prototype, false),
             Constructor::String => match self.call_string(host, &args)? {
                 Invocation::Value(value) => self.construct_object(&[value])?,
                 thrown => thrown,
@@ -1233,6 +1249,10 @@ impl Vm {
             BuiltinCall::WeakMapConstructor => self.throw_type_error("WeakMap requires new"),
             BuiltinCall::WeakMapMethod(method) => self.weakmap_method(method, receiver, &args),
             BuiltinCall::StringConstructor => self.call_string(host, &args),
+            BuiltinCall::RegExpConstructor => self.construct_regexp(host, &args, None, true),
+            BuiltinCall::RegExpMethod(method) => {
+                self.call_regexp_method(host, method, receiver, &args)
+            }
             BuiltinCall::StringMethod(method) => {
                 self.call_string_method(host, method, receiver, &args)
             }
@@ -3197,6 +3217,11 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Math", Some(name)) if MATH_METHODS.contains(&name) => {
             Some(BuiltinCall::MathMethod(name.to_owned()))
         }
+        ("RegExp", None) => Some(BuiltinCall::RegExpConstructor),
+        ("RegExp", Some(name)) => REGEXP_METHODS
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, method)| BuiltinCall::RegExpMethod(*method)),
         ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
         ("String", Some(name)) => STRING_METHODS

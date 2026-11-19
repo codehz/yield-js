@@ -6,11 +6,11 @@
 
 ## 1. 值、转换与全局名
 
-`Value` 仍是 `Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。没有 `RegExp` 值；显式包装是堆对象，不是新的 `Value` 变体。
+`Value` 仍是 `Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。`RegExp` 实例与显式包装对象通过堆对象表示，不是新的 `Value` 变体。
 
 | 缺口 | 现状 |
 | --- | --- |
-| `RegExp` | 字面量与 `RegExp` 内建都没有。字面量落到泛化拒绝 `expression form outside the PoC subset` |
+| `RegExp` | 字面量与全局构造器已支持；只接受 `g` / `i` / `m` / `s` / `y` 和第 4 节的模式子集。无效或不支持的构造参数抛可捕获的 `SyntaxError` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。`NaN` / `Infinity` 作为全局原始值已提供，但仍是运行期值而非编译期常量。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
 | 数字和字符串转换 | 默认十进制数字转字符串（含 `Number.prototype.toString()`）仍沿用现有格式，不完全符合 JS 的指数表示规则；`toFixed`、`toExponential`、`toPrecision` 依赖 Rust 格式化，舍入结果可能与 ECMAScript 不同。超长非十进制字符串转数字未保证只舍入一次。函数转字符串有意使用通用文本而非源码 |
 | 原始值属性 | `Object(value)` / `new Object(value)` 可显式包装字符串、数值、布尔值和 Symbol；`new String` / `new Number` / `new Boolean` 也可构造包装对象。原始值属性访问保留原始接收者，不会创建完整的临时包装对象。字符串包装的 UTF-16 索引与 `length` 不可写；严格写入抛出可捕获的 `TypeError`。 |
@@ -30,7 +30,8 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 - 私有字段（`private field access`）
 - 标签模板。非标签模板已支持
 - lone surrogate 字符串字面量与属性名（`string with a lone surrogate`、`property key with a lone surrogate`）
-- 正则字面量，以及未单列的表达式形式，都落到 `expression form outside the PoC subset`：类表达式、`super`、`new.target`、`import.meta`、`import()`、`yield`、`bigint`
+- 不支持的正则字面量模式与标志在编译时拒绝；若未被 Oxc 提前拒绝，报告带行列的 `unsupported syntax: ...`。模式子集见第 4 节。
+- 未单列的表达式形式落到 `expression form outside the PoC subset`：类表达式、`super`、`new.target`、`import.meta`、`import()`、`yield`、`bigint`
 
 ### 2.3 控制流与顶层
 
@@ -70,7 +71,7 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 | `Number` | 函数调用与包装构造、非强制转换的数值判断、数值常量、`parseInt` / `parseFloat`、共享原型上的数值提取和格式化方法 | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置；指数格式和舍入偏差见第 1 节 |
 | `Math` | 数学常量、数值方法及可快照恢复的 `random` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `JSON` | `parse` / `stringify`：普通对象与数组、可枚举自有字符串键、`toJSON`、replacer、`space`、循环检测 | 不支持 `BigInt`；单独代理码元不能表示为 VM 字符串，解析或序列化时抛可捕获异常 |
-| `RegExp` | 无全局，也无字面量 | 正则 |
+| `RegExp` | 字面量、调用和构造、`exec` / `test` / `toString`、`source` / `flags` / `global` / `ignoreCase` / `multiline` / `dotAll` / `unicode` / `sticky`、`lastIndex` 与快照恢复。模式支持 UTF-16 码元字面量、字符类及范围、`.`、锚点、ASCII 单词边界、常用字符转义、交替、分组（含 ASCII 名称的命名捕获）、贪婪和惰性量词；空匹配推进一个码元 | 仅支持 `g` / `i` / `m` / `s` / `y`；拒绝反向引用、环视、Unicode 属性转义、内联修饰符及其他未实现转义。不支持对断言、可空项或包含内部捕获的组应用量词，`i` 不支持非 ASCII 字面码元及范围端点，`m` 的锚点不与显式换行码元或包含它们的范围组合。`exec` 无法表示单独代理码元时抛 `TypeError`。不支持 `String.prototype.match` / `matchAll` / `replace` / `replaceAll` / `search` / `split` 的正则用法 |
 | `Map` / `Set` | 支持插入顺序、实时迭代及快照恢复 | — |
 | `WeakMap` | 对象身份键、`get` / `has` / `set` / `delete`，快照按 ephemeron 可达性保留条目 | 不支持原始值键（包括非注册 Symbol）；所有四种方法收到原始值键均抛出 `TypeError`。弱键筛选只在生成快照时发生，不是运行期 GC |
 | `Proxy` | `new Proxy` 支持普通对象、数组或原始值包装对象目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，包括目标不变量及快照恢复 | 不可直接调用；不支持撤销、代理函数或构造器、其他 traps，也不保证所有需要内部槽的内建方法都能以代理为接收者 |
@@ -80,7 +81,7 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 
 1. **隐式装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **代理仅覆盖六种 trap。** 支持的属性操作及边界见上表和已实现清单，不等同于完整 ECMAScript Proxy。
-3. **新的堆种类仍要改可达性**。例如 `RegExp` 需要定义其堆表示、追踪规则和快照表示。常规强边由 `heap.rs::write_edges` 提供；`WeakMap` 条目由快照的 ephemeron 追踪单独处理。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；`WeakMap` 条目由快照的 ephemeron 追踪单独处理。`RegExp` 的编译结果不进入快照，而由保存的模式与标志重建。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
 

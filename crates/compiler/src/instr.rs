@@ -53,6 +53,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::CallImport { .. }
         | Instr::Closure { .. }
         | Instr::NewObject { .. }
+        | Instr::NewRegExp { .. }
         | Instr::NewArray { .. }
         | Instr::ArrayAppend { .. }
         | Instr::ArrayHole { .. }
@@ -133,6 +134,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::Closure { dst, .. }
         | Instr::NewObject { dst }
+        | Instr::NewRegExp { dst, .. }
         | Instr::GetBinding { dst, .. }
         | Instr::GetBuiltin { dst, .. } => {
             defs.insert(dst.index);
@@ -302,6 +304,11 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             function,
         },
         Instr::NewObject { dst } => Instr::NewObject { dst: remap(dst) },
+        Instr::NewRegExp { dst, source, flags } => Instr::NewRegExp {
+            dst: remap(dst),
+            source,
+            flags,
+        },
         Instr::NewArray { dst, elements } => Instr::NewArray {
             dst: remap(dst),
             elements: elements.into_iter().map(remap).collect(),

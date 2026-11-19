@@ -10,26 +10,28 @@ use crate::builtins::{
     ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
     ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
-    ROOT_STRING, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE,
-    ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE,
-    ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE,
-    ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
+    ROOT_REGEXP, ROOT_REGEXP_PROTOTYPE, ROOT_STRING, ROOT_STRING_ITERATOR,
+    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE,
+    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE,
+    is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
-    OwnedEdge, PromiseState, Property, ReactionJob, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    OwnProperty, OwnedEdge, PromiseState, Property, ReactionJob, SPECIES_DESCRIPTION,
+    SPECIES_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::{Host, PendingOperationMeta};
+use crate::regexp::compile_pattern;
 use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Includes the globalThis builtin root.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 31;
+// Includes the RegExp builtin roots and object records.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -230,7 +232,11 @@ impl Vm {
         Ok(snapshot)
     }
 
-    pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
+    pub fn restore(
+        mut snapshot: Snapshot,
+        build: Build,
+        host: &mut dyn Host,
+    ) -> Result<Self, VmError> {
         check_versions(&snapshot)?;
         if snapshot.random_state == 0 {
             return Err(VmError::InvalidSnapshot(
@@ -247,8 +253,20 @@ impl Vm {
         Self::check_imports(&build, host)?;
 
         let mut heap = Heap::new();
-        for record in &snapshot.objects {
-            heap.insert_restore(record.id, record.object.clone())?;
+        for ObjectRecord { id, mut object } in std::mem::take(&mut snapshot.objects) {
+            if let Object::RegExp {
+                source,
+                flags,
+                compiled,
+                ..
+            } = &mut object
+            {
+                // Typed snapshots can be edited without going through deserialization.
+                *compiled = compile_pattern(source, &flags.as_string())
+                    .map_err(|error| VmError::InvalidSnapshot(format!("RegExp {id}: {error}")))?
+                    .1;
+            }
+            heap.insert_restore(id, object)?;
         }
         heap.combines = snapshot.combines.clone();
         validate_symbol_tables(&snapshot)?;
@@ -607,6 +625,17 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     let string_prototype = plain_root(ROOT_STRING_PROTOTYPE)?;
     let string = builtin_root(ROOT_STRING, "String")?;
     require_fixed_prototype(heap, string, string_prototype, "String")?;
+    let regexp = builtin_root(ROOT_REGEXP, "RegExp")?;
+    let regexp_prototype = plain_root(ROOT_REGEXP_PROTOTYPE)?;
+    require_fixed_prototype(heap, regexp, regexp_prototype, "RegExp")?;
+    if roots
+        .iter()
+        .any(|(name, id)| name != ROOT_REGEXP_PROTOTYPE && *id == regexp_prototype)
+    {
+        return Err(VmError::InvalidSnapshot(
+            "RegExp.prototype aliases another builtin root".to_owned(),
+        ));
+    }
     let number_prototype = plain_root(ROOT_NUMBER_PROTOTYPE)?;
     let number = builtin_root(ROOT_NUMBER, "Number")?;
     require_fixed_prototype(heap, number, number_prototype, "Number")?;
@@ -751,6 +780,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         array_values,
         string,
         string_prototype,
+        regexp,
+        regexp_prototype,
         number,
         number_prototype,
         boolean_constructor,
@@ -933,6 +964,18 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "string iterator {id} has an invalid byte offset"
+            )));
+        }
+        if let regexp @ Object::RegExp { .. } = heap.get(id)?
+            && !regexp
+                .own_property(PropertyKeyRef::String("lastIndex"))
+                .is_some_and(|property| {
+                    matches!(property, OwnProperty::Stored(Property::Data(_), attributes)
+                        if !attributes.enumerable && !attributes.configurable)
+                })
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "RegExp {id} has an invalid lastIndex property"
             )));
         }
         if let Object::ForInIterator {

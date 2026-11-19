@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::VmError;
 use crate::ops::{array_index, canonical_index};
+use crate::regexp::{RegExpFlags, compile_pattern};
 use crate::value::{
     BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
@@ -641,7 +642,7 @@ fn is_surrogate(unit: u16) -> bool {
     (0xd800..=0xdfff).contains(&unit)
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
     Promise(PromiseObject),
@@ -650,6 +651,16 @@ pub enum Object {
     Array(ArrayObject),
     Boxed {
         primitive: BoxedPrimitive,
+        object: PlainObject,
+    },
+    #[serde(
+        serialize_with = "serialize_regexp",
+        deserialize_with = "deserialize_regexp"
+    )]
+    RegExp {
+        source: String,
+        flags: RegExpFlags,
+        compiled: regex::Regex,
         object: PlainObject,
     },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
@@ -706,6 +717,196 @@ pub enum Object {
         object: PlainObject,
         callback: PromiseCallback,
     },
+}
+
+fn serialize_regexp<S: serde::Serializer>(
+    source: &str,
+    flags: &RegExpFlags,
+    _: &regex::Regex,
+    object: &PlainObject,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Record<'a> {
+        source: &'a str,
+        flags: String,
+        object: &'a PlainObject,
+    }
+
+    Record {
+        source,
+        flags: flags.as_string(),
+        object,
+    }
+    .serialize(serializer)
+}
+
+fn deserialize_regexp<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(String, RegExpFlags, regex::Regex, PlainObject), D::Error> {
+    #[derive(Deserialize)]
+    struct Record {
+        source: String,
+        flags: String,
+        object: PlainObject,
+    }
+
+    let Record {
+        source,
+        flags,
+        object,
+    } = Record::deserialize(deserializer)?;
+    let (flags, compiled) = compile_pattern(&source, &flags).map_err(serde::de::Error::custom)?;
+    Ok((source, flags, compiled, object))
+}
+
+impl PartialEq for Object {
+    fn eq(&self, other: &Self) -> bool {
+        use Object::*;
+        match (self, other) {
+            (Promise(a), Promise(b)) => a == b,
+            (Native(a), Native(b)) => a == b,
+            (Plain(a), Plain(b)) => a == b,
+            (Array(a), Array(b)) => a == b,
+            (
+                Boxed {
+                    primitive: a,
+                    object: x,
+                },
+                Boxed {
+                    primitive: b,
+                    object: y,
+                },
+            ) => a == b && x == y,
+            // The compiled matcher is derived from the source and flags.
+            (
+                RegExp {
+                    source: a,
+                    flags: f,
+                    object: x,
+                    ..
+                },
+                RegExp {
+                    source: b,
+                    flags: g,
+                    object: y,
+                    ..
+                },
+            ) => a == b && f == g && x == y,
+            (
+                Proxy {
+                    target: a,
+                    handler: h,
+                    object: x,
+                },
+                Proxy {
+                    target: b,
+                    handler: i,
+                    object: y,
+                },
+            ) => a == b && h == i && x == y,
+            (
+                Map {
+                    object: x,
+                    entries: a,
+                },
+                Map {
+                    object: y,
+                    entries: b,
+                },
+            ) => x == y && a == b,
+            (
+                WeakMap {
+                    object: x,
+                    entries: a,
+                },
+                WeakMap {
+                    object: y,
+                    entries: b,
+                },
+            ) => x == y && a == b,
+            (
+                Set {
+                    object: x,
+                    elements: a,
+                },
+                Set {
+                    object: y,
+                    elements: b,
+                },
+            ) => x == y && a == b,
+            (
+                CollectionIterator {
+                    object: x,
+                    kind: k,
+                    iteration: i,
+                    target: a,
+                    next_index: n,
+                },
+                CollectionIterator {
+                    object: y,
+                    kind: l,
+                    iteration: j,
+                    target: b,
+                    next_index: m,
+                },
+            ) => x == y && k == l && i == j && a == b && n == m,
+            (
+                ArrayIterator {
+                    object: x,
+                    array: a,
+                    next_index: n,
+                },
+                ArrayIterator {
+                    object: y,
+                    array: b,
+                    next_index: m,
+                },
+            ) => x == y && a == b && n == m,
+            (
+                StringIterator {
+                    object: x,
+                    string: a,
+                    byte_offset: n,
+                },
+                StringIterator {
+                    object: y,
+                    string: b,
+                    byte_offset: m,
+                },
+            ) => x == y && a == b && n == m,
+            (
+                ForInIterator {
+                    current: a,
+                    pending: p,
+                    visited: v,
+                    string_indices: x,
+                },
+                ForInIterator {
+                    current: b,
+                    pending: q,
+                    visited: w,
+                    string_indices: y,
+                },
+            ) => a == b && p == q && v == w && x == y,
+            (Function(a), Function(b)) => a == b,
+            (Bound(a), Bound(b)) => a == b,
+            (Environment(a), Environment(b)) => a == b,
+            (BuiltinStatic(a), BuiltinStatic(b)) => a == b,
+            (Resolution(a), Resolution(b)) => a == b,
+            (
+                PromiseCallback {
+                    object: x,
+                    callback: a,
+                },
+                PromiseCallback {
+                    object: y,
+                    callback: b,
+                },
+            ) => x == y && a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -803,6 +1004,7 @@ impl Object {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
+            | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -825,6 +1027,7 @@ impl Object {
         match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
+            | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -890,6 +1093,7 @@ impl Object {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
+            | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -912,6 +1116,7 @@ impl Object {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
+            | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -1052,6 +1257,7 @@ impl Object {
         match self {
             Self::Plain(plain)
             | Self::Boxed { object: plain, .. }
+            | Self::RegExp { object: plain, .. }
             | Self::Proxy { object: plain, .. }
             | Self::Map { object: plain, .. }
             | Self::Set { object: plain, .. }
@@ -1074,6 +1280,7 @@ impl Object {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
+            | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
@@ -1154,6 +1361,7 @@ impl Object {
             }
             Self::Native(_)
             | Self::Plain(_)
+            | Self::RegExp { .. }
             | Self::BuiltinStatic(_)
             | Self::WeakMap { .. }
             | Self::StringIterator { .. } => {}

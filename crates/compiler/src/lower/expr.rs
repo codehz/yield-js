@@ -47,6 +47,24 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 })?;
                 self.emit_constant(Constant::String(value.to_owned()))
             }
+            Expression::RegExpLiteral(literal) => {
+                let source = literal.regex.pattern.text.as_str();
+                let flags = literal.regex.flags.to_string();
+                yield_vm::validate_regexp(source, &flags).map_err(|message| {
+                    unsupported(
+                        self.source_text(),
+                        literal.span,
+                        &format!("RegExp literal: {message}"),
+                    )
+                })?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::NewRegExp {
+                    dst: self.slot(dst),
+                    source: source.to_owned(),
+                    flags,
+                });
+                Ok(dst)
+            }
             Expression::Identifier(identifier) => self.compile_identifier(identifier),
             Expression::ParenthesizedExpression(expression) => {
                 self.compile_expression(&expression.expression)

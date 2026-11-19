@@ -260,6 +260,11 @@ impl Vm {
                 frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
+            Instr::NewRegExp { dst, source, flags } => {
+                let id = self.alloc_regexp(&source, &flags)?;
+                frame.write(dst, Value::Object(id))?;
+                Ok(Step::Next)
+            }
             Instr::NewArray { dst, elements } => {
                 let elements = frame.read_list(&elements)?;
                 let id = self.heap.alloc_array(elements);

@@ -17,6 +17,8 @@ mod math;
 mod number;
 mod ops;
 mod proxy;
+mod regexp;
+mod regexp_runtime;
 mod resolve;
 mod runtime;
 pub mod snapshot;
@@ -30,6 +32,7 @@ pub use bytecode::{
 pub use error::VmError;
 pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host, HostReply, PendingOperationMeta};
+pub use regexp::{RegExpFlags, validate_regexp};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, HostValue, NativeKey, ObjectId, Value};
 pub use vm::Vm;

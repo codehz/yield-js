@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 26;
+pub const BYTECODE_VERSION: u32 = 27;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -20,7 +20,7 @@ pub const BYTECODE_VERSION: u32 = 26;
 /// objects; they load via [`Instr::GetBuiltin`]. Error constructors are appended
 /// after `String` at indices 11–16. The compiler and `Build::validate` both use
 /// this table; do not reorder it.
-pub const BUILTINS: [&str; 26] = [
+pub const BUILTINS: [&str; 27] = [
     "Promise",
     "queueMicrotask",
     "Error",
@@ -47,6 +47,7 @@ pub const BUILTINS: [&str; 26] = [
     "Proxy",
     "Boolean",
     "globalThis",
+    "RegExp",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -224,6 +225,12 @@ pub enum Instr {
     },
     NewObject {
         dst: Slot,
+    },
+    /// Allocates a fresh literal using the intrinsic RegExp prototype.
+    NewRegExp {
+        dst: Slot,
+        source: String,
+        flags: String,
     },
     /// Copies enumerable own properties from source onto target.
     CopyDataProperties {
@@ -851,6 +858,12 @@ impl Build {
                     }
                 }
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
+                Instr::NewRegExp { dst, source, flags } => {
+                    check_slot(*dst, "NewRegExp.dst")?;
+                    crate::validate_regexp(source, flags).map_err(|message| {
+                        format!("{location}: invalid NewRegExp at pc {pc}: {message}")
+                    })?;
+                }
                 Instr::CopyDataProperties { target, source } => {
                     check_slot(*target, "CopyDataProperties.target")?;
                     check_slot(*source, "CopyDataProperties.source")?;

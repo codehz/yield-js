@@ -440,6 +440,30 @@ fn restore_rejects_array_index_past_length() {
 }
 
 #[test]
+fn snapshot_decode_rejects_invalid_regexp_source_and_flags() {
+    let s = Suspended::start(
+        "export async function run() { const re = /foo/g; await wait('a'); return re.test('foo'); }",
+        vec![],
+    );
+    let snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");
+    let index = snapshot["objects"]
+        .as_array()
+        .expect("object records")
+        .iter()
+        .position(|record| record["object"]["reg_exp"]["source"] == "foo")
+        .expect("live RegExp in snapshot");
+    for (field, invalid) in [("source", "["), ("flags", "gg")] {
+        let mut corrupt = snapshot.clone();
+        corrupt["objects"][index]["object"]["reg_exp"][field] = serde_json::json!(invalid);
+        let json = serde_json::to_string(&corrupt).expect("serialize corrupted snapshot");
+        assert!(
+            yield_vm::Snapshot::from_json(&json).is_err(),
+            "accepted invalid RegExp {field}: {invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn restore_rejects_corrupt_collection_records() {
     let mut s = Suspended::start(
         "export async function run() { const m = new Map([[{}, Symbol()]]); const i = m.keys(); const s = new Set([{}]); await wait('a'); return i.next().done || s.size; }",
