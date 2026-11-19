@@ -2,10 +2,8 @@
 //! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
 //! restore consume that combined list instead of re-matching object kinds.
 //!
-//! Plain objects store own data or accessor properties. Only a missing key
-//! walks the prototype chain; environments are not script objects.
-//! Array iterators share plain-object properties but keep their cursor internal.
-//! Bound functions have no own properties or internal prototype.
+//! Script property tables store data or accessor properties. Only a missing
+//! key walks the prototype chain; environments and native handles are opaque.
 
 use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
@@ -101,9 +99,9 @@ pub struct PromiseObject {
     /// Original settlement reapplied after a `finally` thenable. Distinct from
     /// the value currently being adopted.
     pub finally_settlement: Option<PromiseState>,
-    pub props: PropertyTable<String, Value>,
+    pub props: PropertyTable<String, Property>,
     /// Symbol-keyed own properties, kept beside the string table.
-    pub symbol_props: PropertyTable<SymbolId, Value>,
+    pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Promise instances share one identity.
     pub prototype: Option<ObjectId>,
 }
@@ -116,6 +114,11 @@ pub struct NativeObject {
 /// Lookup stays keyed; the ordinal records creation order, not write order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
+
+type PropertyTables<'a> = (
+    &'a PropertyTable<String, Property>,
+    &'a PropertyTable<SymbolId, Property>,
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct OrderedProperty<V> {
@@ -154,7 +157,6 @@ impl Attributes {
         writable: false,
         ..Self::ORDINARY
     };
-    const ARRAY_LENGTH: Self = Self::FUNCTION_PROTOTYPE;
 }
 
 impl<K: Ord, V> PropertyTable<K, V> {
@@ -263,31 +265,115 @@ pub enum Property {
     },
 }
 
+/// An absent field leaves the current descriptor unchanged. `Some(None)`
+/// explicitly clears an accessor handler.
+#[derive(Default)]
+pub(crate) struct DescriptorUpdate {
+    pub value: Option<Value>,
+    pub writable: Option<bool>,
+    pub get: Option<Option<ObjectId>>,
+    pub set: Option<Option<ObjectId>>,
+    pub enumerable: Option<bool>,
+    pub configurable: Option<bool>,
+}
+
+impl DescriptorUpdate {
+    pub(crate) fn is_accessor(&self) -> bool {
+        self.get.is_some() || self.set.is_some()
+    }
+
+    pub(crate) fn is_data(&self) -> bool {
+        self.value.is_some() || self.writable.is_some()
+    }
+
+    fn complete(self, current: Option<OwnProperty<'_>>) -> Option<(Property, Attributes)> {
+        let length;
+        let (old, attrs) = match current {
+            Some(OwnProperty::Stored(property, attrs)) => (Some(property), attrs),
+            Some(property @ OwnProperty::ArrayLength(..)) => {
+                let attrs = property.attributes();
+                length = property.into_owned();
+                (Some(&length), attrs)
+            }
+            None => (None, Attributes::FIXED),
+        };
+        let old_accessor = matches!(old, Some(Property::Accessor { .. }));
+        let accessor = self.is_accessor() || !self.is_data() && old_accessor;
+        let next = Attributes {
+            enumerable: self.enumerable.unwrap_or(attrs.enumerable),
+            configurable: self.configurable.unwrap_or(attrs.configurable),
+            writable: !accessor && self.writable.unwrap_or(attrs.writable),
+        };
+        if old.is_some()
+            && !attrs.configurable
+            && (next.configurable
+                || next.enumerable != attrs.enumerable
+                || accessor != old_accessor)
+        {
+            return None;
+        }
+        let property = if accessor {
+            let (get, set) = match old {
+                Some(Property::Accessor { get, set }) => (*get, *set),
+                _ => (None, None),
+            };
+            let next_get = self.get.unwrap_or(get);
+            let next_set = self.set.unwrap_or(set);
+            if old_accessor && !attrs.configurable && (get != next_get || set != next_set) {
+                return None;
+            }
+            Property::Accessor {
+                get: next_get,
+                set: next_set,
+            }
+        } else {
+            let value = match old {
+                Some(Property::Data(value)) => value,
+                _ => &Value::Undefined,
+            };
+            if old.is_some()
+                && !attrs.configurable
+                && !attrs.writable
+                && (next.writable
+                    || self
+                        .value
+                        .as_ref()
+                        .is_some_and(|next| !crate::ops::same_value(value, next)))
+            {
+                return None;
+            }
+            Property::Data(self.value.unwrap_or_else(|| value.clone()))
+        };
+        Some((property, next))
+    }
+}
+
 pub(crate) enum OwnProperty<'a> {
-    Plain(&'a Property, Attributes),
-    Data(&'a Value, Attributes),
-    ArrayLength(usize),
+    Stored(&'a Property, Attributes),
+    ArrayLength(usize, bool),
 }
 
 impl OwnProperty<'_> {
     pub(crate) fn into_owned(self) -> Property {
         match self {
-            Self::Plain(property, _) => property.clone(),
-            Self::Data(value, _) => Property::Data(value.clone()),
-            Self::ArrayLength(length) => Property::Data(Value::Number(length as f64)),
+            Self::Stored(property, _) => property.clone(),
+            Self::ArrayLength(length, _) => Property::Data(Value::Number(length as f64)),
         }
     }
 
     pub(crate) fn attributes(&self) -> Attributes {
         match self {
-            Self::Plain(_, attributes) | Self::Data(_, attributes) => *attributes,
-            Self::ArrayLength(_) => Attributes::ARRAY_LENGTH,
+            Self::Stored(_, attributes) => *attributes,
+            Self::ArrayLength(_, writable) => Attributes {
+                writable: *writable,
+                ..Attributes::FIXED
+            },
         }
     }
 
     pub(crate) fn setter(&self) -> Option<Option<ObjectId>> {
         match self {
-            Self::Plain(Property::Accessor { set, .. }, _) => Some(*set),
+            Self::Stored(Property::Accessor { set, .. }, _) => Some(*set),
             _ => None,
         }
     }
@@ -297,7 +383,7 @@ impl OwnProperty<'_> {
 pub struct PlainObject {
     pub props: PropertyTable<String, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
-    /// Internal prototype. Literals use `None`.
+    /// Internal prototype.
     pub prototype: Option<ObjectId>,
 }
 
@@ -313,56 +399,51 @@ impl PlainObject {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayObject {
-    pub elements: Vec<Value>,
+    elements: BTreeMap<usize, (Property, Attributes)>,
+    pub(crate) length: usize,
+    pub(crate) length_writable: bool,
     /// Own properties other than `length` and canonical indices.
-    pub props: PropertyTable<String, Value>,
-    pub symbol_props: PropertyTable<SymbolId, Value>,
+    pub props: PropertyTable<String, Property>,
+    pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
 }
 
 impl ArrayObject {
-    /// `Some` is an own hit, including an explicit `undefined`.
-    fn own(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
-        match key {
-            PropertyKeyRef::String("length") => Some(OwnProperty::ArrayLength(self.elements.len())),
-            PropertyKeyRef::String(key) if let Some(index) = array_index(key) => self
-                .elements
-                .get(index)
-                .map(|value| OwnProperty::Data(value, Attributes::ORDINARY)),
-            key => lookup_tables(&self.props, &self.symbol_props, key)
-                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
-        }
+    pub(crate) fn own_index(&self, index: usize) -> Option<OwnProperty<'_>> {
+        self.elements
+            .get(&index)
+            .map(|(property, attributes)| OwnProperty::Stored(property, *attributes))
     }
 
-    fn set(
-        &mut self,
-        key: String,
-        value: Value,
-        attributes: Option<Attributes>,
-    ) -> Result<(), VmError> {
-        if key == "length" {
-            let Value::Number(length) = value else {
-                return Err(VmError::InvalidState(
-                    "array length must be a number".to_owned(),
-                ));
-            };
-            if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
-                return Err(VmError::InvalidState(
-                    "array length must be a non-negative integer".to_owned(),
-                ));
-            }
-            self.elements.resize(length as usize, Value::Undefined);
-            return Ok(());
+    pub(crate) fn append(&mut self, value: Value) -> Result<(), VmError> {
+        if self.length >= u32::MAX as usize || !self.length_writable {
+            return Err(VmError::InvalidState(
+                "cannot append to array literal".to_owned(),
+            ));
         }
-        if let Some(index) = array_index(&key) {
-            if self.elements.len() <= index {
-                self.elements.resize(index + 1, Value::Undefined);
-            }
-            self.elements[index] = value;
-            return Ok(());
-        }
-        self.props.update(key, attributes, |_| value);
+        self.elements
+            .insert(self.length, (Property::Data(value), Attributes::ORDINARY));
+        self.length += 1;
         Ok(())
+    }
+
+    /// Delete in descending index order. A fixed element blocks further
+    /// deletions, but neither prior deletions nor the writable change roll back.
+    fn set_length(&mut self, length: usize, writable: bool) -> bool {
+        while let Some((&index, (_, attributes))) = self.elements.last_key_value() {
+            if index < length {
+                break;
+            }
+            if !attributes.configurable {
+                self.length = index + 1;
+                self.length_writable = writable;
+                return false;
+            }
+            self.elements.pop_last();
+        }
+        self.length = length;
+        self.length_writable = writable;
+        true
     }
 }
 
@@ -372,8 +453,8 @@ impl ArrayObject {
 pub struct FunctionObject {
     pub func_id: u32,
     pub env: Option<ObjectId>,
-    pub props: PropertyTable<String, Value>,
-    pub symbol_props: PropertyTable<SymbolId, Value>,
+    pub props: PropertyTable<String, Property>,
+    pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
 }
@@ -394,8 +475,8 @@ pub struct EnvironmentObject {
 pub struct BuiltinStatic {
     pub name: String,
     pub member: Option<String>,
-    pub props: PropertyTable<String, Value>,
-    pub symbol_props: PropertyTable<SymbolId, Value>,
+    pub props: PropertyTable<String, Property>,
+    pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
 }
 
@@ -410,6 +491,7 @@ pub struct Resolution {
     pub pair: ObjectId,
     pub resolve: bool,
     pub called: bool,
+    pub object: PlainObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -417,6 +499,7 @@ pub struct BoundObject {
     pub target: ObjectId,
     pub bound_this: Value,
     pub args: Vec<Value>,
+    pub object: PlainObject,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -449,6 +532,7 @@ pub(crate) enum EnvRole {
 #[derive(Clone, Copy)]
 pub(crate) enum OwnedEdge {
     Object(ObjectId),
+    Accessor(ObjectId),
     Prototype(ObjectId),
     Environment { id: ObjectId, role: EnvRole },
     Continuation(ContinuationId),
@@ -491,23 +575,34 @@ impl Object {
         }
     }
 
+    fn tables(&self) -> Option<PropertyTables<'_>> {
+        Some(match self {
+            Self::Plain(o)
+            | Self::ArrayIterator { object: o, .. }
+            | Self::Bound(BoundObject { object: o, .. })
+            | Self::Resolution(Resolution { object: o, .. }) => (&o.props, &o.symbol_props),
+            Self::Array(o) => (&o.props, &o.symbol_props),
+            Self::Function(o) => (&o.props, &o.symbol_props),
+            Self::Promise(o) => (&o.props, &o.symbol_props),
+            Self::BuiltinStatic(o) => (&o.props, &o.symbol_props),
+            Self::Native(_) | Self::Environment(_) => return None,
+        })
+    }
+
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
-        match self {
-            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
-                lookup_tables(&plain.props, &plain.symbol_props, key)
-                    .map(|p| OwnProperty::Plain(&p.value, p.attributes))
+        if let (Self::Array(array), PropertyKeyRef::String(key)) = (self, key) {
+            if key == "length" {
+                return Some(OwnProperty::ArrayLength(
+                    array.length,
+                    array.length_writable,
+                ));
             }
-            Self::Array(array) => array.own(key),
-            Self::Function(function) => lookup_tables(&function.props, &function.symbol_props, key)
-                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
-            Self::Promise(promise) => lookup_tables(&promise.props, &promise.symbol_props, key)
-                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
-            Self::BuiltinStatic(builtin) => {
-                lookup_tables(&builtin.props, &builtin.symbol_props, key)
-                    .map(|p| OwnProperty::Data(&p.value, p.attributes))
+            if let Some(index) = array_index(key) {
+                return array.own_index(index);
             }
-            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => None,
         }
+        let (props, symbols) = self.tables()?;
+        lookup_tables(props, symbols, key).map(|p| OwnProperty::Stored(&p.value, p.attributes))
     }
 
     pub(crate) fn own_keys(
@@ -515,52 +610,29 @@ impl Object {
         enumerable_strings_only: bool,
     ) -> impl Iterator<Item = PropertyKey> + '_ {
         let mut keys = Vec::new();
-        match self {
-            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
-                collect_own_keys(
-                    &mut keys,
-                    &plain.props,
-                    &plain.symbol_props,
-                    enumerable_strings_only,
-                );
-            }
-            Self::Array(array) => collect_own_keys(
-                &mut keys,
-                &array.props,
-                &array.symbol_props,
-                enumerable_strings_only,
-            ),
-            Self::Function(function) => collect_own_keys(
-                &mut keys,
-                &function.props,
-                &function.symbol_props,
-                enumerable_strings_only,
-            ),
-            Self::Promise(promise) => collect_own_keys(
-                &mut keys,
-                &promise.props,
-                &promise.symbol_props,
-                enumerable_strings_only,
-            ),
-            Self::BuiltinStatic(builtin) => collect_own_keys(
-                &mut keys,
-                &builtin.props,
-                &builtin.symbol_props,
-                enumerable_strings_only,
-            ),
-            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => {}
+        if let Some((props, symbols)) = self.tables() {
+            collect_own_keys(&mut keys, props, symbols, enumerable_strings_only);
         }
         keys.sort_unstable_by_key(|&(order, _)| order);
-        let array_len = match self {
-            Self::Array(array) => Some(array.elements.len()),
+        let array = match self {
+            Self::Array(array) => Some(array),
             _ => None,
         };
-        (0..array_len.unwrap_or_default())
-            .map(|index| PropertyKey::String(index.to_string()))
+        array
+            .into_iter()
+            .flat_map(move |array| {
+                array
+                    .elements
+                    .iter()
+                    .filter(move |(_, (_, attributes))| {
+                        !enumerable_strings_only || attributes.enumerable
+                    })
+                    .map(|(index, _)| PropertyKey::String(index.to_string()))
+            })
             .chain(
-                array_len
+                array
                     .filter(|_| !enumerable_strings_only)
-                    .map(|_| PropertyKey::String("length".to_owned())),
+                    .map(|_| "length".into()),
             )
             .chain(keys.into_iter().map(|(_, key)| match key {
                 PropertyKeyRef::String(key) => PropertyKey::String(key.to_owned()),
@@ -569,29 +641,25 @@ impl Object {
     }
 
     fn valid_property_tables(&self) -> bool {
+        if let Some((props, symbols)) = self.tables()
+            && (!props.valid_order() || !symbols.valid_order())
+        {
+            return false;
+        }
         match self {
-            Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
-                plain.props.valid_order() && plain.symbol_props.valid_order()
-            }
             Self::Array(array) => {
-                array.props.valid_order()
-                    && array.symbol_props.valid_order()
+                array.length <= u32::MAX as usize
+                    && array
+                        .elements
+                        .last_key_value()
+                        .is_none_or(|(&index, _)| index < array.length)
                     && array
                         .props
                         .0
                         .keys()
                         .all(|key| key != "length" && array_index(key).is_none())
             }
-            Self::Function(function) => {
-                function.props.valid_order() && function.symbol_props.valid_order()
-            }
-            Self::Promise(promise) => {
-                promise.props.valid_order() && promise.symbol_props.valid_order()
-            }
-            Self::BuiltinStatic(builtin) => {
-                builtin.props.valid_order() && builtin.symbol_props.valid_order()
-            }
-            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => true,
+            _ => true,
         }
     }
 
@@ -602,7 +670,9 @@ impl Object {
             Self::Function(function) => function.prototype,
             Self::Promise(promise) => promise.prototype,
             Self::BuiltinStatic(builtin) => builtin.prototype,
-            Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => None,
+            Self::Bound(bound) => bound.object.prototype,
+            Self::Resolution(resolution) => resolution.object.prototype,
+            Self::Native(_) | Self::Environment(_) => None,
         }
     }
 
@@ -610,6 +680,18 @@ impl Object {
     /// this method, which replaces the buffer contents.
     pub(crate) fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
         out.clear();
+        if let Some(id) = self.prototype() {
+            out.push(OwnedEdge::Prototype(id));
+        }
+        if let Some((props, symbols)) = self.tables() {
+            for (_, property) in props.iter() {
+                push_property(out, property);
+            }
+            for (key, property) in symbols.iter() {
+                out.push(OwnedEdge::Symbol(*key));
+                push_property(out, property);
+            }
+        }
         match self {
             Self::Promise(promise) => {
                 if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) =
@@ -626,12 +708,6 @@ impl Object {
                 for job in &promise.reactions {
                     job.write_edges(out);
                 }
-                push_script(out, &promise.props, promise.prototype);
-                push_symbol_values(out, &promise.symbol_props);
-            }
-            Self::BuiltinStatic(builtin) => {
-                push_script(out, &builtin.props, builtin.prototype);
-                push_symbol_values(out, &builtin.symbol_props);
             }
             Self::Resolution(resolution) => {
                 out.push(OwnedEdge::Object(resolution.promise));
@@ -639,20 +715,16 @@ impl Object {
                     out.push(OwnedEdge::Object(resolution.pair));
                 }
             }
-            Self::Native(_) => {}
-            Self::Plain(plain) => push_plain(out, plain),
-            Self::ArrayIterator { object, array, .. } => {
-                push_plain(out, object);
+            Self::Native(_) | Self::Plain(_) | Self::BuiltinStatic(_) => {}
+            Self::ArrayIterator { array, .. } => {
                 if let Some(id) = array {
                     out.push(OwnedEdge::Object(*id));
                 }
             }
             Self::Array(array) => {
-                for value in &array.elements {
-                    push_value(out, value);
+                for (property, _) in array.elements.values() {
+                    push_property(out, property);
                 }
-                push_script(out, &array.props, array.prototype);
-                push_symbol_values(out, &array.symbol_props);
             }
             Self::Function(function) => {
                 if let Some(id) = function.env {
@@ -661,8 +733,6 @@ impl Object {
                         role: EnvRole::Closure,
                     });
                 }
-                push_script(out, &function.props, function.prototype);
-                push_symbol_values(out, &function.symbol_props);
             }
             Self::Bound(bound) => {
                 out.push(OwnedEdge::Object(bound.target));
@@ -686,48 +756,11 @@ impl Object {
     }
 }
 
-fn push_plain(out: &mut Vec<OwnedEdge>, plain: &PlainObject) {
-    if let Some(id) = plain.prototype {
-        out.push(OwnedEdge::Prototype(id));
-    }
-    for (_, property) in plain.props.iter() {
-        push_property(out, property);
-    }
-    push_symbol_properties(out, &plain.symbol_props);
-}
-
-fn push_script(
-    out: &mut Vec<OwnedEdge>,
-    props: &PropertyTable<String, Value>,
-    prototype: Option<ObjectId>,
-) {
-    if let Some(id) = prototype {
-        out.push(OwnedEdge::Prototype(id));
-    }
-    for (_, value) in props.iter() {
-        push_value(out, value);
-    }
-}
-
-fn push_symbol_values(out: &mut Vec<OwnedEdge>, table: &PropertyTable<SymbolId, Value>) {
-    for (key, value) in table.iter() {
-        out.push(OwnedEdge::Symbol(*key));
-        push_value(out, value);
-    }
-}
-
-fn push_symbol_properties(out: &mut Vec<OwnedEdge>, table: &PropertyTable<SymbolId, Property>) {
-    for (key, property) in table.iter() {
-        out.push(OwnedEdge::Symbol(*key));
-        push_property(out, property);
-    }
-}
-
 fn push_property(out: &mut Vec<OwnedEdge>, property: &Property) {
     match property {
         Property::Data(value) => push_value(out, value),
         Property::Accessor { get, set } => {
-            out.extend([*get, *set].into_iter().flatten().map(OwnedEdge::Object));
+            out.extend([*get, *set].into_iter().flatten().map(OwnedEdge::Accessor));
         }
     }
 }
@@ -916,7 +949,13 @@ impl Heap {
 
     pub(crate) fn alloc_array(&mut self, elements: Vec<Value>) -> ObjectId {
         self.alloc(Object::Array(ArrayObject {
-            elements,
+            length: elements.len(),
+            length_writable: true,
+            elements: elements
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| (index, (Property::Data(value), Attributes::ORDINARY)))
+                .collect(),
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.array_prototype,
@@ -1116,7 +1155,7 @@ impl Heap {
         value: Value,
         attributes: Attributes,
     ) -> Result<(), VmError> {
-        self.write_own_data(id, key.into(), value, Some(attributes))
+        self.write_own_property(id, key.into(), Property::Data(value), Some(attributes))
     }
 
     /// Writes an own data property. Does not walk the chain or apply readonly checks.
@@ -1126,68 +1165,81 @@ impl Heap {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
-        self.write_own_data(id, key, value, None)
+        self.write_own_property(id, key, Property::Data(value), None)
     }
 
-    fn write_own_data(
+    pub(crate) fn apply_descriptor(
         &mut self,
         id: ObjectId,
         key: PropertyKey,
-        value: Value,
+        update: DescriptorUpdate,
+    ) -> Result<bool, VmError> {
+        let object = self.get(id)?;
+        if object.tables().is_none() {
+            return Ok(false);
+        }
+        if let (Object::Array(array), Some(name)) = (object, key.as_string())
+            && !array.length_writable
+            && array_index(name).is_some_and(|index| index >= array.length)
+        {
+            return Ok(false);
+        }
+        let Some((property, attrs)) = update.complete(object.own_property(key.borrowed())) else {
+            return Ok(false);
+        };
+        if key.as_string() == Some("length")
+            && let Object::Array(array) = self.get_mut(id)?
+        {
+            let Property::Data(Value::Number(length)) = property else {
+                unreachable!("validated array length descriptor")
+            };
+            return Ok(array.set_length(length as usize, attrs.writable));
+        }
+        self.write_own_property(id, key, property, Some(attrs))?;
+        Ok(true)
+    }
+
+    fn write_own_property(
+        &mut self,
+        id: ObjectId,
+        key: PropertyKey,
+        property: Property,
         attributes: Option<Attributes>,
     ) -> Result<(), VmError> {
-        match self.get_mut(id)? {
-            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
-                insert_table(
-                    &mut plain.props,
-                    &mut plain.symbol_props,
-                    key,
-                    attributes,
-                    |_| Property::Data(value),
-                );
-                Ok(())
+        let object = self.get_mut(id)?;
+        if let (Object::Array(array), PropertyKeyRef::String(name)) = (&mut *object, key.borrowed())
+            && let Some(index) = array_index(name)
+        {
+            let entry = array
+                .elements
+                .entry(index)
+                .or_insert((Property::Data(Value::Undefined), Attributes::ORDINARY));
+            entry.0 = property;
+            if let Some(attributes) = attributes {
+                entry.1 = attributes;
             }
-            Object::Function(function) => {
-                insert_table(
-                    &mut function.props,
-                    &mut function.symbol_props,
-                    key,
-                    attributes,
-                    |_| value,
-                );
-                Ok(())
-            }
-            Object::Promise(promise) => {
-                insert_table(
-                    &mut promise.props,
-                    &mut promise.symbol_props,
-                    key,
-                    attributes,
-                    |_| value,
-                );
-                Ok(())
-            }
-            Object::BuiltinStatic(builtin) => {
-                insert_table(
-                    &mut builtin.props,
-                    &mut builtin.symbol_props,
-                    key,
-                    attributes,
-                    |_| value,
-                );
-                Ok(())
-            }
-            Object::Array(array) => match key {
-                PropertyKey::String(key) => array.set(key, value, attributes),
-                PropertyKey::Symbol(id) => {
-                    array.symbol_props.update(id, attributes, |_| value);
-                    Ok(())
-                }
-            },
-            _ => Err(VmError::InvalidState(format!(
-                "object {id} does not expose script properties"
-            ))),
+            array.length = array.length.max(index + 1);
+            return Ok(());
         }
+        let (props, symbols) = match object {
+            Object::Plain(o)
+            | Object::ArrayIterator { object: o, .. }
+            | Object::Bound(BoundObject { object: o, .. })
+            | Object::Resolution(Resolution { object: o, .. }) => {
+                (&mut o.props, &mut o.symbol_props)
+            }
+            Object::Array(o) => (&mut o.props, &mut o.symbol_props),
+            Object::Function(o) => (&mut o.props, &mut o.symbol_props),
+            Object::Promise(o) => (&mut o.props, &mut o.symbol_props),
+            Object::BuiltinStatic(o) => (&mut o.props, &mut o.symbol_props),
+            _ => {
+                return Err(VmError::InvalidState(format!(
+                    "object {id} does not expose script properties"
+                )));
+            }
+        };
+        insert_table(props, symbols, key, attributes, |_| property);
+        Ok(())
     }
 
     pub(crate) fn define_property(

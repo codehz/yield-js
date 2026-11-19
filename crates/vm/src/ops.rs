@@ -113,6 +113,7 @@ pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
 pub(crate) fn property_key(value: &Value) -> Result<PropertyKey, VmError> {
     match value {
         Value::Symbol(id) => Ok(PropertyKey::Symbol(*id)),
+        Value::Number(number) if *number == 0.0 => Ok("0".into()),
         _ => Ok(PropertyKey::String(to_js_string(value))),
     }
 }
@@ -154,6 +155,15 @@ fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
     }
 }
 
+pub(crate) fn same_value(lhs: &Value, rhs: &Value) -> bool {
+    match (lhs, rhs) {
+        (Value::Number(lhs), Value::Number(rhs)) => {
+            lhs.to_bits() == rhs.to_bits() || lhs.is_nan() && rhs.is_nan()
+        }
+        _ => strict_equal(lhs, rhs),
+    }
+}
+
 fn loose_equal(lhs: &Value, rhs: &Value) -> Result<bool, VmError> {
     if strict_equal(lhs, rhs) {
         return Ok(true);
@@ -168,7 +178,7 @@ fn loose_equal(lhs: &Value, rhs: &Value) -> Result<bool, VmError> {
     }
 }
 
-fn to_number(value: &Value) -> Result<f64, VmError> {
+pub(crate) fn to_number(value: &Value) -> Result<f64, VmError> {
     match value {
         Value::Undefined => Ok(f64::NAN),
         Value::Null => Ok(0.0),

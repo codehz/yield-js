@@ -6,8 +6,9 @@ use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
     ROOT_ERROR_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
     ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    is_callable_object,
 };
-use crate::bytecode::{BYTECODE_VERSION, Build, Function};
+use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
@@ -18,7 +19,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 11;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -214,7 +215,6 @@ impl Vm {
             snapshot.next_symbol_id,
         );
         check_heap_edges(&build, &heap, host)?;
-        validate_accessors(&build, &heap)?;
         require_value_objects(&heap, snapshot.globals.values())?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         for continuation in continuations.values() {
@@ -321,6 +321,7 @@ impl<'a> Tracer<'a> {
         for edge in &edges {
             match *edge {
                 OwnedEdge::Object(target)
+                | OwnedEdge::Accessor(target)
                 | OwnedEdge::Prototype(target)
                 | OwnedEdge::Environment { id: target, .. } => {
                     self.mark_object(target)?;
@@ -618,6 +619,19 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
                         )));
                     }
                 }
+                OwnedEdge::Accessor(target) => match heap.get(target) {
+                    Ok(object) if is_callable_object(object) => {}
+                    Ok(_) => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} accessor has invalid target {target}"
+                        )));
+                    }
+                    Err(_) => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} accessor references missing object {target}"
+                        )));
+                    }
+                },
                 OwnedEdge::Prototype(target) => match heap.is_environment(target) {
                     None => {
                         return Err(VmError::InvalidSnapshot(format!(
@@ -664,43 +678,6 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             current = next;
         }
         completed.extend(std::mem::take(&mut path));
-    }
-    Ok(())
-}
-
-fn validate_accessors(build: &Build, heap: &Heap) -> Result<(), VmError> {
-    for id in heap.ids() {
-        let plain = match heap.get(id)? {
-            Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => plain,
-            _ => continue,
-        };
-        for (key, property) in plain
-            .props
-            .iter()
-            .map(|(k, p)| (k.to_string(), p))
-            .chain(plain.symbol_props.iter().map(|(k, p)| (k.to_string(), p)))
-        {
-            let Property::Accessor { get, set } = property else {
-                continue;
-            };
-            if get.is_none() && set.is_none() {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "object {id} has empty accessor {key}"
-                )));
-            }
-            for target in [*get, *set].into_iter().flatten() {
-                let valid = heap
-                    .get(target)?
-                    .as_function()
-                    .and_then(|function| build.function(function.func_id))
-                    .is_some_and(Function::is_accessor_method);
-                if !valid {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "object {id} accessor {key} has invalid target {target}"
-                    )));
-                }
-            }
-        }
     }
     Ok(())
 }

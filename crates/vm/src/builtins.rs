@@ -12,13 +12,13 @@ use std::collections::BTreeMap;
 
 use crate::error::VmError;
 use crate::heap::{
-    Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, ITERATOR_SYMBOL, Object,
-    PlainObject, PromiseState, Property, ReactionJob, Resolution,
+    Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
+    ITERATOR_SYMBOL, Object, PlainObject, PromiseState, Property, ReactionJob, Resolution,
 };
 use crate::host::Host;
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::value::{ObjectId, PropertyKey, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 pub(crate) const ROOT_PROMISE: &str = "promise";
@@ -97,6 +97,7 @@ pub(crate) enum BuiltinCall {
     ObjectConstructor,
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
+    ObjectDefineProperty,
 }
 
 enum Dispatch<'a> {
@@ -129,7 +130,7 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Object.prototype stores its constructor");
-        for name in ["keys", "getOwnPropertyDescriptor"] {
+        for name in ["keys", "getOwnPropertyDescriptor", "defineProperty"] {
             let method = self.heap.alloc_builtin("Object", Some(name));
             self.heap
                 .define_data(object, name, Value::Object(method), Attributes::METHOD)
@@ -283,13 +284,7 @@ impl Vm {
         let Value::Object(id) = value else {
             return false;
         };
-        matches!(
-            self.heap.get(*id),
-            Ok(Object::Function(_)
-                | Object::BuiltinStatic(_)
-                | Object::Resolution(_)
-                | Object::Bound(_))
-        )
+        self.heap.get(*id).is_ok_and(is_callable_object)
     }
 
     pub(crate) fn builtin_id(&self, builtin: u32) -> Result<ObjectId, VmError> {
@@ -443,6 +438,7 @@ impl Vm {
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
             BuiltinCall::ObjectKeys => self.object_keys(&args),
             BuiltinCall::ObjectGetOwnPropertyDescriptor => self.get_own_property_descriptor(&args),
+            BuiltinCall::ObjectDefineProperty => self.object_define_property(host, &args),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -463,7 +459,7 @@ impl Vm {
                 ))),
             },
             BuiltinCall::ArrayValues => self.array_values(receiver),
-            BuiltinCall::ArrayIteratorNext => self.array_iterator_next(receiver),
+            BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::ReflectOwnKeys => {
                 let Some(Value::Object(id)) = args.first() else {
@@ -528,7 +524,11 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(iterator)))
     }
 
-    fn array_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+    fn array_iterator_next(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
         let invalid_receiver = "ArrayIterator.next requires an array iterator";
         let Value::Object(id) = *receiver else {
             return self.throw_type_error(invalid_receiver);
@@ -539,33 +539,39 @@ impl Vm {
         else {
             return self.throw_type_error(invalid_receiver);
         };
-        let value = if let Some(source) = *array {
-            let Object::Array(source) = self.heap.get(source)? else {
+        let next = if let Some(source) = *array {
+            let Object::Array(array) = self.heap.get(source)? else {
                 return Err(VmError::InvalidState(
                     "array iterator source is not an array".to_owned(),
                 ));
             };
-            source.elements.get(*next_index).cloned()
-        } else {
-            None
-        };
-        if array.is_some() {
+            let next = (*next_index < array.length).then_some((source, *next_index));
             let Object::ArrayIterator {
                 array, next_index, ..
             } = self.heap.get_mut(id)?
             else {
-                unreachable!();
+                unreachable!()
             };
-            if value.is_some() {
+            if next.is_some() {
                 *next_index += 1;
             } else {
                 *array = None;
             }
-        }
-        let done = value.is_none();
+            next
+        } else {
+            None
+        };
+        let done = next.is_none();
+        let value = if let Some((source, index)) = next {
+            match self.read_array_index(host, source, index)? {
+                Invocation::Value(value) => value,
+                thrown => return Ok(thrown),
+            }
+        } else {
+            Value::Undefined
+        };
         let result = self.heap.alloc_plain();
-        self.heap
-            .set_own_string(result, "value", value.unwrap_or(Value::Undefined))?;
+        self.heap.set_own_string(result, "value", value)?;
         self.heap
             .set_own_string(result, "done", Value::Bool(done))?;
         Ok(Invocation::Value(Value::Object(result)))
@@ -592,7 +598,10 @@ impl Vm {
                 let args = match args.next() {
                     None | Some(Value::Undefined | Value::Null) => Vec::new(),
                     Some(Value::Object(id)) if let Object::Array(array) = self.heap.get(id)? => {
-                        array.elements.clone()
+                        match self.read_array_elements(host, id, array.length)? {
+                            Ok(values) => values,
+                            Err(error) => return Ok(Invocation::Thrown(error)),
+                        }
                     }
                     _ => return self.throw_type_error("createListFromArrayLike"),
                 };
@@ -603,6 +612,7 @@ impl Vm {
                     target,
                     bound_this: this_arg,
                     args: args.collect(),
+                    object: PlainObject::new(None),
                 }));
                 Ok(Invocation::Value(Value::Object(id)))
             }
@@ -696,6 +706,108 @@ impl Vm {
         self.heap
             .set_own_string(result, "configurable", Value::Bool(attributes.configurable))?;
         Ok(Invocation::Value(Value::Object(result)))
+    }
+
+    fn object_define_property(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error("Object.defineProperty requires an object target");
+        };
+        let key = ops::property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+        let Some(descriptor @ Value::Object(id)) = args.get(2) else {
+            return self.throw_type_error("property descriptor must be an object");
+        };
+        let mut update = DescriptorUpdate::default();
+        // ToPropertyDescriptor observes inherited fields, and checks/reads each
+        // in order: an earlier getter can affect the fields read afterward.
+        for name in [
+            "enumerable",
+            "configurable",
+            "value",
+            "writable",
+            "get",
+            "set",
+        ] {
+            let key = PropertyKeyRef::String(name);
+            if !self.heap.has_property(*id, key)? {
+                continue;
+            }
+            let value = match self.read_property(host, descriptor, key)? {
+                Invocation::Value(value) => value,
+                thrown => return Ok(thrown),
+            };
+            match name {
+                "enumerable" => update.enumerable = Some(value.truthy()),
+                "configurable" => update.configurable = Some(value.truthy()),
+                "value" => update.value = Some(value),
+                "writable" => update.writable = Some(value.truthy()),
+                "get" | "set" => {
+                    let handler = match value {
+                        Value::Undefined => None,
+                        Value::Object(id) if self.is_callable(&value) => Some(id),
+                        _ => {
+                            return self.throw_type_error(
+                                "descriptor accessor must be callable or undefined",
+                            );
+                        }
+                    };
+                    if name == "get" {
+                        update.get = Some(handler);
+                    } else {
+                        update.set = Some(handler);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        if update.is_data() && update.is_accessor() {
+            return self.throw_type_error("descriptor cannot mix data and accessor fields");
+        }
+        self.apply_property_update(*target, key, update)
+    }
+
+    pub(crate) fn apply_property_update(
+        &mut self,
+        target: ObjectId,
+        key: PropertyKey,
+        mut update: DescriptorUpdate,
+    ) -> Result<Invocation, VmError> {
+        if key.as_string() == Some("length")
+            && matches!(self.heap.get(target)?, Object::Array(_))
+            && let Some(value) = &mut update.value
+        {
+            let length = match ops::to_number(value) {
+                Ok(length) => length,
+                Err(_) if matches!(value, Value::String(_)) => f64::NAN,
+                Err(_) => return self.throw_type_error("cannot convert array length to a number"),
+            };
+            if !(0.0..=u32::MAX as f64).contains(&length) || length.fract() != 0.0 {
+                let error = self.alloc_error(
+                    self.builtins.error_prototype,
+                    "RangeError",
+                    Some("Invalid array length".to_owned()),
+                )?;
+                let Value::Object(id) = error else {
+                    unreachable!()
+                };
+                self.heap.define_data(
+                    id,
+                    "name",
+                    Value::String("RangeError".to_owned()),
+                    Attributes::METHOD,
+                )?;
+                return Ok(Invocation::Thrown(error));
+            }
+            *value = Value::Number((length as u32) as f64);
+        }
+        if self.heap.apply_descriptor(target, key, update)? {
+            Ok(Invocation::Value(Value::Object(target)))
+        } else {
+            self.throw_type_error("Cannot define property")
+        }
     }
 
     fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
@@ -911,10 +1023,21 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let iterable = args.first().cloned().unwrap_or(Value::Undefined);
-        let Some(elements) = self.array_elements(&iterable)? else {
+        let Value::Object(id) = iterable else {
             return self.throw_type_error("Promise combinator iterable is not an array");
         };
+        let Object::Array(array) = self.heap.get(id)? else {
+            return self.throw_type_error("Promise combinator iterable is not an array");
+        };
+        let elements = self.read_array_elements(host, id, array.length)?;
         let result = self.heap.alloc_promise();
+        let elements = match elements {
+            Ok(elements) => elements,
+            Err(error) => {
+                self.settle(result, Settlement::Rejected(error))?;
+                return Ok(Invocation::Value(Value::Object(result)));
+            }
+        };
         if elements.is_empty() {
             match kind {
                 CombineKind::All | CombineKind::AllSettled => {
@@ -966,14 +1089,20 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(result)))
     }
 
-    fn array_elements(&self, value: &Value) -> Result<Option<Vec<Value>>, VmError> {
-        let Value::Object(id) = value else {
-            return Ok(None);
-        };
-        Ok(match self.heap.get(*id)? {
-            Object::Array(array) => Some(array.elements.clone()),
-            _ => None,
-        })
+    fn read_array_elements(
+        &mut self,
+        host: &mut dyn Host,
+        id: ObjectId,
+        length: usize,
+    ) -> Result<Result<Vec<Value>, Value>, VmError> {
+        let mut values = Vec::new();
+        for index in 0..length {
+            match self.read_array_index(host, id, index)? {
+                Invocation::Value(value) => values.push(value),
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            }
+        }
+        Ok(Ok(values))
     }
 
     pub(crate) fn alloc_capability_pair(
@@ -985,12 +1114,14 @@ impl Vm {
             pair: 0,
             resolve: true,
             called: false,
+            object: PlainObject::new(None),
         }));
         let reject_id = self.heap.alloc(Object::Resolution(Resolution {
             promise,
             pair: resolve_id,
             resolve: false,
             called: false,
+            object: PlainObject::new(None),
         }));
         match self.heap.get_mut(resolve_id)? {
             Object::Resolution(resolution) => resolution.pair = reject_id,
@@ -1201,6 +1332,14 @@ impl Vm {
     }
 }
 
+pub(crate) fn is_callable_object(object: &Object) -> bool {
+    match object {
+        Object::Function(_) | Object::Resolution(_) | Object::Bound(_) => true,
+        Object::BuiltinStatic(function) => static_call(function).is_some(),
+        _ => false,
+    }
+}
+
 fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
     match (function.name.as_str(), function.member.as_deref()) {
         ("Promise", None) => Some(BuiltinCall::Constructor),
@@ -1221,6 +1360,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Object", Some("getOwnPropertyDescriptor")) => {
             Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
         }
+        ("Object", Some("defineProperty")) => Some(BuiltinCall::ObjectDefineProperty),
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),

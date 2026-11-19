@@ -50,7 +50,6 @@ async function run() {
             Some(snapshot.objects[index].id),
             "invalid target",
         ),
-        (None, None, "empty accessor"),
     ] {
         let mut corrupt = snapshot.clone();
         let Object::Plain(plain) = &mut corrupt.objects[index].object else {
@@ -369,5 +368,27 @@ fn restore_rejects_writable_object_prototype() {
         .expect_err("writable Object.prototype");
     assert!(
         matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("Object.prototype"))
+    );
+}
+
+#[test]
+fn restore_rejects_array_index_past_length() {
+    let mut s = Suspended::start(
+        "async function run() { const a = []; Object.defineProperty(a, '9', { value: 4 }); await wait('a'); return a[9]; }",
+        vec![],
+    );
+    let mut snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");
+    let array = snapshot["objects"]
+        .as_array_mut()
+        .expect("object records")
+        .iter_mut()
+        .find_map(|record| record["object"].get_mut("array"))
+        .expect("sparse array in snapshot");
+    array["length"] = serde_json::json!(9);
+    let error = s
+        .restore(serde_json::from_value(snapshot).expect("deserialize snapshot"))
+        .expect_err("array element outside length");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
     );
 }

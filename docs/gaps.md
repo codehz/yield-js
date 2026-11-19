@@ -49,8 +49,8 @@
 | 语义点 | design.md 目标 | 现状 |
 | --- | --- | --- |
 | `arguments` | 支持（严格模式 `arguments`） | 无任何绑定或降级；引用即"unknown binding"/未知名 |
-| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器的接收者语义、`hasOwnProperty`、`in`、`Reflect.ownKeys`、`Object.keys` 及对象目标的 `Object.getOwnPropertyDescriptor`。快照保留自有键顺序及描述符标志；严格赋值拒绝只读属性。仍缺 `Object.defineProperty` / `defineProperties`、删除、原型查询和修改、冻结及冻结检查。 |
-| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | 已有 `Promise`、`queueMicrotask`、`Error`、`TypeError`、`Symbol`、`Reflect`（仅 `ownKeys`）与 `Object`（`keys`、`getOwnPropertyDescriptor`；调用或构造接受对象或空值，不实现原始值包装）。仍无 `Array` 等全局名。 |
+| 原型链、属性描述符、getter/setter 运行时 | 支持 | 已支持原型链查找、继承访问器、`hasOwnProperty`、`in`、`Reflect.ownKeys`、`Object.keys`、`Object.defineProperty` 和对象目标的 `Object.getOwnPropertyDescriptor`。定义可读取继承的描述符字段，遵守只读和不可配置限制；键转换仍沿用成员访问的子集语义。宿主原生句柄不开放属性定义。仍缺 `Object.defineProperties`、删除、原型查询和修改、冻结及冻结检查。 |
+| 标准内建 | `Object`/`Array`/`String`/`Number`/`Math`/`RegExp`/`JSON`/`Error` 等 | 已有 `Promise`、`queueMicrotask`、`Error`、`TypeError`、`Symbol`、`Reflect`（仅 `ownKeys`）与 `Object`（`keys`、`getOwnPropertyDescriptor`、`defineProperty`；调用或构造接受对象或空值，不实现原始值包装）。仍无 `Array` 等全局名。 |
 | 错误对象 | 标准错误类型 | `Error` / `TypeError` 可构造；VM 生成的 `TypeError` 同样是对象，提供 `name`、`message` 和简化的 `stack`。`Promise.any` 的 `AggregateError` 拒绝值仍为字符串。 |
 | 完整 ECMAScript TDZ | 明确不做 | `pending_lexicals` 仅本函数静态检查；闭包提前读得 `undefined` |
 | 循环每轮新绑定 | 明确不做 | 共享绑定 |
@@ -62,9 +62,9 @@
 
 1. **值模型单类型化**：加 `BigInt`/`RegExp` 仍要动 `Value`、`type_of`、truthy、堆边表、快照可达性（`heap.rs::write_edges`）与 `SNAPSHOT_FORMAT_VERSION`；Symbol 已按此路径落地（v8）。
 2. **顶层不是脚本体**：无法承载顶层 `await`、模块语句、顶层 `var`；若要支持，需要把顶层也建成一个函数帧而非只建函数表。
-3. **迭代协议**：同步 `for…of` 与数组展开使用 `[Symbol.iterator]`，缓存 `next`。`for…of` 在循环提前退出时执行 `IteratorClose`；数组展开仅在 `next` 读取异常时关闭，自然耗尽不关闭。迭代器和 `next` 通过现有持久槽跨 `await` 保存；快照格式 v9 保存数组迭代器的源数组引用及游标。`for…in` 仍拒绝；数组仍为稠密存储，没有空洞语义。字节码 v10 增加 `ArrayAppend`。
+3. **迭代协议**：同步 `for…of` 与数组展开使用 `[Symbol.iterator]`，缓存 `next`。`for…of` 在循环提前退出时执行 `IteratorClose`；数组展开仅在 `next` 读取异常时关闭，自然耗尽不关闭。迭代器和 `next` 通过现有持久槽跨 `await` 保存。数组支持运行时空洞（增长 `length` 或越界写索引），但数组字面量的省略项仍生成显式 `undefined`。`for…in` 仍拒绝。
 4. **解构与其余 spread 仍拒绝**：数组解构尚未接入迭代协议；实参展开与对象展开也未实现。
-5. **属性存在性、枚举与描述符**：`in` 与成员读取共用原型链查找，存在性检查不复制属性值。`Reflect.ownKeys` 按数值升序返回索引键，再按创建顺序分别返回其余字符串键和 Symbol 键；`Object.keys` 使用同一顺序但过滤不可枚举属性和 Symbol。稠密数组的 `length` 是不可枚举自有属性。快照格式 v11 保存描述符标志，字节码 v12 增加 `Object` 内建槽。对象展开、`for…in` 和 Proxy 不变量仍未实现。
+5. **属性存在性、枚举与描述符**：`in` 与成员读取共用原型链查找。`Reflect.ownKeys` 按数值升序返回索引键，再按创建顺序分别返回其余字符串键和 Symbol 键；`Object.keys` 过滤不可枚举属性和 Symbol。快照格式 v12 保存稀疏数组索引及描述符、`length` 的可写性和各类脚本对象上的访问器。对象展开、`for…in` 和 Proxy 不变量仍未实现。
 
 ## 5. 优先级示意（仅现状组织，非承诺）
 

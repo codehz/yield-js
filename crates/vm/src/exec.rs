@@ -6,7 +6,7 @@ use crate::bytecode::{
 };
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{ITERATOR_SYMBOL, Object, OwnProperty, Property, object_id};
+use crate::heap::{DescriptorUpdate, ITERATOR_SYMBOL, Object, OwnProperty, Property, object_id};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -378,8 +378,7 @@ impl Vm {
                 "array append target must be an array".to_owned(),
             ));
         };
-        array.elements.push(value.clone());
-        Ok(())
+        array.append(value.clone())
     }
 
     fn close_iterator(
@@ -423,7 +422,7 @@ impl Vm {
         self.read_property(host, object, key.borrowed())
     }
 
-    fn read_property(
+    pub(crate) fn read_property(
         &mut self,
         host: &mut dyn Host,
         object: &Value,
@@ -432,22 +431,51 @@ impl Vm {
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
         };
-        match self
+        if let Some(property) = self
             .heap
             .find_property(id, key)?
             .map(OwnProperty::into_owned)
         {
-            Some(Property::Data(value)) => Ok(Invocation::Value(value)),
-            Some(Property::Accessor { get: Some(get), .. }) => {
-                self.invoke(host, &Value::Object(get), Vec::new(), object)
-            }
-            None if let PropertyKeyRef::String(key) = key
-                && self.has_virtual_function_method(id, key) =>
-            {
+            return self.read_property_value(host, object, property);
+        }
+        match key {
+            PropertyKeyRef::String(key) if self.has_virtual_function_method(id, key) => {
                 let method = self.heap.alloc_builtin("Function", Some(key));
                 Ok(Invocation::Value(Value::Object(method)))
             }
             _ => Ok(Invocation::Value(Value::Undefined)),
+        }
+    }
+
+    pub(crate) fn read_array_index(
+        &mut self,
+        host: &mut dyn Host,
+        id: ObjectId,
+        index: usize,
+    ) -> Result<Invocation, VmError> {
+        let Object::Array(array) = self.heap.get(id)? else {
+            unreachable!("array index reader requires an array")
+        };
+        let receiver = Value::Object(id);
+        if let Some(property) = array.own_index(index).map(OwnProperty::into_owned) {
+            self.read_property_value(host, &receiver, property)
+        } else {
+            self.read_property(host, &receiver, PropertyKeyRef::String(&index.to_string()))
+        }
+    }
+
+    fn read_property_value(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+        property: Property,
+    ) -> Result<Invocation, VmError> {
+        match property {
+            Property::Data(value) => Ok(Invocation::Value(value)),
+            Property::Accessor { get: Some(get), .. } => {
+                self.invoke(host, &Value::Object(get), Vec::new(), receiver)
+            }
+            Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::Undefined)),
         }
     }
 
@@ -503,7 +531,31 @@ impl Vm {
                 };
                 return self.throw_type_error(&message);
             }
-            None => self.heap.set_own(id, key, value)?,
+            None => match self.heap.get(id)? {
+                Object::Array(_) if key.as_string() == Some("length") => {
+                    return self.apply_property_update(
+                        id,
+                        key,
+                        DescriptorUpdate {
+                            value: Some(value),
+                            ..DescriptorUpdate::default()
+                        },
+                    );
+                }
+                Object::Array(array)
+                    if !array.length_writable
+                        && key
+                            .as_string()
+                            .and_then(ops::array_index)
+                            .is_some_and(|index| index >= array.length) =>
+                {
+                    return self.throw_type_error("Cannot extend array with read only length");
+                }
+                Object::Native(_) => {
+                    return self.throw_type_error("native handles do not expose script properties");
+                }
+                _ => self.heap.set_own(id, key, value)?,
+            },
         }
         Ok(Invocation::Value(Value::Undefined))
     }
