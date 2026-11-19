@@ -1,0 +1,9 @@
+[package]
+name = "yield-poc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yield-compiler = { path = "../compiler" }
+yield-vm = { path = "../vm" }

@@ -1,0 +1,10 @@
+[package]
+name = "yield-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxc.workspace = true
+serde.workspace = true
+yield-vm = { path = "../vm" }
