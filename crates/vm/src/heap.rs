@@ -417,6 +417,22 @@ impl ArrayObject {
             .map(|(property, attributes)| OwnProperty::Stored(property, *attributes))
     }
 
+    pub(crate) fn dense_values(&self) -> Result<Vec<Value>, VmError> {
+        let invalid =
+            || VmError::InvalidState("spread arguments require a dense data array".to_owned());
+        if self.length != self.elements.len() {
+            return Err(invalid());
+        }
+        self.elements
+            .iter()
+            .enumerate()
+            .map(|(expected, (&index, (property, _)))| match property {
+                Property::Data(value) if index == expected => Ok(value.clone()),
+                _ => Err(invalid()),
+            })
+            .collect()
+    }
+
     pub(crate) fn append(&mut self, value: Value) -> Result<(), VmError> {
         if self.length >= u32::MAX as usize || !self.length_writable {
             return Err(VmError::InvalidState(

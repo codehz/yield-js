@@ -7,7 +7,7 @@ use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
 use yield_vm::BindingId;
-use yield_vm::bytecode::{BinaryOp, Constant, Instr, PropertyDefinition, Slot, UnaryOp};
+use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
 
 use super::{FunctionSource, Lowerer, THIS_BINDING};
 use crate::emit::Reg;
@@ -588,7 +588,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     value
                 }
                 Callee::Import(import) => {
-                    let args = self.compile_arguments(expression)?;
+                    let args = self.compile_arguments(&expression.arguments)?;
                     let dst = self.alloc_reg()?;
                     self.emit(Instr::CallImport {
                         dst: self.slot(dst),
@@ -629,7 +629,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Some(exits) = exits.filter(|_| expression.optional) {
             self.guard_chain_link(callee, exits)?;
         }
-        let args = self.compile_arguments(expression)?;
+        let args = self.compile_arguments(&expression.arguments)?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CallValue {
             dst: self.slot(dst),
@@ -654,35 +654,49 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
     }
 
-    fn compile_argument_slice(
-        &mut self,
-        arguments: &'ast [Argument<'ast>],
-    ) -> Result<Vec<Slot>, CompileError> {
-        let mut args = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let Some(expression) = argument.as_expression() else {
-                return Err(unsupported(
-                    self.source_text(),
-                    argument.span(),
-                    "spread argument",
-                ));
-            };
-            let reg = self.compile_expression(expression)?;
-            args.push(self.slot(reg));
-        }
-        Ok(args)
-    }
-
     fn compile_arguments(
         &mut self,
-        expression: &'ast CallExpression<'ast>,
-    ) -> Result<Vec<Slot>, CompileError> {
-        self.compile_argument_slice(&expression.arguments)
+        arguments: &'ast [Argument<'ast>],
+    ) -> Result<CallArgs, CompileError> {
+        let mut slots = Vec::new();
+        let mut spread_array = None;
+        for argument in arguments {
+            match argument {
+                Argument::SpreadElement(spread) => {
+                    let array = if let Some(array) = spread_array {
+                        array
+                    } else {
+                        let array = self.alloc_reg()?;
+                        self.emit(Instr::NewArray {
+                            dst: self.slot(array),
+                            elements: std::mem::take(&mut slots),
+                        });
+                        spread_array = Some(array);
+                        array
+                    };
+                    // ArgumentListEvaluation propagates iterator step errors
+                    // directly, without calling the iterator's return method.
+                    self.emit_spread(array, &spread.argument)?;
+                }
+                other => {
+                    let value = self.compile_expression(other.to_expression())?;
+                    if let Some(array) = spread_array {
+                        self.append_array_element(array, value);
+                    } else {
+                        slots.push(self.slot(value));
+                    }
+                }
+            }
+        }
+        Ok(match spread_array {
+            Some(array) => CallArgs::Spread(self.slot(array)),
+            None => CallArgs::Slots(slots),
+        })
     }
 
     fn compile_new(&mut self, expression: &'ast NewExpression<'ast>) -> Result<Reg, CompileError> {
         let callee = self.compile_expression(&expression.callee)?;
-        let args = self.compile_argument_slice(&expression.arguments)?;
+        let args = self.compile_arguments(&expression.arguments)?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::Construct {
             dst: self.slot(dst),
@@ -1087,7 +1101,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     self.append_array_element(dst, value);
                 }
                 ArrayExpressionElement::SpreadElement(spread) => {
-                    self.spread_array_element(dst, &spread.argument)?;
+                    let (iterator, step_pc) = self.emit_spread(dst, &spread.argument)?;
+                    self.protect_iterator_reads(iterator, step_pc, self.pc())?;
                 }
                 other => {
                     let expression = other.as_expression().ok_or_else(|| {
@@ -1112,11 +1127,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         });
     }
 
-    fn spread_array_element(
+    fn emit_spread(
         &mut self,
         array: Reg,
         iterable: &'ast Expression<'ast>,
-    ) -> Result<(), CompileError> {
+    ) -> Result<(Reg, usize), CompileError> {
         let iterable = self.compile_expression(iterable)?;
         let iterator = self.alloc_reg()?;
         let next = self.alloc_reg()?;
@@ -1141,7 +1156,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.jump_to(step_pc);
         let end = self.pc();
         self.patch_jump(exhausted, end)?;
-        self.protect_iterator_reads(iterator, step_pc, end)
+        Ok((iterator, step_pc))
     }
 }
 

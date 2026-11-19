@@ -124,11 +124,6 @@ fn rejects_unsupported_optional_chain_syntax_with_location() {
             "unknown callee \"missing\"",
             24,
         ),
-        (
-            "function run(){ return undefined?.(...[]); }",
-            "unsupported syntax: spread argument",
-            36,
-        ),
     ] {
         let error = compile(source, &CompileOptions::default()).expect_err(source);
         assert!(error.message().contains(message), "{source}: {error}");

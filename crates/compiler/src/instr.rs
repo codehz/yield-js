@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use yield_vm::bytecode::{BinaryOp, Instr, Slot, UnaryOp};
+use yield_vm::bytecode::{BinaryOp, CallArgs, Instr, Slot, UnaryOp};
 
 use crate::emit::Reg;
 
@@ -88,9 +88,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             defs.insert(dst.index);
         }
         Instr::CallImport { dst, args, .. } => {
-            for arg in args {
-                uses.insert(arg.index);
-            }
+            uses.extend(args.slots().iter().map(|arg| arg.index));
             defs.insert(dst.index);
         }
         Instr::CallValue {
@@ -100,9 +98,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             receiver,
         } => {
             uses.insert(callee.index);
-            for arg in args {
-                uses.insert(arg.index);
-            }
+            uses.extend(args.slots().iter().map(|arg| arg.index));
             if let Some(slot) = receiver {
                 uses.insert(slot.index);
             }
@@ -110,9 +106,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::Construct { dst, callee, args } => {
             uses.insert(callee.index);
-            for arg in args {
-                uses.insert(arg.index);
-            }
+            uses.extend(args.slots().iter().map(|arg| arg.index));
             defs.insert(dst.index);
         }
         Instr::Closure { dst, .. }
@@ -216,7 +210,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::CallImport { dst, import, args } => Instr::CallImport {
             dst: remap(dst),
             import,
-            args: args.into_iter().map(remap).collect(),
+            args: remap_args(args, remap),
         },
         Instr::CallValue {
             dst,
@@ -226,13 +220,13 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         } => Instr::CallValue {
             dst: remap(dst),
             callee: remap(callee),
-            args: args.into_iter().map(remap).collect(),
+            args: remap_args(args, remap),
             receiver: receiver.map(remap),
         },
         Instr::Construct { dst, callee, args } => Instr::Construct {
             dst: remap(dst),
             callee: remap(callee),
-            args: args.into_iter().map(remap).collect(),
+            args: remap_args(args, remap),
         },
         Instr::Closure { dst, function } => Instr::Closure {
             dst: remap(dst),
@@ -325,5 +319,12 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             builtin,
         },
+    }
+}
+
+fn remap_args(args: CallArgs, remap: &impl Fn(Slot) -> Slot) -> CallArgs {
+    match args {
+        CallArgs::Slots(slots) => CallArgs::Slots(slots.into_iter().map(remap).collect()),
+        CallArgs::Spread(slot) => CallArgs::Spread(remap(slot)),
     }
 }

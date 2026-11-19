@@ -2,7 +2,8 @@
 //! Handlers run in one place; call sites do not each reimplement catch.
 
 use crate::bytecode::{
-    BinaryOp, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind, UnaryOp,
+    BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
+    UnaryOp,
 };
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -233,7 +234,7 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::CallImport { dst, import, args } => {
-                let args = frame.read_list(&args)?;
+                let args = self.read_call_args(frame, &args)?;
                 frame.write(dst, self.call_import(host, import, &args)?)?;
                 Ok(Step::Next)
             }
@@ -244,7 +245,7 @@ impl Vm {
                 receiver,
             } => self.call_value(host, frame, dst, callee, args, receiver),
             Instr::Construct { dst, callee, args } => {
-                let args = frame.read_list(&args)?;
+                let args = self.read_call_args(frame, &args)?;
                 let callee = frame.read(callee)?;
                 let invocation = self.construct(host, &callee, args)?;
                 store_invocation(frame, dst, invocation)
@@ -408,10 +409,10 @@ impl Vm {
         frame: &mut Frame,
         dst: Slot,
         callee: Slot,
-        args: Vec<Slot>,
+        args: CallArgs,
         receiver: Option<Slot>,
     ) -> Result<Step, VmError> {
-        let args = frame.read_list(&args)?;
+        let args = self.read_call_args(frame, &args)?;
         let callee = frame.read(callee)?;
         let receiver = match receiver {
             Some(slot) => frame.read(slot)?,
@@ -419,6 +420,20 @@ impl Vm {
         };
         let invocation = self.invoke(host, &callee, args, &receiver)?;
         store_invocation(frame, dst, invocation)
+    }
+
+    fn read_call_args(&self, frame: &Frame, args: &CallArgs) -> Result<Vec<Value>, VmError> {
+        match args {
+            CallArgs::Slots(slots) => frame.read_list(slots),
+            CallArgs::Spread(slot) => {
+                let message = "spread arguments require a dense data array";
+                let id = object_id(frame.read_ref(*slot)?, message)?;
+                let Object::Array(array) = self.heap.get(id)? else {
+                    return Err(VmError::InvalidState(message.to_owned()));
+                };
+                array.dense_values()
+            }
+        }
     }
 
     fn get_iterator(

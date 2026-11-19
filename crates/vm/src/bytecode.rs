@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 14;
+pub const BYTECODE_VERSION: u32 = 15;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -55,6 +55,23 @@ impl Slot {
         Self {
             kind: SlotKind::Persistent,
             index,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallArgs {
+    Slots(Vec<Slot>),
+    /// A private, dense argument list built with `NewArray` and `ArrayAppend`.
+    Spread(Slot),
+}
+
+impl CallArgs {
+    pub fn slots(&self) -> &[Slot] {
+        match self {
+            Self::Slots(slots) => slots,
+            Self::Spread(slot) => std::slice::from_ref(slot),
         }
     }
 }
@@ -157,12 +174,12 @@ pub enum Instr {
     CallImport {
         dst: Slot,
         import: u32,
-        args: Vec<Slot>,
+        args: CallArgs,
     },
     CallValue {
         dst: Slot,
         callee: Slot,
-        args: Vec<Slot>,
+        args: CallArgs,
         /// `None` is a bare call (`this` is `undefined`). `Some` is the member
         /// base, evaluated once and passed as the receiver.
         receiver: Option<Slot>,
@@ -171,7 +188,7 @@ pub enum Instr {
     Construct {
         dst: Slot,
         callee: Slot,
-        args: Vec<Slot>,
+        args: CallArgs,
     },
     /// Creates a closure that captures the frame's current environment.
     Closure {
@@ -664,7 +681,7 @@ impl Build {
                             "{location}: CallImport at pc {pc} references import {import}"
                         ));
                     }
-                    for arg in args {
+                    for arg in args.slots() {
                         check_slot(*arg, "CallImport.arg")?;
                     }
                 }
@@ -676,7 +693,7 @@ impl Build {
                 } => {
                     check_slot(*dst, "CallValue.dst")?;
                     check_slot(*callee, "CallValue.callee")?;
-                    for arg in args {
+                    for arg in args.slots() {
                         check_slot(*arg, "CallValue.arg")?;
                     }
                     if let Some(slot) = receiver {
@@ -686,7 +703,7 @@ impl Build {
                 Instr::Construct { dst, callee, args } => {
                     check_slot(*dst, "Construct.dst")?;
                     check_slot(*callee, "Construct.callee")?;
-                    for arg in args {
+                    for arg in args.slots() {
                         check_slot(*arg, "Construct.arg")?;
                     }
                 }

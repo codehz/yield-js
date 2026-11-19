@@ -33,7 +33,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 - `instanceof`
 - 引用形式的 `delete`（标识符、成员、可选链、私有字段）。非引用的 `delete` 会求值操作数并得到 `true`，不删除属性
-- 实参展开（`spread argument`）、对象展开（`object spread`）。数组展开已支持，见第 3 节的迭代差异
+- 对象展开（`object spread`）
 - 赋值或 `++`/`--` 的目标不是简单绑定或成员（`assignment to non-identifier/non-member target`、`update target outside the PoC subset`）
 - 私有字段（`private field access`）
 - 标签模板。非标签模板已支持
@@ -57,7 +57,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length` 或越界写索引可以形成真正的洞 |
-| 字符串迭代 | `for…of` 与数组展开对非对象抛可捕获的 `value is not iterable`。字符串没有迭代器 |
+| 字符串迭代 | `for…of`、数组展开和实参展开对字符串抛可捕获的 `value is not iterable`。字符串没有迭代器 |
 | 迭代关闭 | `for…of` 提前退出会 `IteratorClose`；继续同一循环或自然耗尽不调用 `return`。数组展开只在 `next` 抛错时关闭，自然耗尽不关闭 |
 | 原型与描述符 | 查找、继承访问器、`in`、`hasOwnProperty`、`Object.keys`、`Reflect.ownKeys`、`Object.getOwnPropertyDescriptor`、`Object.defineProperty` / `defineProperties` 已有。定义可读取继承描述符，遵守只读和不可配置限制。批量定义先转换全部可枚举自有键，再按序应用，失败不回滚。仍没有 `delete`、原型查询和修改、`Object.create` / `assign` / `is`、冻结、密封、扩展检查。宿主原生句柄不开放属性定义。键转换沿用第 1 节的子集语义 |
 | 错误对象 | `Error` / `TypeError` 可调用或 `new`，含 `name`、`message` 和简化 `stack`。没有 `RangeError`、`ReferenceError`、`SyntaxError`、`AggregateError` 等其它标准错误类型 |
@@ -86,7 +86,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ## 5. 结构性缺口
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
-2. **迭代协议只接了两处**。同步 `for…of` 和数组展开会取 `[Symbol.iterator]` 并缓存 `next`，两者都能把迭代器放进持久槽跨 `await`。解构、实参展开、字符串、`for…in`、Promise 组合子都还没接上。
+2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构、字符串迭代和 Promise 组合子尚未接入。
 3. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
@@ -95,7 +95,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ```mermaid
 flowchart LR
   C[对象强制转换] --> S[String / Number / 模板]
-  I[已有同步迭代] --> D[解构 / 实参展开 / 字符串迭代]
+  I[已有同步迭代] --> D[解构 / 字符串迭代]
   I --> P[组合子接受任意可迭代]
   K[删除 / 原型 / 冻结] --> N[for-in / 对象展开]
   K --> R[Proxy 与其余 Reflect]
