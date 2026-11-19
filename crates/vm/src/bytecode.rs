@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const BYTECODE_VERSION: u32 = 1;
+use crate::value::BindingId;
+
+pub const BYTECODE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +128,44 @@ pub enum Instr {
         function: u32,
         args: Vec<Slot>,
     },
+    CallValue {
+        dst: Slot,
+        callee: Slot,
+        args: Vec<Slot>,
+    },
+    /// Creates a closure that captures the frame's current environment.
+    Closure {
+        dst: Slot,
+        function: u32,
+    },
+    NewObject {
+        dst: Slot,
+    },
+    NewArray {
+        dst: Slot,
+        elements: Vec<Slot>,
+    },
+    GetMember {
+        dst: Slot,
+        object: Slot,
+        key: Slot,
+    },
+    SetMember {
+        object: Slot,
+        key: Slot,
+        src: Slot,
+    },
+    GetBinding {
+        dst: Slot,
+        binding: BindingId,
+    },
+    SetBinding {
+        binding: BindingId,
+        src: Slot,
+    },
+    DeclareBinding {
+        binding: BindingId,
+    },
     /// Suspends the current async frame. The VM writes the awaited value to
     /// either resume destination and branches to the matching resume PC.
     Await {
@@ -159,16 +199,28 @@ pub struct ResumeEntry {
     pub saved_slots: Vec<u16>,
 }
 
+/// Static exception region. The VM writes the thrown value to `dst` and jumps
+/// to `target_pc`. Regions may nest; the innermost covering PC wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExceptionHandler {
+    pub start_pc: u32,
+    pub end_pc: u32,
+    pub target_pc: u32,
+    pub dst: Slot,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     pub func_id: u32,
     pub name: String,
     pub is_async: bool,
-    pub param_slots: Vec<Slot>,
+    /// Binding ID for each declared parameter, in source order.
+    pub param_bindings: Vec<BindingId>,
     pub transient_slots: u16,
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
     pub resumes: Vec<ResumeEntry>,
+    pub handlers: Vec<ExceptionHandler>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -309,8 +361,8 @@ impl Build {
             Ok(())
         };
 
-        for (index, slot) in function.param_slots.iter().copied().enumerate() {
-            check_slot(slot, &format!("parameter {index}"))?;
+        if function.param_bindings.len() > u16::MAX as usize {
+            return Err(format!("{location}: too many parameters"));
         }
 
         for (pc, instr) in function.code.iter().enumerate() {
@@ -372,6 +424,44 @@ impl Build {
                         check_slot(*arg, "CallFunction.arg")?;
                     }
                 }
+                Instr::CallValue { dst, callee, args } => {
+                    check_slot(*dst, "CallValue.dst")?;
+                    check_slot(*callee, "CallValue.callee")?;
+                    for arg in args {
+                        check_slot(*arg, "CallValue.arg")?;
+                    }
+                }
+                Instr::Closure {
+                    dst,
+                    function: callee,
+                } => {
+                    check_slot(*dst, "Closure.dst")?;
+                    if self.function(*callee).is_none() {
+                        return Err(format!(
+                            "{location}: Closure at pc {pc} references function {callee}"
+                        ));
+                    }
+                }
+                Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
+                Instr::NewArray { dst, elements } => {
+                    check_slot(*dst, "NewArray.dst")?;
+                    for element in elements {
+                        check_slot(*element, "NewArray.element")?;
+                    }
+                }
+                Instr::GetMember { dst, object, key } => {
+                    check_slot(*dst, "GetMember.dst")?;
+                    check_slot(*object, "GetMember.object")?;
+                    check_slot(*key, "GetMember.key")?;
+                }
+                Instr::SetMember { object, key, src } => {
+                    check_slot(*object, "SetMember.object")?;
+                    check_slot(*key, "SetMember.key")?;
+                    check_slot(*src, "SetMember.src")?;
+                }
+                Instr::GetBinding { dst, .. } => check_slot(*dst, "GetBinding.dst")?,
+                Instr::SetBinding { src, .. } => check_slot(*src, "SetBinding.src")?,
+                Instr::DeclareBinding { .. } => {}
                 Instr::Await { dst, input, resume } => {
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));
@@ -422,6 +512,35 @@ impl Build {
                 }
                 previous = Some(*slot);
             }
+        }
+
+        for (handler_id, handler) in function.handlers.iter().enumerate() {
+            if handler.start_pc >= handler.end_pc {
+                return Err(format!(
+                    "{location}: handler {handler_id} has empty or inverted range {}..{}",
+                    handler.start_pc, handler.end_pc
+                ));
+            }
+            if handler.end_pc as usize > function.code.len() {
+                return Err(format!(
+                    "{location}: handler {handler_id} ends at pc {}, code len {}",
+                    handler.end_pc,
+                    function.code.len()
+                ));
+            }
+            if handler.target_pc as usize >= function.code.len() {
+                return Err(format!(
+                    "{location}: handler {handler_id} targets pc {}, code len {}",
+                    handler.target_pc,
+                    function.code.len()
+                ));
+            }
+            if handler.target_pc >= handler.start_pc && handler.target_pc < handler.end_pc {
+                return Err(format!(
+                    "{location}: handler {handler_id} targets a pc inside its own protected range"
+                ));
+            }
+            check_slot(handler.dst, &format!("handler {handler_id}.dst"))?;
         }
 
         Ok(())

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// Heap object identity. Stable across snapshot/restore.
 pub type ObjectId = u32;
+/// Compile-time identity of one lexical binding.
+pub type BindingId = u32;
 /// Continuation identity, local to one VM instance and persisted in snapshots.
 pub type ContinuationId = u64;
 

@@ -6,7 +6,7 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::Object;
 use crate::value::{ContinuationId, ObjectId, Value};
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -24,6 +24,8 @@ pub struct ContinuationRecord {
     /// Promise the continuation waits on. Only recoverable, unsettled promises
     /// are persisted, so this is required for every restored continuation.
     pub waiting_on: ObjectId,
+    /// Invocation environment of the suspended frame.
+    pub env: Option<ObjectId>,
     /// Values in `ResumeEntry::saved_slots` order.
     pub values: Vec<Value>,
 }

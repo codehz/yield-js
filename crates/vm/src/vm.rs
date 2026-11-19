@@ -1,13 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::bytecode::{BinaryOp, Build, Constant, Function, Instr, Slot, SlotKind, UnaryOp};
+use crate::bytecode::{
+    BinaryOp, Build, Constant, ExceptionHandler, Function, Instr, Slot, SlotKind, UnaryOp,
+};
 use crate::error::VmError;
-use crate::heap::{NativeObject, Object, PromiseObject, PromiseState};
+use crate::heap::{
+    ArrayObject, EnvironmentObject, FunctionObject, NativeObject, Object, PlainObject,
+    PromiseObject, PromiseState,
+};
 use crate::host::{Completion, Host, HostReply, PendingOperationMeta};
 use crate::snapshot::{
     ContinuationRecord, ObjectRecord, PendingOperationRecord, SNAPSHOT_FORMAT_VERSION, Snapshot,
 };
-use crate::value::{ContinuationId, HostValue, NativeKey, ObjectId, Value};
+use crate::value::{BindingId, ContinuationId, HostValue, NativeKey, ObjectId, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromiseStateView {
@@ -28,6 +33,7 @@ struct Continuation {
     func_id: u32,
     resume_id: u32,
     waiting_on: Option<ObjectId>,
+    env: Option<ObjectId>,
     values: Vec<Value>,
 }
 
@@ -48,6 +54,7 @@ enum Microtask {
 struct Frame {
     function: usize,
     pc: usize,
+    env: Option<ObjectId>,
     transient: Vec<Value>,
     transient_initialized: Vec<bool>,
     persistent: Vec<Value>,
@@ -125,7 +132,7 @@ impl Vm {
             .iter()
             .map(|value| self.host_to_value(value))
             .collect::<Result<Vec<_>, _>>()?;
-        self.call_function(host, func_id, args)
+        self.call_function(host, func_id, None, args)
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the
@@ -264,6 +271,7 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         func_id: u32,
+        parent_env: Option<ObjectId>,
         args: Vec<Value>,
     ) -> Result<Value, VmError> {
         let function_index = self
@@ -274,13 +282,19 @@ impl Vm {
             .ok_or_else(|| VmError::InvalidState(format!("function {func_id} does not exist")))?;
         let is_async = self.build.functions[function_index].is_async;
         let async_promise = is_async.then(|| self.create_promise());
-        let function = &self.build.functions[function_index];
+        let param_bindings = self.build.functions[function_index].param_bindings.clone();
 
-        let mut frame = Frame::new(function_index, function, async_promise);
-        for (index, slot) in function.param_slots.iter().copied().enumerate() {
+        let mut bindings = BTreeMap::new();
+        for (index, binding) in param_bindings.iter().copied().enumerate() {
             let value = args.get(index).cloned().unwrap_or(Value::Undefined);
-            write_slot(&mut frame, slot, value)?;
+            bindings.insert(binding, value);
         }
+        let env = self.alloc_object(Object::Environment(EnvironmentObject {
+            parent: parent_env,
+            bindings,
+        }));
+        let function = &self.build.functions[function_index];
+        let frame = Frame::new(function_index, function, Some(env), async_promise);
 
         let outcome = self.execute_frame(host, frame)?;
         match outcome {
@@ -320,6 +334,7 @@ impl Vm {
                 return Ok(ExecOutcome::Return(Value::Undefined));
             }
             let instr = function.code[frame.pc].clone();
+            let pc = frame.pc;
             frame.pc += 1;
 
             match instr {
@@ -340,7 +355,8 @@ impl Vm {
                 }
                 Instr::Unary { dst, op, src } => {
                     let src = read_slot(&frame, src)?;
-                    write_slot(&mut frame, dst, unary_op(op, src))?;
+                    let value = self.unary_op(op, src);
+                    write_slot(&mut frame, dst, value)?;
                 }
                 Instr::CallImport { dst, import, args } => {
                     let import_name = self
@@ -393,12 +409,114 @@ impl Vm {
                     for arg in args {
                         values.push(read_slot(&frame, arg)?);
                     }
-                    let value = match self.call_function(host, callee, values) {
+                    let value = match self.call_function(host, callee, None, values) {
                         Ok(value) => value,
-                        Err(VmError::Thrown(value)) => return Ok(ExecOutcome::Thrown(value)),
+                        Err(VmError::Thrown(value)) => {
+                            if self.throw_in_frame(&mut frame, pc, value.clone())? {
+                                continue;
+                            }
+                            return Ok(ExecOutcome::Thrown(value));
+                        }
                         Err(error) => return Err(error),
                     };
                     write_slot(&mut frame, dst, value)?;
+                }
+                Instr::CallValue { dst, callee, args } => {
+                    let callee = read_slot(&frame, callee)?;
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        values.push(read_slot(&frame, arg)?);
+                    }
+                    let (func_id, parent_env) = match callee {
+                        Value::Object(id) => match self.heap.get(&id) {
+                            Some(Object::Function(function)) => (function.func_id, function.env),
+                            _ => {
+                                let value =
+                                    Value::String("TypeError: value is not a function".into());
+                                if self.throw_in_frame(&mut frame, pc, value.clone())? {
+                                    continue;
+                                }
+                                return Ok(ExecOutcome::Thrown(value));
+                            }
+                        },
+                        _ => {
+                            let value = Value::String("TypeError: value is not a function".into());
+                            if self.throw_in_frame(&mut frame, pc, value.clone())? {
+                                continue;
+                            }
+                            return Ok(ExecOutcome::Thrown(value));
+                        }
+                    };
+                    let value = match self.call_function(host, func_id, parent_env, values) {
+                        Ok(value) => value,
+                        Err(VmError::Thrown(value)) => {
+                            if self.throw_in_frame(&mut frame, pc, value.clone())? {
+                                continue;
+                            }
+                            return Ok(ExecOutcome::Thrown(value));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    write_slot(&mut frame, dst, value)?;
+                }
+                Instr::Closure {
+                    dst,
+                    function: callee,
+                } => {
+                    let env = frame.env.ok_or_else(|| {
+                        VmError::InvalidState("closure without an invocation environment".into())
+                    })?;
+                    let id = self.alloc_object(Object::Function(FunctionObject {
+                        func_id: callee,
+                        env: Some(env),
+                    }));
+                    write_slot(&mut frame, dst, Value::Object(id))?;
+                }
+                Instr::NewObject { dst } => {
+                    let id = self.alloc_object(Object::Plain(PlainObject {
+                        props: BTreeMap::new(),
+                    }));
+                    write_slot(&mut frame, dst, Value::Object(id))?;
+                }
+                Instr::NewArray { dst, elements } => {
+                    let mut values = Vec::with_capacity(elements.len());
+                    for element in elements {
+                        values.push(read_slot(&frame, element)?);
+                    }
+                    let id = self.alloc_object(Object::Array(ArrayObject { elements: values }));
+                    write_slot(&mut frame, dst, Value::Object(id))?;
+                }
+                Instr::GetMember { dst, object, key } => {
+                    let object = read_slot(&frame, object)?;
+                    let key = read_slot(&frame, key)?;
+                    let value = self.get_member(&object, &key)?;
+                    write_slot(&mut frame, dst, value)?;
+                }
+                Instr::SetMember { object, key, src } => {
+                    let object = read_slot(&frame, object)?;
+                    let key = read_slot(&frame, key)?;
+                    let value = read_slot(&frame, src)?;
+                    self.set_member(&object, &key, value)?;
+                }
+                Instr::GetBinding { dst, binding } => {
+                    let env = frame
+                        .env
+                        .ok_or_else(|| VmError::InvalidState("binding read without env".into()))?;
+                    let value = self.get_binding(env, binding)?;
+                    write_slot(&mut frame, dst, value)?;
+                }
+                Instr::SetBinding { binding, src } => {
+                    let env = frame
+                        .env
+                        .ok_or_else(|| VmError::InvalidState("binding write without env".into()))?;
+                    let value = read_slot(&frame, src)?;
+                    self.set_binding(env, binding, value)?;
+                }
+                Instr::DeclareBinding { binding } => {
+                    let env = frame.env.ok_or_else(|| {
+                        VmError::InvalidState("binding declaration without env".into())
+                    })?;
+                    self.declare_binding(env, binding)?;
                 }
                 Instr::Await { dst, input, resume } => {
                     let input_value = read_slot(&frame, input)?;
@@ -447,6 +565,7 @@ impl Vm {
                             func_id: self.build.functions[frame.function].func_id,
                             resume_id: resume,
                             waiting_on,
+                            env: frame.env,
                             values,
                         },
                     );
@@ -489,8 +608,190 @@ impl Vm {
                     }
                 }
                 Instr::Return { src } => return Ok(ExecOutcome::Return(read_slot(&frame, src)?)),
-                Instr::Throw { src } => return Ok(ExecOutcome::Thrown(read_slot(&frame, src)?)),
+                Instr::Throw { src } => {
+                    let value = read_slot(&frame, src)?;
+                    if self.throw_in_frame(&mut frame, pc, value.clone())? {
+                        continue;
+                    }
+                    return Ok(ExecOutcome::Thrown(value));
+                }
             }
+        }
+    }
+
+    fn unary_op(&self, operator: UnaryOp, value: Value) -> Value {
+        if matches!(operator, UnaryOp::TypeOf)
+            && let Value::Object(id) = value
+            && matches!(self.heap.get(&id), Some(Object::Function(_)))
+        {
+            return Value::String("function".to_owned());
+        }
+        unary_op(operator, value)
+    }
+
+    fn throw_in_frame(
+        &mut self,
+        frame: &mut Frame,
+        pc: usize,
+        value: Value,
+    ) -> Result<bool, VmError> {
+        let mut selected: Option<ExceptionHandler> = None;
+        for handler in &self.build.functions[frame.function].handlers {
+            if (handler.start_pc as usize) <= pc && pc < handler.end_pc as usize {
+                let replace = selected.as_ref().is_none_or(|current| {
+                    handler.start_pc > current.start_pc
+                        || (handler.start_pc == current.start_pc && handler.end_pc < current.end_pc)
+                });
+                if replace {
+                    selected = Some(handler.clone());
+                }
+            }
+        }
+        let Some(handler) = selected else {
+            return Ok(false);
+        };
+        write_slot(frame, handler.dst, value)?;
+        frame.pc = handler.target_pc as usize;
+        Ok(true)
+    }
+
+    fn get_binding(&self, env: ObjectId, binding: BindingId) -> Result<Value, VmError> {
+        let mut current = Some(env);
+        while let Some(id) = current {
+            let environment = self
+                .heap
+                .get(&id)
+                .and_then(Object::as_environment)
+                .ok_or_else(|| {
+                    VmError::InvalidState(format!("object {id} is not an environment"))
+                })?;
+            if let Some(value) = environment.bindings.get(&binding) {
+                return Ok(value.clone());
+            }
+            current = environment.parent;
+        }
+        Err(VmError::InvalidState(format!(
+            "binding {binding} is not initialized"
+        )))
+    }
+
+    fn set_binding(
+        &mut self,
+        env: ObjectId,
+        binding: BindingId,
+        value: Value,
+    ) -> Result<(), VmError> {
+        let mut current = Some(env);
+        while let Some(id) = current {
+            let environment = self
+                .heap
+                .get_mut(&id)
+                .and_then(|object| match object {
+                    Object::Environment(environment) => Some(environment),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    VmError::InvalidState(format!("object {id} is not an environment"))
+                })?;
+            if let Some(slot) = environment.bindings.get_mut(&binding) {
+                *slot = value;
+                return Ok(());
+            }
+            current = environment.parent;
+        }
+        Err(VmError::InvalidState(format!(
+            "binding {binding} is not declared"
+        )))
+    }
+
+    fn declare_binding(&mut self, env: ObjectId, binding: BindingId) -> Result<(), VmError> {
+        let environment = self
+            .heap
+            .get_mut(&env)
+            .and_then(|object| match object {
+                Object::Environment(environment) => Some(environment),
+                _ => None,
+            })
+            .ok_or_else(|| VmError::InvalidState(format!("object {env} is not an environment")))?;
+        environment
+            .bindings
+            .entry(binding)
+            .or_insert(Value::Undefined);
+        Ok(())
+    }
+
+    fn get_member(&self, object: &Value, key: &Value) -> Result<Value, VmError> {
+        let key = property_key(key)?;
+        let Value::Object(id) = object else {
+            return Err(VmError::InvalidState(
+                "property access on a non-object".to_owned(),
+            ));
+        };
+        match self
+            .heap
+            .get(id)
+            .ok_or_else(|| VmError::InvalidState(format!("object {id} does not exist")))?
+        {
+            Object::Plain(plain) => Ok(plain.props.get(&key).cloned().unwrap_or(Value::Undefined)),
+            Object::Array(array) => {
+                if key == "length" {
+                    return Ok(Value::Number(array.elements.len() as f64));
+                }
+                Ok(array_index(&key)
+                    .and_then(|index| array.elements.get(index).cloned())
+                    .unwrap_or(Value::Undefined))
+            }
+            _ => Err(VmError::InvalidState(format!(
+                "object {id} does not expose script properties"
+            ))),
+        }
+    }
+
+    fn set_member(&mut self, object: &Value, key: &Value, value: Value) -> Result<(), VmError> {
+        let key = property_key(key)?;
+        let Value::Object(id) = object else {
+            return Err(VmError::InvalidState(
+                "property write on a non-object".to_owned(),
+            ));
+        };
+        match self
+            .heap
+            .get_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("object {id} does not exist")))?
+        {
+            Object::Plain(plain) => {
+                plain.props.insert(key, value);
+                Ok(())
+            }
+            Object::Array(array) => {
+                if key == "length" {
+                    let Value::Number(length) = value else {
+                        return Err(VmError::InvalidState(
+                            "array length must be a number".to_owned(),
+                        ));
+                    };
+                    if !length.is_finite() || length < 0.0 || length.fract() != 0.0 {
+                        return Err(VmError::InvalidState(
+                            "array length must be a non-negative integer".to_owned(),
+                        ));
+                    }
+                    array.elements.resize(length as usize, Value::Undefined);
+                    return Ok(());
+                }
+                let Some(index) = array_index(&key) else {
+                    return Err(VmError::InvalidState(format!(
+                        "unsupported array property {key:?}"
+                    )));
+                };
+                if array.elements.len() <= index {
+                    array.elements.resize(index + 1, Value::Undefined);
+                }
+                array.elements[index] = value;
+                Ok(())
+            }
+            _ => Err(VmError::InvalidState(format!(
+                "object {id} does not expose script properties"
+            ))),
         }
     }
 
@@ -583,7 +884,12 @@ impl Vm {
             )));
         }
 
-        let mut frame = Frame::new(function_index, function, Some(continuation.async_promise));
+        let mut frame = Frame::new(
+            function_index,
+            function,
+            continuation.env,
+            Some(continuation.async_promise),
+        );
         for (slot, value) in resume_entry
             .saved_slots
             .iter()
@@ -696,6 +1002,24 @@ impl Vm {
                             mark_value(value, &mut objects, &mut object_queue)?;
                         }
                     }
+                    Object::Array(array) => {
+                        for value in &array.elements {
+                            mark_value(value, &mut objects, &mut object_queue)?;
+                        }
+                    }
+                    Object::Function(function) => {
+                        if let Some(env) = function.env {
+                            mark_value(&Value::Object(env), &mut objects, &mut object_queue)?;
+                        }
+                    }
+                    Object::Environment(environment) => {
+                        if let Some(parent) = environment.parent {
+                            mark_value(&Value::Object(parent), &mut objects, &mut object_queue)?;
+                        }
+                        for value in environment.bindings.values() {
+                            mark_value(value, &mut objects, &mut object_queue)?;
+                        }
+                    }
                 }
             }
             while let Some(id) = continuation_queue.pop_front() {
@@ -710,6 +1034,9 @@ impl Vm {
                 )?;
                 if let Some(waiting_on) = continuation.waiting_on {
                     mark_value(&Value::Object(waiting_on), &mut objects, &mut object_queue)?;
+                }
+                if let Some(env) = continuation.env {
+                    mark_value(&Value::Object(env), &mut objects, &mut object_queue)?;
                 }
                 for value in &continuation.values {
                     mark_value(value, &mut objects, &mut object_queue)?;
@@ -743,6 +1070,7 @@ impl Vm {
                 func_id: continuation.func_id,
                 resume_id: continuation.resume_id,
                 waiting_on,
+                env: continuation.env,
                 values: continuation.values.clone(),
             });
         }
@@ -805,6 +1133,28 @@ impl Vm {
                     }
                 }
                 Object::Plain(plain) => value_refs.extend(plain.props.values()),
+                Object::Array(array) => value_refs.extend(array.elements.iter()),
+                Object::Function(function) => {
+                    if let Some(env) = function.env
+                        && !heap.contains_key(&env)
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "function object {} references missing environment {env}",
+                            record.id
+                        )));
+                    }
+                }
+                Object::Environment(environment) => {
+                    if let Some(parent) = environment.parent
+                        && !heap.contains_key(&parent)
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "environment object {} references missing parent {parent}",
+                            record.id
+                        )));
+                    }
+                    value_refs.extend(environment.bindings.values());
+                }
             }
         }
         for value in snapshot.globals.values() {
@@ -812,6 +1162,14 @@ impl Vm {
         }
         for record in &snapshot.continuations {
             value_refs.extend(record.values.iter());
+            if let Some(env) = record.env
+                && !heap.contains_key(&env)
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} references missing environment {env}",
+                    record.id
+                )));
+            }
         }
         for value in value_refs {
             if let Value::Object(id) = value
@@ -820,6 +1178,29 @@ impl Vm {
                 return Err(VmError::InvalidSnapshot(format!(
                     "value references missing object {id}"
                 )));
+            }
+        }
+        for (id, object) in &heap {
+            match object {
+                Object::Function(function) => {
+                    if let Some(env) = function.env
+                        && !matches!(heap.get(&env), Some(Object::Environment(_)))
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "function object {id} references non-environment {env}"
+                        )));
+                    }
+                }
+                Object::Environment(environment) => {
+                    if let Some(parent) = environment.parent
+                        && !matches!(heap.get(&parent), Some(Object::Environment(_)))
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "environment object {id} references non-environment parent {parent}"
+                        )));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -855,6 +1236,18 @@ impl Vm {
                     record.id,
                     record.values.len(),
                     resume.saved_slots.len()
+                )));
+            }
+            let Some(env) = record.env else {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} has no invocation environment",
+                    record.id
+                )));
+            };
+            if !matches!(heap.get(&env), Some(Object::Environment(_))) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} environment {env} is not an environment",
+                    record.id
                 )));
             }
             match heap.get(&record.async_promise) {
@@ -974,6 +1367,7 @@ impl Vm {
                         func_id: record.func_id,
                         resume_id: record.resume_id,
                         waiting_on: Some(record.waiting_on),
+                        env: record.env,
                         values: record.values,
                     },
                 )
@@ -995,10 +1389,16 @@ impl Vm {
 }
 
 impl Frame {
-    fn new(function_index: usize, function: &Function, async_promise: Option<ObjectId>) -> Self {
+    fn new(
+        function_index: usize,
+        function: &Function,
+        env: Option<ObjectId>,
+        async_promise: Option<ObjectId>,
+    ) -> Self {
         Self {
             function: function_index,
             pc: 0,
+            env,
             transient: vec![Value::Undefined; function.transient_slots as usize],
             transient_initialized: vec![false; function.transient_slots as usize],
             persistent: vec![Value::Undefined; function.persistent_slots as usize],
@@ -1169,6 +1569,25 @@ fn to_int32_lossy(value: &Value) -> i32 {
 
 fn to_uint32(value: &Value) -> Result<u32, VmError> {
     Ok(to_int32(value)? as u32)
+}
+
+fn property_key(value: &Value) -> Result<String, VmError> {
+    match value {
+        Value::Object(_) => Err(VmError::InvalidState(
+            "object property keys are not implemented in this PoC".to_owned(),
+        )),
+        _ => Ok(to_js_string(value)),
+    }
+}
+
+fn array_index(key: &str) -> Option<usize> {
+    if key == "0" {
+        return Some(0);
+    }
+    if key.starts_with('0') {
+        return None;
+    }
+    key.parse::<usize>().ok()
 }
 
 fn to_js_string(value: &Value) -> String {

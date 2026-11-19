@@ -11,10 +11,12 @@ pub mod snapshot;
 pub mod value;
 mod vm;
 
-pub use bytecode::{Build, Constant, Function, Instr, ResumeEntry, Slot, SlotKind};
+pub use bytecode::{
+    Build, Constant, ExceptionHandler, Function, Instr, ResumeEntry, Slot, SlotKind,
+};
 pub use error::VmError;
 pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host, HostReply, PendingOperationMeta};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
-pub use value::{ContinuationId, HostValue, NativeKey, ObjectId, Value};
+pub use value::{BindingId, ContinuationId, HostValue, NativeKey, ObjectId, Value};
 pub use vm::{PromiseStateView, Vm};
