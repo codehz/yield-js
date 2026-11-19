@@ -179,7 +179,11 @@ fn rejects_malformed_property_definition_and_method_metadata() {
     .expect("method");
     for (operand, message) in ["object", "key", "src"].into_iter().enumerate() {
         let mut corrupt = build.clone();
-        let (object, key, src) = corrupt.functions[0]
+        let (object, key, src) = corrupt
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "run")
+            .unwrap()
             .code
             .iter_mut()
             .find_map(|instr| {
@@ -435,5 +439,22 @@ fn allows_lexical_use_after_initialization_and_cross_closure_read() {
             Vec::new()
         };
         compile(source, &CompileOptions { imports }).expect(source);
+    }
+}
+
+#[test]
+fn script_rejects_top_level_await_and_module_syntax() {
+    for (statement, feature) in [
+        ("await 1;", "top-level await"),
+        ("import 'dep';", "module"),
+        ("export const x = 1;", "module"),
+    ] {
+        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        assert_eq!(error.line(), 2, "{error}");
+        assert!(
+            error.message().starts_with("unsupported syntax:"),
+            "{error}"
+        );
+        assert!(error.message().contains(feature), "{error}");
     }
 }

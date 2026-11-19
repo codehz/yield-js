@@ -18,7 +18,7 @@ function run() {
 "#;
     let build_return = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build_return, &host).expect("bindings");
+    let mut vm = Vm::new(build_return, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     assert_eq!(result, Value::Number(5.0));
 
@@ -32,7 +32,7 @@ function run() {
 }
 "#;
     let build_override = build(source);
-    let mut vm = Vm::new(build_override, &host).expect("bindings");
+    let mut vm = Vm::new(build_override, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     assert_eq!(result, Value::Number(2.0));
 
@@ -46,7 +46,7 @@ function run() {
 }
 "#;
     let build_throw = build(source);
-    let mut vm = Vm::new(build_throw, &host).expect("bindings");
+    let mut vm = Vm::new(build_throw, &mut host).expect("bindings");
     let error = vm
         .start(&mut host, "run", Vec::new())
         .expect_err("finally throw wins");
@@ -66,7 +66,7 @@ function run() {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host).expect("bindings");
     // Scope entry initializes `x`; the later initializer never runs.
     let result = vm
         .start(&mut host, "run", Vec::new())
@@ -89,7 +89,7 @@ function run(n) {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host).expect("bindings");
     let result = vm
         .start(&mut host, "run", vec![HostValue::Number(5.0)])
         .expect("start");

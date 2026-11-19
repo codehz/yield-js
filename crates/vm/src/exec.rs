@@ -154,16 +154,6 @@ impl Vm {
                 frame.write(dst, self.call_import(host, import, &args)?)?;
                 Ok(Step::Next)
             }
-            Instr::CallFunction {
-                dst,
-                function,
-                args,
-            } => {
-                let args = frame.read_list(&args)?;
-                let invocation =
-                    self.call_function(host, function, None, args, &Value::Undefined)?;
-                store_invocation(frame, dst, invocation)
-            }
             Instr::CallValue {
                 dst,
                 callee,
@@ -262,11 +252,6 @@ impl Vm {
             }
             Instr::GetBuiltin { dst, builtin } => {
                 let id = self.builtin_id(builtin)?;
-                frame.write(dst, Value::Object(id))?;
-                Ok(Step::Next)
-            }
-            Instr::GetTopFunction { dst, function } => {
-                let id = self.top_function(function)?;
                 frame.write(dst, Value::Object(id))?;
                 Ok(Step::Next)
             }
@@ -602,7 +587,7 @@ impl Vm {
         let env = frame.env.ok_or_else(|| {
             VmError::InvalidState("closure without an invocation environment".into())
         })?;
-        let id = self.materialize_function(func_id, Some(env))?;
+        let id = self.materialize_function(func_id, env)?;
         frame.write(dst, Value::Object(id))?;
         Ok(Step::Next)
     }

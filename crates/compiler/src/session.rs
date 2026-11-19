@@ -17,7 +17,8 @@ use crate::names::Tables;
 pub(crate) struct Session<'src> {
     pub(crate) source: &'src str,
     import_names: BTreeMap<String, u32>,
-    top_level_names: BTreeMap<String, u32>,
+    /// Direct program function name to its script-environment binding.
+    entries: BTreeMap<String, BindingId>,
     constants: Vec<Constant>,
     functions: Vec<BytecodeFunction>,
     imports: Vec<ImportDecl>,
@@ -26,12 +27,7 @@ pub(crate) struct Session<'src> {
 }
 
 impl<'src> Session<'src> {
-    pub(crate) fn new(
-        source: &'src str,
-        options: &CompileOptions,
-        top_level_names: BTreeMap<String, u32>,
-        top_level_count: u32,
-    ) -> Result<Self, CompileError> {
+    pub(crate) fn new(source: &'src str, options: &CompileOptions) -> Result<Self, CompileError> {
         let mut imports = Vec::with_capacity(options.imports.len());
         let mut import_names = BTreeMap::new();
         for name in &options.imports {
@@ -48,11 +44,12 @@ impl<'src> Session<'src> {
         Ok(Self {
             source,
             import_names,
-            top_level_names,
+            entries: BTreeMap::new(),
             constants: Vec::new(),
             functions: Vec::new(),
             imports,
-            next_func_id: top_level_count,
+            // Function 0 is the synthetic script.
+            next_func_id: 1,
             next_binding_id: 0,
         })
     }
@@ -60,8 +57,16 @@ impl<'src> Session<'src> {
     pub(crate) fn names(&self) -> Tables<'_> {
         Tables {
             imports: &self.import_names,
-            top_level: &self.top_level_names,
+            entries: &self.entries,
         }
+    }
+
+    pub(crate) fn insert_entry(&mut self, name: String, binding: BindingId) {
+        self.entries.insert(name, binding);
+    }
+
+    pub(crate) fn entries(&self) -> &BTreeMap<String, BindingId> {
+        &self.entries
     }
 
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
@@ -89,7 +94,13 @@ impl<'src> Session<'src> {
 
     pub(crate) fn finish(self) -> Result<Build, CompileError> {
         let source = self.source;
-        let mut build = Build::new(self.constants, self.imports, self.functions);
+        let mut build = Build::new(
+            self.constants,
+            self.imports,
+            self.functions,
+            0,
+            self.entries,
+        );
         build.finalize();
         build.validate().map_err(|error| {
             CompileError::new(

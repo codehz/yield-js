@@ -4,12 +4,14 @@
 //! around. All operands are explicit slots. No implicit operand stack is
 //! persisted across an `Await`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 12;
+pub const BYTECODE_VERSION: u32 = 13;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -145,11 +147,6 @@ pub enum Instr {
         import: u32,
         args: Vec<Slot>,
     },
-    CallFunction {
-        dst: Slot,
-        function: u32,
-        args: Vec<Slot>,
-    },
     CallValue {
         dst: Slot,
         callee: Slot,
@@ -238,12 +235,6 @@ pub enum Instr {
     GetBuiltin {
         dst: Slot,
         builtin: u32,
-    },
-    /// Loads the VM's single top-level function object. Direct calls stay
-    /// [`Instr::CallFunction`] and do not materialize that object.
-    GetTopFunction {
-        dst: Slot,
-        function: u32,
     },
     /// Calls the intrinsic `Symbol.iterator` method and caches the result's `next` method.
     GetIterator {
@@ -360,6 +351,10 @@ pub struct Build {
     pub constants: Vec<Constant>,
     pub imports: Vec<ImportDecl>,
     pub functions: Vec<Function>,
+    /// Compiler script function. It runs once when the VM is created.
+    pub script: u32,
+    /// Host entry name to a binding declared in [`Self::script`].
+    pub entries: BTreeMap<String, BindingId>,
 }
 
 #[derive(Serialize)]
@@ -368,6 +363,8 @@ struct DigestInput<'a> {
     constants: &'a [Constant],
     imports: &'a [ImportDecl],
     functions: &'a [Function],
+    script: u32,
+    entries: &'a BTreeMap<String, BindingId>,
 }
 
 impl Build {
@@ -375,6 +372,8 @@ impl Build {
         constants: Vec<Constant>,
         imports: Vec<ImportDecl>,
         functions: Vec<Function>,
+        script: u32,
+        entries: BTreeMap<String, BindingId>,
     ) -> Self {
         Self {
             bytecode_version: BYTECODE_VERSION,
@@ -382,6 +381,8 @@ impl Build {
             constants,
             imports,
             functions,
+            script,
+            entries,
         }
     }
 
@@ -390,13 +391,14 @@ impl Build {
     pub fn finalize(&mut self) {
         self.build_id = self.compute_id();
     }
-
     pub fn compute_id(&self) -> String {
         let input = DigestInput {
             bytecode_version: self.bytecode_version,
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,
+            script: self.script,
+            entries: &self.entries,
         };
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
         let digest = Sha256::digest(bytes);
@@ -470,6 +472,56 @@ impl Build {
 
         for function in &self.functions {
             self.validate_function(function)?;
+        }
+        self.validate_script()?;
+        Ok(())
+    }
+
+    fn validate_script(&self) -> Result<(), String> {
+        let Some(script) = self.function(self.script) else {
+            return Err(format!("script function {} does not exist", self.script));
+        };
+        if script.is_async || script.is_arrow || script.is_method {
+            return Err(format!(
+                "script function {} must be a synchronous ordinary function",
+                self.script
+            ));
+        }
+        if !script.params.is_empty() || script.this_param.is_some() {
+            return Err(format!(
+                "script function {} must not take arguments or a receiver",
+                self.script
+            ));
+        }
+        let mut declared = std::collections::BTreeSet::new();
+        for function in &self.functions {
+            for instruction in &function.code {
+                if let Instr::Closure {
+                    function: callee, ..
+                } = instruction
+                    && *callee == self.script
+                {
+                    return Err(format!(
+                        "function {} ({}) closes over the script function",
+                        function.func_id, function.name
+                    ));
+                }
+                if function.func_id == self.script
+                    && let Instr::DeclareBinding { binding } = instruction
+                {
+                    declared.insert(*binding);
+                }
+            }
+        }
+        for (name, binding) in &self.entries {
+            if name.is_empty() {
+                return Err("empty script entry name".to_owned());
+            }
+            if !declared.contains(binding) {
+                return Err(format!(
+                    "script entry {name:?} binding {binding} is not declared in the script"
+                ));
+            }
         }
         Ok(())
     }
@@ -591,21 +643,6 @@ impl Build {
                     }
                     for arg in args {
                         check_slot(*arg, "CallImport.arg")?;
-                    }
-                }
-                Instr::CallFunction {
-                    dst,
-                    function: callee,
-                    args,
-                } => {
-                    check_slot(*dst, "CallFunction.dst")?;
-                    if self.function(*callee).is_none() {
-                        return Err(format!(
-                            "{location}: CallFunction at pc {pc} references function {callee}"
-                        ));
-                    }
-                    for arg in args {
-                        check_slot(*arg, "CallFunction.arg")?;
                     }
                 }
                 Instr::CallValue {
@@ -732,17 +769,6 @@ impl Build {
                 Instr::GetBuiltin { dst, builtin } => {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
-                }
-                Instr::GetTopFunction {
-                    dst,
-                    function: callee,
-                } => {
-                    check_slot(*dst, "GetTopFunction.dst")?;
-                    if self.function(*callee).is_none() {
-                        return Err(format!(
-                            "{location}: GetTopFunction at pc {pc} references function {callee}"
-                        ));
-                    }
                 }
             }
         }

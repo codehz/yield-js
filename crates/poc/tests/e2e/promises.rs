@@ -41,7 +41,7 @@ async function run() {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     vm.run_until_idle(&mut host).expect("await");
     let error = vm.snapshot(&[result]).expect_err("unrooted resolve");

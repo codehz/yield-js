@@ -35,6 +35,7 @@ cargo run -p yield-poc
 ## 已实现
 
 - 字节码版本、构建 ID 摘要、函数/导入/常量/恢复表/异常表结构校验。
+- 顶层脚本在 `Vm::new(build, &mut host)` 验证构建和导入后执行一次；初始化结束后先排空微任务，再交还宿主。`Vm::start` 按名称读取顶层函数声明的当前绑定值并调用；恢复快照不重跑脚本。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
@@ -49,19 +50,19 @@ cargo run -p yield-poc
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。
-- 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例、共享原型与已物化的顶层函数对象进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
+- 内建包括 `Error`、`TypeError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）与 `Symbol`（`Symbol()`、`Symbol.for` / `keyFor` / `iterator`）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - `Error` / `TypeError` 可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供 `name`、`message` 与简化的 `stack`（只含名称和消息）。VM 生成的 `TypeError` 也使用同一原型和属性。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
-- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层函数表和脚本根出发。`Symbol.iterator` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
-- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、顶层函数身份、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
+- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
+- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、顶层环境和宿主入口绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型必须指向存在的非环境对象，且原型链不能成环；普通属性可以互相引用。
 - 快照要求微任务队列已排空。
 
 ## 当前子集
 
 已支持的主要语法：
 
-- 顶层 `function` 声明；嵌套函数声明（提升）；函数表达式；箭头函数；`async` 函数；`await`。
+- 严格模式脚本顶层支持子集内的声明和语句，不要求存在函数声明；只有直接位于脚本顶层的函数声明可作为宿主入口。支持函数声明提升、函数表达式、箭头函数、`async` 函数与函数内的 `await`。
 - `var` / `let` / `const`、块作用域、简单参数。同一函数内可静态识别的 `let`/`const` 提前访问在编译期报错；跨闭包提前读取得到 `undefined`。
 - 字面量、非标签模板、对象/数组字面量（数据属性、简写方法、getter/setter、静态/计算键、数组空洞按 `undefined`、数组展开）、成员读写。
 - 算术/比较/严格与宽松相等/位运算、短路、`??`、条件表达式、序列表达式。
@@ -74,7 +75,7 @@ cargo run -p yield-poc
 
 ## 已知未覆盖
 
-- `super`、对象展开、实参展开；对象/数组跨宿主边界（当前只在 VM 内使用）。
+- `super`、对象展开、实参展开；对象/数组跨宿主边界（当前只在 VM 内使用）。没有 `globalThis`，脚本顶层的 `this` 为 `undefined`。
 - 类、标签模板、generator、async generator、顶层 `await`。
 - `for…in`、`for await…of`、字符串迭代和 `for…of` 解构目标。
 - 每轮循环独立绑定、完整 ECMAScript TDZ、catch 参数解构。

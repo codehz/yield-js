@@ -90,11 +90,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::UnaryExpression(expression) => self.compile_unary(expression),
             Expression::AwaitExpression(expression) => {
                 if !self.is_async {
-                    return Err(unsupported(
-                        self.source_text(),
-                        expression.span,
-                        "await outside async function",
-                    ));
+                    let feature = if self.is_script {
+                        "top-level await"
+                    } else {
+                        "await outside async function"
+                    };
+                    return Err(unsupported(self.source_text(), expression.span, feature));
                 }
                 let input = self.compile_expression(&expression.argument)?;
                 self.emit_await(input)
@@ -224,14 +225,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit(Instr::GetBuiltin {
                     dst: self.slot(dst),
                     builtin: index as u32,
-                });
-                Ok(dst)
-            }
-            ValueName::TopFunction(function) => {
-                let dst = self.alloc_reg()?;
-                self.emit(Instr::GetTopFunction {
-                    dst: self.slot(dst),
-                    function,
                 });
                 Ok(dst)
             }
@@ -585,16 +578,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     });
                     return Ok(dst);
                 }
-                Callee::Function(function) => {
-                    let args = self.compile_arguments(expression)?;
-                    let dst = self.alloc_reg()?;
-                    self.emit(Instr::CallFunction {
-                        dst: self.slot(dst),
-                        function,
-                        args,
-                    });
-                    return Ok(dst);
-                }
                 Callee::Builtin(index) => {
                     let value = self.alloc_reg()?;
                     self.emit(Instr::GetBuiltin {
@@ -692,12 +675,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn compile_this(&mut self, span: oxc::span::Span) -> Result<Reg, CompileError> {
         let Some(binding) = self.lookup(THIS_BINDING) else {
-            return Err(CompileError::new(
-                self.source_text(),
-                span,
-                "this is not available",
-            ));
+            return self.emit_undefined();
         };
+        let _ = span;
         let dst = self.alloc_reg()?;
         self.emit(Instr::GetBinding {
             dst: self.slot(dst),

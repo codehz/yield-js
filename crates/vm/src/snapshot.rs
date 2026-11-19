@@ -19,7 +19,7 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 12;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -63,7 +63,7 @@ pub struct Snapshot {
     pub operations: Vec<PendingOperationRecord>,
     pub globals: BTreeMap<String, Value>,
     pub roots: BTreeMap<String, ObjectId>,
-    pub functions: BTreeMap<u32, ObjectId>,
+    pub script_env: Option<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
     pub symbols: BTreeMap<SymbolId, Option<String>>,
@@ -84,7 +84,7 @@ impl Snapshot {
             operations: Vec::new(),
             globals: BTreeMap::new(),
             roots: BTreeMap::new(),
-            functions: BTreeMap::new(),
+            script_env: None,
             combines: BTreeMap::new(),
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
@@ -123,8 +123,23 @@ impl Vm {
         for id in self.builtins.to_map().values() {
             tracer.mark_object(*id)?;
         }
-        for id in self.functions.values() {
-            tracer.mark_object(*id)?;
+        let script_needs_env = self
+            .build
+            .function(self.build.script)
+            .is_some_and(|function| function.needs_environment());
+        match (script_needs_env, self.script_env) {
+            (true, Some(id)) => tracer.mark_object(id)?,
+            (false, None) => {}
+            (true, None) => {
+                return Err(VmError::InvalidState(
+                    "script environment is missing".to_owned(),
+                ));
+            }
+            (false, Some(id)) => {
+                return Err(VmError::InvalidState(format!(
+                    "script environment {id} is unexpected"
+                )));
+            }
         }
         tracer.drain()?;
         if self
@@ -141,7 +156,7 @@ impl Vm {
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
-        snapshot.functions = self.functions.clone();
+        snapshot.script_env = self.script_env;
         for id in &tracer.objects {
             snapshot.objects.push(ObjectRecord {
                 id: *id,
@@ -220,9 +235,9 @@ impl Vm {
         for continuation in continuations.values() {
             require_value_objects(&heap, continuation.values.iter())?;
         }
+        let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
         let operations = load_operations(&build, &heap, &snapshot.operations, host)?;
         let builtins = load_roots(&heap, &snapshot.roots)?;
-        let functions = load_functions(&build, &heap, &snapshot.functions)?;
         validate_jobs(&heap)?;
         validate_combines(&heap)?;
         Ok(Self::restored(
@@ -232,7 +247,7 @@ impl Vm {
             operations,
             snapshot.globals,
             builtins,
-            functions,
+            script_env,
         ))
     }
 }
@@ -548,38 +563,51 @@ fn required_root(roots: &BTreeMap<String, ObjectId>, name: &str) -> Result<Objec
         .ok_or_else(|| VmError::InvalidSnapshot(format!("snapshot is missing builtin root {name}")))
 }
 
-fn load_functions(
+fn load_script_env(
     build: &Build,
     heap: &Heap,
-    functions: &BTreeMap<u32, ObjectId>,
-) -> Result<BTreeMap<u32, ObjectId>, VmError> {
-    for (func_id, id) in functions {
-        if build.function(*func_id).is_none() {
-            return Err(VmError::InvalidSnapshot(format!(
-                "function table references missing function {func_id}"
-            )));
-        }
-        match heap.get(*id)? {
-            Object::Function(function)
-                if function.func_id == *func_id && function.env.is_none() => {}
-            _ => {
+    script_env: Option<ObjectId>,
+) -> Result<Option<ObjectId>, VmError> {
+    let needs_env = build
+        .function(build.script)
+        .is_some_and(|function| function.needs_environment());
+    match (needs_env, script_env) {
+        (false, None) => Ok(None),
+        (false, Some(id)) => Err(VmError::InvalidSnapshot(format!(
+            "script does not use an environment, found {id}"
+        ))),
+        (true, None) => Err(VmError::InvalidSnapshot(
+            "script environment is missing".to_owned(),
+        )),
+        (true, Some(id)) => {
+            let environment = match heap.get(id) {
+                Ok(Object::Environment(environment)) => environment,
+                Ok(_) => {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "script environment {id} is not an environment"
+                    )));
+                }
+                Err(_) => {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "script environment {id} does not exist"
+                    )));
+                }
+            };
+            if environment.parent.is_some() {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "function {func_id} does not match object {id}"
+                    "script environment {id} has a parent"
                 )));
             }
+            for (name, binding) in &build.entries {
+                if !environment.bindings.contains_key(binding) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "script entry {name:?} binding {binding} is missing"
+                    )));
+                }
+            }
+            Ok(Some(id))
         }
     }
-    for id in heap.ids() {
-        if let Object::Function(function) = heap.get(id)?
-            && function.env.is_none()
-            && functions.get(&function.func_id) != Some(&id)
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "top-level function object {id} is missing from the function table"
-            )));
-        }
-    }
-    Ok(functions.clone())
 }
 
 fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
@@ -590,6 +618,13 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             && !host.has_native(&native.key)
         {
             return Err(VmError::MissingNative(native.key.clone()));
+        }
+        if let Object::Function(function) = heap.get(id)?
+            && function.func_id == build.script
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "function object {id} references the script function"
+            )));
         }
         // The shared edge walk below checks the bound receiver and arguments.
         if let Object::Bound(bound) = heap.get(id)?
@@ -796,6 +831,12 @@ fn validate_continuation(
             record.id, record.func_id
         ))
     })?;
+    if record.func_id == build.script {
+        return Err(VmError::InvalidSnapshot(format!(
+            "continuation {} references the script function",
+            record.id
+        )));
+    }
     let resume = function
         .resumes
         .get(record.resume_id as usize)

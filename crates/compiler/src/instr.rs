@@ -21,7 +21,6 @@ use crate::emit::Reg;
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
     match instruction {
         Instr::Throw { .. }
-        | Instr::CallFunction { .. }
         | Instr::CallValue { .. }
         | Instr::Construct { .. }
         | Instr::GetMember { .. }
@@ -53,7 +52,6 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::GetBuiltin { .. }
-        | Instr::GetTopFunction { .. }
         | Instr::DefineProperty { .. }
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
@@ -85,7 +83,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(src.index);
             defs.insert(dst.index);
         }
-        Instr::CallImport { dst, args, .. } | Instr::CallFunction { dst, args, .. } => {
+        Instr::CallImport { dst, args, .. } => {
             for arg in args {
                 uses.insert(arg.index);
             }
@@ -116,8 +114,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Closure { dst, .. }
         | Instr::NewObject { dst }
         | Instr::GetBinding { dst, .. }
-        | Instr::GetBuiltin { dst, .. }
-        | Instr::GetTopFunction { dst, .. } => {
+        | Instr::GetBuiltin { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::NewArray { dst, elements } => {
@@ -206,15 +203,6 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::CallImport { dst, import, args } => Instr::CallImport {
             dst: remap(dst),
             import,
-            args: args.into_iter().map(remap).collect(),
-        },
-        Instr::CallFunction {
-            dst,
-            function,
-            args,
-        } => Instr::CallFunction {
-            dst: remap(dst),
-            function,
             args: args.into_iter().map(remap).collect(),
         },
         Instr::CallValue {
@@ -323,10 +311,6 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::GetBuiltin { dst, builtin } => Instr::GetBuiltin {
             dst: remap(dst),
             builtin,
-        },
-        Instr::GetTopFunction { dst, function } => Instr::GetTopFunction {
-            dst: remap(dst),
-            function,
         },
     }
 }

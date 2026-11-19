@@ -44,7 +44,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 - `for…in`（`for-in`）
 - `class` 声明（`class declaration`）。首版约定由离线构建降级，编译器仍整段拒绝
-- 顶层只允许函数声明和空语句，且至少有一个函数声明。顶层 `await`、`var`/`let`/`const`、表达式语句都拒绝。打包后的脚本体因此还不能作为编译输入
 
 ## 3. 能编过，但语义不完整
 
@@ -86,11 +85,10 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ## 5. 结构性缺口
 
-1. **顶层不是脚本帧**。编译器只建函数表。design 的输入是打好的严格模式脚本，会有顶层语句。要接这段输入，顶层必须变成一个函数帧，而不是只放函数声明。顶层 `await` 本身仍在首版契约外。
-2. **强制转换是标量路径**。对象或非法数字字符串参与二元算术、位运算时是 `VmError`，`try`/`catch` 捕不到。一元正号收成 `NaN`，关系运算得到 `false`。模板和字符串 `+` 不调用 `toString`。验收包里的对象拼接和数值转换会先撞上这里。
-3. **迭代协议只接了两处**。同步 `for…of` 和数组展开会取 `[Symbol.iterator]` 并缓存 `next`，两者都能把迭代器放进持久槽跨 `await`。解构、实参展开、字符串、`for…in`、Promise 组合子都还没接上。
-4. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
-5. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+1. **强制转换是标量路径**。对象或非法数字字符串参与二元算术、位运算时是 `VmError`，`try`/`catch` 捕不到。一元正号收成 `NaN`，关系运算得到 `false`。模板和字符串 `+` 不调用 `toString`。验收包里的对象拼接和数值转换会先撞上这里。
+2. **迭代协议只接了两处**。同步 `for…of` 和数组展开会取 `[Symbol.iterator]` 并缓存 `next`，两者都能把迭代器放进持久槽跨 `await`。解构、实参展开、字符串、`for…in`、Promise 组合子都还没接上。
+3. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
+4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
 
@@ -101,7 +99,6 @@ flowchart LR
   I --> P[组合子接受任意可迭代]
   K[删除 / 原型 / 冻结] --> N[for-in / 对象展开]
   K --> R[Proxy 与其余 Reflect]
-  B[顶层脚本帧] --> A[打包脚本可编译]
 ```
 
 ## 7. 明确不做（不要当缺口实现）

@@ -102,7 +102,7 @@ pub(crate) enum BuiltinCall {
 }
 
 enum Dispatch<'a> {
-    Script { func_id: u32, env: Option<ObjectId> },
+    Script { func_id: u32, env: ObjectId },
     Builtin(BuiltinCall),
     Bound(&'a BoundObject),
 }
@@ -308,25 +308,16 @@ impl Vm {
         }
     }
 
-    pub(crate) fn top_function(&mut self, func_id: u32) -> Result<ObjectId, VmError> {
-        if let Some(id) = self.functions.get(&func_id).copied() {
-            return Ok(id);
-        }
-        if self.build.function(func_id).is_none() {
-            return Err(VmError::InvalidState(format!(
-                "function {func_id} does not exist"
-            )));
-        }
-        let id = self.materialize_function(func_id, None)?;
-        self.functions.insert(func_id, id);
-        Ok(id)
-    }
-
     pub(crate) fn materialize_function(
         &mut self,
         func_id: u32,
-        env: Option<ObjectId>,
+        env: ObjectId,
     ) -> Result<ObjectId, VmError> {
+        if func_id == self.build.script {
+            return Err(VmError::InvalidState(
+                "script function cannot be materialized".to_owned(),
+            ));
+        }
         let id = self.heap.alloc_function(func_id, env);
         let index = self.function_index(func_id)?;
         let constructable = self.build.functions[index].is_constructable();
@@ -358,7 +349,12 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
-                self.call_function(host, func_id, env, args, receiver)
+                if func_id == self.build.script {
+                    return Err(VmError::InvalidState(
+                        "script function is not callable".to_owned(),
+                    ));
+                }
+                self.call_function(host, func_id, Some(env), args, receiver)
             }
             Some(Dispatch::Builtin(call)) => self.call_builtin(host, call, args, receiver),
             Some(Dispatch::Bound(bound)) => {
@@ -379,6 +375,11 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
+                if func_id == self.build.script {
+                    return Err(VmError::InvalidState(
+                        "script function is not callable".to_owned(),
+                    ));
+                }
                 let index = self.function_index(func_id)?;
                 let constructable = self.build.functions[index].is_constructable();
                 if !constructable {
@@ -394,7 +395,13 @@ impl Vm {
                     _ => None,
                 };
                 let instance = self.heap.alloc_plain_with(prototype);
-                match self.call_function(host, func_id, env, args, &Value::Object(instance))? {
+                match self.call_function(
+                    host,
+                    func_id,
+                    Some(env),
+                    args,
+                    &Value::Object(instance),
+                )? {
                     Invocation::Thrown(value) => Ok(Invocation::Thrown(value)),
                     Invocation::Value(Value::Object(id)) => {
                         Ok(Invocation::Value(Value::Object(id)))

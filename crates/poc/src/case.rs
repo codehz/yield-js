@@ -25,7 +25,8 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let build =
         compile(source, &compile_options()).map_err(|error| format!("{name}: compile: {error}"))?;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &host).map_err(|error| format!("{name}: vm: {error}"))?;
+    let mut vm =
+        Vm::new(build.clone(), &mut host).map_err(|error| format!("{name}: vm: {error}"))?;
     let result = vm
         .start(&mut host, "run", args)
         .map_err(|error| format!("{name}: start: {error}"))?;

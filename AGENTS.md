@@ -16,7 +16,7 @@ yield-poc  →  yield-compiler  →  yield-vm
 
 ```text
 source (parsed as .mjs only to force strict mode; import/export rejected)
-  → frontend     parse, top-level function declarations
+  → frontend     parse a strict script
   → lower        bindings, exceptions, await  →  LoweredFunction
   → bindings     which ids stay shared across functions
   → promote      unshared bindings become logical registers
@@ -29,8 +29,8 @@ source (parsed as .mjs only to force strict mode; import/export rejected)
 Public entry points:
 
 - `yield_compiler::compile(source, &CompileOptions { imports }) -> Result<Build, CompileError>`
-- `Vm::new(build, &host)` checks imports before any script runs
-- `Vm::start(host, "run", args)` then `Vm::run_until_idle(host)`
+- `Vm::new(build, &mut host)` validates the build and imports, runs the script once, and drains initialization microtasks
+- `Vm::start(host, "run", args)` reads the live top-level function declaration binding, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::restore(snapshot, same_build, host)` rebinds natives and operations before execution
 - Host async work is `HostReply::Operation { operation_id }`, later `Vm::complete_operation`
@@ -41,10 +41,10 @@ Suspend/resume invariants (do not weaken these):
 - `ResumeEntry` is `{ fulfill_pc, fulfill_dst, reject_pc, reject_dst, saved_slots }`. Continuations are keyed by `resume_id`, not a runtime PC.
 - `saved_slots` is the union of both resume entries' live-in after subtracting that entry's result register. Result slots are written on resume, not saved. Persistent slots are not reused across different live values. Transient slots are dropped on suspend.
 - `undefined` is a real value. Frame slot `None` means uninitialized, not `undefined`.
-- Bindings read or written from another function stay in a heap environment. Unshared bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
+- Bindings read or written from another function, plus host entry bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
 - Settled promises still resume through the microtask queue. `AWAIT` never continues inline.
-- Snapshot roots: pending operations, async continuations, closure environments, plus caller-supplied script roots. Native pointers, host callbacks, and queued microtasks are not in the snapshot. Native objects are `(type, id)` keys.
+- Snapshot roots include the script environment, builtins, pending operations, and caller-supplied script roots. Traverse reachable closure environments and async continuations. Native pointers, host callbacks, and queued microtasks are not in the snapshot. Native objects are `(type, id)` keys.
 - Restore is exact-version: `SNAPSHOT_FORMAT_VERSION`, `BYTECODE_VERSION`, and `build_id` must match. Missing native binding or missing operation rejects the whole restore; the VM must not start. No snapshot migration.
 
 `Host::call` is synchronous and must not re-enter the VM. The host is authoritative for operation state; the VM stores only the operation id and its Promise link.
@@ -88,7 +88,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingNative` / `MissingOperation`, `Host`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host failures are `String`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `let` and `const` are not distinguished. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
-- Name policy (`compiler/src/names.rs`): locals shadow at value and call positions. Host imports and top-level functions are callable, not first-class values. `typeof` is the exception: an import or top-level function of the same name reports `"function"` even when a local shadows it. Preserve that until the policy is deliberately changed.
+- Name policy (`compiler/src/names.rs`): script and local bindings shadow globals and imports at value and call positions. Imports are callable, not first-class values. Preserve the intentional `typeof` fold for imports and locally shadowed top-level function names; an unshadowed top-level function binding is live.
 - Adding a host import used by fixtures means updating `IMPORTS` in `crates/poc/src/lib.rs` and `TestHost::call`. Demo host in `main.rs` is separate (`inspect`, `seed`, `wait` only).
 - `TestHost` semantics: `seed()` → `10`; `wait(label)` → operation id `wait:{label}`; `bind(id)` → `NativeKey { type_name: "Node", id }`; `inspect` / `setLabel` → `undefined`. Failure injection: `fail_import`, `reject_native`, `reject_restore_operation`.
 
@@ -106,7 +106,7 @@ Where to edit:
 
 Easy to break:
 
-- Top level is function declarations plus empty statements only, at least one function. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
+- Top-level statements lower into a synchronous script frame; direct function declarations are hoisted and their bindings are host entries. Snapshot the script environment and never execute the script during restore. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
 - Before `allocate`, every `Slot` is a logical register stuffed into `SlotKind::Transient`. `slot.kind` is meaningless until `FrameLayout` remaps it. `promote` rewrites one instruction to one instruction so jump, resume, and handler PCs stay valid.
 - `instr.rs::may_throw` must classify any opcode that can deliver a JavaScript exception, or exception edges never reach liveness or promotion. A `VmError` is not a JavaScript exception.
 - `Function::needs_environment` is derived from params and code (`GetBinding` and friends). Do not store a forgeable flag. Restore requires an env iff that function needs one.

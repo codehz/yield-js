@@ -447,12 +447,11 @@ impl ArrayObject {
     }
 }
 
-/// A function value. `env` is the lexical environment captured at creation;
-/// top-level cached functions use `None`.
+/// A function value. `env` is the lexical environment captured at creation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FunctionObject {
     pub func_id: u32,
-    pub env: Option<ObjectId>,
+    pub env: ObjectId,
     pub props: PropertyTable<String, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
@@ -727,12 +726,10 @@ impl Object {
                 }
             }
             Self::Function(function) => {
-                if let Some(id) = function.env {
-                    out.push(OwnedEdge::Environment {
-                        id,
-                        role: EnvRole::Closure,
-                    });
-                }
+                out.push(OwnedEdge::Environment {
+                    id: function.env,
+                    role: EnvRole::Closure,
+                });
             }
             Self::Bound(bound) => {
                 out.push(OwnedEdge::Object(bound.target));
@@ -962,7 +959,7 @@ impl Heap {
         }))
     }
 
-    pub(crate) fn alloc_function(&mut self, func_id: u32, env: Option<ObjectId>) -> ObjectId {
+    pub(crate) fn alloc_function(&mut self, func_id: u32, env: ObjectId) -> ObjectId {
         self.alloc(Object::Function(FunctionObject {
             func_id,
             env,

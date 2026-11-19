@@ -114,14 +114,15 @@ async function run() {
         snapshot
             .objects
             .iter()
-            .any(|record| matches!(record.object, Object::Function(_))),
+            .any(|record| matches!(&record.object, Object::Function(function) if Some(function.env) == snapshot.continuations[0].env)),
         "the escaped closure is reachable from the suspended environment"
     );
     assert!(
         snapshot
             .objects
             .iter()
-            .any(|record| matches!(record.object, Object::Environment(_))),
+            .any(|record| Some(record.id) == snapshot.continuations[0].env
+                && matches!(record.object, Object::Environment(_))),
         "the captured environment is reachable"
     );
     s.restore(json_round_trip(&snapshot)).expect("restore");
@@ -195,7 +196,7 @@ async function run() {
         .objects
         .iter()
         .find_map(|record| match &record.object {
-            Object::Function(function) => function.env,
+            Object::Function(function) => Some(function.env),
             _ => None,
         })
         .expect("captured environment");
@@ -269,7 +270,6 @@ function demo() {
         snapshot.roots.keys().collect::<Vec<_>>(),
         baseline.roots.keys().collect::<Vec<_>>()
     );
-    assert!(!snapshot.functions.is_empty());
 
     let mut missing = snapshot.clone();
     missing.roots.pop_first();

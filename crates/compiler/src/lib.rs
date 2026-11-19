@@ -8,8 +8,8 @@
 //!
 //! ```text
 //! source
-//!   → frontend   parse, top-level function declarations
-//!   → lower      bindings, exceptions, await  →  LoweredFunction
+//!   → frontend   parse
+//!   → lower      script function 0, then nested functions
 //!   → bindings   owner table; cross-function reads and writes stay shared
 //!   → promote    unshared bindings become logical registers
 //!   → analyze    CFG live-in, including resume and handler edges
@@ -43,19 +43,14 @@ pub struct CompileOptions {
     pub imports: Vec<String>,
 }
 
-/// Compiles a strict-mode JavaScript source bundle into a versioned bytecode
-/// build. The source is parsed as an ES module only to guarantee strict-mode
-/// parsing; module declarations are rejected by the subset compiler.
+/// Compiles a strict-mode JavaScript program into a versioned bytecode build.
+/// Parsing uses ES module grammar so strict syntax is rejected up front.
+/// Evaluation is a synthetic script (function id 0). Direct function
+/// declarations become entries in that script's environment.
 pub fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
     let allocator = Allocator::default();
     let program = frontend::parse(&allocator, source)?;
-    let top_level = frontend::collect_top_level(source, &program)?;
-    let mut session = session::Session::new(
-        source,
-        options,
-        top_level.names,
-        top_level.functions.len() as u32,
-    )?;
-    lower::lower_all(&mut session, top_level.functions)?;
+    let mut session = session::Session::new(source, options)?;
+    lower::lower_program(&mut session, &program)?;
     session.finish()
 }

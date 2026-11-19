@@ -19,16 +19,18 @@ pub struct Vm {
     pub(crate) globals: BTreeMap<String, Value>,
     next_continuation_id: ContinuationId,
     pub(crate) builtins: BuiltinRoots,
-    /// Materialized top-level function objects, keyed by function id.
-    pub(crate) functions: BTreeMap<u32, ObjectId>,
+    /// Live environment of the script, present exactly when the script needs one.
+    pub(crate) script_env: Option<ObjectId>,
 }
 
 impl Vm {
-    pub fn new(build: Build, host: &dyn Host) -> Result<Self, VmError> {
+    pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         build.validate().map_err(VmError::InvalidBuild)?;
         Self::check_imports(&build, host)?;
         let mut vm = Self::empty(build);
         vm.init_builtins();
+        vm.run_script(host)?;
+        vm.run_until_idle(host)?;
         Ok(vm)
     }
 
@@ -42,7 +44,7 @@ impl Vm {
             globals: BTreeMap::new(),
             next_continuation_id: 1,
             builtins: BuiltinRoots::default(),
-            functions: BTreeMap::new(),
+            script_env: None,
         }
     }
 
@@ -69,17 +71,31 @@ impl Vm {
         entry: &str,
         args: Vec<HostValue>,
     ) -> Result<Value, VmError> {
-        let func_id = self
-            .build
-            .function_named(entry)
-            .ok_or_else(|| VmError::InvalidBuild(format!("entry function {entry:?} not found")))?
-            .func_id;
+        let binding =
+            *self.build.entries.get(entry).ok_or_else(|| {
+                VmError::InvalidBuild(format!("script entry {entry:?} not found"))
+            })?;
+        let env = self
+            .script_env
+            .ok_or_else(|| VmError::InvalidState("script has no environment".to_owned()))?;
+        let callee = self.heap.get_binding(env, binding)?;
         let args = args
             .iter()
             .map(|value| self.host_to_value(value))
             .collect::<Result<Vec<_>, _>>()?;
-        self.call_function(host, func_id, None, args, &Value::Undefined)?
+        self.invoke(host, &callee, args, &Value::Undefined)?
             .into_result()
+    }
+    fn run_script(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        let func_id = self.build.script;
+        let index = self.function_index(func_id)?;
+        let prepared = self.build.functions[index]
+            .needs_environment()
+            .then(|| self.heap.alloc_environment(None, BTreeMap::new()));
+        self.script_env = prepared;
+        self.activate(host, func_id, None, prepared, Vec::new(), &Value::Undefined)?
+            .into_result()
+            .map(|_| ())
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the
@@ -317,6 +333,18 @@ impl Vm {
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        self.activate(host, func_id, parent_env, None, args, receiver)
+    }
+
+    fn activate(
+        &mut self,
+        host: &mut dyn Host,
+        func_id: u32,
+        parent_env: Option<ObjectId>,
+        prepared_env: Option<ObjectId>,
+        args: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
         let params = self.build.functions[function_index].params.clone();
@@ -343,7 +371,22 @@ impl Vm {
             }
         }
         let needs_env = self.build.functions[function_index].needs_environment();
-        let env = needs_env.then(|| self.heap.alloc_environment(parent_env, bindings));
+        let env = if needs_env {
+            let env = match prepared_env {
+                Some(env) => env,
+                None => self.heap.alloc_environment(parent_env, BTreeMap::new()),
+            };
+            if !bindings.is_empty() {
+                self.heap.environment_mut(env)?.bindings.extend(bindings);
+            }
+            Some(env)
+        } else if prepared_env.is_some() {
+            return Err(VmError::InvalidState(
+                "prepared environment for a function that has none".to_owned(),
+            ));
+        } else {
+            None
+        };
         let mut frame = Frame::new(
             function_index,
             &self.build.functions[function_index],
@@ -376,7 +419,7 @@ impl Vm {
         operations: BTreeMap<String, PendingOperation>,
         globals: BTreeMap<String, Value>,
         builtins: BuiltinRoots,
-        functions: BTreeMap<u32, ObjectId>,
+        script_env: Option<ObjectId>,
     ) -> Self {
         heap.promise_prototype = Some(builtins.promise_prototype);
         heap.object_prototype = Some(builtins.object_prototype);
@@ -392,7 +435,7 @@ impl Vm {
             globals,
             next_continuation_id,
             builtins,
-            functions,
+            script_env,
         }
     }
 }

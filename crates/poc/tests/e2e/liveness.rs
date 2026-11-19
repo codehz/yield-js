@@ -21,11 +21,10 @@ fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<String> {
         .collect()
 }
 
-fn has_environment(snapshot: &yield_vm::Snapshot) -> bool {
-    snapshot
-        .objects
-        .iter()
-        .any(|record| matches!(record.object, Object::Environment(_)))
+fn has_call_environment(snapshot: &yield_vm::Snapshot) -> bool {
+    snapshot.objects.iter().any(|record| {
+        Some(record.id) != snapshot.script_env && matches!(record.object, Object::Environment(_))
+    })
 }
 
 #[test]
@@ -46,7 +45,7 @@ async function run() {
             .any(|tag| tag == "discard-only"),
         "dead must not remain reachable through a call environment or saved slot"
     );
-    assert!(!has_environment(&snapshot));
+    assert!(!has_call_environment(&snapshot));
     assert!(snapshot.continuations[0].env.is_none());
     let saved_objects: Vec<_> = values_beyond(
         &snapshot.continuations[0].values,
@@ -91,7 +90,7 @@ async function run() {
             .iter()
             .any(|tag| tag == "discard-only")
     );
-    assert!(has_environment(&snapshot));
+    assert!(has_call_environment(&snapshot));
     assert!(snapshot.continuations[0].env.is_some());
 
     s.restore(snapshot).expect("restore");

@@ -97,7 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             imports: vec!["inspect".into(), "seed".into(), "wait".into()],
         },
     )?;
-    let function = &build.functions[0];
+    let function = build.function_named("run").expect("demo entry function");
     println!("build {} ({})", build.build_id, function.name);
     println!(
         "slots: {} transient, {} persistent",
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut host = DemoHost::new();
-    let mut vm = Vm::new(build.clone(), &host)?;
+    let mut vm = Vm::new(build.clone(), &mut host)?;
     let result = vm.start(&mut host, "run", vec![HostValue::String("input".into())])?;
     vm.run_until_idle(&mut host)?;
     println!(

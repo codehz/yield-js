@@ -69,7 +69,7 @@ async function run() {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     let error = vm
         .snapshot(&[result])
@@ -83,7 +83,7 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
 
     let mut corrupt = build("function run() { return 1; }");
     corrupt.bytecode_version = 5;
-    let error = Vm::new(corrupt, &host).expect_err("bytecode version");
+    let error = Vm::new(corrupt, &mut host).expect_err("bytecode version");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("bytecode version"))
     );
@@ -94,13 +94,20 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
         constant: 0,
     };
     corrupt.finalize();
-    let error = Vm::new(corrupt, &host).expect_err("out-of-range slot");
+    let error = Vm::new(corrupt, &mut host).expect_err("out-of-range slot");
     assert!(matches!(error, VmError::InvalidBuild(message) if message.contains("out-of-range")));
 
     let mut corrupt = build(RUN);
-    corrupt.functions[0].resumes[0].saved_slots.push(u16::MAX);
+    corrupt
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap()
+        .resumes[0]
+        .saved_slots
+        .push(u16::MAX);
     corrupt.finalize();
-    let error = Vm::new(corrupt, &host).expect_err("bad saved slot");
+    let error = Vm::new(corrupt, &mut host).expect_err("bad saved slot");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("saves persistent slot") || message.contains("not strictly"))
     );
@@ -108,10 +115,8 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
     let mut corrupt = build("function run() { return 1; }");
     corrupt.functions[0].code[0] = Instr::Jump { target: u32::MAX };
     corrupt.finalize();
-    let error = Vm::new(corrupt, &host).expect_err("bad jump target");
+    let error = Vm::new(corrupt, &mut host).expect_err("bad jump target");
     assert!(matches!(error, VmError::InvalidBuild(message) if message.contains("targets pc")));
-
-    let _ = &mut host;
 }
 
 #[test]
@@ -144,12 +149,16 @@ fn corrupted_snapshot_associations_are_rejected() {
 #[test]
 fn loader_rejects_handler_target_inside_its_protected_range() {
     let mut corrupt = build("function run() { try { throw 1; } catch (e) { return 2; } }");
-    let function = &mut corrupt.functions[0];
+    let function = corrupt
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
     let handler = &mut function.handlers[0];
     handler.target_pc = handler.start_pc;
     corrupt.finalize();
-    let host = TestHost::default();
-    let error = Vm::new(corrupt, &host).expect_err("bad exception target");
+    let mut host = TestHost::default();
+    let error = Vm::new(corrupt, &mut host).expect_err("bad exception target");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("inside its own protected range"))
     );
@@ -335,7 +344,7 @@ async function run() {
 }
 "#;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &host).expect("create VM");
+    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
     let error = vm
         .start(&mut host, "run", Vec::new())
         .expect_err("symbol argument is rejected");
@@ -344,4 +353,100 @@ async function run() {
         "{error}"
     );
     assert_eq!(host.count("inspect"), 0, "host must not be called");
+}
+
+#[test]
+fn script_startup_validates_before_calling_the_host() {
+    let mut host = TestHost::default();
+    let mut invalid = build("inspect(1); function run() {}");
+    *invalid.entries.get_mut("run").unwrap() = u32::MAX;
+    invalid.finalize();
+    assert!(matches!(
+        Vm::new(invalid, &mut host),
+        Err(VmError::InvalidBuild(_))
+    ));
+
+    let options = yield_compiler::CompileOptions {
+        imports: vec!["inspect".into(), "missing".into()],
+    };
+    let missing = yield_compiler::compile("inspect(1);", &options).unwrap();
+    assert!(
+        matches!(Vm::new(missing, &mut host), Err(VmError::MissingImport(name)) if name == "missing")
+    );
+    assert_eq!(host.count("inspect"), 0);
+
+    let throws = build("throw 7; inspect(1);");
+    assert!(matches!(
+        Vm::new(throws, &mut host),
+        Err(VmError::Thrown(Value::Number(7.0)))
+    ));
+    assert_eq!(host.count("inspect"), 0);
+
+    let standalone = build("inspect(2);");
+    let vm = Vm::new(standalone.clone(), &mut host).unwrap();
+    Vm::restore(vm.snapshot(&[]).unwrap(), standalone, &mut host).unwrap();
+    assert_eq!(host.count("inspect"), 1);
+}
+
+#[test]
+fn restore_preserves_live_entries_without_replaying_startup() {
+    let build = build(
+        r#"
+inspect(1);
+let count = seed();
+function run() { throw 'stale entry'; }
+run = () => ++count;
+function dropEntry() { run = 0; }
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::Number(11.0)
+    );
+
+    let snapshot = vm.snapshot(&[]).unwrap();
+    let mut missing = snapshot.clone();
+    missing.script_env = None;
+    assert!(matches!(
+        Vm::restore(missing, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut incorrect = snapshot.clone();
+    incorrect.script_env = snapshot.roots.values().next().copied();
+    assert!(matches!(
+        Vm::restore(incorrect, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut absent_entry = snapshot.clone();
+    let script = absent_entry.script_env.unwrap();
+    let record = absent_entry
+        .objects
+        .iter_mut()
+        .find(|record| record.id == script)
+        .unwrap();
+    let Object::Environment(env) = &mut record.object else {
+        panic!("not the script environment")
+    };
+    env.bindings.remove(&build.entries["run"]);
+    assert!(matches!(
+        Vm::restore(absent_entry, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+
+    let mut vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::Number(12.0)
+    );
+    assert_eq!(host.count("inspect"), 1);
+    assert_eq!(host.count("seed"), 1);
+
+    vm.start(&mut host, "dropEntry", vec![]).unwrap();
+    let mut vm = Vm::restore(vm.snapshot(&[]).unwrap(), build, &mut host).unwrap();
+    assert!(matches!(
+        vm.start(&mut host, "run", vec![]),
+        Err(VmError::Thrown(_))
+    ));
 }

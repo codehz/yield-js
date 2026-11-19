@@ -24,7 +24,7 @@ impl Suspended {
     #[track_caller]
     pub(super) fn start(source: &str, args: Vec<HostValue>) -> Self {
         let mut host = TestHost::default();
-        let mut vm = Vm::new(build(source), &host).expect("create VM");
+        let mut vm = Vm::new(build(source), &mut host).expect("create VM");
         let result = vm.start(&mut host, "run", args).expect("start run");
         vm.run_until_idle(&mut host).expect("drain after start");
         Self { vm, host, result }
