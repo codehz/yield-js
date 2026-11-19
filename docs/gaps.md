@@ -13,7 +13,7 @@
 | `RegExp` | 字面量与 `RegExp` 内建都没有。字面量落到泛化拒绝 `expression form outside the PoC subset` |
 | `NaN` / `Infinity` 全局 | 不是内建。裸引用是 `unknown binding`；`typeof NaN` / `typeof Infinity` 在编译期折叠成 `"undefined"` |
 | 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
-| `ToPrimitive` | 对象不调用 `valueOf` / `toString`。对象或本子集无法解析的数字字符串（如 `"foo"`、`"0x10"`，也不识别 `0x` / `0b` / `0o`）参与二元算术或位运算时，是 `VmError::InvalidState`，不是 `NaN` 或 `TypeError`。一元 `+` / `-` 走 lossy 转换，对象和非法数字字符串变成 `NaN`；`~` 先 `ToInt32`，非有限数变成 `0`，所以 `~{}` 是 `-1`。关系运算同样 lossy，结果是 `false` 而不是抛错。`==` 不对对象做转换，对象与数字比较为 `false`。任一操作数已经是字符串时，`+` 与模板插值把对象拼成 `"[object Object]"`。属性键同样不走 `ToPrimitive`，对象键变成 `"[object Object]"` |
+| `ToPrimitive` | 对象不调用 `valueOf` / `toString`。对象参与二元算术或位运算时仍是 `VmError::InvalidState`，不是可捕获的 `TypeError`。非法数字字符串（如 `"foo"`、`"0xZ"`）的 `ToNumber` 为 `NaN`；支持 `0x` / `0b` / `0o` 前缀。一元 `+` / `-` 走 lossy 转换，对象变成 `NaN`；`~` 先 `ToInt32`，非有限数变成 `0`，所以 `~{}` 是 `-1`。关系运算同样 lossy，结果是 `false` 而不是抛错。`==` 不对对象做转换，对象与数字比较为 `false`。任一操作数已经是字符串时，`+` 与模板插值把对象拼成 `"[object Object]"`。属性键同样不走 `ToPrimitive`，对象键变成 `"[object Object]"` |
 | 原始值属性 | 对字符串、数字、布尔、`null`、`undefined` 做成员读写，抛可捕获的 `property access on a non-object` / `property write on a non-object`。`Object()` 拒绝装箱。`Object.keys("ab")` 会按 UTF-16 码元枚举索引，但不能用下标读出字符 |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
@@ -85,7 +85,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 
 ## 5. 结构性缺口
 
-1. **强制转换是标量路径**。对象或非法数字字符串参与二元算术、位运算时是 `VmError`，`try`/`catch` 捕不到。一元正号收成 `NaN`，关系运算得到 `false`。模板和字符串 `+` 不调用 `toString`。验收包里的对象拼接和数值转换会先撞上这里。
+1. **强制转换是标量路径**。对象仍不调用 `valueOf` / `toString`，参与二元算术或位运算时是 `VmError`，`try`/`catch` 捕不到；一元正号收成 `NaN`，关系运算得到 `false`。数字字符串已支持无效值转 `NaN` 与 `0x` / `0b` / `0o` 前缀。模板和字符串 `+` 不调用 `toString`。对象转换仍是高影响缺口。
 2. **迭代协议只接了两处**。同步 `for…of` 和数组展开会取 `[Symbol.iterator]` 并缓存 `next`，两者都能把迭代器放进持久槽跨 `await`。解构、实参展开、字符串、`for…in`、Promise 组合子都还没接上。
 3. **属性模型还不能做删除、原型变更和冻结**。`for…in`、对象展开、`Proxy` 不变量都依赖这层，而不是再写一个查找。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。

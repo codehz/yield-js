@@ -209,9 +209,36 @@ fn parse_js_number(value: &str) -> Result<f64, VmError> {
     if trimmed == "-Infinity" {
         return Ok(f64::NEG_INFINITY);
     }
-    trimmed.parse().map_err(|_| {
-        VmError::InvalidState(format!("cannot convert {value:?} to number in this PoC"))
-    })
+    let radix = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .map(|digits| (16, digits))
+        .or_else(|| {
+            trimmed
+                .strip_prefix("0b")
+                .or_else(|| trimmed.strip_prefix("0B"))
+                .map(|digits| (2, digits))
+        })
+        .or_else(|| {
+            trimmed
+                .strip_prefix("0o")
+                .or_else(|| trimmed.strip_prefix("0O"))
+                .map(|digits| (8, digits))
+        });
+    if let Some((base, digits)) = radix {
+        if digits.is_empty() {
+            return Ok(f64::NAN);
+        }
+        let mut number = 0.0;
+        for digit in digits.chars() {
+            let Some(value) = digit.to_digit(base) else {
+                return Ok(f64::NAN);
+            };
+            number = number * base as f64 + value as f64;
+        }
+        return Ok(number);
+    }
+    Ok(trimmed.parse().unwrap_or(f64::NAN))
 }
 
 fn to_int32(value: &Value) -> Result<i32, VmError> {
