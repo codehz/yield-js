@@ -258,7 +258,7 @@ function demo() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
-    assert_eq!(snapshot.roots.len(), 8);
+    assert_eq!(snapshot.roots.len(), 9);
     assert!(!snapshot.functions.is_empty());
 
     let mut missing = snapshot.clone();

@@ -2,38 +2,100 @@
 
 use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
-use crate::value::Value;
+use crate::value::{PropertyKey, Value};
+
+/// Operators that coerce operands to number or string. A Symbol operand
+/// reaches the throw path instead of the lossy helpers.
+pub(crate) fn binary_coerces(operator: BinaryOp) -> bool {
+    !matches!(
+        operator,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    )
+}
+
+pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
+    matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+}
+
+pub(crate) fn symbol_conversion_error(what: &str) -> VmError {
+    VmError::Thrown(crate::builtins::type_error(&format!(
+        "Cannot convert a Symbol value to {what}"
+    )))
+}
+
+/// Coercing operands must be rejected before the lossy helpers run; the error
+/// is a script `TypeError` so `try`/`catch` can capture it.
+fn check_no_symbol(operator_kind: &str, values: &[&Value]) -> Result<(), VmError> {
+    if values.iter().any(|value| matches!(value, Value::Symbol(_))) {
+        return Err(symbol_conversion_error(operator_kind));
+    }
+    Ok(())
+}
 
 pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, VmError> {
     Ok(match operator {
-        BinaryOp::Add => match (lhs, rhs) {
-            (Value::String(lhs), rhs) => Value::String(lhs + &to_js_string(&rhs)),
-            (lhs, Value::String(rhs)) => Value::String(to_js_string(&lhs) + &rhs),
-            (lhs, rhs) => Value::Number(to_number(&lhs)? + to_number(&rhs)?),
+        BinaryOp::Add => match (&lhs, &rhs) {
+            (Value::String(_), _) | (_, Value::String(_)) => {
+                if matches!(lhs, Value::Symbol(_)) || matches!(rhs, Value::Symbol(_)) {
+                    return Err(symbol_conversion_error("a string"));
+                }
+                Value::String(to_js_string(&lhs) + &to_js_string(&rhs))
+            }
+            (lhs, rhs) => {
+                check_no_symbol("a number", &[&lhs, &rhs])?;
+                Value::Number(to_number(&lhs)? + to_number(&rhs)?)
+            }
         },
-        BinaryOp::Sub => Value::Number(to_number(&lhs)? - to_number(&rhs)?),
-        BinaryOp::Mul => Value::Number(to_number(&lhs)? * to_number(&rhs)?),
-        BinaryOp::Div => Value::Number(to_number(&lhs)? / to_number(&rhs)?),
-        BinaryOp::Rem => Value::Number(to_number(&lhs)? % to_number(&rhs)?),
-        BinaryOp::Exp => Value::Number(to_number(&lhs)?.powf(to_number(&rhs)?)),
-        BinaryOp::Lt => compare(&lhs, &rhs, |ordering| ordering.is_lt()),
-        BinaryOp::Le => compare(&lhs, &rhs, |ordering| ordering.is_le()),
-        BinaryOp::Gt => compare(&lhs, &rhs, |ordering| ordering.is_gt()),
-        BinaryOp::Ge => compare(&lhs, &rhs, |ordering| ordering.is_ge()),
+        BinaryOp::Sub => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number(to_number(&lhs)? - to_number(&rhs)?)
+        }
+        BinaryOp::Mul => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number(to_number(&lhs)? * to_number(&rhs)?)
+        }
+        BinaryOp::Div => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number(to_number(&lhs)? / to_number(&rhs)?)
+        }
+        BinaryOp::Rem => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number(to_number(&lhs)? % to_number(&rhs)?)
+        }
+        BinaryOp::Exp => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number(to_number(&lhs)?.powf(to_number(&rhs)?))
+        }
+        BinaryOp::Lt => relational(&lhs, &rhs, |ordering| ordering.is_lt())?,
+        BinaryOp::Le => relational(&lhs, &rhs, |ordering| ordering.is_le())?,
+        BinaryOp::Gt => relational(&lhs, &rhs, |ordering| ordering.is_gt())?,
+        BinaryOp::Ge => relational(&lhs, &rhs, |ordering| ordering.is_ge())?,
         BinaryOp::Eq => Value::Bool(loose_equal(&lhs, &rhs)?),
         BinaryOp::Ne => Value::Bool(!loose_equal(&lhs, &rhs)?),
         BinaryOp::StrictEq => Value::Bool(strict_equal(&lhs, &rhs)),
         BinaryOp::StrictNe => Value::Bool(!strict_equal(&lhs, &rhs)),
-        BinaryOp::BitAnd => Value::Number((to_int32(&lhs)? & to_int32(&rhs)?) as f64),
-        BinaryOp::BitOr => Value::Number((to_int32(&lhs)? | to_int32(&rhs)?) as f64),
-        BinaryOp::BitXor => Value::Number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64),
+        BinaryOp::BitAnd => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number((to_int32(&lhs)? & to_int32(&rhs)?) as f64)
+        }
+        BinaryOp::BitOr => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number((to_int32(&lhs)? | to_int32(&rhs)?) as f64)
+        }
+        BinaryOp::BitXor => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
+            Value::Number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64)
+        }
         BinaryOp::Shl => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)?).wrapping_shl(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::Shr => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
             Value::Number((to_int32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::UShr => {
+            check_no_symbol("a number", &[&lhs, &rhs])?;
             Value::Number((to_uint32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
     })
@@ -50,12 +112,10 @@ pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
     }
 }
 
-pub(crate) fn property_key(value: &Value) -> Result<String, VmError> {
+pub(crate) fn property_key(value: &Value) -> Result<PropertyKey, VmError> {
     match value {
-        Value::Object(_) => Err(VmError::InvalidState(
-            "object property keys are not implemented in this PoC".to_owned(),
-        )),
-        _ => Ok(to_js_string(value)),
+        Value::Symbol(id) => Ok(PropertyKey::Symbol(*id)),
+        _ => Ok(PropertyKey::String(to_js_string(value))),
     }
 }
 
@@ -69,13 +129,18 @@ pub(crate) fn array_index(key: &str) -> Option<usize> {
     key.parse().ok()
 }
 
-fn compare(lhs: &Value, rhs: &Value, predicate: impl Fn(std::cmp::Ordering) -> bool) -> Value {
+fn relational(
+    lhs: &Value,
+    rhs: &Value,
+    predicate: impl Fn(std::cmp::Ordering) -> bool,
+) -> Result<Value, VmError> {
+    check_no_symbol("a string or a number", &[lhs, rhs])?;
     if let (Value::String(lhs), Value::String(rhs)) = (lhs, rhs) {
-        return Value::Bool(predicate(lhs.cmp(rhs)));
+        return Ok(Value::Bool(predicate(lhs.cmp(rhs))));
     }
     let lhs = to_number_lossy(lhs);
     let rhs = to_number_lossy(rhs);
-    Value::Bool(lhs.partial_cmp(&rhs).is_some_and(predicate))
+    Ok(Value::Bool(lhs.partial_cmp(&rhs).is_some_and(predicate)))
 }
 
 fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
@@ -84,6 +149,7 @@ fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
         (Value::Bool(lhs), Value::Bool(rhs)) => lhs == rhs,
         (Value::Number(lhs), Value::Number(rhs)) => lhs == rhs,
         (Value::String(lhs), Value::String(rhs)) => lhs == rhs,
+        (Value::Symbol(lhs), Value::Symbol(rhs)) => lhs == rhs,
         (Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
         _ => false,
     }
@@ -110,6 +176,9 @@ fn to_number(value: &Value) -> Result<f64, VmError> {
         Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
         Value::Number(value) => Ok(*value),
         Value::String(value) => parse_js_number(value),
+        Value::Symbol(_) => Err(VmError::InvalidState(
+            "numeric conversion of a Symbol is not implemented in this PoC".to_owned(),
+        )),
         Value::Object(_) => Err(VmError::InvalidState(
             "numeric conversion of objects is not implemented in this PoC".to_owned(),
         )),
@@ -171,6 +240,7 @@ pub(crate) fn to_js_string(value: &Value) -> String {
             }
         }
         Value::String(value) => value.clone(),
+        Value::Symbol(_) => "Symbol()".to_owned(),
         Value::Object(_) => "[object Object]".to_owned(),
     }
 }

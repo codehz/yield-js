@@ -12,7 +12,7 @@ use crate::host::{Host, HostReply};
 use crate::ops::{self, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
-use crate::value::{ObjectId, Value};
+use crate::value::{ObjectId, PropertyKey, Value};
 use crate::vm::Vm;
 
 /// What one instruction did. `Throw` has not been caught yet.
@@ -132,12 +132,21 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Binary { dst, op, lhs, rhs } => {
-                let value = ops::binary_op(op, frame.read(lhs)?, frame.read(rhs)?)?;
+                let value = match ops::binary_op(op, frame.read(lhs)?, frame.read(rhs)?) {
+                    Ok(value) => value,
+                    Err(VmError::Thrown(value)) => return Ok(Step::Throw(value)),
+                    Err(error) => return Err(error),
+                };
                 frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::Unary { dst, op, src } => {
-                frame.write(dst, self.unary(op, frame.read(src)?))?;
+                let value = match self.unary(op, frame.read(src)?) {
+                    Ok(value) => value,
+                    Err(VmError::Thrown(value)) => return Ok(Step::Throw(value)),
+                    Err(error) => return Err(error),
+                };
+                frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::CallImport { dst, import, args } => {
@@ -290,10 +299,11 @@ impl Vm {
             Some(Property::Accessor { get: Some(get), .. }) => {
                 self.invoke(host, &Value::Object(get), Vec::new(), object)
             }
-            None if self.heap.function(id).is_some()
+            None if let PropertyKey::String(key) = &key
+                && self.heap.function(id).is_some()
                 && matches!(key.as_str(), "call" | "apply" | "bind") =>
             {
-                let method = self.heap.alloc_builtin("Function", Some(&key));
+                let method = self.heap.alloc_builtin("Function", Some(key));
                 Ok(Invocation::Value(Value::Object(method)))
             }
             _ => Ok(Invocation::Value(Value::Undefined)),
@@ -309,7 +319,9 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let key = ops::property_key(key)?;
         let id = object_id(object, "property write on a non-object")?;
-        if self.prototype_write_rejected(object, &key) {
+        if let PropertyKey::String(key) = &key
+            && self.prototype_write_rejected(object, key)
+        {
             return Ok(Invocation::Thrown(type_error(
                 "Cannot assign to read only property 'prototype'",
             )));
@@ -327,7 +339,7 @@ impl Vm {
                     "Cannot set property without a setter",
                 )));
             }
-            _ => self.heap.set_own(id, &key, value)?,
+            _ => self.heap.set_own(id, key, value)?,
         }
         Ok(Invocation::Value(Value::Undefined))
     }
@@ -478,11 +490,14 @@ impl Vm {
         self.react(promise, crate::heap::ReactionJob::Await(continuation))
     }
 
-    fn unary(&self, operator: UnaryOp, value: Value) -> Value {
+    fn unary(&self, operator: UnaryOp, value: Value) -> Result<Value, VmError> {
         if matches!(operator, UnaryOp::TypeOf) && self.is_callable(&value) {
-            return Value::String("function".to_owned());
+            return Ok(Value::String("function".to_owned()));
         }
-        unary_op(operator, value)
+        if ops::unary_coerces(operator) && matches!(value, Value::Symbol(_)) {
+            return Err(ops::symbol_conversion_error("a number"));
+        }
+        Ok(unary_op(operator, value))
     }
 
     fn constant(&self, index: u32) -> Result<Value, VmError> {

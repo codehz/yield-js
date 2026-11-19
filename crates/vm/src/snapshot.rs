@@ -4,19 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
     BuiltinRoots, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
-    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_PROMISE_PROTOTYPE, ROOT_QUEUE_MICROTASK, ROOT_SYMBOL, ROOT_TYPEERROR,
+    ROOT_TYPEERROR_PROTOTYPE,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
 use crate::heap::{
-    CombineState, EnvRole, Heap, Object, OwnedEdge, PromiseState, Property, ReactionJob,
+    CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object, OwnedEdge,
+    PromiseState, Property, ReactionJob,
 };
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
-use crate::value::{ContinuationId, ObjectId, Value};
+use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -62,6 +64,12 @@ pub struct Snapshot {
     pub roots: BTreeMap<String, ObjectId>,
     pub functions: BTreeMap<u32, ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
+    /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
+    pub symbols: BTreeMap<SymbolId, Option<String>>,
+    /// `Symbol.for` registry entries kept alive by the snapshot.
+    pub symbol_registry: BTreeMap<String, SymbolId>,
+    /// Allocation high-water mark, preserved so restored ids stay fresh.
+    pub next_symbol_id: SymbolId,
 }
 
 impl Snapshot {
@@ -77,6 +85,9 @@ impl Snapshot {
             roots: BTreeMap::new(),
             functions: BTreeMap::new(),
             combines: BTreeMap::new(),
+            symbols: BTreeMap::new(),
+            symbol_registry: BTreeMap::new(),
+            next_symbol_id: 0,
         }
     }
 
@@ -167,6 +178,16 @@ impl Vm {
                 snapshot.combines.insert(*id, state.clone());
             }
         }
+        snapshot.next_symbol_id = self.heap.next_symbol_id();
+        snapshot.symbol_registry = self.heap.symbol_registry.clone();
+        let mut symbol_ids = tracer.symbols;
+        symbol_ids.insert(ITERATOR_SYMBOL);
+        symbol_ids.extend(self.heap.symbol_registry.values().copied());
+        for id in symbol_ids {
+            if let Some(description) = self.heap.symbols.get(&id) {
+                snapshot.symbols.insert(id, description.clone());
+            }
+        }
         Ok(snapshot)
     }
 
@@ -186,6 +207,12 @@ impl Vm {
             heap.insert_restore(record.id, record.object.clone())?;
         }
         heap.combines = snapshot.combines.clone();
+        validate_symbol_tables(&snapshot)?;
+        heap.restore_symbols(
+            snapshot.symbols.clone(),
+            snapshot.symbol_registry.clone(),
+            snapshot.next_symbol_id,
+        );
         check_heap_edges(&build, &heap, host)?;
         validate_accessors(&build, &heap)?;
         require_value_objects(&heap, snapshot.globals.values())?;
@@ -214,6 +241,7 @@ struct Tracer<'a> {
     heap: &'a Heap,
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
     objects: BTreeSet<ObjectId>,
+    symbols: BTreeSet<SymbolId>,
     continuations_seen: BTreeSet<ContinuationId>,
     object_queue: VecDeque<ObjectId>,
     continuation_queue: VecDeque<ContinuationId>,
@@ -226,6 +254,7 @@ impl<'a> Tracer<'a> {
             heap,
             continuations,
             objects: BTreeSet::new(),
+            symbols: BTreeSet::new(),
             continuations_seen: BTreeSet::new(),
             object_queue: VecDeque::new(),
             continuation_queue: VecDeque::new(),
@@ -234,8 +263,12 @@ impl<'a> Tracer<'a> {
     }
 
     fn mark_value(&mut self, value: &Value) -> Result<(), VmError> {
-        if let Value::Object(id) = value {
-            self.mark_object(*id)?;
+        match value {
+            Value::Object(id) => self.mark_object(*id)?,
+            Value::Symbol(id) => {
+                self.symbols.insert(*id);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -295,6 +328,9 @@ impl<'a> Tracer<'a> {
                 OwnedEdge::Continuation(continuation) => {
                     self.mark_continuation(id, continuation)?;
                 }
+                OwnedEdge::Symbol(symbol) => {
+                    self.symbols.insert(symbol);
+                }
             }
         }
         edges.clear();
@@ -334,10 +370,61 @@ fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
     Ok(())
 }
 
+/// Symbol tables are self-consistent before any heap edge is checked: the
+/// iterator record is exact, registry entries are unique and describe
+/// themselves, and every id stays below the preserved high-water mark.
+fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
+    if snapshot.next_symbol_id == 0 {
+        return Err(VmError::InvalidSnapshot(
+            "next symbol id must be positive".to_owned(),
+        ));
+    }
+    for (id, description) in &snapshot.symbols {
+        if *id >= snapshot.next_symbol_id {
+            return Err(VmError::InvalidSnapshot(format!(
+                "symbol {id} is not below the next symbol id {}",
+                snapshot.next_symbol_id
+            )));
+        }
+        if *id == ITERATOR_SYMBOL && description.as_deref() != Some(ITERATOR_DESCRIPTION) {
+            return Err(VmError::InvalidSnapshot(
+                "iterator symbol must be described as Symbol.iterator".to_owned(),
+            ));
+        }
+    }
+    if snapshot.symbols.get(&ITERATOR_SYMBOL).is_none() {
+        return Err(VmError::InvalidSnapshot(
+            "snapshot is missing the Symbol.iterator record".to_owned(),
+        ));
+    }
+    let mut registered = BTreeSet::new();
+    for (key, id) in &snapshot.symbol_registry {
+        if *id == ITERATOR_SYMBOL {
+            return Err(VmError::InvalidSnapshot(format!(
+                "registry key {key:?} points at the iterator symbol"
+            )));
+        }
+        if !registered.insert(*id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "registry key {key:?} duplicates symbol {id}"
+            )));
+        }
+        match snapshot.symbols.get(id) {
+            Some(Some(description)) if description == key => {}
+            _ => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "registry key {key:?} does not describe symbol {id}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 8 {
+    if roots.len() != 9 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 8",
+            "snapshot has {} builtin roots, expected 9",
             roots.len()
         )));
     }
@@ -403,6 +490,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         typeerror_prototype: plain_root(ROOT_TYPEERROR_PROTOTYPE)?,
         error: builtin_root(ROOT_ERROR, "Error")?,
         typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
+        symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
     })
 }
 
@@ -494,6 +582,13 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
                     require_environment(heap, id, env, role)?;
                 }
                 OwnedEdge::Continuation(_) => {}
+                OwnedEdge::Symbol(symbol) => {
+                    if !heap.symbols.contains_key(&symbol) {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} references missing symbol {symbol}"
+                        )));
+                    }
+                }
             }
         }
     }
@@ -523,7 +618,12 @@ fn validate_accessors(build: &Build, heap: &Heap) -> Result<(), VmError> {
         let Object::Plain(plain) = heap.get(id)? else {
             continue;
         };
-        for (key, property) in &plain.props {
+        for (key, property) in plain
+            .props
+            .iter()
+            .map(|(k, p)| (k.to_string(), p))
+            .chain(plain.symbol_props.iter().map(|(k, p)| (k.to_string(), p)))
+        {
             let Property::Accessor { get, set } = property else {
                 continue;
             };
@@ -581,12 +681,18 @@ fn require_value_objects<'a>(
     values: impl IntoIterator<Item = &'a Value>,
 ) -> Result<(), VmError> {
     for value in values {
-        if let Value::Object(id) = value
-            && !heap.contains(*id)
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "value references missing object {id}"
-            )));
+        match value {
+            Value::Object(id) if !heap.contains(*id) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "value references missing object {id}"
+                )));
+            }
+            Value::Symbol(id) if !heap.symbols.contains_key(id) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "value references missing symbol {id}"
+                )));
+            }
+            _ => {}
         }
     }
     Ok(())

@@ -159,6 +159,9 @@ impl Vm {
             Value::Bool(value) => Ok(HostValue::Bool(*value)),
             Value::Number(value) => Ok(HostValue::Number(*value)),
             Value::String(value) => Ok(HostValue::String(value.clone())),
+            Value::Symbol(_) => Err(VmError::InvalidState(
+                "Symbol values cannot cross the host boundary".to_owned(),
+            )),
             Value::Object(id) => match self.heap.get(*id)? {
                 crate::heap::Object::Native(native) => Ok(HostValue::Native(native.key.clone())),
                 _ => Err(VmError::InvalidState(format!(

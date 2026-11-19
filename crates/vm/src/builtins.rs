@@ -30,6 +30,7 @@ pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
 pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
+pub(crate) const ROOT_SYMBOL: &str = "symbol";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -41,6 +42,7 @@ pub(crate) struct BuiltinRoots {
     pub typeerror_prototype: ObjectId,
     pub error: ObjectId,
     pub typeerror: ObjectId,
+    pub symbol: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -57,6 +59,7 @@ impl BuiltinRoots {
             ),
             (ROOT_ERROR.to_owned(), self.error),
             (ROOT_TYPEERROR.to_owned(), self.typeerror),
+            (ROOT_SYMBOL.to_owned(), self.symbol),
         ])
     }
 }
@@ -70,6 +73,9 @@ pub(crate) enum BuiltinCall {
     Static(String),
     Method { name: String },
     Resolution { id: ObjectId },
+    SymbolConstructor,
+    SymbolFor,
+    SymbolKeyFor,
 }
 
 enum Dispatch<'a> {
@@ -91,7 +97,7 @@ impl Vm {
         self.heap.object_prototype = Some(object_prototype);
         let has_own = self.heap.alloc_builtin("Object", Some("hasOwnProperty"));
         self.heap
-            .set_own(object_prototype, "hasOwnProperty", Value::Object(has_own))
+            .set_own_string(object_prototype, "hasOwnProperty", Value::Object(has_own))
             .expect("Object.prototype stores methods");
 
         let prototype = self.heap.alloc_plain();
@@ -100,20 +106,20 @@ impl Vm {
         for name in PROMISE_STATICS {
             let id = self.heap.alloc_builtin("Promise", Some(name));
             self.heap
-                .set_own(promise, name, Value::Object(id))
+                .set_own_string(promise, name, Value::Object(id))
                 .expect("Promise constructor stores statics");
         }
         for name in PROMISE_METHODS {
             let id = self.heap.alloc_builtin("Promise", Some(name));
             self.heap
-                .set_own(prototype, name, Value::Object(id))
+                .set_own_string(prototype, name, Value::Object(id))
                 .expect("Promise.prototype stores methods");
         }
         self.heap
-            .set_own(prototype, "constructor", Value::Object(promise))
+            .set_own_string(prototype, "constructor", Value::Object(promise))
             .expect("Promise.prototype.constructor");
         self.heap
-            .set_own(promise, "prototype", Value::Object(prototype))
+            .set_own_string(promise, "prototype", Value::Object(prototype))
             .expect("Promise.prototype");
         self.heap.promise_prototype = Some(prototype);
 
@@ -124,14 +130,28 @@ impl Vm {
             (typeerror_prototype, "TypeError"),
         ] {
             self.heap
-                .set_own(id, "name", Value::String(name.to_owned()))
+                .set_own_string(id, "name", Value::String(name.to_owned()))
                 .expect("Error prototype stores name");
         }
         self.heap
-            .set_own(error_prototype, "message", Value::String(String::new()))
+            .set_own_string(error_prototype, "message", Value::String(String::new()))
             .expect("Error.prototype stores message");
         let error = self.heap.alloc_builtin("Error", None);
         let typeerror = self.heap.alloc_builtin("TypeError", None);
+        let symbol = self.heap.alloc_builtin("Symbol", None);
+        for name in ["for", "keyFor"] {
+            let id = self.heap.alloc_builtin("Symbol", Some(name));
+            self.heap
+                .set_own_string(symbol, name, Value::Object(id))
+                .expect("Symbol constructor stores statics");
+        }
+        self.heap
+            .set_own_string(
+                symbol,
+                "iterator",
+                Value::Symbol(crate::heap::ITERATOR_SYMBOL),
+            )
+            .expect("Symbol constructor stores the iterator symbol");
         self.builtins = BuiltinRoots {
             promise,
             promise_prototype: prototype,
@@ -141,6 +161,7 @@ impl Vm {
             typeerror_prototype,
             error,
             typeerror,
+            symbol,
         };
     }
 
@@ -163,6 +184,7 @@ impl Vm {
             1 => Ok(self.builtins.queue_microtask),
             2 => Ok(self.builtins.error),
             3 => Ok(self.builtins.typeerror),
+            4 => Ok(self.builtins.symbol),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -194,9 +216,9 @@ impl Vm {
         if constructable {
             let prototype = self.heap.alloc_plain();
             self.heap
-                .set_own(prototype, "constructor", Value::Object(id))?;
+                .set_own_string(prototype, "constructor", Value::Object(id))?;
             self.heap
-                .set_own(id, "prototype", Value::Object(prototype))?;
+                .set_own_string(id, "prototype", Value::Object(prototype))?;
         }
         Ok(id)
     }
@@ -263,6 +285,9 @@ impl Vm {
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 self.construct_error(&name, args)
             }
+            Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => Ok(Invocation::Thrown(
+                type_error("Symbol is not a constructor"),
+            )),
             _ => Ok(Invocation::Thrown(type_error("value is not a constructor"))),
         }
     }
@@ -310,7 +335,7 @@ impl Vm {
                             )));
                         }
                     };
-                    let key = ops::to_js_string(args.first().unwrap_or(&Value::Undefined));
+                    let key = ops::property_key(args.first().unwrap_or(&Value::Undefined))?;
                     Ok(Invocation::Value(Value::Bool(self.heap.has_own(id, &key)?)))
                 }
                 _ => Err(VmError::InvalidState(format!(
@@ -318,6 +343,13 @@ impl Vm {
                 ))),
             },
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
+            BuiltinCall::SymbolConstructor => self.symbol_constructor(args),
+            BuiltinCall::SymbolFor => {
+                self.symbol_static(receiver, |vm, args| vm.symbol_for(args), args)
+            }
+            BuiltinCall::SymbolKeyFor => {
+                self.symbol_static(receiver, |vm, args| vm.symbol_key_for(args), args)
+            }
             BuiltinCall::Static(name) => {
                 if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
                     return Ok(Invocation::Thrown(type_error(
@@ -407,9 +439,11 @@ impl Vm {
         };
         let stack = format!("{name}: {}", message.as_deref().unwrap_or_default());
         if let Some(message) = message {
-            self.heap.set_own(id, "message", Value::String(message))?;
+            self.heap
+                .set_own_string(id, "message", Value::String(message))?;
         }
-        self.heap.set_own(id, "stack", Value::String(stack))?;
+        self.heap
+            .set_own_string(id, "stack", Value::String(stack))?;
         Ok(Invocation::Value(Value::Object(id)))
     }
 
@@ -436,6 +470,66 @@ impl Vm {
             self.capability_call(host, reject_id, error)?;
         }
         Ok(Invocation::Value(Value::Object(promise)))
+    }
+
+    fn symbol_static(
+        &mut self,
+        receiver: &Value,
+        call: impl FnOnce(&mut Self, Vec<Value>) -> Result<Invocation, VmError>,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
+        if !matches!(receiver, Value::Object(id) if *id == self.builtins.symbol) {
+            return Ok(Invocation::Thrown(type_error(
+                "incompatible Symbol receiver",
+            )));
+        }
+        call(self, args)
+    }
+
+    /// `Symbol(desc)`: every call produces a fresh identity.
+    fn symbol_constructor(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+        let description = match args.first() {
+            None | Some(Value::Undefined) => None,
+            Some(Value::Symbol(_)) => {
+                return Ok(Invocation::Thrown(type_error(
+                    "Cannot convert a Symbol value to a string",
+                )));
+            }
+            Some(value) => Some(ops::to_js_string(value)),
+        };
+        let id = self.heap.alloc_symbol(description)?;
+        Ok(Invocation::Value(Value::Symbol(id)))
+    }
+
+    fn symbol_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+        let key = match args.first() {
+            None | Some(Value::Undefined) => "undefined".to_owned(),
+            Some(Value::Symbol(_)) => {
+                return Ok(Invocation::Thrown(type_error(
+                    "Cannot convert a Symbol value to a string",
+                )));
+            }
+            Some(value) => ops::to_js_string(value),
+        };
+        let id = self.heap.intern_symbol(key)?;
+        Ok(Invocation::Value(Value::Symbol(id)))
+    }
+
+    fn symbol_key_for(&self, args: Vec<Value>) -> Result<Invocation, VmError> {
+        let Some(Value::Symbol(id)) = args.first() else {
+            return Ok(Invocation::Thrown(type_error(
+                "Symbol.keyFor requires a Symbol",
+            )));
+        };
+        let key = self
+            .heap
+            .symbol_registry
+            .iter()
+            .find_map(|(key, registered)| (*registered == *id).then(|| key.clone()));
+        Ok(Invocation::Value(match key {
+            Some(key) => Value::String(key),
+            None => Value::Undefined,
+        }))
     }
 
     fn queue_microtask(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
@@ -835,8 +929,8 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let id = self.heap.alloc_plain();
         self.heap
-            .set_own(id, "status", Value::String(status.to_owned()))?;
-        self.heap.set_own(id, payload.0, payload.1)?;
+            .set_own_string(id, "status", Value::String(status.to_owned()))?;
+        self.heap.set_own_string(id, payload.0, payload.1)?;
         Ok(Value::Object(id))
     }
 }
@@ -860,6 +954,9 @@ fn static_call(function: &BuiltinStatic) -> Result<BuiltinCall, Value> {
         ("Promise", Some(member)) if PROMISE_METHODS.contains(&member) => Ok(BuiltinCall::Method {
             name: member.to_owned(),
         }),
+        ("Symbol", None) => Ok(BuiltinCall::SymbolConstructor),
+        ("Symbol", Some("for")) => Ok(BuiltinCall::SymbolFor),
+        ("Symbol", Some("keyFor")) => Ok(BuiltinCall::SymbolKeyFor),
         _ => Err(type_error("value is not a function")),
     }
 }

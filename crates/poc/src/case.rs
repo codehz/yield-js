@@ -475,6 +475,7 @@ fn format_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => format_number(*value),
         Value::String(value) => format!("{value:?}"),
+        Value::Symbol(_) => "symbol".to_owned(),
         Value::Object(_) => "object".to_owned(),
     }
 }
