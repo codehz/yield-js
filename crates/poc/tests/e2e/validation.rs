@@ -208,3 +208,78 @@ async function run() {
     );
     assert_eq!(s.host.count("wait"), calls, "restore must not run script");
 }
+
+fn suspended_symbol_snapshot() -> (super::support::Suspended, yield_vm::Snapshot) {
+    let source = r#"
+async function run() {
+  const key = Symbol("key");
+  const obj = {};
+  obj[key] = 5;
+  obj[Symbol.for("k")] = 6;
+  await wait("a");
+  return obj[key];
+}
+"#;
+    let s = super::support::Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    (s, snapshot)
+}
+
+fn live_symbol_id(snapshot: &yield_vm::Snapshot) -> yield_vm::value::SymbolId {
+    *snapshot
+        .symbols
+        .iter()
+        .find_map(|(id, description)| (description.as_deref() == Some("key")).then_some(id))
+        .expect("live symbol record")
+}
+
+#[test]
+fn symbol_snapshot_tampering_is_rejected() {
+    let (mut s, snapshot) = suspended_symbol_snapshot();
+    let symbol_id = live_symbol_id(&snapshot);
+
+    let mut missing_key = snapshot.clone();
+    assert!(missing_key.symbols.remove(&symbol_id).is_some());
+    let error = s.restore(missing_key).expect_err("deleted live symbol");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("missing symbol"))
+    );
+
+    let mut iterator_registry = snapshot.clone();
+    iterator_registry.symbol_registry.insert("fake".into(), 0);
+    let error = s
+        .restore(iterator_registry)
+        .expect_err("registry points at iterator");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("iterator")));
+
+    let mut lowered = snapshot.clone();
+    lowered.next_symbol_id = symbol_id;
+    let error = s.restore(lowered).expect_err("lowered high-water mark");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("next symbol id"))
+    );
+
+    let mut old_format = snapshot;
+    old_format.format_version = 7;
+    let error = s.restore(old_format).expect_err("format version 7");
+    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("format")));
+}
+
+#[test]
+fn symbols_never_reach_the_host_call() {
+    let source = r#"
+async function run() {
+  return inspect(Symbol("hidden"));
+}
+"#;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build(source), &host).expect("create VM");
+    let error = vm
+        .start(&mut host, "run", Vec::new())
+        .expect_err("symbol argument is rejected");
+    assert!(
+        matches!(&error, VmError::InvalidState(message) if message.contains("Symbol")),
+        "{error}"
+    );
+    assert_eq!(host.count("inspect"), 0, "host must not be called");
+}

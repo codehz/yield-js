@@ -33,8 +33,8 @@ pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Va
                 Value::String(to_js_string(&lhs) + &to_js_string(&rhs))
             }
             (lhs, rhs) => {
-                check_no_symbol("a number", &[&lhs, &rhs])?;
-                Value::Number(to_number(&lhs)? + to_number(&rhs)?)
+                check_no_symbol("a number", &[lhs, rhs])?;
+                Value::Number(to_number(lhs)? + to_number(rhs)?)
             }
         },
         BinaryOp::Sub => {

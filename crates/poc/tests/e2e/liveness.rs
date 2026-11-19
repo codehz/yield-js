@@ -1,6 +1,6 @@
 //! Snapshots retain live values across suspension edges and omit dead objects.
 
-use super::support::Suspended;
+use super::support::{Suspended, json_round_trip};
 use yield_poc::number;
 use yield_vm::heap::Property;
 use yield_vm::{Completion, HostValue, Object, PromiseState, Value};
@@ -122,4 +122,65 @@ async function run() {
         s.state(),
         PromiseState::Fulfilled(Value::String("kept".into()))
     );
+}
+
+fn symbol_descriptions(snapshot: &yield_vm::Snapshot) -> Vec<Option<String>> {
+    snapshot.symbols.values().cloned().collect()
+}
+
+#[test]
+fn symbol_property_keys_survive_restore() {
+    let source = r#"
+async function run() {
+  const key = Symbol("key");
+  const obj = {};
+  obj[key] = 5;
+  await wait("a");
+  return obj[key];
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = json_round_trip(&s.snapshot());
+    assert!(snapshot.symbols.contains_key(&0), "iterator is always kept");
+    assert!(
+        snapshot
+            .symbols
+            .values()
+            .any(|description| description.as_deref() == Some("key"))
+    );
+    s.restore(snapshot).expect("restore");
+    s.complete("wait:a", Completion::Fulfilled(number(0.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
+}
+
+#[test]
+fn unreferenced_symbols_are_absent_and_registry_keys_are_kept() {
+    let source = r#"
+async function run() {
+  Symbol("orphan");
+  const dropped = Symbol.for("registry-only");
+  await wait("a");
+  return dropped === Symbol.for("registry-only");
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let descriptions = symbol_descriptions(&snapshot);
+    assert!(
+        !descriptions
+            .iter()
+            .any(|description| description.as_deref() == Some("orphan")),
+        "a symbol with no reference must not reach the snapshot"
+    );
+    assert!(
+        snapshot
+            .symbols
+            .values()
+            .any(|description| description.as_deref() == Some("registry-only")),
+        "registered keys stay alive without script references"
+    );
+    assert!(snapshot.symbol_registry.contains_key("registry-only"));
+    s.restore(snapshot).expect("restore");
+    s.complete("wait:a", Completion::Fulfilled(number(0.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
 }

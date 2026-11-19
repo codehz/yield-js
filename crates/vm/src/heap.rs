@@ -959,7 +959,7 @@ fn lookup_tables<'m, V>(
     }
 }
 
-fn define_in_table(entry: Entry<'_, impl Eq + Ord, Property>, mut property: Property) {
+fn define_in_table<K: Ord>(entry: Entry<'_, K, Property>, mut property: Property) {
     match entry {
         Entry::Occupied(mut own) => {
             if let Property::Accessor { get, set } = &mut property

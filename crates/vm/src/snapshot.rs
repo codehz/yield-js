@@ -339,16 +339,19 @@ impl<'a> Tracer<'a> {
     }
 
     fn walk_continuation(&mut self, id: ContinuationId) -> Result<(), VmError> {
-        let objects = {
+        let (objects, values) = {
             let continuation = self.continuations.get(&id).ok_or_else(|| {
                 VmError::InvalidState(format!("continuation {id} does not exist"))
             })?;
             let mut objects = Vec::new();
             continuation.for_each_object(|object| objects.push(object));
-            objects
+            (objects, continuation.values.clone())
         };
         for object in objects {
             self.mark_object(object)?;
+        }
+        for value in &values {
+            self.mark_value(value)?;
         }
         Ok(())
     }
@@ -392,7 +395,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             ));
         }
     }
-    if snapshot.symbols.get(&ITERATOR_SYMBOL).is_none() {
+    if !snapshot.symbols.contains_key(&ITERATOR_SYMBOL) {
         return Err(VmError::InvalidSnapshot(
             "snapshot is missing the Symbol.iterator record".to_owned(),
         ));
