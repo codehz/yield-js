@@ -21,7 +21,7 @@ use yield_vm::bytecode::{Constant, Instr};
 use crate::allocate;
 use crate::bindings;
 use crate::emit::{Emitter, Reg};
-use crate::env::{BindingKind, Env};
+use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
 use crate::ir::LoweredFunction;
 use crate::promote;
@@ -41,7 +41,7 @@ pub(crate) fn lower_program<'ast>(
             source: FunctionSource::Script(&program.body),
             func_id: 0,
             name: "\0script".to_owned(),
-            outer_scopes: Vec::new(),
+            outer: CapturedEnv::default(),
         },
     )?);
     while let Some(task) = tasks.pop_front() {
@@ -98,7 +98,7 @@ struct Task<'ast> {
     source: FunctionSource<'ast>,
     func_id: u32,
     name: String,
-    outer_scopes: Vec<BTreeMap<String, BindingId>>,
+    outer: CapturedEnv,
 }
 
 struct Lowerer<'ast, 'borrow, 'src> {
@@ -151,7 +151,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_arrow: task.source.is_arrow(),
             is_method: matches!(task.source, FunctionSource::Method(_)),
             is_script: matches!(task.source, FunctionSource::Script(_)),
-            env: Env::new(task.outer_scopes),
+            env: Env::new(task.outer),
             emit: Emitter::new(source_text, span),
             control: Control::new(),
             param_bindings: Vec::new(),
@@ -404,6 +404,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.env.lookup(name)
     }
 
+    /// Emit the PutValue step after evaluating an assignment's inputs.
+    pub(super) fn put_binding(&mut self, binding: BindingId, value: Reg) -> usize {
+        if self.env.is_const(binding) {
+            self.emit(Instr::ThrowAssignmentToConst)
+        } else {
+            self.emit(Instr::SetBinding {
+                binding,
+                src: self.slot(value),
+            })
+        }
+    }
+
     pub(super) fn check_tdz(
         &self,
         binding: BindingId,
@@ -441,12 +453,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         span: Span,
     ) -> Result<u32, CompileError> {
         let func_id = self.session.alloc_func_id(span)?;
-        let outer_scopes = self.env.capture();
         self.tasks.push_back(Task {
             source,
             func_id,
             name: format!("{hint}@{func_id}"),
-            outer_scopes,
+            outer: self.env.capture(),
         });
         Ok(func_id)
     }
@@ -480,12 +491,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         span: Span,
     ) -> Result<u32, CompileError> {
         let func_id = self.session.alloc_func_id(span)?;
-        let outer_scopes = self.env.capture();
         self.tasks.push_back(Task {
             source: FunctionSource::Function(function),
             func_id,
             name: name.to_owned(),
-            outer_scopes,
+            outer: self.env.capture(),
         });
         Ok(func_id)
     }
@@ -836,7 +846,8 @@ fn as_binding_kind(
 ) -> Result<BindingKind, CompileError> {
     match kind {
         VariableDeclarationKind::Var => Ok(BindingKind::Var),
-        VariableDeclarationKind::Let | VariableDeclarationKind::Const => Ok(BindingKind::Lexical),
+        VariableDeclarationKind::Let => Ok(BindingKind::Lexical),
+        VariableDeclarationKind::Const => Ok(BindingKind::Const),
         other => Err(unsupported(
             source,
             span,

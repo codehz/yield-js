@@ -68,7 +68,7 @@ pub(crate) fn normal_successors(
         }
         Instr::Jump { target } => vec![*target as usize],
         Instr::BranchFalse { target, .. } => vec![*target as usize, pc + 1],
-        Instr::Return { .. } | Instr::Throw { .. } => Vec::new(),
+        Instr::Return { .. } | Instr::Throw { .. } | Instr::ThrowAssignmentToConst => Vec::new(),
         _ => vec![pc + 1],
     };
     for successor in &result {

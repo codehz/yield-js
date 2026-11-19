@@ -23,7 +23,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ### 2.1 绑定与参数
 
 - `for…of` 多个声明（`for-of declaration`）
-- `const` 与 `let` 在绑定种类上不分。重复赋值 `const` 能编过，也不会在运行期拒绝
 
 ### 2.2 表达式
 

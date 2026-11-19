@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 23;
+pub const BYTECODE_VERSION: u32 = 24;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -289,6 +289,8 @@ pub enum Instr {
     Throw {
         src: Slot,
     },
+    /// Throws a TypeError for an assignment to a constant binding.
+    ThrowAssignmentToConst,
     /// Loads a cached builtin value (object builtins, or the number globals
     /// `NaN` and `Infinity`).
     GetBuiltin {
@@ -966,6 +968,7 @@ impl Build {
                 }
                 Instr::Return { src } => check_slot(*src, "Return.src")?,
                 Instr::Throw { src } => check_slot(*src, "Throw.src")?,
+                Instr::ThrowAssignmentToConst => {}
                 Instr::GetBuiltin { dst, builtin } => {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;

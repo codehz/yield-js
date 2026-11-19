@@ -480,6 +480,9 @@ impl Vm {
             }
             Instr::Return { src } => Ok(Step::Return(frame.read(src)?)),
             Instr::Throw { src } => Ok(Step::Throw(frame.read(src)?)),
+            Instr::ThrowAssignmentToConst => Ok(Step::Throw(
+                self.type_error("Assignment to constant variable.")?,
+            )),
         }
     }
 

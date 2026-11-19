@@ -3,12 +3,11 @@
 //! The compiler assigns stable [`BindingId`]s and records the scope chain a
 //! nested function captures. Bindings read or written from another function
 //! stay in a heap environment; the rest become frame slots after lowering.
-//! `let` and `const` are not distinguished. [`Env::pending_lexicals`] tracks
-//! bindings that have entered scope in this function but have not finished
-//! initializing. [`Env::capture`] copies only the name-to-id chain, so a
-//! nested function starts with an empty pending set and does not reject an
-//! early read of an outer binding. This is not full ECMAScript TDZ, and loop
-//! iterations do not get fresh bindings.
+//! [`Env::pending_lexicals`] tracks bindings that have entered scope in this
+//! function but have not finished initializing. [`Env::capture`] copies the
+//! scope chain and const binding IDs, but not the pending set. A nested function
+//! therefore does not reject an early read of an outer binding. This is not full
+//! ECMAScript TDZ, and loop iterations do not get fresh bindings.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,22 +24,32 @@ pub(crate) enum BindingKind {
     /// Block-scoped. A clash with a function-scoped name in the function body
     /// is an error; a name already predeclared in the current block is reused.
     Lexical,
+    /// Block-scoped, with assignment forbidden after initialization.
+    Const,
+}
+
+#[derive(Default)]
+pub(crate) struct CapturedEnv {
+    scopes: Vec<BTreeMap<String, BindingId>>,
+    const_bindings: BTreeSet<BindingId>,
 }
 
 pub(crate) struct Env {
     function_scope: BTreeMap<String, BindingId>,
     scopes: Vec<BTreeMap<String, BindingId>>,
     outer_scopes: Vec<BTreeMap<String, BindingId>>,
+    const_bindings: BTreeSet<BindingId>,
     /// Lexical bindings in this function whose initializer has not run.
     pending_lexicals: BTreeSet<BindingId>,
 }
 
 impl Env {
-    pub(crate) fn new(outer_scopes: Vec<BTreeMap<String, BindingId>>) -> Self {
+    pub(crate) fn new(outer: CapturedEnv) -> Self {
         Self {
             function_scope: BTreeMap::new(),
             scopes: vec![BTreeMap::new()],
-            outer_scopes,
+            outer_scopes: outer.scopes,
+            const_bindings: outer.const_bindings,
             pending_lexicals: BTreeSet::new(),
         }
     }
@@ -75,6 +84,7 @@ impl Env {
         if let Some(scope) = self.scopes.pop() {
             for binding in scope.values() {
                 self.pending_lexicals.remove(binding);
+                self.const_bindings.remove(binding);
             }
         }
     }
@@ -91,6 +101,10 @@ impl Env {
 
     pub(crate) fn clear_pending(&mut self, binding: BindingId) {
         self.pending_lexicals.remove(&binding);
+    }
+
+    pub(crate) fn is_const(&self, binding: BindingId) -> bool {
+        self.const_bindings.contains(&binding)
     }
 
     /// Reject a use of a lexical binding whose initializer has not been lowered.
@@ -113,11 +127,14 @@ impl Env {
 
     /// Scope chain a nested function closes over, including this function's
     /// parameter/var scope and every open block.
-    pub(crate) fn capture(&self) -> Vec<BTreeMap<String, BindingId>> {
-        let mut outer = self.outer_scopes.clone();
-        outer.push(self.function_scope.clone());
-        outer.extend(self.scopes.iter().cloned());
-        outer
+    pub(crate) fn capture(&self) -> CapturedEnv {
+        let mut scopes = self.outer_scopes.clone();
+        scopes.push(self.function_scope.clone());
+        scopes.extend(self.scopes.iter().cloned());
+        CapturedEnv {
+            scopes,
+            const_bindings: self.const_bindings.clone(),
+        }
     }
 
     pub(crate) fn declare(
@@ -137,7 +154,7 @@ impl Env {
                 self.function_scope.insert(name.to_owned(), binding);
                 Ok((binding, true))
             }
-            BindingKind::Lexical => {
+            BindingKind::Lexical | BindingKind::Const => {
                 let conflicts_with_function_scope =
                     self.scopes.len() == 1 && self.function_scope.contains_key(name);
                 let current = self.scopes.last().expect("scope stack is never empty");
@@ -152,6 +169,9 @@ impl Env {
                     ));
                 }
                 let binding = alloc_binding(next_binding);
+                if matches!(kind, BindingKind::Const) {
+                    self.const_bindings.insert(binding);
+                }
                 self.scopes
                     .last_mut()
                     .expect("scope stack is never empty")
@@ -182,7 +202,7 @@ impl Env {
                 self.function_scope.insert(name.to_owned(), binding);
                 Some(binding)
             }
-            BindingKind::Lexical => {
+            BindingKind::Lexical | BindingKind::Const => {
                 let conflicts_with_function_scope =
                     self.scopes.len() == 1 && self.function_scope.contains_key(name);
                 if let Some(binding) = self.current_binding(name) {
@@ -192,6 +212,9 @@ impl Env {
                     return None;
                 }
                 let binding = alloc_binding(next_binding);
+                if matches!(kind, BindingKind::Const) {
+                    self.const_bindings.insert(binding);
+                }
                 self.scopes
                     .last_mut()
                     .expect("scope stack is never empty")

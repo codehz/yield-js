@@ -851,10 +851,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 let end = self.begin_logical_rhs(op, result)?;
                 let right = self.compile_expression(&expression.right)?;
-                self.emit(Instr::SetBinding {
-                    binding,
-                    src: self.slot(right),
-                });
+                self.put_binding(binding, right);
                 self.emit(Instr::Move {
                     dst: self.slot(result),
                     src: self.slot(right),
@@ -881,10 +878,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 value
             };
-            self.emit(Instr::SetBinding {
-                binding,
-                src: self.slot(value),
-            });
+            self.put_binding(binding, value);
             let result = self.alloc_reg()?;
             self.emit(Instr::Move {
                 dst: self.slot(result),
@@ -1042,10 +1036,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             rhs: self.slot(one),
         });
         match &target {
-            Target::Binding(binding) => self.emit(Instr::SetBinding {
-                binding: *binding,
-                src: self.slot(updated),
-            }),
+            Target::Binding(binding) => self.put_binding(*binding, updated),
             Target::Member(object, key) => self.emit(Instr::SetMember {
                 object: self.slot(*object),
                 key: self.slot(*key),

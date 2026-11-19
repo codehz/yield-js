@@ -19,6 +19,7 @@ use crate::emit::Reg;
 pub(crate) fn may_throw(instruction: &Instr) -> bool {
     match instruction {
         Instr::Throw { .. }
+        | Instr::ThrowAssignmentToConst
         | Instr::CallValue { .. }
         | Instr::Construct { .. }
         | Instr::Await { .. }
@@ -226,6 +227,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
         }
+        Instr::ThrowAssignmentToConst => {}
     }
     (uses, defs)
 }
@@ -420,6 +422,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         },
         Instr::Return { src } => Instr::Return { src: remap(src) },
         Instr::Throw { src } => Instr::Throw { src: remap(src) },
+        Instr::ThrowAssignmentToConst => Instr::ThrowAssignmentToConst,
         Instr::GetBuiltin { dst, builtin } => Instr::GetBuiltin {
             dst: remap(dst),
             builtin,

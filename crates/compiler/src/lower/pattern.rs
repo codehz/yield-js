@@ -17,7 +17,7 @@ enum Pattern<'ast> {
 
 enum Destination<'ast> {
     Pattern(Pattern<'ast>),
-    Binding(BindingId),
+    AssignmentBinding(BindingId),
     Member { object: Reg, key: Reg },
 }
 
@@ -58,7 +58,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Result<Destination<'ast>, CompileError> {
         if let Pattern::Assignment(target) = pattern {
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = target {
-                return Ok(Destination::Binding(self.assignment_binding(id)?));
+                return Ok(Destination::AssignmentBinding(self.assignment_binding(id)?));
             }
             if let Some(member) = target.as_member_expression() {
                 let (object, key) = self.compile_member_parts(member)?;
@@ -76,7 +76,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let src = self.slot(value);
         match destination {
             Destination::Pattern(pattern) => return self.compile_pattern(pattern, value),
-            Destination::Binding(binding) => self.emit(Instr::SetBinding { binding, src }),
+            Destination::AssignmentBinding(binding) => self.put_binding(binding, value),
             Destination::Member { object, key } => self.emit(Instr::SetMember {
                 object: self.slot(object),
                 key: self.slot(key),
@@ -93,7 +93,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     .lookup(id.name.as_str())
                     .expect("predeclared pattern binding");
                 self.env.clear_pending(binding);
-                self.write_pattern(Destination::Binding(binding), value)
+                self.emit(Instr::SetBinding {
+                    binding,
+                    src: self.slot(value),
+                });
+                Ok(())
             }
             Pattern::Binding(BindingPattern::AssignmentPattern(pattern)) => {
                 let value = self.compile_pattern_default(value, &pattern.right)?;
@@ -125,7 +129,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                             self.emit_constant(Constant::String(
                                 property.binding.name.as_str().to_owned(),
                             ))?,
-                            Destination::Binding(self.assignment_binding(&property.binding)?),
+                            Destination::AssignmentBinding(
+                                self.assignment_binding(&property.binding)?,
+                            ),
                             property.init.as_ref(),
                         ),
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
