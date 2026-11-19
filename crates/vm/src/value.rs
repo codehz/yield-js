@@ -79,6 +79,12 @@ impl PropertyKey {
     }
 }
 
+impl From<&str> for PropertyKey {
+    fn from(key: &str) -> Self {
+        Self::String(key.to_owned())
+    }
+}
+
 /// Stable key for a host-owned object wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NativeKey {

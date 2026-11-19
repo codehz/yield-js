@@ -43,8 +43,9 @@ cargo run -p yield-poc
 - 脚本函数支持 `call`、`apply`（参数表限数组、`null` 或 `undefined`）与 `bind`。绑定函数的目标、`this` 与预置参数可跨 `await` 快照恢复；绑定函数不支持 `new`，没有自有属性或原型。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。`for…in` 仍不支持。
-- `Reflect.ownKeys(obj)` 返回自有键：数组索引键按数值升序，其余字符串键及 Symbol 键分别按创建顺序。稠密数组包含 `length`；不访问继承属性或调用 getter。自有键顺序可跨快照恢复。其余 `Reflect` 操作和属性描述符标志尚未实现。
-- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Object` / `Array` 全局名。数组字面量展开复用该迭代协议，部分结果可跨 `await` 保存；实参展开、对象展开和解构仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
+- `Reflect.ownKeys(obj)` 返回全部自有键：数组索引键按数值升序，其余字符串键及 Symbol 键分别按创建顺序。`Object.keys(value)` 复用该顺序，仅返回可枚举的自有字符串键；字符串原始值按 UTF-16 索引枚举。两者都不遍历原型链或调用 getter。
+- `Object.getOwnPropertyDescriptor(obj, key)` 查询自有数据或访问器属性，不调用 getter。描述符标志可跨快照恢复；严格模式下向只读属性赋值会抛出 `TypeError`，包括继承的只读属性。内建方法与数组 `length` 不可枚举。`Object.defineProperty`、原始值包装对象和其余 `Reflect` 操作尚未实现。
+- 普通对象和数组都继承 `Object.prototype.hasOwnProperty`（含 Symbol 键）；数组通过共享原型提供同一个 `values` 与 `[Symbol.iterator]` 方法，游标读取实时元素并可跨 `await` 和快照续用。尚无 `Array` 全局名。数组字面量展开复用该迭代协议，部分结果可跨 `await` 保存；实参展开、对象展开和解构仍不支持。Symbol 键保真身份、不参与 `length`，字符串键与 Symbol 键分别成表存储。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
 - async 函数、`await`、Promise 微任务恢复；已结算 Promise 也必须经微任务恢复。`await` 会同化 thenable。

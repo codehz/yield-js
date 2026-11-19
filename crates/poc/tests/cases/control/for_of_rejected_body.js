@@ -23,8 +23,12 @@ async function run() {
       return iterator;
     }
   };
-  // The protocol does not depend on the writable global Symbol.iterator property.
-  Symbol.iterator = null;
+  try {
+    Symbol.iterator = null;
+    return "Symbol.iterator accepted a write";
+  } catch (error) {
+    if (error.name !== "TypeError") throw error;
+  }
   try {
     for (var value of iterable) {
       await wait("body");

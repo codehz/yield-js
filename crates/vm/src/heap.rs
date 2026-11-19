@@ -121,6 +121,40 @@ pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
 struct OrderedProperty<V> {
     ordinal: usize,
     value: V,
+    attributes: Attributes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Attributes {
+    pub writable: bool,
+    pub enumerable: bool,
+    pub configurable: bool,
+}
+
+impl Attributes {
+    pub const ORDINARY: Self = Self {
+        writable: true,
+        enumerable: true,
+        configurable: true,
+    };
+    pub const METHOD: Self = Self {
+        enumerable: false,
+        ..Self::ORDINARY
+    };
+    pub const FIXED: Self = Self {
+        writable: false,
+        enumerable: false,
+        configurable: false,
+    };
+    pub const FUNCTION_PROTOTYPE: Self = Self {
+        writable: true,
+        ..Self::FIXED
+    };
+    const ACCESSOR: Self = Self {
+        writable: false,
+        ..Self::ORDINARY
+    };
+    const ARRAY_LENGTH: Self = Self::FUNCTION_PROTOTYPE;
 }
 
 impl<K: Ord, V> PropertyTable<K, V> {
@@ -135,6 +169,13 @@ impl<K: Ord, V> PropertyTable<K, V> {
         self.0.get(key).map(|property| &property.value)
     }
 
+    fn entry<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&OrderedProperty<V>>
+    where
+        K: Borrow<Q>,
+    {
+        self.0.get(key)
+    }
+
     pub fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -147,17 +188,26 @@ impl<K: Ord, V> PropertyTable<K, V> {
         self.0.iter().map(|(key, property)| (key, &property.value))
     }
 
-    fn update(&mut self, key: K, value: impl FnOnce(Option<&V>) -> V) {
+    fn update(
+        &mut self,
+        key: K,
+        attributes: Option<Attributes>,
+        value: impl FnOnce(Option<&V>) -> V,
+    ) {
         let ordinal = self.0.len();
         match self.0.entry(key) {
             Entry::Occupied(mut entry) => {
                 let property = entry.get_mut();
                 property.value = value(Some(&property.value));
+                if let Some(attributes) = attributes {
+                    property.attributes = attributes;
+                }
             }
             Entry::Vacant(entry) => {
                 entry.insert(OrderedProperty {
                     ordinal,
                     value: value(None),
+                    attributes: attributes.unwrap_or(Attributes::ORDINARY),
                 });
             }
         }
@@ -176,21 +226,32 @@ fn collect_own_keys<'a, V>(
     keys: &mut Vec<((u8, usize), PropertyKeyRef<'a>)>,
     props: &'a PropertyTable<String, V>,
     symbols: &'a PropertyTable<SymbolId, V>,
+    enumerable_strings_only: bool,
 ) {
-    keys.reserve(props.0.len() + symbols.0.len());
-    keys.extend(props.0.iter().map(|(key, property)| {
-        let order = match array_index(key) {
-            Some(index) => (0, index),
-            None => (1, property.ordinal),
-        };
-        (order, PropertyKeyRef::String(key))
-    }));
+    if !enumerable_strings_only {
+        keys.reserve(props.0.len() + symbols.0.len());
+    }
     keys.extend(
-        symbols
+        props
             .0
             .iter()
-            .map(|(&id, property)| ((2, property.ordinal), PropertyKeyRef::Symbol(id))),
+            .filter(|(_, property)| !enumerable_strings_only || property.attributes.enumerable)
+            .map(|(key, property)| {
+                let order = match array_index(key) {
+                    Some(index) => (0, index),
+                    None => (1, property.ordinal),
+                };
+                (order, PropertyKeyRef::String(key))
+            }),
     );
+    if !enumerable_strings_only {
+        keys.extend(
+            symbols
+                .0
+                .iter()
+                .map(|(&id, property)| ((2, property.ordinal), PropertyKeyRef::Symbol(id))),
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,18 +263,32 @@ pub enum Property {
     },
 }
 
-enum OwnProperty<'a> {
-    Plain(&'a Property),
-    Data(&'a Value),
+pub(crate) enum OwnProperty<'a> {
+    Plain(&'a Property, Attributes),
+    Data(&'a Value, Attributes),
     ArrayLength(usize),
 }
 
 impl OwnProperty<'_> {
-    fn into_owned(self) -> Property {
+    pub(crate) fn into_owned(self) -> Property {
         match self {
-            Self::Plain(property) => property.clone(),
-            Self::Data(value) => Property::Data(value.clone()),
+            Self::Plain(property, _) => property.clone(),
+            Self::Data(value, _) => Property::Data(value.clone()),
             Self::ArrayLength(length) => Property::Data(Value::Number(length as f64)),
+        }
+    }
+
+    pub(crate) fn attributes(&self) -> Attributes {
+        match self {
+            Self::Plain(_, attributes) | Self::Data(_, attributes) => *attributes,
+            Self::ArrayLength(_) => Attributes::ARRAY_LENGTH,
+        }
+    }
+
+    pub(crate) fn setter(&self) -> Option<Option<ObjectId>> {
+        match self {
+            Self::Plain(Property::Accessor { set, .. }, _) => Some(*set),
+            _ => None,
         }
     }
 }
@@ -250,19 +325,21 @@ impl ArrayObject {
     fn own(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
         match key {
             PropertyKeyRef::String("length") => Some(OwnProperty::ArrayLength(self.elements.len())),
-            PropertyKeyRef::String(key) => self.own_value(key).map(OwnProperty::Data),
-            PropertyKeyRef::Symbol(id) => self.symbol_props.get(&id).map(OwnProperty::Data),
+            PropertyKeyRef::String(key) if let Some(index) = array_index(key) => self
+                .elements
+                .get(index)
+                .map(|value| OwnProperty::Data(value, Attributes::ORDINARY)),
+            key => lookup_tables(&self.props, &self.symbol_props, key)
+                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
         }
     }
 
-    fn own_value(&self, key: &str) -> Option<&Value> {
-        if let Some(index) = array_index(key) {
-            return self.elements.get(index);
-        }
-        self.props.get(key)
-    }
-
-    fn set(&mut self, key: String, value: Value) -> Result<(), VmError> {
+    fn set(
+        &mut self,
+        key: String,
+        value: Value,
+        attributes: Option<Attributes>,
+    ) -> Result<(), VmError> {
         if key == "length" {
             let Value::Number(length) = value else {
                 return Err(VmError::InvalidState(
@@ -284,7 +361,7 @@ impl ArrayObject {
             self.elements[index] = value;
             return Ok(());
         }
-        self.props.update(key, |_| value);
+        self.props.update(key, attributes, |_| value);
         Ok(())
     }
 }
@@ -414,41 +491,63 @@ impl Object {
         }
     }
 
-    fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
+    pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
         match self {
             Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
-                lookup_tables(&plain.props, &plain.symbol_props, key).map(OwnProperty::Plain)
+                lookup_tables(&plain.props, &plain.symbol_props, key)
+                    .map(|p| OwnProperty::Plain(&p.value, p.attributes))
             }
             Self::Array(array) => array.own(key),
-            Self::Function(function) => {
-                lookup_tables(&function.props, &function.symbol_props, key).map(OwnProperty::Data)
-            }
-            Self::Promise(promise) => {
-                lookup_tables(&promise.props, &promise.symbol_props, key).map(OwnProperty::Data)
-            }
+            Self::Function(function) => lookup_tables(&function.props, &function.symbol_props, key)
+                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
+            Self::Promise(promise) => lookup_tables(&promise.props, &promise.symbol_props, key)
+                .map(|p| OwnProperty::Data(&p.value, p.attributes)),
             Self::BuiltinStatic(builtin) => {
-                lookup_tables(&builtin.props, &builtin.symbol_props, key).map(OwnProperty::Data)
+                lookup_tables(&builtin.props, &builtin.symbol_props, key)
+                    .map(|p| OwnProperty::Data(&p.value, p.attributes))
             }
             Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => None,
         }
     }
 
-    pub(crate) fn own_keys(&self) -> impl Iterator<Item = PropertyKey> + '_ {
+    pub(crate) fn own_keys(
+        &self,
+        enumerable_strings_only: bool,
+    ) -> impl Iterator<Item = PropertyKey> + '_ {
         let mut keys = Vec::new();
         match self {
             Self::Plain(plain) | Self::ArrayIterator { object: plain, .. } => {
-                collect_own_keys(&mut keys, &plain.props, &plain.symbol_props);
+                collect_own_keys(
+                    &mut keys,
+                    &plain.props,
+                    &plain.symbol_props,
+                    enumerable_strings_only,
+                );
             }
-            Self::Array(array) => collect_own_keys(&mut keys, &array.props, &array.symbol_props),
-            Self::Function(function) => {
-                collect_own_keys(&mut keys, &function.props, &function.symbol_props)
-            }
-            Self::Promise(promise) => {
-                collect_own_keys(&mut keys, &promise.props, &promise.symbol_props)
-            }
-            Self::BuiltinStatic(builtin) => {
-                collect_own_keys(&mut keys, &builtin.props, &builtin.symbol_props)
-            }
+            Self::Array(array) => collect_own_keys(
+                &mut keys,
+                &array.props,
+                &array.symbol_props,
+                enumerable_strings_only,
+            ),
+            Self::Function(function) => collect_own_keys(
+                &mut keys,
+                &function.props,
+                &function.symbol_props,
+                enumerable_strings_only,
+            ),
+            Self::Promise(promise) => collect_own_keys(
+                &mut keys,
+                &promise.props,
+                &promise.symbol_props,
+                enumerable_strings_only,
+            ),
+            Self::BuiltinStatic(builtin) => collect_own_keys(
+                &mut keys,
+                &builtin.props,
+                &builtin.symbol_props,
+                enumerable_strings_only,
+            ),
             Self::Native(_) | Self::Resolution(_) | Self::Environment(_) | Self::Bound(_) => {}
         }
         keys.sort_unstable_by_key(|&(order, _)| order);
@@ -458,7 +557,11 @@ impl Object {
         };
         (0..array_len.unwrap_or_default())
             .map(|index| PropertyKey::String(index.to_string()))
-            .chain(array_len.map(|_| PropertyKey::String("length".to_owned())))
+            .chain(
+                array_len
+                    .filter(|_| !enumerable_strings_only)
+                    .map(|_| PropertyKey::String("length".to_owned())),
+            )
             .chain(keys.into_iter().map(|(_, key)| match key {
                 PropertyKeyRef::String(key) => PropertyKey::String(key.to_owned()),
                 PropertyKeyRef::Symbol(id) => PropertyKey::Symbol(id),
@@ -944,14 +1047,6 @@ impl Heap {
         self.alloc(Object::Native(NativeObject { key }))
     }
 
-    pub(crate) fn lookup_property(
-        &self,
-        id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Result<Option<Property>, VmError> {
-        Ok(self.find_property(id, key)?.map(OwnProperty::into_owned))
-    }
-
     pub(crate) fn has_property(
         &self,
         id: ObjectId,
@@ -960,7 +1055,7 @@ impl Heap {
         Ok(self.find_property(id, key)?.is_some())
     }
 
-    fn find_property(
+    pub(crate) fn find_property(
         &self,
         id: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -1014,6 +1109,16 @@ impl Heap {
         self.set_own(id, PropertyKey::String(key.to_owned()), value)
     }
 
+    pub(crate) fn define_data(
+        &mut self,
+        id: ObjectId,
+        key: impl Into<PropertyKey>,
+        value: Value,
+        attributes: Attributes,
+    ) -> Result<(), VmError> {
+        self.write_own_data(id, key.into(), value, Some(attributes))
+    }
+
     /// Writes an own data property. Does not walk the chain or apply readonly checks.
     pub(crate) fn set_own(
         &mut self,
@@ -1021,35 +1126,61 @@ impl Heap {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), VmError> {
+        self.write_own_data(id, key, value, None)
+    }
+
+    fn write_own_data(
+        &mut self,
+        id: ObjectId,
+        key: PropertyKey,
+        value: Value,
+        attributes: Option<Attributes>,
+    ) -> Result<(), VmError> {
         match self.get_mut(id)? {
             Object::Plain(plain) | Object::ArrayIterator { object: plain, .. } => {
-                insert_table(&mut plain.props, &mut plain.symbol_props, key, |_| {
-                    Property::Data(value)
-                });
+                insert_table(
+                    &mut plain.props,
+                    &mut plain.symbol_props,
+                    key,
+                    attributes,
+                    |_| Property::Data(value),
+                );
                 Ok(())
             }
             Object::Function(function) => {
-                insert_table(&mut function.props, &mut function.symbol_props, key, |_| {
-                    value
-                });
+                insert_table(
+                    &mut function.props,
+                    &mut function.symbol_props,
+                    key,
+                    attributes,
+                    |_| value,
+                );
                 Ok(())
             }
             Object::Promise(promise) => {
-                insert_table(&mut promise.props, &mut promise.symbol_props, key, |_| {
-                    value
-                });
+                insert_table(
+                    &mut promise.props,
+                    &mut promise.symbol_props,
+                    key,
+                    attributes,
+                    |_| value,
+                );
                 Ok(())
             }
             Object::BuiltinStatic(builtin) => {
-                insert_table(&mut builtin.props, &mut builtin.symbol_props, key, |_| {
-                    value
-                });
+                insert_table(
+                    &mut builtin.props,
+                    &mut builtin.symbol_props,
+                    key,
+                    attributes,
+                    |_| value,
+                );
                 Ok(())
             }
             Object::Array(array) => match key {
-                PropertyKey::String(key) => array.set(key, value),
+                PropertyKey::String(key) => array.set(key, value, attributes),
                 PropertyKey::Symbol(id) => {
-                    array.symbol_props.update(id, |_| value);
+                    array.symbol_props.update(id, attributes, |_| value);
                     Ok(())
                 }
             },
@@ -1073,19 +1204,29 @@ impl Heap {
                 ));
             }
         };
-        insert_table(&mut plain.props, &mut plain.symbol_props, key, |old| {
-            let mut property = property;
-            if let Property::Accessor { get, set } = &mut property
-                && let Some(Property::Accessor {
-                    get: old_get,
-                    set: old_set,
-                }) = old
-            {
-                *get = get.or(*old_get);
-                *set = set.or(*old_set);
-            }
-            property
-        });
+        let attributes = match property {
+            Property::Data(_) => Attributes::ORDINARY,
+            Property::Accessor { .. } => Attributes::ACCESSOR,
+        };
+        insert_table(
+            &mut plain.props,
+            &mut plain.symbol_props,
+            key,
+            Some(attributes),
+            |old| {
+                let mut property = property;
+                if let Property::Accessor { get, set } = &mut property
+                    && let Some(Property::Accessor {
+                        get: old_get,
+                        set: old_set,
+                    }) = old
+                {
+                    *get = get.or(*old_get);
+                    *set = set.or(*old_set);
+                }
+                property
+            },
+        );
         Ok(())
     }
 
@@ -1150,10 +1291,10 @@ fn lookup_tables<'m, V>(
     props: &'m PropertyTable<String, V>,
     symbol_props: &'m PropertyTable<SymbolId, V>,
     key: PropertyKeyRef<'_>,
-) -> Option<&'m V> {
+) -> Option<&'m OrderedProperty<V>> {
     match key {
-        PropertyKeyRef::String(key) => props.get(key),
-        PropertyKeyRef::Symbol(id) => symbol_props.get(&id),
+        PropertyKeyRef::String(key) => props.entry(key),
+        PropertyKeyRef::Symbol(id) => symbol_props.entry(&id),
     }
 }
 
@@ -1161,11 +1302,12 @@ fn insert_table<V>(
     props: &mut PropertyTable<String, V>,
     symbol_props: &mut PropertyTable<SymbolId, V>,
     key: PropertyKey,
+    attributes: Option<Attributes>,
     value: impl FnOnce(Option<&V>) -> V,
 ) {
     match key {
-        PropertyKey::String(key) => props.update(key, value),
-        PropertyKey::Symbol(id) => symbol_props.update(id, value),
+        PropertyKey::String(key) => props.update(key, attributes, value),
+        PropertyKey::Symbol(id) => symbol_props.update(id, attributes, value),
     }
 }
 

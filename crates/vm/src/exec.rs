@@ -6,7 +6,7 @@ use crate::bytecode::{
 };
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{ITERATOR_SYMBOL, Object, Property, object_id};
+use crate::heap::{ITERATOR_SYMBOL, Object, OwnProperty, Property, object_id};
 use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
@@ -432,7 +432,11 @@ impl Vm {
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
         };
-        match self.heap.lookup_property(id, key)? {
+        match self
+            .heap
+            .find_property(id, key)?
+            .map(OwnProperty::into_owned)
+        {
             Some(Property::Data(value)) => Ok(Invocation::Value(value)),
             Some(Property::Accessor { get: Some(get), .. }) => {
                 self.invoke(host, &Value::Object(get), Vec::new(), object)
@@ -478,23 +482,28 @@ impl Vm {
         let Value::Object(id) = *object else {
             return self.throw_type_error("property write on a non-object");
         };
-        if let PropertyKey::String(key) = &key
-            && self.prototype_write_rejected(object, key)
-        {
-            return self.throw_type_error("Cannot assign to read only property 'prototype'");
-        }
-        match self.heap.lookup_property(id, key.borrowed())? {
-            Some(Property::Accessor { set: Some(set), .. }) => {
+        let property = self.heap.find_property(id, key.borrowed())?;
+        match property.as_ref().and_then(OwnProperty::setter) {
+            Some(Some(set)) => {
                 if let Invocation::Thrown(error) =
                     self.invoke(host, &Value::Object(set), vec![value], object)?
                 {
                     return Ok(Invocation::Thrown(error));
                 }
             }
-            Some(Property::Accessor { set: None, .. }) => {
-                return self.throw_type_error("Cannot set property without a setter");
+            Some(None) => return self.throw_type_error("Cannot set property without a setter"),
+            None if property.is_some_and(|property| !property.attributes().writable) => {
+                let message = match &key {
+                    PropertyKey::String(key) => {
+                        format!("Cannot assign to read only property '{key}'")
+                    }
+                    PropertyKey::Symbol(_) => {
+                        "Cannot assign to read only symbol property".to_owned()
+                    }
+                };
+                return self.throw_type_error(&message);
             }
-            _ => self.heap.set_own(id, key, value)?,
+            None => self.heap.set_own(id, key, value)?,
         }
         Ok(Invocation::Value(Value::Undefined))
     }

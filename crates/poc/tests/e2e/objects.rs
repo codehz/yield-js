@@ -351,3 +351,23 @@ async function run() {
         );
     }
 }
+
+#[test]
+fn restore_rejects_writable_object_prototype() {
+    let mut s = Suspended::start("async function run() { await wait('a'); }", vec![]);
+    let snapshot = s.snapshot();
+    let index = snapshot
+        .objects
+        .iter()
+        .position(|record| record.id == snapshot.roots["object"])
+        .expect("Object constructor in snapshot");
+    let mut corrupt = serde_json::to_value(snapshot).expect("serialize snapshot");
+    corrupt["objects"][index]["object"]["builtin_static"]["props"]["prototype"]["attributes"]["writable"] =
+        serde_json::json!(true);
+    let error = s
+        .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
+        .expect_err("writable Object.prototype");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("Object.prototype"))
+    );
+}

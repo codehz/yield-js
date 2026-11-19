@@ -4,21 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::builtins::{
     BuiltinRoots, ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ERROR,
-    ROOT_ERROR_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
+    ROOT_ERROR_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE,
     ROOT_QUEUE_MICROTASK, ROOT_REFLECT, ROOT_SYMBOL, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build, Function};
 use crate::error::VmError;
 use crate::heap::{
-    CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object, OwnedEdge,
-    PromiseState, Property, ReactionJob,
+    Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
+    OwnedEdge, PromiseState, Property, ReactionJob,
 };
 use crate::host::{Host, PendingOperationMeta};
 use crate::runtime::{Continuation, PendingOperation};
-use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
+use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 10;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -425,27 +425,24 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
 }
 
 fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    if roots.len() != 12 {
+    if roots.len() != 13 {
         return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected 12",
+            "snapshot has {} builtin roots, expected 13",
             roots.len()
         )));
     }
     let promise = required_root(roots, ROOT_PROMISE)?;
     let prototype = required_root(roots, ROOT_PROMISE_PROTOTYPE)?;
     let queue = required_root(roots, ROOT_QUEUE_MICROTASK)?;
-    let constructor = match heap.get(promise)? {
+    match heap.get(promise)? {
         Object::BuiltinStatic(function)
-            if function.name == "Promise" && function.member.is_none() =>
-        {
-            function
-        }
+            if function.name == "Promise" && function.member.is_none() => {}
         _ => {
             return Err(VmError::InvalidSnapshot(
                 "promise root is not the Promise constructor".to_owned(),
             ));
         }
-    };
+    }
     if !matches!(heap.get(prototype)?, Object::Plain(_)) {
         return Err(VmError::InvalidSnapshot(
             "promise.prototype root is not a plain object".to_owned(),
@@ -460,11 +457,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             ));
         }
     }
-    if constructor.props.get("prototype") != Some(&Value::Object(prototype)) {
-        return Err(VmError::InvalidSnapshot(
-            "Promise.prototype does not match the prototype root".to_owned(),
-        ));
-    }
+    require_fixed_prototype(heap, promise, prototype, "Promise")?;
     let plain_root = |name| {
         let id = required_root(roots, name)?;
         if !matches!(heap.get(id), Ok(Object::Plain(_))) {
@@ -485,6 +478,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         Ok(id)
     };
     let object_prototype = plain_root(ROOT_OBJECT_PROTOTYPE)?;
+    let object = builtin_root(ROOT_OBJECT, "Object")?;
+    require_fixed_prototype(heap, object, object_prototype, "Object")?;
     let array_prototype = plain_root(ROOT_ARRAY_PROTOTYPE)?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     if array_prototype == array_iterator_prototype
@@ -519,7 +514,30 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
         symbol: builtin_root(ROOT_SYMBOL, "Symbol")?,
         reflect: plain_root(ROOT_REFLECT)?,
+        object,
     })
+}
+
+fn require_fixed_prototype(
+    heap: &Heap,
+    constructor: ObjectId,
+    prototype: ObjectId,
+    name: &str,
+) -> Result<(), VmError> {
+    if heap
+        .get(constructor)?
+        .own_property(PropertyKeyRef::String("prototype"))
+        .is_some_and(|property| {
+            property.attributes() == Attributes::FIXED
+                && property.into_owned() == Property::Data(Value::Object(prototype))
+        })
+    {
+        Ok(())
+    } else {
+        Err(VmError::InvalidSnapshot(format!(
+            "{name}.prototype does not match the fixed prototype root"
+        )))
+    }
 }
 
 fn required_root(roots: &BTreeMap<String, ObjectId>, name: &str) -> Result<ObjectId, VmError> {

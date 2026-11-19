@@ -2,7 +2,6 @@
 //!
 //! Script-visible `Error` and `TypeError` are objects, including VM-generated
 //! TypeErrors. The `AggregateError` rejection from `Promise.any` is a string.
-//! `Object.prototype` has no constructor because there is no `Object` global.
 //!
 //! `queueMicrotask` enqueues a VM microtask. It does not call the host, so
 //! `Host::call` cannot re-enter the VM from this path. A throw inside that
@@ -13,8 +12,8 @@ use std::collections::BTreeMap;
 
 use crate::error::VmError;
 use crate::heap::{
-    BoundObject, BuiltinStatic, CombineKind, CombineState, ITERATOR_SYMBOL, Object, PlainObject,
-    PromiseState, ReactionJob, Resolution,
+    Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, ITERATOR_SYMBOL, Object,
+    PlainObject, PromiseState, Property, ReactionJob, Resolution,
 };
 use crate::host::Host;
 use crate::ops;
@@ -34,6 +33,7 @@ pub(crate) const ROOT_ERROR: &str = "error";
 pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
 pub(crate) const ROOT_REFLECT: &str = "reflect";
+pub(crate) const ROOT_OBJECT: &str = "object";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct BuiltinRoots {
@@ -49,6 +49,7 @@ pub(crate) struct BuiltinRoots {
     pub typeerror: ObjectId,
     pub symbol: ObjectId,
     pub reflect: ObjectId,
+    pub object: ObjectId,
 }
 
 impl BuiltinRoots {
@@ -72,6 +73,7 @@ impl BuiltinRoots {
             (ROOT_TYPEERROR.to_owned(), self.typeerror),
             (ROOT_SYMBOL.to_owned(), self.symbol),
             (ROOT_REFLECT.to_owned(), self.reflect),
+            (ROOT_OBJECT.to_owned(), self.object),
         ])
     }
 }
@@ -92,6 +94,9 @@ pub(crate) enum BuiltinCall {
     ArrayIteratorNext,
     IteratorIdentity,
     ReflectOwnKeys,
+    ObjectConstructor,
+    ObjectKeys,
+    ObjectGetOwnPropertyDescriptor,
 }
 
 enum Dispatch<'a> {
@@ -107,9 +112,37 @@ impl Vm {
     pub(crate) fn init_builtins(&mut self) {
         let object_prototype = self.heap.alloc_plain();
         self.heap.object_prototype = Some(object_prototype);
+        let object = self.heap.alloc_builtin("Object", None);
+        self.heap
+            .define_data(
+                object,
+                "prototype",
+                Value::Object(object_prototype),
+                Attributes::FIXED,
+            )
+            .expect("Object stores its prototype");
+        self.heap
+            .define_data(
+                object_prototype,
+                "constructor",
+                Value::Object(object),
+                Attributes::METHOD,
+            )
+            .expect("Object.prototype stores its constructor");
+        for name in ["keys", "getOwnPropertyDescriptor"] {
+            let method = self.heap.alloc_builtin("Object", Some(name));
+            self.heap
+                .define_data(object, name, Value::Object(method), Attributes::METHOD)
+                .expect("Object stores statics");
+        }
         let has_own = self.heap.alloc_builtin("Object", Some("hasOwnProperty"));
         self.heap
-            .set_own_string(object_prototype, "hasOwnProperty", Value::Object(has_own))
+            .define_data(
+                object_prototype,
+                "hasOwnProperty",
+                Value::Object(has_own),
+                Attributes::METHOD,
+            )
             .expect("Object.prototype stores methods");
 
         let array_prototype = self.heap.alloc_plain();
@@ -119,23 +152,30 @@ impl Vm {
         let next = Value::Object(self.heap.alloc_builtin("ArrayIterator", Some("next")));
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
-            .set_own_string(array_prototype, "values", values.clone())
+            .define_data(
+                array_prototype,
+                "values",
+                values.clone(),
+                Attributes::METHOD,
+            )
             .expect("Array.prototype stores values");
         self.heap
-            .set_own(
+            .define_data(
                 array_prototype,
                 PropertyKey::Symbol(ITERATOR_SYMBOL),
                 values,
+                Attributes::METHOD,
             )
             .expect("Array.prototype stores Symbol.iterator");
         self.heap
-            .set_own_string(array_iterator_prototype, "next", next)
+            .define_data(array_iterator_prototype, "next", next, Attributes::METHOD)
             .expect("Array iterator prototype stores next");
         self.heap
-            .set_own(
+            .define_data(
                 array_iterator_prototype,
                 PropertyKey::Symbol(ITERATOR_SYMBOL),
                 identity,
+                Attributes::METHOD,
             )
             .expect("Array iterator prototype stores Symbol.iterator");
 
@@ -145,20 +185,30 @@ impl Vm {
         for name in PROMISE_STATICS {
             let id = self.heap.alloc_builtin("Promise", Some(name));
             self.heap
-                .set_own_string(promise, name, Value::Object(id))
+                .define_data(promise, name, Value::Object(id), Attributes::METHOD)
                 .expect("Promise constructor stores statics");
         }
         for name in PROMISE_METHODS {
             let id = self.heap.alloc_builtin("Promise", Some(name));
             self.heap
-                .set_own_string(prototype, name, Value::Object(id))
+                .define_data(prototype, name, Value::Object(id), Attributes::METHOD)
                 .expect("Promise.prototype stores methods");
         }
         self.heap
-            .set_own_string(prototype, "constructor", Value::Object(promise))
+            .define_data(
+                prototype,
+                "constructor",
+                Value::Object(promise),
+                Attributes::METHOD,
+            )
             .expect("Promise.prototype.constructor");
         self.heap
-            .set_own_string(promise, "prototype", Value::Object(prototype))
+            .define_data(
+                promise,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FIXED,
+            )
             .expect("Promise.prototype");
         self.heap.promise_prototype = Some(prototype);
 
@@ -169,11 +219,21 @@ impl Vm {
             (typeerror_prototype, "TypeError"),
         ] {
             self.heap
-                .set_own_string(id, "name", Value::String(name.to_owned()))
+                .define_data(
+                    id,
+                    "name",
+                    Value::String(name.to_owned()),
+                    Attributes::METHOD,
+                )
                 .expect("Error prototype stores name");
         }
         self.heap
-            .set_own_string(error_prototype, "message", Value::String(String::new()))
+            .define_data(
+                error_prototype,
+                "message",
+                Value::String(String::new()),
+                Attributes::METHOD,
+            )
             .expect("Error.prototype stores message");
         let error = self.heap.alloc_builtin("Error", None);
         let typeerror = self.heap.alloc_builtin("TypeError", None);
@@ -181,16 +241,26 @@ impl Vm {
         for name in ["for", "keyFor"] {
             let id = self.heap.alloc_builtin("Symbol", Some(name));
             self.heap
-                .set_own_string(symbol, name, Value::Object(id))
+                .define_data(symbol, name, Value::Object(id), Attributes::METHOD)
                 .expect("Symbol constructor stores statics");
         }
         self.heap
-            .set_own_string(symbol, "iterator", Value::Symbol(ITERATOR_SYMBOL))
+            .define_data(
+                symbol,
+                "iterator",
+                Value::Symbol(ITERATOR_SYMBOL),
+                Attributes::FIXED,
+            )
             .expect("Symbol constructor stores the iterator symbol");
         let reflect = self.heap.alloc_plain();
         let own_keys = self.heap.alloc_builtin("Reflect", Some("ownKeys"));
         self.heap
-            .set_own_string(reflect, "ownKeys", Value::Object(own_keys))
+            .define_data(
+                reflect,
+                "ownKeys",
+                Value::Object(own_keys),
+                Attributes::METHOD,
+            )
             .expect("Reflect stores ownKeys");
         self.builtins = BuiltinRoots {
             promise,
@@ -205,6 +275,7 @@ impl Vm {
             typeerror,
             symbol,
             reflect,
+            object,
         };
     }
 
@@ -229,6 +300,7 @@ impl Vm {
             3 => Ok(self.builtins.typeerror),
             4 => Ok(self.builtins.symbol),
             5 => Ok(self.builtins.reflect),
+            6 => Ok(self.builtins.object),
             _ => Err(VmError::InvalidState(format!(
                 "builtin {builtin} does not exist"
             ))),
@@ -259,16 +331,20 @@ impl Vm {
         let constructable = self.build.functions[index].is_constructable();
         if constructable {
             let prototype = self.heap.alloc_plain();
-            self.heap
-                .set_own_string(prototype, "constructor", Value::Object(id))?;
-            self.heap
-                .set_own_string(id, "prototype", Value::Object(prototype))?;
+            self.heap.define_data(
+                prototype,
+                "constructor",
+                Value::Object(id),
+                Attributes::METHOD,
+            )?;
+            self.heap.define_data(
+                id,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FUNCTION_PROTOTYPE,
+            )?;
         }
         Ok(id)
-    }
-
-    pub(crate) fn prototype_write_rejected(&self, object: &Value, key: &str) -> bool {
-        key == "prototype" && matches!(object, Value::Object(id) if *id == self.builtins.promise)
     }
 
     /// Script errors are returned as `Invocation::Thrown`.
@@ -326,6 +402,7 @@ impl Vm {
                 }
             }
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
+            Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => self.construct_object(&args),
             Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
                 self.construct_error(&name, args)
             }
@@ -363,6 +440,9 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match call {
             BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
+            BuiltinCall::ObjectConstructor => self.construct_object(&args),
+            BuiltinCall::ObjectKeys => self.object_keys(&args),
+            BuiltinCall::ObjectGetOwnPropertyDescriptor => self.get_own_property_descriptor(&args),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(&name, args),
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
@@ -392,7 +472,7 @@ impl Vm {
                 let keys = self
                     .heap
                     .get(*id)?
-                    .own_keys()
+                    .own_keys(false)
                     .map(|key| match key {
                         PropertyKey::String(key) => Value::String(key),
                         PropertyKey::Symbol(id) => Value::Symbol(id),
@@ -544,6 +624,80 @@ impl Vm {
         self.type_error(message).map(Invocation::Thrown)
     }
 
+    fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        match args.first() {
+            None | Some(Value::Undefined | Value::Null) => {
+                Ok(Invocation::Value(Value::Object(self.heap.alloc_plain())))
+            }
+            Some(value @ Value::Object(_)) => Ok(Invocation::Value(value.clone())),
+            _ => self.throw_type_error("Object does not support primitive wrappers"),
+        }
+    }
+
+    fn object_keys(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        let keys = match args.first() {
+            None | Some(Value::Undefined | Value::Null) => {
+                return self.throw_type_error("Object.keys requires a non-nullish value");
+            }
+            Some(Value::Object(id)) => self
+                .heap
+                .get(*id)?
+                .own_keys(true)
+                .map(|key| {
+                    let PropertyKey::String(key) = key else {
+                        unreachable!("only string keys")
+                    };
+                    Value::String(key)
+                })
+                .collect(),
+            Some(Value::String(text)) => (0..text.encode_utf16().count())
+                .map(|index| Value::String(index.to_string()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        Ok(Invocation::Value(Value::Object(
+            self.heap.alloc_array(keys),
+        )))
+    }
+
+    fn get_own_property_descriptor(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self
+                .throw_type_error("Object.getOwnPropertyDescriptor requires an object in this VM");
+        };
+        let key = ops::property_key(args.get(1).unwrap_or(&Value::Undefined))?;
+        let Some(property) = self.heap.get(*target)?.own_property(key.borrowed()) else {
+            return Ok(Invocation::Value(Value::Undefined));
+        };
+        let attributes = property.attributes();
+        let property = property.into_owned();
+        let result = self.heap.alloc_plain();
+        match property {
+            Property::Data(value) => {
+                self.heap.set_own_string(result, "value", value)?;
+                self.heap
+                    .set_own_string(result, "writable", Value::Bool(attributes.writable))?;
+            }
+            Property::Accessor { get, set } => {
+                self.heap.set_own_string(
+                    result,
+                    "get",
+                    get.map_or(Value::Undefined, Value::Object),
+                )?;
+                self.heap.set_own_string(
+                    result,
+                    "set",
+                    set.map_or(Value::Undefined, Value::Object),
+                )?;
+            }
+        }
+        self.heap
+            .set_own_string(result, "enumerable", Value::Bool(attributes.enumerable))?;
+        self.heap
+            .set_own_string(result, "configurable", Value::Bool(attributes.configurable))?;
+        Ok(Invocation::Value(Value::Object(result)))
+    }
+
     fn construct_error(&mut self, name: &str, args: Vec<Value>) -> Result<Invocation, VmError> {
         let prototype = match name {
             "Error" => self.builtins.error_prototype,
@@ -572,10 +726,10 @@ impl Vm {
         let stack = format!("{name}: {}", message.as_deref().unwrap_or_default());
         if let Some(message) = message {
             self.heap
-                .set_own_string(id, "message", Value::String(message))?;
+                .define_data(id, "message", Value::String(message), Attributes::METHOD)?;
         }
         self.heap
-            .set_own_string(id, "stack", Value::String(stack))?;
+            .define_data(id, "stack", Value::String(stack), Attributes::METHOD)?;
         Ok(Value::Object(id))
     }
 
@@ -1062,6 +1216,11 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Object", Some(name @ "hasOwnProperty")) => Some(BuiltinCall::ObjectMethod {
             name: name.to_owned(),
         }),
+        ("Object", None) => Some(BuiltinCall::ObjectConstructor),
+        ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
+        ("Object", Some("getOwnPropertyDescriptor")) => {
+            Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
+        }
         ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
         ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
