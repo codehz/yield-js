@@ -100,6 +100,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_await(input)
             }
             Expression::CallExpression(expression) => self.compile_call(expression),
+            Expression::ChainExpression(expression) => Ok(self.compile_chain(expression, false)?.0),
             Expression::AssignmentExpression(expression) => self.compile_assignment(expression),
             Expression::UpdateExpression(expression) => self.compile_update(expression),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
@@ -412,11 +413,137 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
+    fn compile_chain(
+        &mut self,
+        chain: &'ast ChainExpression<'ast>,
+        preserve_receiver: bool,
+    ) -> Result<(Reg, Option<Reg>), CompileError> {
+        let mut exits = Vec::new();
+        let (value, receiver) = if let ChainElement::CallExpression(call) = &chain.expression {
+            (self.compile_call_inner(call, Some(&mut exits))?, None)
+        } else if let Some(member) = chain.expression.as_member_expression() {
+            let (value, object) = self.compile_chain_member(member, &mut exits)?;
+            (value, preserve_receiver.then_some(object))
+        } else {
+            return Err(unsupported(
+                self.source_text(),
+                chain.expression.span(),
+                "expression form outside the PoC subset",
+            ));
+        };
+        let result = self.alloc_reg()?;
+        self.emit(Instr::Move {
+            dst: self.slot(result),
+            src: self.slot(value),
+        });
+        let result_receiver = if let Some(receiver) = receiver {
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::Move {
+                dst: self.slot(dst),
+                src: self.slot(receiver),
+            });
+            Some(dst)
+        } else {
+            None
+        };
+        // Direct calls to known functions or imports may not emit a guard.
+        if !exits.is_empty() {
+            let end = self.jump();
+            let short_circuit = self.pc();
+            for exit in exits {
+                self.patch_jump(exit, short_circuit)?;
+            }
+            self.emit(Instr::Undefined {
+                dst: self.slot(result),
+            });
+            if let Some(receiver) = result_receiver {
+                self.emit(Instr::Undefined {
+                    dst: self.slot(receiver),
+                });
+            }
+            self.patch_jump(end, self.pc())?;
+        }
+        Ok((result, result_receiver))
+    }
+
+    fn guard_chain_link(&mut self, value: Reg, exits: &mut Vec<usize>) -> Result<(), CompileError> {
+        let non_nullish = self.begin_logical_rhs(LogicalOperator::Coalesce, value)?;
+        exits.push(self.jump());
+        self.patch_jump(non_nullish, self.pc())
+    }
+
+    // Only unwrapped members and calls continue this chain. In particular,
+    // parentheses and nested chain wrappers go through ordinary lowering.
+    fn compile_chain_link(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+        exits: &mut Vec<usize>,
+    ) -> Result<(Reg, Option<Reg>), CompileError> {
+        if let Expression::CallExpression(call) = expression {
+            Ok((self.compile_call_inner(call, Some(exits))?, None))
+        } else if let Some(member) = expression.as_member_expression() {
+            let (value, receiver) = self.compile_chain_member(member, exits)?;
+            Ok((value, Some(receiver)))
+        } else {
+            Ok((self.compile_expression(expression)?, None))
+        }
+    }
+
+    fn compile_chain_member(
+        &mut self,
+        member: &'ast MemberExpression<'ast>,
+        exits: &mut Vec<usize>,
+    ) -> Result<(Reg, Reg), CompileError> {
+        let (base, optional) = match member {
+            MemberExpression::StaticMemberExpression(member) => (&member.object, member.optional),
+            MemberExpression::ComputedMemberExpression(member) => (&member.object, member.optional),
+            MemberExpression::PrivateFieldExpression(member) => {
+                return Err(unsupported(
+                    self.source_text(),
+                    member.span,
+                    "private field access",
+                ));
+            }
+        };
+        let (object, _) = self.compile_chain_link(base, exits)?;
+        if optional {
+            self.guard_chain_link(object, exits)?;
+        }
+        let key = match member {
+            MemberExpression::StaticMemberExpression(member) => {
+                self.emit_constant(Constant::String(member.property.name.as_str().to_owned()))?
+            }
+            MemberExpression::ComputedMemberExpression(member) => {
+                self.compile_expression(&member.expression)?
+            }
+            MemberExpression::PrivateFieldExpression(_) => unreachable!(),
+        };
+        Ok((self.emit_get_member(object, key)?, object))
+    }
+
+    fn emit_get_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::GetMember {
+            dst: self.slot(dst),
+            object: self.slot(object),
+            key: self.slot(key),
+        });
+        Ok(dst)
+    }
+
     fn compile_call(
         &mut self,
         expression: &'ast CallExpression<'ast>,
     ) -> Result<Reg, CompileError> {
-        if expression.optional {
+        self.compile_call_inner(expression, None)
+    }
+
+    fn compile_call_inner(
+        &mut self,
+        expression: &'ast CallExpression<'ast>,
+        mut exits: Option<&mut Vec<usize>>,
+    ) -> Result<Reg, CompileError> {
+        if expression.optional && exits.is_none() {
             return Err(unsupported(
                 self.source_text(),
                 expression.span,
@@ -429,25 +556,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             callee = &paren.expression;
         }
 
-        if let Expression::Identifier(callee) = callee {
-            let name = callee.name.as_str();
-            match self.session.names().callee(&self.env, name) {
+        let (callee, receiver) = if let Expression::Identifier(identifier) = callee {
+            let name = identifier.name.as_str();
+            let value = match self.session.names().callee(&self.env, name) {
                 Callee::Binding(binding) => {
-                    self.check_tdz(binding, name, callee.span)?;
-                    let callee = self.alloc_reg()?;
+                    self.check_tdz(binding, name, identifier.span)?;
+                    let value = self.alloc_reg()?;
                     self.emit(Instr::GetBinding {
-                        dst: self.slot(callee),
+                        dst: self.slot(value),
                         binding,
                     });
-                    let args = self.compile_arguments(expression)?;
-                    let dst = self.alloc_reg()?;
-                    self.emit(Instr::CallValue {
-                        dst: self.slot(dst),
-                        callee: self.slot(callee),
-                        args,
-                        receiver: None,
-                    });
-                    return Ok(dst);
+                    value
                 }
                 Callee::Import(import) => {
                     let args = self.compile_arguments(expression)?;
@@ -470,59 +589,60 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     return Ok(dst);
                 }
                 Callee::Builtin(index) => {
-                    let callee = self.alloc_reg()?;
+                    let value = self.alloc_reg()?;
                     self.emit(Instr::GetBuiltin {
-                        dst: self.slot(callee),
+                        dst: self.slot(value),
                         builtin: index as u32,
                     });
-                    let args = self.compile_argument_slice(&expression.arguments)?;
-                    let dst = self.alloc_reg()?;
-                    self.emit(Instr::CallValue {
-                        dst: self.slot(dst),
-                        callee: self.slot(callee),
-                        args,
-                        receiver: None,
-                    });
-                    return Ok(dst);
+                    value
+                }
+                Callee::Unknown if expression.optional && name == "undefined" => {
+                    self.compile_identifier(identifier)?
                 }
                 Callee::Unknown => {
                     return Err(CompileError::new(
                         self.source_text(),
-                        callee.span,
+                        identifier.span,
                         format!("unknown callee {name:?}"),
                     ));
                 }
+            };
+            (value, None)
+        } else {
+            // Parentheses end short-circuit propagation, but not the member reference.
+            let boundary = matches!(expression.callee, Expression::ParenthesizedExpression(_))
+                || matches!(callee, Expression::ChainExpression(_));
+            match exits.as_deref_mut() {
+                Some(exits) if !boundary => self.compile_chain_link(callee, exits)?,
+                _ => self.compile_callee_value(callee)?,
             }
+        };
+        if let Some(exits) = exits.filter(|_| expression.optional) {
+            self.guard_chain_link(callee, exits)?;
         }
-        if let Some(member) = callee.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            let callee = self.alloc_reg()?;
-            self.emit(Instr::GetMember {
-                dst: self.slot(callee),
-                object: self.slot(object),
-                key: self.slot(key),
-            });
-            let args = self.compile_arguments(expression)?;
-            let dst = self.alloc_reg()?;
-            self.emit(Instr::CallValue {
-                dst: self.slot(dst),
-                callee: self.slot(callee),
-                args,
-                receiver: Some(self.slot(object)),
-            });
-            return Ok(dst);
-        }
-
-        let callee = self.compile_expression(callee)?;
         let args = self.compile_arguments(expression)?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CallValue {
             dst: self.slot(dst),
             callee: self.slot(callee),
             args,
-            receiver: None,
+            receiver: receiver.map(|receiver| self.slot(receiver)),
         });
         Ok(dst)
+    }
+
+    fn compile_callee_value(
+        &mut self,
+        callee: &'ast Expression<'ast>,
+    ) -> Result<(Reg, Option<Reg>), CompileError> {
+        if let Expression::ChainExpression(chain) = callee {
+            self.compile_chain(chain, true)
+        } else if let Some(member) = callee.as_member_expression() {
+            let (object, key) = self.compile_member_parts(member)?;
+            Ok((self.emit_get_member(object, key)?, Some(object)))
+        } else {
+            Ok((self.compile_expression(callee)?, None))
+        }
     }
 
     fn compile_argument_slice(

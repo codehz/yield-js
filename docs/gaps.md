@@ -27,7 +27,6 @@
 ### 2.2 表达式
 - **`in` / `instanceof` 运算符**
 - **`delete`**：仅当操作数为标识符/成员/可选链时拒绝；`delete` 属性删除无实现
-- **可选链调用/成员访问**（"optional call"、"optional member access"）
 - **实参展开、数组展开、对象展开**（"spread argument" / "array spread" / "object spread"）
 - **自增/自减**：目标仅限简单绑定或成员（"update target outside the PoC subset"），其余赋值目标拒绝（"assignment to non-identifier/non-member target"）。算术复合赋值与逻辑赋值（`||=`/`&&=`/`??=`）已支持
 - **私有字段**（"private field access"）

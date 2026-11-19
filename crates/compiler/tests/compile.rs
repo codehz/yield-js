@@ -88,6 +88,37 @@ fn rejects_delete_of_property_with_location() {
 }
 
 #[test]
+fn rejects_unsupported_optional_chain_syntax_with_location() {
+    for (source, message, column) in [
+        (
+            "function run(x){\n  return delete x?.p;\n}",
+            "unsupported syntax: delete",
+            10,
+        ),
+        (
+            "function run(){ return null?.[missing]; }",
+            "unknown binding \"missing\"",
+            31,
+        ),
+        (
+            "function run(){ return missing?.(); }",
+            "unknown callee \"missing\"",
+            24,
+        ),
+        (
+            "function run(){ return undefined?.(...[]); }",
+            "unsupported syntax: spread argument",
+            36,
+        ),
+    ] {
+        let error = compile(source, &CompileOptions::default()).expect_err(source);
+        assert!(error.message().contains(message), "{source}: {error}");
+        assert_eq!(error.line(), if source.contains('\n') { 2 } else { 1 });
+        assert_eq!(error.column(), column, "{source}: {error}");
+    }
+}
+
+#[test]
 fn rejects_invalid_label_uses_with_location() {
     let cases = [
         "function run() { break missing; }",
@@ -248,6 +279,13 @@ fn rejects_static_use_before_lexical_initialization() {
             marker: "x;",
             skip: 0,
             imports: &[],
+        },
+        TdzCase {
+            source: "function run() {\n  seed?.();\n  let seed;\n}\n",
+            name: "seed",
+            marker: "seed?.",
+            skip: 0,
+            imports: &["seed"],
         },
         TdzCase {
             source: "function run() {\n  x = 1;\n  let x;\n}\n",
