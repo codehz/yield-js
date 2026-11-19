@@ -6,7 +6,7 @@
 // @fulfill ["wait:b7", 8]
 // @fulfilled "CISM|9:1:2:7:8:3"
 
-async function run() {
+export async function run() {
   let trace = "";
   const obj = {
     id: 9,

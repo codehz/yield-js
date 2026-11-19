@@ -1,7 +1,7 @@
 // @args [2]
 // @fulfilled "two"
 
-async function run(value) {
+export async function run(value) {
   switch (value) {
     case 1:
       return "one";

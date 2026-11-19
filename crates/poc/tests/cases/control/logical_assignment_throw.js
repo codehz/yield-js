@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let o = { v: 1 };
   try {
     o.v &&= fail();

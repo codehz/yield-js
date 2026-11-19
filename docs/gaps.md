@@ -106,7 +106,7 @@ flowchart LR
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造、`with`
 - `class` 与标签模板：首版由离线构建降级。编译器拒绝它们是符合契约的，不是 VM 还欠的语法
-- 打包后仍残留的 `import` / `export`：构建应失败。解析成 `.mjs` 只为强制严格模式，模块语法由子集拒绝
+- 离线打包后的单个严格 ESM 模块支持本地命名导出，但不支持模块查找、加载或链接；残留的静态 `import`、`import.meta`、默认导出和再导出均在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`

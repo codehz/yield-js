@@ -629,10 +629,10 @@ fn load_script_env(
                     "script environment {id} has a parent"
                 )));
             }
-            for (name, binding) in &build.entries {
+            for (name, binding) in &build.exports {
                 if !environment.bindings.contains_key(binding) {
                     return Err(VmError::InvalidSnapshot(format!(
-                        "script entry {name:?} binding {binding} is missing"
+                        "export {name:?} binding {binding} is missing"
                     )));
                 }
             }

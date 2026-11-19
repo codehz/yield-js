@@ -3,7 +3,7 @@
 // @fulfill ["wait:a", 7]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let read = () => x;
   let before = read();
   let x = await wait("a");

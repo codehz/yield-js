@@ -3,7 +3,7 @@
 // @fulfill ["wait:a", 0]
 // @fulfilled "f"
 
-async function run() {
+export async function run() {
   let s = "";
   done: {
     try {

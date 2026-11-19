@@ -1,7 +1,7 @@
 // @args [3]
 // @fulfilled 7
 
-async function run(value) {
+export async function run(value) {
   let total = 0;
   switch (value) {
     case 1:

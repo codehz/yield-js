@@ -7,7 +7,7 @@ function make() {
     return n;
   };
 }
-function run() {
+export function run() {
   const a = make();
   a();
   a();

@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const key = Symbol("key");
   let hints = "";
   const value = {

@@ -5,7 +5,7 @@
 
 function Box() {}
 
-async function run() {
+export async function run() {
   const symbol = Symbol("data");
   const object = {
     [symbol]: 1,

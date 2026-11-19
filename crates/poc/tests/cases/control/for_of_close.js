@@ -12,7 +12,7 @@ function earlyReturn(record) {
   for (const ignored of stream("o", record)) return 7;
 }
 
-async function run() {
+export async function run() {
   let trace = "";
   const record = value => { trace += value; };
   let item;

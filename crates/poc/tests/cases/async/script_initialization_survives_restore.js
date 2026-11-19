@@ -23,7 +23,7 @@ async function startBoot() {
   total += increment;
 }
 
-async function run() {
+export async function run() {
   const initialized = total;
   await boot;
   return early === undefined && hoisted === undefined && initialized === 6 &&

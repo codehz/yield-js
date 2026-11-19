@@ -1,6 +1,6 @@
 // @fulfilled 4
 
-async function run() {
+export async function run() {
   let i = 0;
   let n = 0;
   d: do {

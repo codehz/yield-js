@@ -4,7 +4,7 @@ function demo() {
   return 1;
 }
 
-function run() {
+export function run() {
   const alias = demo;
   return alias === demo;
 }

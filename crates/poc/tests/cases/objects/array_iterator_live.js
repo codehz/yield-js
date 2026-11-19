@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const a = [1, 2];
   const shared = a.values === a[Symbol.iterator] && !a.hasOwnProperty(Symbol.iterator);
   const it = a.values();

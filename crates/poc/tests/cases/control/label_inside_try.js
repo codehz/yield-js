@@ -1,6 +1,6 @@
 // @fulfilled 5
 
-async function run() {
+export async function run() {
   let n = 0;
   try {
     done: {

@@ -438,11 +438,110 @@ fn allows_lexical_use_after_initialization_and_cross_closure_read() {
 }
 
 #[test]
-fn script_rejects_top_level_await_and_module_syntax() {
+fn collects_only_explicit_local_named_exports() {
+    let build = compile(
+        r#"
+export { n as a, n as b, n, n as "" };
+export {};
+let n = 1;
+export var v, initialized = 2;
+export let l = 3;
+export const c = 4;
+export function named() {}
+export async function later() {}
+function run() {}
+"#,
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        build.exports.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "",
+            "a",
+            "b",
+            "c",
+            "initialized",
+            "l",
+            "later",
+            "n",
+            "named",
+            "v"
+        ]
+    );
+    for name in ["", "a", "b"] {
+        assert_eq!(build.exports[name], build.exports["n"]);
+    }
+    assert!(
+        compile("function run() {}", &CompileOptions::default())
+            .unwrap()
+            .exports
+            .is_empty()
+    );
+}
+
+#[test]
+fn rejects_exports_of_unknown_local_bindings() {
+    for (source, name) in [
+        ("\nexport { missing };", "missing"),
+        (
+            "{ let privateName = 1; }\nexport { privateName };",
+            "privateName",
+        ),
+        ("\nexport { inspect };", "inspect"),
+    ] {
+        let options = CompileOptions {
+            imports: vec!["inspect".into()],
+        };
+        let error = compile(source, &options).unwrap_err();
+        assert!(
+            error.message().contains("unknown export binding"),
+            "{error}"
+        );
+        assert_eq!(error.line(), 2, "{error}");
+        assert_eq!(
+            error.span().start as usize,
+            source.rfind(name).unwrap(),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_duplicate_public_names() {
+    for (source, name) in [
+        ("export const a = 1;\nexport { a };", "a"),
+        ("let a = 1;\nexport { a as one, a as one };", "one"),
+    ] {
+        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        assert!(
+            error.message().to_ascii_lowercase().contains("duplicat"),
+            "{error}"
+        );
+        let span = error.span();
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            name,
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unsupported_module_syntax() {
     for (statement, feature) in [
         ("await 1;", "top-level await"),
-        ("import 'dep';", "module"),
-        ("export const x = 1;", "module"),
+        ("for await (const value of []) {}", "top-level await"),
+        ("import 'dep';", "import declaration"),
+        ("import('dep');", "dynamic import"),
+        ("import.meta;", "import.meta"),
+        ("export default 1;", "default export"),
+        ("let x; export { x as default };", "default export"),
+        ("export { x } from 'dep';", "re-export"),
+        ("export * from 'dep';", "re-export"),
+        ("export * as ns from 'dep';", "re-export"),
+        ("export class C {}", "class declaration"),
+        ("export const { x } = {};", "destructuring"),
     ] {
         let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
@@ -451,5 +550,15 @@ fn script_rejects_top_level_await_and_module_syntax() {
             "{error}"
         );
         assert!(error.message().contains(feature), "{error}");
+    }
+}
+
+#[test]
+fn exported_lexical_declarations_keep_the_tdz() {
+    for declaration in ["let", "const"] {
+        let source = format!("\n  x;\nexport {declaration} x = 1;");
+        let error = compile(&source, &CompileOptions::default()).unwrap_err();
+        assert!(error.message().contains("before initialization"), "{error}");
+        assert_eq!((error.line(), error.column()), (2, 3), "{error}");
     }
 }

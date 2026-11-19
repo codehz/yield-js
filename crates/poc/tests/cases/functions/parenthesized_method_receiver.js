@@ -1,6 +1,6 @@
 // @returns true
 
-function run() {
+export function run() {
   function receiver() { return this; }
   let o = {};
   o.f = receiver;

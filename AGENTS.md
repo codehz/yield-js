@@ -15,8 +15,8 @@ yield-poc  →  yield-compiler  →  yield-vm
 `yield-vm` owns the bytecode contract and never imports the compiler. Oxc AST stays inside `yield-compiler` (`frontend` and `lower` only). The only Oxc type on the public compiler surface is `oxc::span::Span` on `CompileError`.
 
 ```text
-source (parsed as .mjs only to force strict mode; import/export rejected)
-  → frontend     parse a strict script
+source (strict .mjs; explicit local named exports, no module loading)
+  → frontend     parse a strict ES module
   → lower        bindings, exceptions, await  →  LoweredFunction
   → bindings     which ids stay shared across functions
   → promote      unshared bindings become logical registers
@@ -30,7 +30,8 @@ Public entry points:
 
 - `yield_compiler::compile(source, &CompileOptions { imports }) -> Result<Build, CompileError>`
 - `Vm::new(build, &mut host)` validates the build and imports, runs the script once, and drains initialization microtasks
-- `Vm::start(host, "run", args)` reads the live top-level function declaration binding, then the host calls `Vm::run_until_idle(host)`
+- `Vm::get_export("name")` reads the current value of an explicitly exported module binding
+- `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::restore(snapshot, same_build, host)` rebinds natives and operations before execution
 - Host async work is `HostReply::Operation { operation_id }`, later `Vm::complete_operation`
@@ -41,7 +42,7 @@ Suspend/resume invariants (do not weaken these):
 - `ResumeEntry` is `{ fulfill_pc, fulfill_dst, reject_pc, reject_dst, saved_slots }`. Continuations are keyed by `resume_id`, not a runtime PC.
 - `saved_slots` is the union of both resume entries' live-in after subtracting that entry's result register. Result slots are written on resume, not saved. Persistent slots are not reused across different live values. Transient slots are dropped on suspend.
 - `undefined` is a real value. Frame slot `None` means uninitialized, not `undefined`.
-- Bindings read or written from another function, plus host entry bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
+- Bindings read or written from another function, plus exported bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
 - Settled promises still resume through the microtask queue. `AWAIT` never continues inline.
 - Snapshot roots include the script environment, builtins, pending operations, and caller-supplied script roots. Traverse reachable closure environments and async continuations. Native pointers, host callbacks, and queued microtasks are not in the snapshot. Native objects are `(type, id)` keys.
@@ -107,7 +108,7 @@ Where to edit:
 
 Easy to break:
 
-- Top-level statements lower into a synchronous script frame; direct function declarations are hoisted and their bindings are host entries. Snapshot the script environment and never execute the script during restore. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
+- Top-level statements lower into a synchronous module initializer. Direct functions are hoisted whether exported or private. Only explicit exports are visible to the host. Snapshot the module environment and never re-run initialization during restore. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
 - Before `allocate`, every `Slot` is a logical register stuffed into `SlotKind::Transient`. `slot.kind` is meaningless until `FrameLayout` remaps it. `promote` rewrites one instruction to one instruction so jump, resume, and handler PCs stay valid.
 - `instr.rs::may_throw` must classify any opcode that can deliver a JavaScript exception, or exception edges never reach liveness or promotion. A `VmError` is not a JavaScript exception.
 - `Function::needs_environment` is derived from params and code (`GetBinding` and friends). Do not store a forgeable flag. Restore requires an env iff that function needs one.
@@ -120,7 +121,7 @@ Easy to break:
 - `crates/compiler/src/lib.rs` — pipeline and `compile`
 - `crates/vm/src/lib.rs` — re-exports: `Build`, `Vm`, `Host`, `Snapshot`, `Value`, `VmError`
 - `crates/vm/src/bytecode.rs` — `Instr`, `ResumeEntry`, `ExceptionHandler`, `Build::validate`
-- `crates/vm/src/vm.rs` — `start`, `run_until_idle`, `complete_operation`
+- `crates/vm/src/vm.rs` — `get_export`, `start`, `run_until_idle`, `complete_operation`
 - `crates/vm/src/snapshot.rs` — `Vm::snapshot`, `Vm::restore`, JSON codec
 - `crates/poc/src/case.rs` — `// @` directive runner
 - `crates/poc/build.rs` — generates `OUT_DIR/cases.rs`
@@ -145,7 +146,7 @@ Three layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[
 Case contract (`yield_poc::run_case`):
 
 - Leading blank lines and `// @` directives are the header. The whole file, header included, is compiled so diagnostics keep file line numbers.
-- Body must define `async function run`. The runner always starts `"run"`.
+- Body must explicitly export a callable binding under the public name `run`. The runner always starts `"run"`.
 - `@args` JSON array, only as the first directive.
 - `@pending ["wait:a"]`, `@restore` (JSON round-trip, then `Vm::restore`), `@fulfill ["wait:a", 2]`, `@reject ["wait:a", "boom"]`.
 - Last directive must be `@returns`, `@fulfilled`, or `@rejected`. Scalars only: number, bool, string, `null`, `undefined`.
@@ -159,7 +160,7 @@ Example:
 // @fulfill ["wait:a", 2]
 // @fulfilled 2
 
-async function run() {
+export async function run() {
   return await wait("a");
 }
 ```

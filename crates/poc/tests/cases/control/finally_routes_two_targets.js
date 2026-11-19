@@ -1,6 +1,6 @@
 // @fulfilled "ioio"
 
-async function run() {
+export async function run() {
   let s = "";
   outer: for (let i = 0; i < 3; i++) {
     try {

@@ -1,6 +1,6 @@
 // @returns 110
 
-function run() {
+export function run() {
   let log = 0;
   try {
     try {

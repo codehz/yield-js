@@ -1,6 +1,6 @@
 // @fulfilled "NRoriginal"
 
-async function run() {
+export async function run() {
   let trace = "";
   const iterable = {
     [Symbol.iterator]() {

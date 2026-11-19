@@ -1,6 +1,6 @@
 // @fulfilled "iso"
 
-async function run() {
+export async function run() {
   let s = "";
   try {
     switch (1) {

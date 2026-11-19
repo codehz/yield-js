@@ -4,7 +4,7 @@
 // @pending []
 // @rejected "boom"
 
-async function run(input) {
+export async function run(input) {
   inspect(input);
   const base = seed();
   const x = await wait("a");

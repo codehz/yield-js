@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let order = "";
   function substitution(label, value) {
     order += "eval:" + label + ";";

@@ -1,6 +1,6 @@
 // @fulfilled "before:exec:after:done"
 
-async function run() {
+export async function run() {
   let order = "before";
   const pending = new Promise(function (resolve) {
     order = order + ":exec";

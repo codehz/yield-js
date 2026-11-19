@@ -3,7 +3,7 @@
 // @reject ["wait:a", "boom"]
 // @fulfilled "boom"
 
-async function run() {
+export async function run() {
   let i = 0;
   try {
     while (i++ < 1) {

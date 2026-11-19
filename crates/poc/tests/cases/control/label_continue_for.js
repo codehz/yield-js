@@ -1,6 +1,6 @@
 // @fulfilled 3
 
-async function run() {
+export async function run() {
   let n = 0;
   a: b: for (let i = 0; i < 3; i++) {
     do {

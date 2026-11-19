@@ -5,7 +5,7 @@
 
 function Descriptors() {}
 
-async function run() {
+export async function run() {
   const define = Object.defineProperties;
   const target = {};
   const symbol = Symbol("property");

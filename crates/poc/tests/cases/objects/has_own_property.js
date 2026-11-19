@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const obj = { a: 1, "[object Object]": undefined };
   const arr = [1, 2];
   arr.extra = undefined;

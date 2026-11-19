@@ -3,7 +3,7 @@
 // @fulfill ["wait:rhs", 7]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let original = { v: null };
   let current = original;
   let calls = 0;

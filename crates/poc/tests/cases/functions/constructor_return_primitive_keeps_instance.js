@@ -5,6 +5,6 @@ function Box(value) {
   return value;
 }
 
-function run() {
+export function run() {
   return new Box(3).value;
 }

@@ -1,6 +1,6 @@
 // @fulfilled 124
 
-async function run() {
+export async function run() {
   const a = Symbol("x");
   const b = Symbol("x");
   const obj = { x: 0 };

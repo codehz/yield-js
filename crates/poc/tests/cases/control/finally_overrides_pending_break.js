@@ -1,6 +1,6 @@
 // @fulfilled 2
 
-async function run() {
+export async function run() {
   let i = 0;
   while (i < 2) {
     i++;

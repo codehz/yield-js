@@ -6,7 +6,7 @@ use oxc::span::GetSpan;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::JumpTarget;
-use super::{FunctionSource, Lowerer};
+use super::{FunctionSource, Lowerer, local_declaration};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 
@@ -18,37 +18,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     where
         'node: 'ast,
     {
+        if let Some(declaration) = local_declaration(statement) {
+            return self.compile_declaration(declaration);
+        }
         match statement {
             Statement::BlockStatement(block) => self.compile_block(block),
             Statement::EmptyStatement(_) => Ok(()),
             Statement::ExpressionStatement(statement) => {
                 self.compile_expression(&statement.expression)?;
                 Ok(())
-            }
-            Statement::VariableDeclaration(declaration) => {
-                self.compile_variable_declaration(declaration)
-            }
-            Statement::FunctionDeclaration(function) => {
-                if self.hoisted.contains(&function.span.start) {
-                    return Ok(());
-                }
-                let name = function
-                    .id
-                    .as_ref()
-                    .ok_or_else(|| {
-                        unsupported(self.source_text(), function.span, "anonymous declaration")
-                    })?
-                    .name
-                    .as_str()
-                    .to_owned();
-                let (binding, _) =
-                    self.declare(&name, VariableDeclarationKind::Let, function.span)?;
-                let func_id = self.enqueue_function(
-                    FunctionSource::Function(function),
-                    &name,
-                    function.span,
-                )?;
-                self.init_function_binding(binding, func_id)
             }
             Statement::ReturnStatement(statement) => {
                 let value = match &statement.argument {
@@ -178,9 +156,56 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Statement::ForOfStatement(statement) => self.compile_for_of(statement),
             Statement::LabeledStatement(statement) => self.compile_labeled(statement),
-            Statement::ClassDeclaration(statement) => Err(unsupported(
+            Statement::ExportNamedDeclaration(_) => Ok(()),
+            Statement::ExportDefaultDeclaration(export) => Err(unsupported(
                 self.source_text(),
-                statement.span,
+                export.span,
+                "default export",
+            )),
+            Statement::ExportFromDeclaration(export) => {
+                Err(unsupported(self.source_text(), export.span, "re-export"))
+            }
+            Statement::ExportAllDeclaration(export) => {
+                Err(unsupported(self.source_text(), export.span, "re-export"))
+            }
+            Statement::ImportDeclaration(import) => Err(unsupported(
+                self.source_text(),
+                import.span,
+                "import declaration",
+            )),
+            other => Err(unsupported(
+                self.source_text(),
+                other.span(),
+                "top-level/module statement",
+            )),
+        }
+    }
+
+    fn compile_declaration(
+        &mut self,
+        declaration: &'ast Declaration<'ast>,
+    ) -> Result<(), CompileError> {
+        match declaration {
+            Declaration::VariableDeclaration(declaration) => {
+                self.compile_variable_declaration(declaration)
+            }
+            Declaration::FunctionDeclaration(function) => {
+                if self.hoisted.contains(&function.span.start) {
+                    return Ok(());
+                }
+                let name = super::function_name(self.source_text(), function)?;
+                let (binding, _) =
+                    self.declare(&name, VariableDeclarationKind::Let, function.span)?;
+                let func_id = self.enqueue_function(
+                    FunctionSource::Function(function),
+                    &name,
+                    function.span,
+                )?;
+                self.init_function_binding(binding, func_id)
+            }
+            Declaration::ClassDeclaration(class) => Err(unsupported(
+                self.source_text(),
+                class.span,
                 "class declaration",
             )),
             other => Err(unsupported(
@@ -199,7 +224,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return Err(unsupported(
                 self.source_text(),
                 statement.span,
-                "for-await-of",
+                if self.is_script {
+                    "top-level await"
+                } else {
+                    "for-await-of"
+                },
             ));
         }
         self.env.enter_block();

@@ -1,7 +1,7 @@
 // @args ["b"]
 // @fulfilled "matched-b"
 
-async function run(value) {
+export async function run(value) {
   switch (value) {
     case "a":
       return "matched-a";

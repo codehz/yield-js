@@ -10,7 +10,7 @@ use yield_vm::{Object, Value, Vm, VmError};
 #[test]
 fn missing_bindings_and_mismatched_builds_are_rejected_before_execution() {
     let source = r#"
-async function run() {
+export async function run() {
   const node = bind("root");
   setLabel(node, "before");
   await wait("a");
@@ -62,7 +62,7 @@ async function run() {
 #[test]
 fn snapshot_requires_a_drained_microtask_queue() {
     let source = r#"
-async function run() {
+export async function run() {
   await 1;
   return 2;
 }
@@ -167,7 +167,7 @@ fn loader_rejects_handler_target_inside_its_protected_range() {
 #[test]
 fn restore_rejects_an_environment_the_function_does_not_use() {
     let source = r#"
-async function run() {
+export async function run() {
   const live = {n: 7};
   await wait("a");
   return live.n;
@@ -204,7 +204,7 @@ async function run() {
 #[test]
 fn restore_rejects_a_missing_environment_required_by_layout() {
     let source = r#"
-async function run() {
+export async function run() {
   const live = {n: 1};
   const alias = () => live;
   await wait("a");
@@ -225,7 +225,7 @@ async function run() {
 
 fn suspended_symbol_snapshot() -> (super::support::Suspended, yield_vm::Snapshot) {
     let source = r#"
-async function run() {
+export async function run() {
   const key = Symbol("key");
   const obj = {};
   obj[key] = 5;
@@ -379,7 +379,7 @@ fn string_iterator_snapshot_rejects_invalid_offsets() {
 #[test]
 fn symbols_never_reach_the_host_call() {
     let source = r#"
-async function run() {
+export async function run() {
   return inspect(Symbol("hidden"));
 }
 "#;
@@ -398,8 +398,8 @@ async function run() {
 #[test]
 fn script_startup_validates_before_calling_the_host() {
     let mut host = TestHost::default();
-    let mut invalid = build("inspect(1); function run() {}");
-    *invalid.entries.get_mut("run").unwrap() = u32::MAX;
+    let mut invalid = build("inspect(1); export function run() {}");
+    *invalid.exports.get_mut("run").unwrap() = u32::MAX;
     invalid.finalize();
     assert!(matches!(
         Vm::new(invalid, &mut host),
@@ -429,22 +429,54 @@ fn script_startup_validates_before_calling_the_host() {
 }
 
 #[test]
+fn build_deserialization_rejects_duplicate_export_names() {
+    let build = build("export function run() {}");
+    let json = serde_json::to_string(&build).unwrap();
+    let member = format!(r#""run":{}"#, build.exports["run"]);
+    let export_map = format!(r#""exports":{{{member}}}"#);
+    assert!(json.contains(&export_map));
+    // Duplicate the identical value so last-write-wins would pass the digest check.
+    let duplicate = json.replacen(
+        &export_map,
+        &format!(r#""exports":{{{member},{member}}}"#),
+        1,
+    );
+    let error = serde_json::from_str::<yield_vm::Build>(&duplicate).unwrap_err();
+    assert!(
+        error.to_string().contains("duplicate export name"),
+        "{error}"
+    );
+}
+
+#[test]
 fn restore_preserves_live_entries_without_replaying_startup() {
     let build = build(
         r#"
 inspect(1);
 let count = seed();
-function run() { throw 'stale entry'; }
-run = () => ++count;
-function dropEntry() { run = 0; }
+export { entry as run, count as total };
+function entry() { throw 'stale entry'; }
+entry = () => ++count;
+export function dropEntry() { entry = 0; }
 "#,
     );
     let mut host = TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    assert_eq!(vm.get_export("total").unwrap(), Value::Number(10.0));
+    for name in ["entry", "count"] {
+        let expected = format!("unknown export {name:?}");
+        assert!(
+            matches!(vm.get_export(name), Err(VmError::InvalidState(message)) if message == expected)
+        );
+        assert!(
+            matches!(vm.start(&mut host, name, vec![]), Err(VmError::InvalidState(message)) if message == expected)
+        );
+    }
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::Number(11.0)
     );
+    assert_eq!(vm.get_export("total").unwrap(), Value::Number(11.0));
 
     let snapshot = vm.snapshot(&[]).unwrap();
     let mut missing = snapshot.clone();
@@ -459,9 +491,9 @@ function dropEntry() { run = 0; }
         Vm::restore(incorrect, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
-    let mut absent_entry = snapshot.clone();
-    let script = absent_entry.script_env.unwrap();
-    let record = absent_entry
+    let mut absent_export = snapshot.clone();
+    let script = absent_export.script_env.unwrap();
+    let record = absent_export
         .objects
         .iter_mut()
         .find(|record| record.id == script)
@@ -469,24 +501,27 @@ function dropEntry() { run = 0; }
     let Object::Environment(env) = &mut record.object else {
         panic!("not the script environment")
     };
-    env.bindings.remove(&build.entries["run"]);
+    env.bindings.remove(&build.exports["run"]);
     assert!(matches!(
-        Vm::restore(absent_entry, build.clone(), &mut host),
+        Vm::restore(absent_export, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
 
     let mut vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
+    assert_eq!(vm.get_export("total").unwrap(), Value::Number(11.0));
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::Number(12.0)
     );
-    assert_eq!(host.count("inspect"), 1);
-    assert_eq!(host.count("seed"), 1);
+    assert_eq!(vm.get_export("total").unwrap(), Value::Number(12.0));
 
     vm.start(&mut host, "dropEntry", vec![]).unwrap();
     let mut vm = Vm::restore(vm.snapshot(&[]).unwrap(), build, &mut host).unwrap();
+    assert_eq!(vm.get_export("run").unwrap(), Value::Number(0.0));
     assert!(matches!(
         vm.start(&mut host, "run", vec![]),
         Err(VmError::Thrown(_))
     ));
+    assert_eq!(host.count("inspect"), 1);
+    assert_eq!(host.count("seed"), 1);
 }

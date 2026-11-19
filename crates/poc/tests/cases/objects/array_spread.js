@@ -1,6 +1,6 @@
 // @fulfilled "1234ITypeErrorGnoiter|1,2,3,4,undefined,9"
 
-async function run() {
+export async function run() {
   let order = "";
   const mark = (value) => {
     order += value;

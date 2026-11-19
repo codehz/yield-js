@@ -8,7 +8,7 @@ function first(a) {
   return a;
 }
 
-async function run() {
+export async function run() {
   let trace = "";
   const mark = (value) => {
     trace += value;

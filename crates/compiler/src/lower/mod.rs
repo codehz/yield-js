@@ -47,7 +47,7 @@ pub(crate) fn lower_program<'ast>(
         lowered.push(Lowerer::compile_task(session, &mut tasks, task)?);
     }
     let mut facts = bindings::classify(&lowered)?;
-    for binding in session.entries().values().copied() {
+    for binding in session.exports().values().copied() {
         facts.shared.insert(binding);
     }
     for function in &mut lowered {
@@ -164,6 +164,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match source {
             FunctionSource::Script(statements) => {
                 self.hoist_script(statements)?;
+                self.collect_exports(statements)?;
                 for statement in statements {
                     self.compile_statement(statement)?;
                 }
@@ -454,7 +455,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     /// the body, including `var` nested in blocks, loops, and `try`. Nested
     /// functions are not scanned. A direct function shares its binding with
     /// `var` of the same name: the hoisted closure wins over an uninitialized
-    /// `var`, and an initializer later updates the entry.
+    /// `var`, and an initializer later updates the binding.
     fn hoist_script(&mut self, statements: &'ast [Statement<'ast>]) -> Result<(), CompileError> {
         let scan = script_scan(self.source_text(), statements)?;
         for (_, function) in &scan.functions {
@@ -495,11 +496,79 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "internal compiler error: script function {name:?} was not declared"
                 )));
             };
-            self.session.insert_entry(name.clone(), binding);
             let func_id = self.enqueue_direct(function, &name, function.span)?;
             self.init_function_binding(binding, func_id)?;
+            self.session.record_top_level_function(name, binding);
         }
         Ok(())
+    }
+
+    fn collect_exports(&mut self, statements: &[Statement<'_>]) -> Result<(), CompileError> {
+        for statement in statements {
+            match statement {
+                Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::FunctionDeclaration(function) => {
+                        if let Some(id) = &function.id {
+                            self.export_binding(
+                                id.name.as_str(),
+                                id.span,
+                                id.name.as_str(),
+                                id.span,
+                            )?;
+                        }
+                    }
+                    Declaration::VariableDeclaration(declaration) => {
+                        for declarator in &declaration.declarations {
+                            if let BindingPattern::BindingIdentifier(id) = &declarator.id {
+                                self.export_binding(
+                                    id.name.as_str(),
+                                    id.span,
+                                    id.name.as_str(),
+                                    id.span,
+                                )?;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Statement::ExportNamedDeclaration(export) => {
+                    for specifier in &export.specifiers {
+                        self.export_binding(
+                            specifier.local.name().as_str(),
+                            specifier.local.span(),
+                            specifier.exported.name().as_str(),
+                            specifier.exported.span(),
+                        )?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn export_binding(
+        &mut self,
+        local: &str,
+        local_span: Span,
+        public: &str,
+        public_span: Span,
+    ) -> Result<(), CompileError> {
+        if public == "default" {
+            return Err(unsupported(
+                self.source_text(),
+                public_span,
+                "default export",
+            ));
+        }
+        let binding = self.env.lookup(local).ok_or_else(|| {
+            CompileError::new(
+                self.source_text(),
+                local_span,
+                format!("unknown export binding {local:?}"),
+            )
+        })?;
+        self.session.insert_export(public, binding, public_span)
     }
 
     pub(super) fn predeclare_scope(
@@ -509,11 +578,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let mut function_names = BTreeSet::new();
         let mut lexical = Vec::new();
         for statement in statements {
-            match statement {
-                Statement::VariableDeclaration(declaration) => {
+            match local_declaration(statement) {
+                Some(Declaration::VariableDeclaration(declaration)) => {
                     lexical.extend(self.register_declarators(declaration)?);
                 }
-                Statement::FunctionDeclaration(function) => {
+                Some(Declaration::FunctionDeclaration(function)) => {
                     if let Some(identifier) = &function.id {
                         let name = identifier.name.as_str();
                         function_names.insert(name.to_owned());
@@ -532,7 +601,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         // other statement runs. Their captured scope already includes every
         // lexical binding predeclared above.
         for statement in statements {
-            let Statement::FunctionDeclaration(function) = statement else {
+            let Some(Declaration::FunctionDeclaration(function)) = local_declaration(statement)
+            else {
                 continue;
             };
             if !self.hoisted.insert(function.span.start) {
@@ -744,6 +814,14 @@ struct ScriptScan<'ast> {
     functions: Vec<(String, &'ast Function<'ast>)>,
 }
 
+/// Oxc represents declarations with `export` separately from export lists.
+fn local_declaration<'ast>(statement: &'ast Statement<'ast>) -> Option<&'ast Declaration<'ast>> {
+    match statement {
+        Statement::ExportDeclaration(export) => Some(&export.declaration),
+        _ => statement.as_declaration(),
+    }
+}
+
 fn script_scan<'ast>(
     source: &str,
     statements: &'ast [Statement<'ast>],
@@ -783,14 +861,11 @@ fn collect_stmt<'ast>(
     vars: &mut BTreeMap<String, Span>,
     functions: &mut Vec<(String, &'ast Function<'ast>)>,
 ) -> Result<(), CompileError> {
-    match statement {
-        Statement::BlockStatement(block) => {
-            merge_vars(vars, collect_list(source, &block.body, false, functions)?);
-        }
-        Statement::VariableDeclaration(declaration) => {
+    match local_declaration(statement) {
+        Some(Declaration::VariableDeclaration(declaration)) => {
             bind_declaration(source, declaration, lexical, vars)?;
         }
-        Statement::FunctionDeclaration(function) => {
+        Some(Declaration::FunctionDeclaration(function)) => {
             let name = function_name(source, function)?;
             if func_as_var {
                 if functions.iter().any(|(existing, _)| existing == &name) {
@@ -813,10 +888,16 @@ fn collect_stmt<'ast>(
                 add_lexical(source, lexical, &name, function.span)?;
             }
         }
-        Statement::ClassDeclaration(class) => {
+        Some(Declaration::ClassDeclaration(class)) => {
             if let Some(id) = &class.id {
                 add_lexical(source, lexical, id.name.as_str(), class.span)?;
             }
+        }
+        _ => {}
+    }
+    match statement {
+        Statement::BlockStatement(block) => {
+            merge_vars(vars, collect_list(source, &block.body, false, functions)?);
         }
         Statement::IfStatement(statement) => {
             merge_vars(

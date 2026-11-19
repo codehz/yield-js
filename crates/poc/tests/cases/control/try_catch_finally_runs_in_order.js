@@ -1,6 +1,6 @@
 // @returns 108
 
-function run() {
+export function run() {
   let out = 0;
   try {
     out = 1;

@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   function callable() {}
   const text = `${callable}`;
   if (typeof text !== "string" || callable + "" !== text || `${callable}` !== text) return false;

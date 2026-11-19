@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const define = Object.defineProperties;
   const target = {};
   const error = {};

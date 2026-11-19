@@ -6,7 +6,7 @@
 // @fulfill ["wait:done", true]
 // @fulfilled "é|😀|ok:汉|:done"
 
-async function run() {
+export async function run() {
   const iterator = "é😀汉"[Symbol.iterator]();
   let trace = `${iterator.next().value}|`;
   for (const ch of iterator) {

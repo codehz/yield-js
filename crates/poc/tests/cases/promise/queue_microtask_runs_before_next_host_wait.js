@@ -2,7 +2,7 @@
 // @fulfill ["wait:a", 0]
 // @fulfilled 1
 
-async function run() {
+export async function run() {
   let v = 0;
   queueMicrotask(function () {
     v = 1;

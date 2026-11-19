@@ -1,6 +1,6 @@
 // @returns 4
 
-function run() {
+export function run() {
   function read() {
     return x;
   }

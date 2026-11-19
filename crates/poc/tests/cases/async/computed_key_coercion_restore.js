@@ -3,7 +3,7 @@
 // @fulfill ["wait:key coercion", 5]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const symbol = Symbol("saved key");
   const failure = {};
   let conversions = 0;

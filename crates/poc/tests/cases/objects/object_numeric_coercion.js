@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const value = { valueOf() { return 7; } };
   let caught = false;
   try {

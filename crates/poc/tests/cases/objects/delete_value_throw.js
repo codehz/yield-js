@@ -4,6 +4,6 @@ function fail() {
   throw "boom";
 }
 
-async function run() {
+export async function run() {
   return delete fail();
 }

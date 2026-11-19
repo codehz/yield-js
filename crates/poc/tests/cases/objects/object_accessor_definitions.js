@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let order = "";
   function key(mark) { order += mark; return "x"; }
   function rhs() { order += "r"; return 2; }

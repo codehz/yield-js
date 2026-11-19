@@ -2,7 +2,7 @@
 // @reject ["wait:a",5]
 // @fulfilled 15
 
-async function run() {
+export async function run() {
   let base = 10;
   try {
     await wait("a");

@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let log = "";
   let obj = {v: 8};
   function base() { log += "b"; return obj; }

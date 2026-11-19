@@ -17,8 +17,9 @@ use crate::names::Tables;
 pub(crate) struct Session<'src> {
     pub(crate) source: &'src str,
     import_names: BTreeMap<String, u32>,
-    /// Direct program function name to its script-environment binding.
-    entries: BTreeMap<String, BindingId>,
+    /// Direct program function names, for the local `typeof` policy only.
+    top_level_functions: BTreeMap<String, BindingId>,
+    exports: BTreeMap<String, BindingId>,
     constants: Vec<Constant>,
     functions: Vec<BytecodeFunction>,
     imports: Vec<ImportDecl>,
@@ -44,7 +45,8 @@ impl<'src> Session<'src> {
         Ok(Self {
             source,
             import_names,
-            entries: BTreeMap::new(),
+            top_level_functions: BTreeMap::new(),
+            exports: BTreeMap::new(),
             constants: Vec::new(),
             functions: Vec::new(),
             imports,
@@ -57,16 +59,33 @@ impl<'src> Session<'src> {
     pub(crate) fn names(&self) -> Tables<'_> {
         Tables {
             imports: &self.import_names,
-            entries: &self.entries,
+            top_level_functions: &self.top_level_functions,
         }
     }
 
-    pub(crate) fn insert_entry(&mut self, name: String, binding: BindingId) {
-        self.entries.insert(name, binding);
+    pub(crate) fn record_top_level_function(&mut self, name: String, binding: BindingId) {
+        self.top_level_functions.insert(name, binding);
     }
 
-    pub(crate) fn entries(&self) -> &BTreeMap<String, BindingId> {
-        &self.entries
+    pub(crate) fn insert_export(
+        &mut self,
+        name: &str,
+        binding: BindingId,
+        span: Span,
+    ) -> Result<(), CompileError> {
+        if self.exports.contains_key(name) {
+            return Err(CompileError::new(
+                self.source,
+                span,
+                format!("duplicate export name {name:?}"),
+            ));
+        }
+        self.exports.insert(name.to_owned(), binding);
+        Ok(())
+    }
+
+    pub(crate) fn exports(&self) -> &BTreeMap<String, BindingId> {
+        &self.exports
     }
 
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
@@ -99,7 +118,7 @@ impl<'src> Session<'src> {
             self.imports,
             self.functions,
             0,
-            self.entries,
+            self.exports,
         );
         build.finalize();
         build.validate().map_err(|error| {

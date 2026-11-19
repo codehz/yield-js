@@ -1,8 +1,8 @@
 //! Oxc parse.
 //!
-//! The source is parsed as an ES module so the parser applies strict-mode
-//! grammar. Module declarations are still rejected by lowering. Only this
-//! module and [`crate::lower`] see the Oxc AST.
+//! The source is parsed as a strict ES module. Lowering supports local named
+//! exports without a module loader. Only this module and [`crate::lower`] see
+//! the Oxc AST.
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::Program;

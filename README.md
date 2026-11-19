@@ -24,6 +24,8 @@ cargo run -p yield-poc
 - `inspect` / `seed` 在恢复后不会重跑；
 - 最终结果 `15`。
 
+宿主只能按公开名读取或调用显式导出的活绑定。示例用 `export async function run` 公开入口；仅声明 `function run` 不会公开它。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
+
 ## 目录
 
 | 路径 | 内容 |

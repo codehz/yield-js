@@ -1,6 +1,6 @@
 // @fulfilled "TypeError: boom | TypeError: boom"
 
-async function run() {
+export async function run() {
   if (new Error(42).message !== "42") return "wrong numeric message";
   const empty = TypeError();
   if (empty.name !== "TypeError" || empty.message !== "" || empty.hasOwnProperty("message")) {

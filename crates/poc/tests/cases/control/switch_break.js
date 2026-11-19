@@ -1,7 +1,7 @@
 // @args [2]
 // @fulfilled "1a2b3a"
 
-async function run(value) {
+export async function run(value) {
   let out = "";
   let i = 1;
   while (i <= 3) {

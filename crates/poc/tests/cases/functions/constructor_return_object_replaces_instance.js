@@ -4,6 +4,6 @@ function Box() {
   return { tag: "made" };
 }
 
-function run() {
+export function run() {
   return new Box().tag;
 }

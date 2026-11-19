@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   try {
     await constructMethod();
   } catch (e) {

@@ -5,7 +5,7 @@
 
 function Box() {}
 
-async function run() {
+export async function run() {
   Box.prototype.inherited = 1;
   const object = new Box();
   const symbol = Symbol("extra");

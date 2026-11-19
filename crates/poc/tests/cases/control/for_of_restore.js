@@ -6,7 +6,7 @@
 // @fulfill ["wait:finally", 0]
 // @fulfilled "123C"
 
-async function run() {
+export async function run() {
   let trace = "";
   const array = [1, 2];
   const iterator = array.values();

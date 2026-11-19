@@ -2,7 +2,7 @@
 
 function Box() {}
 
-function run() {
+export function run() {
   Box.prototype.kind = "box";
   return new Box().kind;
 }

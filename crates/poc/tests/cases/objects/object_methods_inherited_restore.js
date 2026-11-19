@@ -3,7 +3,7 @@
 // @fulfill ["wait:a",0]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   function C() {}
   const b = 2;
   C.prototype = {

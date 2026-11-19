@@ -3,7 +3,7 @@
 // @fulfill ["wait:a",0]
 // @fulfilled 23
 
-async function run() {
+export async function run() {
   const it = [1, 2].values();
   if (it.next().value !== 1) {
     throw "iterator did not start at the first element";

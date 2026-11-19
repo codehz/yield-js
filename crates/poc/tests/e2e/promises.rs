@@ -7,7 +7,7 @@ use yield_vm::{Completion, HostValue, Object, PromiseState, Value, Vm, VmError};
 #[test]
 fn script_reaction_survives_restore_and_runs_on_fulfill() {
     let source = r#"
-async function run() {
+export async function run() {
   return await wait("a").then(function (value) {
     return value + 1;
   });
@@ -31,7 +31,7 @@ async function run() {
 #[test]
 fn snapshot_rejects_an_unrooted_thenable_capability() {
     let source = r#"
-async function run() {
+export async function run() {
   Promise.resolve({
     then: function () {},
   });
@@ -74,7 +74,7 @@ fn restore_rejects_a_locked_promise_without_an_adopt_job() {
 #[test]
 fn restore_rejects_a_reaction_whose_handler_is_missing() {
     let source = r#"
-async function run() {
+export async function run() {
   return await wait("a").then(function (value) {
     return value;
   });
@@ -98,7 +98,7 @@ async function run() {
 #[test]
 fn promise_all_combine_state_survives_a_partial_fulfill() {
     let source = r#"
-async function run() {
+export async function run() {
   const values = await Promise.all([wait("a"), wait("b")]);
   return values[0] + values[1];
 }

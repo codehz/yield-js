@@ -4,7 +4,7 @@ function collect(a, b, c, d, e, f) {
   return [a, b, c, d, e, f].join("|");
 }
 
-async function run() {
+export async function run() {
   const text = "Aé汉😀e\u0301";
   const expected = "A|é|汉|😀|e|\u0301";
   let loop = [];

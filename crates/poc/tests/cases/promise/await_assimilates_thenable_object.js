@@ -1,6 +1,6 @@
 // @fulfilled 9
 
-async function run() {
+export async function run() {
   return await {
     then: function (resolve) {
       resolve(9);

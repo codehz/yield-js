@@ -2,7 +2,7 @@
 
 function Box() {}
 
-function run() {
+export function run() {
   Box.prototype.x = 7;
   let first = new Box();
   let second = new Box();

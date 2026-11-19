@@ -3,7 +3,7 @@
 // @fulfill ["wait:array descriptor", 0]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const define = Object.defineProperty;
   const describe = Object.getOwnPropertyDescriptor;
   const array = [];

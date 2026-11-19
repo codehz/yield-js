@@ -3,7 +3,7 @@
 // @fulfill ["wait:a",0]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const v = seed();
   const object = {get x() { throw 3; }};
   await wait("a");

@@ -3,7 +3,7 @@
 // @fulfill ["wait:rhs",0]
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const symbol = Symbol("x");
   function Box() {}
   Box.prototype = {

@@ -1,6 +1,6 @@
 // @fulfilled 4
 
-async function run() {
+export async function run() {
   let n = 0;
   done: {
     while (true) {

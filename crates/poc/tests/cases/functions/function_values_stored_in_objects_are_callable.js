@@ -1,6 +1,6 @@
 // @returns 5
 
-function run() {
+export function run() {
   const obj = {
     f: function(x) {
       return x + 1;

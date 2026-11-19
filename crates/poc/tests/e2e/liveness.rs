@@ -30,7 +30,7 @@ fn has_call_environment(snapshot: &yield_vm::Snapshot) -> bool {
 #[test]
 fn promoted_dead_object_is_absent_from_the_snapshot_graph() {
     let source = r#"
-async function run() {
+export async function run() {
   const dead = {tag: "discard-only"};
   const live = {n: 7};
   await wait("a");
@@ -75,7 +75,7 @@ async function run() {
 #[test]
 fn captured_binding_keeps_object_identity_across_restore() {
     let source = r#"
-async function run() {
+export async function run() {
   const dead = {tag: "discard-only"};
   const live = {n: 7};
   const alias = () => live;
@@ -101,7 +101,7 @@ async function run() {
 #[test]
 fn catch_reads_object_saved_across_the_reject_edge() {
     let source = r#"
-async function run() {
+export async function run() {
   const kept = {tag: "kept"};
   try {
     await wait("a");
@@ -132,7 +132,7 @@ fn symbol_descriptions(snapshot: &yield_vm::Snapshot) -> Vec<Option<String>> {
 #[test]
 fn symbol_property_keys_survive_restore() {
     let source = r#"
-async function run() {
+export async function run() {
   const key = Symbol("key");
   const obj = {};
   obj[key] = 5;
@@ -162,7 +162,7 @@ async function run() {
 #[test]
 fn unreferenced_symbols_are_absent_and_registry_keys_are_kept() {
     let source = r#"
-async function run() {
+export async function run() {
   Symbol("orphan");
   const dropped = Symbol.for("registry-only");
   await wait("a");

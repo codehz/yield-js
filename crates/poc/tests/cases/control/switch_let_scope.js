@@ -1,6 +1,6 @@
 // @fulfilled 6
 
-async function run() {
+export async function run() {
   switch (1) {
     case 1:
       let shared = 5;

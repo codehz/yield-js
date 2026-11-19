@@ -3,7 +3,7 @@
 // @reject ["wait:s", "boom"]
 // @fulfilled "symbol|truthy|TypeError: Symbol is not a constructor|TypeError: Symbol.keyFor requires a Symbol|TypeError: Cannot convert a Symbol value to a string|TypeError: Cannot convert a Symbol value to a number|g8|same|distinct"
 
-async function run() {
+export async function run() {
   const s = Symbol("s");
   let out = typeof s + "|" + (s ? "truthy" : "falsy");
   try {

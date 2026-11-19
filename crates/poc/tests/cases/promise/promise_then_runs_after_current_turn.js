@@ -2,7 +2,7 @@
 // @fulfill ["wait:a", 1]
 // @fulfilled 2
 
-async function run() {
+export async function run() {
   let v = 1;
   const pending = new Promise(function (resolve) {
     resolve(2);

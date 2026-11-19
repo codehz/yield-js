@@ -1,6 +1,6 @@
 // @returns 5
 
-function run() {
+export function run() {
   let n = 3;
   const add = (x) => x + n;
   n = 4;

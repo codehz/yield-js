@@ -77,7 +77,7 @@ fn snapshot_and_restore_across_two_awaits() {
 #[test]
 fn await_inside_finally_preserves_pending_return() {
     let source = r#"
-async function run() {
+export async function run() {
   try {
     seed();
     return 7;
@@ -109,7 +109,7 @@ async function run() {
 #[test]
 fn await_inside_finally_preserves_pending_throw() {
     let source = r#"
-async function run() {
+export async function run() {
   try {
     seed();
     throw 5;
@@ -136,7 +136,7 @@ async function run() {
 #[test]
 fn temporary_await_results_are_still_saved_across_resume_points() {
     let source = r#"
-async function run() {
+export async function run() {
   return (await wait("a")) + (await wait("b"));
 }
 "#;

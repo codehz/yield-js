@@ -1,6 +1,6 @@
 // @returns 15
 
-function run() {
+export function run() {
   const obj = { a: 1, nested: { b: 2 }, list: [3, 4] };
   obj.a = obj.a + obj.nested.b;
   obj.list[1] += 5;

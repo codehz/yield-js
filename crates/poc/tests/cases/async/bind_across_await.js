@@ -3,7 +3,7 @@
 // @fulfill ["wait:a", 2]
 // @fulfilled 12
 
-async function run() {
+export async function run() {
   const f = add.bind(null, 10);
   const v = await wait("a");
   return f(v);

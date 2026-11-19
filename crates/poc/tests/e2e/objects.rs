@@ -15,7 +15,7 @@ function make() {
     set x(v) { hidden += v; }
   };
 }
-async function run() {
+export async function run() {
   const o = make();
   await wait("a");
   o.x = 5;
@@ -76,7 +76,7 @@ async function run() {
 #[test]
 fn unreachable_native_wrappers_do_not_require_rebinding() {
     let source = r#"
-async function run() {
+export async function run() {
   bind("temporary");
   await wait("a");
   return 1;
@@ -97,7 +97,7 @@ async function run() {
 #[test]
 fn closures_and_their_environment_survive_snapshot() {
     let source = r#"
-async function run() {
+export async function run() {
   let n = 1;
   function step() {
     n = n + 1;
@@ -133,7 +133,7 @@ async function run() {
 #[test]
 fn object_identity_survives_snapshot() {
     let source = r#"
-async function run() {
+export async function run() {
   const obj = { n: 1, list: [2] };
   const alias = obj;
   await wait("a");
@@ -166,7 +166,7 @@ fn restore_validates_internal_prototypes_but_allows_property_cycles() {
     let source = r#"
 function Box() {}
 
-async function run() {
+export async function run() {
   Box.prototype.x = 7;
   const first = new Box();
   const second = new Box();
@@ -252,7 +252,7 @@ async function run() {
 #[test]
 fn builtin_roots_and_function_identity_survive_restore() {
     let source = r#"
-async function run() {
+export async function run() {
   const then = Promise.prototype.then;
   const fn = demo;
   await wait("a");
@@ -284,7 +284,7 @@ function demo() {
 #[test]
 fn bound_function_survives_restore() {
     let source = r#"
-async function run() {
+export async function run() {
   const captured = 4;
   const fn = function (arg, v) { return captured + this.n + arg.n + v; };
   const bound = fn.bind({ n: 3 }, { n: 5 });
@@ -327,7 +327,7 @@ async function run() {
 #[test]
 fn restore_rejects_invalid_property_ordinals() {
     let source = r#"
-async function run() {
+export async function run() {
   const obj = { z: 1, a: 2 };
   await wait("a");
   return Reflect.ownKeys(obj)[0];
@@ -353,7 +353,7 @@ async function run() {
 
 #[test]
 fn restore_rejects_writable_object_prototype() {
-    let mut s = Suspended::start("async function run() { await wait('a'); }", vec![]);
+    let mut s = Suspended::start("export async function run() { await wait('a'); }", vec![]);
     let snapshot = s.snapshot();
     let index = snapshot
         .objects
@@ -374,7 +374,7 @@ fn restore_rejects_writable_object_prototype() {
 #[test]
 fn restore_rejects_array_index_past_length() {
     let mut s = Suspended::start(
-        "async function run() { const a = []; Object.defineProperty(a, '9', { value: 4 }); await wait('a'); return a[9]; }",
+        "export async function run() { const a = []; Object.defineProperty(a, '9', { value: 4 }); await wait('a'); return a[9]; }",
         vec![],
     );
     let mut snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");

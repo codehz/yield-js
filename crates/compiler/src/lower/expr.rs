@@ -135,6 +135,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_function_value(func_id)
             }
             Expression::TemplateLiteral(template) => self.compile_template_literal(template),
+            Expression::ImportExpression(import) => Err(unsupported(
+                self.source_text(),
+                import.span,
+                "dynamic import",
+            )),
+            Expression::ImportMeta(property) => Err(unsupported(
+                self.source_text(),
+                property.span,
+                "import.meta",
+            )),
             other => Err(unsupported(
                 self.source_text(),
                 other.span(),

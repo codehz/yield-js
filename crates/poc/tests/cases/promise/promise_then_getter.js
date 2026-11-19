@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let reads = 0;
   const thenable = {
     n: 7,

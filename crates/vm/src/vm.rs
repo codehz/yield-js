@@ -67,20 +67,26 @@ impl Vm {
         &self.build
     }
 
+    /// Reads the current value of a public module binding.
+    pub fn get_export(&self, name: &str) -> Result<Value, VmError> {
+        let binding = *self
+            .build
+            .exports
+            .get(name)
+            .ok_or_else(|| VmError::InvalidState(format!("unknown export {name:?}")))?;
+        let env = self
+            .script_env
+            .ok_or_else(|| VmError::InvalidState("script has no environment".to_owned()))?;
+        self.heap.get_binding(env, binding)
+    }
+
     pub fn start(
         &mut self,
         host: &mut dyn Host,
         entry: &str,
         args: Vec<HostValue>,
     ) -> Result<Value, VmError> {
-        let binding =
-            *self.build.entries.get(entry).ok_or_else(|| {
-                VmError::InvalidBuild(format!("script entry {entry:?} not found"))
-            })?;
-        let env = self
-            .script_env
-            .ok_or_else(|| VmError::InvalidState("script has no environment".to_owned()))?;
-        let callee = self.heap.get_binding(env, binding)?;
+        let callee = self.get_export(entry)?;
         let args = args
             .iter()
             .map(|value| self.host_to_value(value))

@@ -1,6 +1,6 @@
 // @returns 35
 
-function run() {
+export function run() {
   let x = 1;
   function inc() {
     x = x + 2;

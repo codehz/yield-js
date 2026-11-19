@@ -1,7 +1,7 @@
 // @args [1]
 // @fulfilled "one;default;two"
 
-async function run(value) {
+export async function run(value) {
   let seen = "";
   switch (value) {
     case 1:

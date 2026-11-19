@@ -5,7 +5,7 @@
 
 function Descriptor() {}
 
-async function run() {
+export async function run() {
   const define = Object.defineProperty;
   const describe = Object.getOwnPropertyDescriptor;
   const symbol = Symbol("state");

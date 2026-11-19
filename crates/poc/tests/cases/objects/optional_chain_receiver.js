@@ -2,7 +2,7 @@
 
 function top() { return 2; }
 
-async function run() {
+export async function run() {
   let o = { x: 7, m() { return this.x; }, detached() { return this === undefined; } };
   let f = null;
   if (f?.() !== undefined || top?.() !== 2) return -1;

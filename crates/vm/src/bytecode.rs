@@ -4,14 +4,15 @@
 //! around. All operands are explicit slots. No implicit operand stack is
 //! persisted across an `Await`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::value::BindingId;
 
-pub const BYTECODE_VERSION: u32 = 15;
+pub const BYTECODE_VERSION: u32 = 16;
 
 /// VM-provided global names, in builtin-index order.
 ///
@@ -382,8 +383,44 @@ pub struct Build {
     pub functions: Vec<Function>,
     /// Compiler script function. It runs once when the VM is created.
     pub script: u32,
-    /// Host entry name to a binding declared in [`Self::script`].
-    pub entries: BTreeMap<String, BindingId>,
+    /// Public module name to a live binding declared in [`Self::script`].
+    #[serde(deserialize_with = "deserialize_exports")]
+    pub exports: BTreeMap<String, BindingId>,
+}
+
+fn deserialize_exports<'de, D>(deserializer: D) -> Result<BTreeMap<String, BindingId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Exports;
+
+    impl<'de> Visitor<'de> for Exports {
+        type Value = BTreeMap<String, BindingId>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a map of unique export names to binding IDs")
+        }
+
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut exports = BTreeMap::new();
+            while let Some(name) = map.next_key::<String>()? {
+                match exports.entry(name) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(map.next_value()?);
+                    }
+                    Entry::Occupied(entry) => {
+                        return Err(de::Error::custom(format_args!(
+                            "duplicate export name {:?}",
+                            entry.key()
+                        )));
+                    }
+                }
+            }
+            Ok(exports)
+        }
+    }
+
+    deserializer.deserialize_map(Exports)
 }
 
 #[derive(Serialize)]
@@ -393,7 +430,7 @@ struct DigestInput<'a> {
     imports: &'a [ImportDecl],
     functions: &'a [Function],
     script: u32,
-    entries: &'a BTreeMap<String, BindingId>,
+    exports: &'a BTreeMap<String, BindingId>,
 }
 
 impl Build {
@@ -402,7 +439,7 @@ impl Build {
         imports: Vec<ImportDecl>,
         functions: Vec<Function>,
         script: u32,
-        entries: BTreeMap<String, BindingId>,
+        exports: BTreeMap<String, BindingId>,
     ) -> Self {
         Self {
             bytecode_version: BYTECODE_VERSION,
@@ -411,7 +448,7 @@ impl Build {
             imports,
             functions,
             script,
-            entries,
+            exports,
         }
     }
 
@@ -427,7 +464,7 @@ impl Build {
             imports: &self.imports,
             functions: &self.functions,
             script: self.script,
-            entries: &self.entries,
+            exports: &self.exports,
         };
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
         let digest = Sha256::digest(bytes);
@@ -542,13 +579,10 @@ impl Build {
                 }
             }
         }
-        for (name, binding) in &self.entries {
-            if name.is_empty() {
-                return Err("empty script entry name".to_owned());
-            }
+        for (name, binding) in &self.exports {
             if !declared.contains(binding) {
                 return Err(format!(
-                    "script entry {name:?} binding {binding} is not declared in the script"
+                    "export {name:?} binding {binding} is not declared in the script"
                 ));
             }
         }

@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   const sparse = [1, , null, undefined, 5];
   if (sparse.join("|") !== "1||||5" || `${sparse}` !== "1,,,,5") return false;
   if (+[7] !== 7 || [7] + 1 !== "71") return false;

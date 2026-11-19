@@ -15,7 +15,7 @@ use yield_vm::bytecode::BUILTINS;
 
 pub(crate) struct Tables<'a> {
     pub(crate) imports: &'a BTreeMap<String, u32>,
-    pub(crate) entries: &'a BTreeMap<String, BindingId>,
+    pub(crate) top_level_functions: &'a BTreeMap<String, BindingId>,
 }
 
 pub(crate) enum ValueName {
@@ -69,7 +69,7 @@ impl Tables<'_> {
         let known = name == "undefined"
             || binding.is_some()
             || self.imports.contains_key(name)
-            || self.entries.contains_key(name)
+            || self.top_level_functions.contains_key(name)
             || builtin_index(name).is_some();
         if !known {
             return Some("undefined");
@@ -77,8 +77,8 @@ impl Tables<'_> {
         if self.imports.contains_key(name) {
             return Some("function");
         }
-        if let Some(entry) = self.entries.get(name).copied()
-            && binding != Some(entry)
+        if let Some(function) = self.top_level_functions.get(name).copied()
+            && binding != Some(function)
         {
             return Some("function");
         }

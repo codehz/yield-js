@@ -1,6 +1,6 @@
 // @fulfilled 1
 
-async function run() {
+export async function run() {
   let n = 0;
   let o = null;
   try {

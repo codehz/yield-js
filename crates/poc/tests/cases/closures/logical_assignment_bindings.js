@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let x = 0;
   let skipped = (x &&= await wait("skip"));
   if (skipped !== 0 || x !== 0) {

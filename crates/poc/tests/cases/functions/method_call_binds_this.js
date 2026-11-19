@@ -1,6 +1,6 @@
 // @returns 4
 
-function run() {
+export function run() {
   const obj = {
     value: 4,
     method: function () {

@@ -4,7 +4,7 @@ function failIfCalled() {
   throw "callee ran";
 }
 
-async function run() {
+export async function run() {
   let trace = "";
   function later() {
     trace += "later";

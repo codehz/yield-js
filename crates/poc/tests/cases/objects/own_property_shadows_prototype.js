@@ -4,7 +4,7 @@ function Box() {
   this.kind = "own";
 }
 
-function run() {
+export function run() {
   Box.prototype.kind = "proto";
   return new Box().kind;
 }

@@ -3,7 +3,7 @@
 // @reject ["wait:body", "original"]
 // @fulfilled "INVRoriginal"
 
-async function run() {
+export async function run() {
   let trace = "";
   const iterator = {
     get next() {

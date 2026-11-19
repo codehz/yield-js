@@ -5,7 +5,7 @@ function outer() {
   return arrow;
 }
 
-function run() {
+export function run() {
   const obj = { n: 7, method: outer };
   return obj.method()();
 }

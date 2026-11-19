@@ -4,7 +4,7 @@
 function fail() {
   throw "sync boom";
 }
-async function run() {
+export async function run() {
   await wait("a");
   fail();
   return 1;

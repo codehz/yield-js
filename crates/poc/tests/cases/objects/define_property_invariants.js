@@ -5,7 +5,7 @@ function rejects(action) {
   return false;
 }
 
-async function run() {
+export async function run() {
   const define = Object.defineProperty;
   const target = {};
   const read = function () { return 12; };

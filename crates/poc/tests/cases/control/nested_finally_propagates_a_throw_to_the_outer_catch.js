@@ -1,6 +1,6 @@
 // @returns 94
 
-function run() {
+export function run() {
   let side = 0;
   try {
     try {

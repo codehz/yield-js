@@ -5,7 +5,7 @@
 
 function Box() {}
 
-async function run() {
+export async function run() {
   const first = Symbol("same");
   const second = Symbol("same");
   const obj = {

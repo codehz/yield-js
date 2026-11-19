@@ -6,7 +6,7 @@ use yield_vm::{HostValue, Value, Vm, VmError};
 #[test]
 fn finally_completion_overrides_return_and_throw() {
     let source = r#"
-function run() {
+export function run() {
   let log = 0;
   try {
     return 1;
@@ -23,7 +23,7 @@ function run() {
     assert_eq!(result, Value::Number(5.0));
 
     let source = r#"
-function run() {
+export function run() {
   try {
     throw 1;
   } finally {
@@ -37,7 +37,7 @@ function run() {
     assert_eq!(result, Value::Number(2.0));
 
     let source = r#"
-function run() {
+export function run() {
   try {
     return 1;
   } finally {
@@ -56,7 +56,7 @@ function run() {
 #[test]
 fn hoisted_functions_can_capture_later_bindings() {
     let source = r#"
-function run() {
+export function run() {
   return read();
   function read() {
     return x;
@@ -77,7 +77,7 @@ function run() {
 #[test]
 fn sync_control_flow_executes_before_any_await() {
     let source = r#"
-function run(n) {
+export function run(n) {
   let sum = 0;
   for (let i = 0; i < n; i += 1) {
     if (i % 2 === 0) {

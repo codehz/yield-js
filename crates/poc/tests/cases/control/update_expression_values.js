@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let x = "4";
   let a = x++;
   let b = --x;

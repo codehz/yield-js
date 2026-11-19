@@ -7,7 +7,7 @@ use yield_vm::{
 };
 
 const SOURCE: &str = r#"
-async function run(input) {
+export async function run(input) {
   inspect(input);
   const base = seed();
   const x = await wait("a");

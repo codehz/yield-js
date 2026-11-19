@@ -1,6 +1,6 @@
 // @fulfilled true
 
-async function run() {
+export async function run() {
   let n = 0;
   const obj = { x: 7 };
   const result = delete (n++, obj.x);

@@ -3,7 +3,7 @@
 function boom() {
   throw 6;
 }
-function run() {
+export function run() {
   try {
     boom();
   } catch {
