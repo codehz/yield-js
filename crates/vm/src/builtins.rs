@@ -176,6 +176,8 @@ pub(crate) enum BuiltinCall {
     ArrayJoin,
     ArrayToString,
     IteratorIdentity,
+    ReflectApply,
+    ReflectConstruct,
     ReflectOwnKeys,
     ReflectDeleteProperty,
     ReflectGet,
@@ -203,6 +205,14 @@ enum Dispatch<'a> {
     Script { func_id: u32, env: ObjectId },
     Builtin(BuiltinCall),
     Bound(&'a BoundObject),
+}
+
+enum Constructor {
+    Script { func_id: u32, env: ObjectId },
+    Promise,
+    Object,
+    Array,
+    Error { name: String },
 }
 
 const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
@@ -537,6 +547,8 @@ impl Vm {
             "set",
             "has",
             "getOwnPropertyDescriptor",
+            "apply",
+            "construct",
         ] {
             let method = self.heap.alloc_builtin("Reflect", Some(name));
             self.heap
@@ -669,62 +681,147 @@ impl Vm {
         }
     }
 
-    pub(crate) fn construct(
+    fn constructor(&self, value: &Value) -> Result<Option<Constructor>, VmError> {
+        Ok(match self.classify(value)? {
+            Some(Dispatch::Script { func_id, env })
+                if func_id != self.build.script
+                    && self.build.functions[self.function_index(func_id)?].is_constructable() =>
+            {
+                Some(Constructor::Script { func_id, env })
+            }
+            Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
+            Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
+            Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => Some(Constructor::Array),
+            Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
+                Some(Constructor::Error { name })
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn construct_with(
         &mut self,
         host: &mut dyn Host,
         callee: &Value,
         args: Vec<Value>,
+        new_target: &Value,
     ) -> Result<Invocation, VmError> {
-        match self.classify(callee)? {
-            Some(Dispatch::Script { func_id, env }) => {
-                if func_id == self.build.script {
-                    return Err(VmError::InvalidState(
-                        "script function is not callable".to_owned(),
-                    ));
+        let Some(constructor) = self.constructor(callee)? else {
+            return match self.classify(callee)? {
+                Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
+                    self.call_string(host, &args, true)
                 }
-                let index = self.function_index(func_id)?;
-                let constructable = self.build.functions[index].is_constructable();
-                if !constructable {
-                    return self.throw_type_error("value is not a constructor");
+                Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
+                    self.throw_type_error("Symbol is not a constructor")
                 }
-                let prototype_value =
-                    match self.read_member(host, callee, &Value::String("prototype".to_owned()))? {
-                        Invocation::Value(value) => value,
-                        thrown @ Invocation::Thrown(_) => return Ok(thrown),
-                    };
-                let prototype = match prototype_value {
-                    Value::Object(id) if self.heap.is_environment(id) != Some(true) => Some(id),
-                    _ => None,
-                };
-                let instance = self.heap.alloc_plain_with(prototype);
-                match self.call_function(
-                    host,
-                    func_id,
-                    Some(env),
-                    args,
-                    &Value::Object(instance),
-                )? {
-                    Invocation::Thrown(value) => Ok(Invocation::Thrown(value)),
-                    Invocation::Value(Value::Object(id)) => {
-                        Ok(Invocation::Value(Value::Object(id)))
+                _ => self.throw_type_error("value is not a constructor"),
+            };
+        };
+        let prototype = if !ops::strict_equal(callee, new_target)
+            || matches!(constructor, Constructor::Script { .. })
+        {
+            match self.read_property(host, new_target, PropertyKeyRef::String("prototype"))? {
+                Invocation::Value(Value::Object(id)) => Some(id),
+                Invocation::Value(_) => None,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            }
+        } else {
+            None
+        };
+        let result = match constructor {
+            Constructor::Script { func_id, env } => {
+                let instance = Value::Object(self.heap.alloc_plain_with(prototype));
+                return match self.call_function(host, func_id, Some(env), args, &instance)? {
+                    Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
+                        Ok(Invocation::Value(instance))
                     }
-                    Invocation::Value(_) => Ok(Invocation::Value(Value::Object(instance))),
+                    result => Ok(result),
+                };
+            }
+            Constructor::Promise => {
+                return self.construct_promise(host, args, prototype);
+            }
+            Constructor::Object => {
+                // Do not change the prototype of a supplied argument object.
+                if let Some(prototype) = prototype {
+                    return Ok(Invocation::Value(Value::Object(
+                        self.heap.alloc_plain_with(Some(prototype)),
+                    )));
                 }
+                return self.construct_object(&args);
             }
-            Some(Dispatch::Builtin(BuiltinCall::Constructor)) => self.construct_promise(host, args),
-            Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => self.construct_object(&args),
-            Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => self.construct_array(args),
-            Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => {
-                self.call_string(host, &args, true)
-            }
-            Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
-                self.construct_error(host, &name, args)
-            }
-            Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
-                self.throw_type_error("Symbol is not a constructor")
-            }
-            _ => self.throw_type_error("value is not a constructor"),
+            Constructor::Array => self.construct_array(args)?,
+            Constructor::Error { name } => self.construct_error(host, &name, args)?,
+        };
+        if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
+            && !self.heap.set_prototype(*id, Some(prototype))?
+        {
+            return self.throw_type_error("cannot set constructor result prototype");
         }
+        Ok(result)
+    }
+
+    fn reflect_call(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+        construct: bool,
+    ) -> Result<Invocation, VmError> {
+        let target = args.first().unwrap_or(&Value::Undefined);
+        let new_target = args.get(2).unwrap_or(target);
+        let list = if construct {
+            if self.constructor(target)?.is_none() || self.constructor(new_target)?.is_none() {
+                return self.throw_type_error("value is not a constructor");
+            }
+            args.get(1)
+        } else {
+            if !self.is_callable(target) {
+                return self.throw_type_error("value is not a function");
+            }
+            args.get(2)
+        };
+        let values =
+            match self.arguments_from_array_like(host, list.unwrap_or(&Value::Undefined))? {
+                Ok(values) => values,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        if construct {
+            self.construct_with(host, target, values, new_target)
+        } else {
+            self.invoke(
+                host,
+                target,
+                values,
+                args.get(1).unwrap_or(&Value::Undefined),
+            )
+        }
+    }
+
+    fn arguments_from_array_like(
+        &mut self,
+        host: &mut dyn Host,
+        list: &Value,
+    ) -> Result<Result<Vec<Value>, Value>, VmError> {
+        if !matches!(list, Value::Object(_)) {
+            return Ok(Err(self.type_error("argumentsList must be an object")?));
+        }
+        let length = match self.read_property(host, list, PropertyKeyRef::String("length"))? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let length = match self.coerce_number(host, &length)? {
+            // Casting NaN to an integer yields zero, as required by ToLength.
+            Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as u64,
+            Err(error) => return Ok(Err(error)),
+        };
+        let mut values = Vec::new();
+        for index in 0..length {
+            match self.read_property(host, list, PropertyKeyRef::String(&index.to_string()))? {
+                Invocation::Value(value) => values.push(value),
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            }
+        }
+        Ok(Ok(values))
     }
 
     fn classify(&self, value: &Value) -> Result<Option<Dispatch<'_>>, VmError> {
@@ -876,6 +973,8 @@ impl Vm {
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
+            BuiltinCall::ReflectApply => self.reflect_call(host, &args, false),
+            BuiltinCall::ReflectConstruct => self.reflect_call(host, &args, true),
             BuiltinCall::ReflectOwnKeys => {
                 let Some(Value::Object(id)) = args.first() else {
                     return self.throw_type_error("Reflect.ownKeys requires an object");
@@ -1773,12 +1872,17 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         args: Vec<Value>,
+        prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
         let executor = args.first().cloned().unwrap_or(Value::Undefined);
         if !self.is_callable(&executor) {
             return self.throw_type_error("Promise executor is not a function");
         }
         let promise = self.heap.alloc_promise();
+        if let Some(prototype) = prototype {
+            let accepted = self.heap.set_prototype(promise, Some(prototype))?;
+            debug_assert!(accepted, "fresh Promise accepts its prototype");
+        }
         let (resolve_id, reject_id) = self.alloc_capability_pair(promise)?;
         let invocation = self.invoke(
             host,
@@ -2365,6 +2469,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             }),
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
+        ("Reflect", Some("apply")) => Some(BuiltinCall::ReflectApply),
+        ("Reflect", Some("construct")) => Some(BuiltinCall::ReflectConstruct),
         ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
         ("Reflect", Some("deleteProperty")) => Some(BuiltinCall::ReflectDeleteProperty),
         ("Reflect", Some("get")) => Some(BuiltinCall::ReflectGet),

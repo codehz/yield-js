@@ -251,7 +251,7 @@ impl Vm {
             Instr::Construct { dst, callee, args } => {
                 let args = self.read_call_args(frame, &args)?;
                 let callee = frame.read(callee)?;
-                let invocation = self.construct(host, &callee, args)?;
+                let invocation = self.construct_with(host, &callee, args, &callee)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
