@@ -1,4 +1,4 @@
-use crate::value::{HostValue, NativeKey};
+use crate::value::{HostValue, NativeKey, Value};
 
 /// Metadata the VM persists for a recoverable host operation. Private host
 /// state stays with the host.
@@ -30,6 +30,10 @@ pub trait Host {
 
     /// Invoked synchronously by script code. Must not re-enter the VM.
     fn call(&mut self, import: &str, args: &[HostValue]) -> Result<HostReply, String>;
+
+    /// Called when a microtask callback throws with no promise result.
+    /// The host decides whether and how to log the error.
+    fn report_error(&mut self, _error: &Value) {}
 
     /// Called during snapshot restore before execution starts.
     fn has_native(&self, key: &NativeKey) -> bool;

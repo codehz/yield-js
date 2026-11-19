@@ -149,7 +149,7 @@ Case contract (`yield_poc::run_case`):
 - Body must explicitly export a callable binding under the public name `run`. The runner always starts `"run"`.
 - `@args` JSON array, only as the first directive.
 - `@pending ["wait:a"]`, `@restore` (JSON round-trip, then `Vm::restore`), `@fulfill ["wait:a", 2]`, `@reject ["wait:a", "boom"]`.
-- Last directive must be `@returns`, `@fulfilled`, or `@rejected`. Scalars only: number, bool, string, `null`, `undefined`.
+- Last directive must be `@returns`, `@fulfilled`, `@rejected`, or `@uncaught`. Scalars only: number, bool, string, `null`, `undefined`. `@uncaught` takes an array and checks the exact ordered list of errors reported to the host.
 - Fixed compile imports: `inspect`, `seed`, `wait`, `bind`, `setLabel`.
 
 Example:

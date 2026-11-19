@@ -57,6 +57,7 @@
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
+- `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
 - 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
 - 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型（含修改过的内建共享原型）按身份保存；恢复时拒绝悬空链接、环境对象、原型环和 `Object.prototype` 的非空原型。普通属性可以互相引用。

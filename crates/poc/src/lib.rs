@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::Build;
-use yield_vm::{Host, HostReply, HostValue, NativeKey, PendingOperationMeta};
+use yield_vm::{Host, HostReply, HostValue, NativeKey, PendingOperationMeta, Value};
 
 mod case;
 
@@ -13,6 +13,7 @@ const IMPORTS: [&str; 5] = ["inspect", "seed", "wait", "bind", "setLabel"];
 #[derive(Default)]
 pub struct TestHost {
     calls: Vec<(String, Vec<HostValue>)>,
+    errors: Vec<Value>,
     operations: BTreeMap<String, PendingOperationMeta>,
     natives: BTreeSet<NativeKey>,
     pub reject_restore_operation: bool,
@@ -27,6 +28,10 @@ impl TestHost {
 
     pub fn count(&self, name: &str) -> usize {
         self.calls.iter().filter(|(call, _)| call == name).count()
+    }
+
+    pub fn errors(&self) -> &[Value] {
+        &self.errors
     }
 }
 
@@ -70,6 +75,10 @@ impl Host for TestHost {
             "setLabel" => Ok(HostReply::Value(HostValue::Undefined)),
             _ => Err(format!("unknown import {import}")),
         }
+    }
+
+    fn report_error(&mut self, error: &Value) {
+        self.errors.push(error.clone());
     }
 
     fn has_native(&self, key: &NativeKey) -> bool {

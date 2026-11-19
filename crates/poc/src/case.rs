@@ -76,6 +76,9 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
             Directive::Rejected(expected) => {
                 assert_settled(name, step.line, "@rejected", &vm, &result, false, &expected)?;
             }
+            Directive::Uncaught(expected) => {
+                assert_uncaught(name, step.line, &expected, host.errors())?;
+            }
         }
     }
     Ok(())
@@ -95,6 +98,7 @@ enum Directive {
     Returns(Expected),
     Fulfilled(Expected),
     Rejected(Expected),
+    Uncaught(Vec<Expected>),
 }
 
 enum Expected {
@@ -146,6 +150,7 @@ fn parse_directive(line: usize, body: &str) -> Result<Step, String> {
         "returns" => Directive::Returns(parse_expected(line, "@returns", args)?),
         "fulfilled" => Directive::Fulfilled(parse_expected(line, "@fulfilled", args)?),
         "rejected" => Directive::Rejected(parse_expected(line, "@rejected", args)?),
+        "uncaught" => Directive::Uncaught(parse_uncaught(line, args)?),
         other => return Err(format!("{line}: unknown directive `{other}`")),
     };
     Ok(Step { line, kind })
@@ -191,7 +196,10 @@ fn validate(steps: &[Step]) -> Result<(), String> {
 fn is_terminal(kind: &Directive) -> bool {
     matches!(
         kind,
-        Directive::Returns(_) | Directive::Fulfilled(_) | Directive::Rejected(_)
+        Directive::Returns(_)
+            | Directive::Fulfilled(_)
+            | Directive::Rejected(_)
+            | Directive::Uncaught(_)
     )
 }
 
@@ -205,6 +213,7 @@ fn directive_name(kind: &Directive) -> &'static str {
         Directive::Returns(_) => "@returns",
         Directive::Fulfilled(_) => "@fulfilled",
         Directive::Rejected(_) => "@rejected",
+        Directive::Uncaught(_) => "@uncaught",
     }
 }
 
@@ -282,6 +291,59 @@ fn parse_array(line: usize, directive: &str, args: &str) -> Result<Vec<serde_jso
             json_kind(&other)
         )),
     }
+}
+
+fn parse_uncaught(line: usize, args: &str) -> Result<Vec<Expected>, String> {
+    const DIRECTIVE: &str = "@uncaught";
+    let mut undefined = Vec::new();
+    let mut normalized = String::new();
+    let args = if let Some(items) = args.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        && items.contains("undefined")
+    {
+        // Normalize whole bare undefined items without changing quoted strings.
+        let mut quoted = false;
+        let mut escaped = false;
+        let items = items.split(|ch| {
+            if escaped {
+                escaped = false;
+            } else if quoted && ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = !quoted;
+            } else if !quoted && ch == ',' {
+                return true;
+            }
+            false
+        });
+        normalized.push('[');
+        for (index, item) in items.enumerate() {
+            if index != 0 {
+                normalized.push(',');
+            }
+            if item.trim() == "undefined" {
+                undefined.push(index);
+                normalized.push_str("null");
+            } else {
+                normalized.push_str(item);
+            }
+        }
+        normalized.push(']');
+        &normalized
+    } else {
+        args
+    };
+    let mut undefined = undefined.into_iter().peekable();
+    parse_array(line, DIRECTIVE, args)?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if undefined.next_if_eq(&index).is_some() {
+                Ok(Expected::Undefined)
+            } else {
+                json_scalar(line, DIRECTIVE, value)
+            }
+        })
+        .collect()
 }
 
 fn parse_expected(line: usize, directive: &str, args: &str) -> Result<Expected, String> {
@@ -437,6 +499,35 @@ fn assert_value(
         "{name}:{line}: {directive}: expected {}, actual {}",
         format_expected(expected),
         format_value(actual)
+    ))
+}
+
+fn assert_uncaught(
+    name: &str,
+    line: usize,
+    expected: &[Expected],
+    actual: &[Value],
+) -> Result<(), String> {
+    if expected.len() == actual.len()
+        && expected
+            .iter()
+            .zip(actual)
+            .all(|(expected, actual)| values_equal(expected, actual))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{name}:{line}: @uncaught: expected [{}], actual [{}]",
+        expected
+            .iter()
+            .map(format_expected)
+            .collect::<Vec<_>>()
+            .join(", "),
+        actual
+            .iter()
+            .map(format_value)
+            .collect::<Vec<_>>()
+            .join(", "),
     ))
 }
 

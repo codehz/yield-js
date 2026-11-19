@@ -3,10 +3,9 @@
 //! Script-visible `Error` and `TypeError` are objects, including VM-generated
 //! TypeErrors. The `AggregateError` rejection from `Promise.any` is a string.
 //!
-//! `queueMicrotask` enqueues a VM microtask. It does not call the host, so
-//! `Host::call` cannot re-enter the VM from this path. A throw inside that
-//! callback has no result promise and is dropped: unhandled rejections are not
-//! tracked here.
+//! `queueMicrotask` enqueues a VM microtask. A throw from its callback has no
+//! result promise and is delivered through `Host::report_error`. Unhandled
+//! promise rejections are not tracked.
 
 use std::collections::BTreeMap;
 
@@ -2777,7 +2776,9 @@ impl Vm {
         function: Value,
         args: Vec<Value>,
     ) -> Result<(), VmError> {
-        let _ = self.invoke(host, &function, args, &Value::Undefined)?;
+        if let Invocation::Thrown(error) = self.invoke(host, &function, args, &Value::Undefined)? {
+            host.report_error(&error);
+        }
         Ok(())
     }
 
