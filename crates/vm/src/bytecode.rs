@@ -443,6 +443,7 @@ where
 #[derive(Serialize)]
 struct DigestInput<'a> {
     bytecode_version: u32,
+    execution_revision: u32,
     constants: &'a [Constant],
     imports: &'a [ImportDecl],
     functions: &'a [Function],
@@ -477,6 +478,9 @@ impl Build {
     pub fn compute_id(&self) -> String {
         let input = DigestInput {
             bytecode_version: self.bytecode_version,
+            // Reject artifacts from older builtin semantics even when their
+            // instruction stream and snapshot record layout are unchanged.
+            execution_revision: 1,
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,

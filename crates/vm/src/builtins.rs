@@ -1515,23 +1515,52 @@ impl Vm {
         kind: CombineKind,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        let iterable = args.first().cloned().unwrap_or(Value::Undefined);
-        let Value::Object(id) = iterable else {
-            return self.throw_type_error("Promise combinator iterable is not an array");
-        };
-        let Object::Array(array) = self.heap.get(id)? else {
-            return self.throw_type_error("Promise combinator iterable is not an array");
-        };
-        let elements = self.read_array_elements(host, id, array.length)?;
+        let iterable = args.first().unwrap_or(&Value::Undefined);
         let result = self.heap.alloc_promise();
-        let elements = match elements {
-            Ok(elements) => elements,
+        let (iterator, next) = match self.get_iterator(host, iterable)? {
+            Ok(record) => record,
             Err(error) => {
                 self.settle(result, Settlement::Rejected(error))?;
                 return Ok(Invocation::Value(Value::Object(result)));
             }
         };
-        if elements.is_empty() {
+        let mut state = CombineState {
+            kind,
+            count: 0,
+            remaining: 0,
+            results: Vec::new(),
+            states: Vec::new(),
+            first: None,
+            elements: Vec::new(),
+        };
+        loop {
+            let element = match self.iterator_step(host, &iterator, &next)? {
+                Ok(Some(element)) => element,
+                Ok(None) => break,
+                Err(error) => {
+                    self.settle(result, Settlement::Rejected(error))?;
+                    return Ok(Invocation::Value(Value::Object(result)));
+                }
+            };
+            let index = state.elements.len();
+            let slot = self.heap.alloc_promise();
+            self.react(
+                slot,
+                ReactionJob::Combine {
+                    result,
+                    index,
+                    kind,
+                },
+            )?;
+            // Resolve before advancing: reading an element's `then` may run script.
+            self.resolve_promise(host, slot, element)?;
+            state.elements.push(slot);
+            state.results.push(Value::Undefined);
+            if kind == CombineKind::AllSettled {
+                state.states.push(PromiseState::Pending);
+            }
+        }
+        if state.elements.is_empty() {
             match kind {
                 CombineKind::All | CombineKind::AllSettled => {
                     let array = self.heap.alloc_array(Vec::new());
@@ -1542,42 +1571,11 @@ impl Vm {
                     self.settle(result, Settlement::Rejected(aggregate_error()))?;
                 }
             }
-            return Ok(Invocation::Value(Value::Object(result)));
-        }
-        let count = elements.len();
-        self.heap.combines.insert(
-            result,
-            CombineState {
-                kind,
-                count,
-                remaining: count,
-                results: vec![Value::Undefined; count],
-                states: if kind == CombineKind::AllSettled {
-                    vec![PromiseState::Pending; count]
-                } else {
-                    Vec::new()
-                },
-                first: None,
-                elements: Vec::with_capacity(count),
-            },
-        );
-        for (index, element) in elements.into_iter().enumerate() {
-            let slot = self.heap.alloc_promise();
-            self.heap
-                .combines
-                .get_mut(&result)
-                .expect("combine state inserted above")
-                .elements
-                .push(slot);
-            self.react(
-                slot,
-                ReactionJob::Combine {
-                    result,
-                    index,
-                    kind,
-                },
-            )?;
-            self.resolve_promise(host, slot, element)?;
+        } else {
+            // Reactions cannot run until this synchronous builtin returns.
+            state.count = state.elements.len();
+            state.remaining = state.count;
+            self.heap.combines.insert(result, state);
         }
         Ok(Invocation::Value(Value::Object(result)))
     }

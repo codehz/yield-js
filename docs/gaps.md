@@ -51,11 +51,10 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 | --- | --- |
 | `await` 普通对象 | thenable 同化已有。没有可调用 `then` 的对象（普通对象、数组、函数、宿主原生句柄）在 `await` 上是 `VmError`：`await only supports VM promises and plain values`。同一值交给 `Promise.resolve` 可以兑现 |
 | Promise 自决议 | 用自身决议被忽略，不抛规范里的 `TypeError` |
-| Promise 组合子 | `all` / `allSettled` / `race` / `any` 已实现，但只接受数组，不走迭代协议。`Promise.any` 全拒绝时的拒绝值是字符串 `AggregateError: All promises were rejected`，不是 `AggregateError` 对象 |
+| Promise 组合子 | `all` / `allSettled` / `race` / `any` 已接入同步迭代协议，但仍使用 VM 内部决议流程，不查找接收者覆写的 `resolve`。`Promise.any` 全拒绝时的拒绝值是字符串 `AggregateError: All promises were rejected`，不是带 `errors` 数组的 `AggregateError` 对象 |
 | `queueMicrotask` | 回调抛错没有结果 Promise，异常被丢掉；未处理拒绝不跟踪 |
 | 函数对象 | 函数通过共享内部原型继承 `toString` 和 `Object.prototype`，但默认 `toString` 有意返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法；`apply` 的参数表只接受数组、`null` 或 `undefined`。绑定函数不能 `new`，也不自动带 `.prototype`。没有 `Function` 全局或函数的 `name` / `length` |
 | 数组字面量空洞 | `[1,,2]` 的省略项写成显式 `undefined`，不是稀疏洞。运行时增长 `length`、越界写索引或删除索引可以形成真正的洞 |
-| 迭代关闭 | `for…of` 提前退出会 `IteratorClose`；继续同一循环或自然耗尽不调用 `return`。数组展开只在 `next` 抛错时关闭，自然耗尽不关闭 |
 | 原型与描述符 | `Object.getPrototypeOf` 不对原始值装箱。仍缺 `Object.assign` / `is` 和 `Object.getOwnPropertyDescriptors`。宿主原生句柄固定不可扩展，不开放属性定义。键转换沿用第 1 节的子集语义；数组 `length` 的描述符值仍使用简化数字转换。 |
 | 错误对象 | `Error` / `TypeError` 可调用或 `new`，含 `name`、`message` 和简化 `stack`。没有 `RangeError`、`ReferenceError`、`SyntaxError`、`AggregateError` 等其它标准错误类型 |
 | 未声明名字 | 除 `typeof` 折叠为 `"undefined"` 外，读取或赋值都是编译错误，不是运行时 `ReferenceError`。没有 `globalThis`，不能做 `globalThis.MessageChannel` 这种探测 |
@@ -84,7 +83,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 ## 5. 结构性缺口
 
 1. **部分内建参数仍绕过完整的强制转换**。运算、计算属性键、模板插值及数组元素字符串化已调用对象转换方法并传播脚本异常；部分内建参数、原始值装箱和数字边界语义仍不完整。
-2. **同步迭代协议尚未覆盖所有消费者**。`for…of`、数组展开和实参展开共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；解构和 Promise 组合子尚未接入。
+2. **同步迭代协议尚未覆盖解构**。`for…of`、数组展开、实参展开和 Promise 组合子共用 `[Symbol.iterator]` 查找与 `next` 缓存机制；数组解构尚未接入。
 3. **属性枚举尚未覆盖对象展开和代理。** 对象展开仍需按自有键顺序复制可枚举的字符串与 Symbol 属性；`Proxy` 仍需将各 trap 接入属性操作，并根据目标的扩展性和自有描述符校验 trap 结果。
 4. **新的堆种类仍要改可达性**。`RegExp`、`Map` / `Set`、`Proxy`、`WeakMap` 都要进 `Value` 或 `Object`、`heap.rs::write_edges` 和快照。`WeakMap` 不能把键提升成强根。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
@@ -94,7 +93,6 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`、以及 Symbol 参与�
 flowchart LR
   C[对象强制转换] --> S[String / Number / 模板]
   I[已有同步迭代] --> D[解构]
-  I --> P[组合子接受任意可迭代]
   E --> O[对象展开]
   E --> R[Proxy 与其余 Reflect]
 ```

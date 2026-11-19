@@ -728,8 +728,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         spread_array = Some(array);
                         array
                     };
-                    // ArgumentListEvaluation propagates iterator step errors
-                    // directly, without calling the iterator's return method.
                     self.emit_spread(array, &spread.argument)?;
                 }
                 other => {
@@ -1155,8 +1153,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     self.append_array_element(dst, value);
                 }
                 ArrayExpressionElement::SpreadElement(spread) => {
-                    let (iterator, step_pc) = self.emit_spread(dst, &spread.argument)?;
-                    self.protect_iterator_reads(iterator, step_pc, self.pc())?;
+                    self.emit_spread(dst, &spread.argument)?;
                 }
                 other => {
                     let expression = other.as_expression().ok_or_else(|| {
@@ -1185,7 +1182,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         array: Reg,
         iterable: &'ast Expression<'ast>,
-    ) -> Result<(Reg, usize), CompileError> {
+    ) -> Result<(), CompileError> {
         let iterable = self.compile_expression(iterable)?;
         let iterator = self.alloc_reg()?;
         let next = self.alloc_reg()?;
@@ -1210,7 +1207,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.jump_to(step_pc);
         let end = self.pc();
         self.patch_jump(exhausted, end)?;
-        Ok((iterator, step_pc))
+        Ok(())
     }
 }
 

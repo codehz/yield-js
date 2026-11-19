@@ -307,14 +307,10 @@ impl Vm {
                 next,
                 iterable,
             } => {
-                let value = match self.get_iterator(host, frame.read_ref(iterable)?)? {
-                    Invocation::Value(value) => value,
-                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                };
-                let next_method =
-                    match self.read_property(host, &value, PropertyKeyRef::String("next"))? {
-                        Invocation::Value(value) => value,
-                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                let (value, next_method) =
+                    match self.get_iterator(host, frame.read_ref(iterable)?)? {
+                        Ok(record) => record,
+                        Err(error) => return Ok(Step::Throw(error)),
                     };
                 frame.write(iterator, value)?;
                 frame.write(next, next_method)?;
@@ -326,29 +322,16 @@ impl Vm {
                 iterator,
                 next,
             } => {
-                let result =
-                    self.invoke(host, &frame.read(next)?, Vec::new(), &frame.read(iterator)?)?;
-                let result = match self
-                    .require_iterator_object(result, "iterator next must return an object")?
-                {
-                    Invocation::Value(value) => value,
-                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                let item = match self.iterator_step(
+                    host,
+                    frame.read_ref(iterator)?,
+                    frame.read_ref(next)?,
+                )? {
+                    Ok(item) => item,
+                    Err(error) => return Ok(Step::Throw(error)),
                 };
-                let is_done =
-                    match self.read_property(host, &result, PropertyKeyRef::String("done"))? {
-                        Invocation::Value(value) => value.truthy(),
-                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                    };
-                let item = if is_done {
-                    Value::Undefined
-                } else {
-                    match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
-                        Invocation::Value(value) => value,
-                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                    }
-                };
-                frame.write(done, Value::Bool(is_done))?;
-                frame.write(value, item)?;
+                frame.write(done, Value::Bool(item.is_none()))?;
+                frame.write(value, item.unwrap_or(Value::Undefined))?;
                 Ok(Step::Next)
             }
             Instr::IteratorClose {
@@ -463,21 +446,54 @@ impl Vm {
         }
     }
 
-    fn get_iterator(
+    pub(crate) fn get_iterator(
         &mut self,
         host: &mut dyn Host,
         iterable: &Value,
-    ) -> Result<Invocation, VmError> {
-        if !matches!(iterable, Value::Object(_) | Value::String(_)) {
-            return self.throw_type_error("value is not iterable");
-        }
-        let method =
+    ) -> Result<Result<(Value, Value), Value>, VmError> {
+        let iterator = if matches!(iterable, Value::Object(_) | Value::String(_)) {
             match self.read_property(host, iterable, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))? {
-                Invocation::Value(method) => method,
-                thrown => return Ok(thrown),
+                Invocation::Value(method) => {
+                    let result = self.invoke(host, &method, Vec::new(), iterable)?;
+                    self.require_iterator_object(result, "Symbol.iterator must return an object")?
+                }
+                thrown => thrown,
+            }
+        } else {
+            self.throw_type_error("value is not iterable")?
+        };
+        let iterator = match iterator {
+            Invocation::Value(iterator) => iterator,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        match self.read_property(host, &iterator, PropertyKeyRef::String("next"))? {
+            Invocation::Value(next) => Ok(Ok((iterator, next))),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
+    }
+
+    /// A failed step is not a consumer-side abrupt exit and does not close the iterator.
+    pub(crate) fn iterator_step(
+        &mut self,
+        host: &mut dyn Host,
+        iterator: &Value,
+        next: &Value,
+    ) -> Result<Result<Option<Value>, Value>, VmError> {
+        let result = self.invoke(host, next, Vec::new(), iterator)?;
+        let result =
+            match self.require_iterator_object(result, "iterator next must return an object")? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => return Ok(Err(error)),
             };
-        let invocation = self.invoke(host, &method, Vec::new(), iterable)?;
-        self.require_iterator_object(invocation, "Symbol.iterator must return an object")
+        match self.read_property(host, &result, PropertyKeyRef::String("done"))? {
+            Invocation::Value(done) if done.truthy() => return Ok(Ok(None)),
+            Invocation::Thrown(error) => return Ok(Err(error)),
+            _ => {}
+        }
+        match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
+            Invocation::Value(value) => Ok(Ok(Some(value))),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
     }
 
     fn append_array(&mut self, array: &Value, value: &Value) -> Result<(), VmError> {
