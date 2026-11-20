@@ -393,6 +393,54 @@ export async function run() {
     );
 }
 
+struct Point {
+    x: f64,
+}
+
+impl HostClass for Point {
+    const TAG: &'static str = "Point";
+    const METHODS: &'static [yield_vm::binding::MethodDecl] = &[yield_vm::binding::MethodDecl {
+        name: "x",
+        arity: 0,
+        call: |cx| {
+            let this = cx.this::<Point>()?;
+            Ok(JsValue::number(this.instance().payload(cx)?.x))
+        },
+    }];
+}
+
+#[test]
+fn declared_constructor_exports_create_class_instances() {
+    let bindings = Bindings::builder()
+        .class::<Point>()
+        .module(
+            ModuleDecl::new("geom").constructor_for::<Point>("Point", 1, |cx| {
+                let value = cx.arg(0)?;
+                let x = cx.number(&value)?;
+                let point = cx.alloc(Point { x })?;
+                Ok(point.value(cx))
+            }),
+        )
+        .build()
+        .expect("geometry bindings");
+    let source = r#"
+import { Point } from "geom";
+export function run() {
+  const point = new Point(3);
+  if (!(point instanceof Point)) return -1;
+  if (Object.getPrototypeOf(point) !== Point.prototype) return -2;
+  return point.x();
+}
+"#;
+    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let mut host = StrategyHost::new(bindings);
+    let mut vm = Vm::new(build, &mut host).expect("create VM");
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).expect("start"),
+        Value::Number(3.0)
+    );
+}
+
 #[test]
 fn corrupt_instance_payload_rejects_restore() {
     let source = r#"

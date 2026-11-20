@@ -906,6 +906,15 @@ impl Vm {
         let mut current = Some(target);
         while let Some(id) = current {
             let object = self.heap.get(id)?;
+            if let Object::Native(native) = object
+                && key.is_str("prototype")
+                && let crate::binding::NativeTarget::Export(export) = native.target
+                && let Some(class) = self.bindings.export_class(export)
+            {
+                return Ok(Invocation::Value(Value::Object(
+                    self.class_prototypes[class],
+                )));
+            }
             if let Object::Proxy {
                 target, handler, ..
             } = *object

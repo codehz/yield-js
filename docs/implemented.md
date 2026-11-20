@@ -5,7 +5,7 @@
 - 字节码版本、构建 ID 摘要、函数/导入/导出/常量/恢复表/异常表结构校验；导出表拒绝重复公开名，目标必须是初始化函数声明的绑定。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。声明由 `yield_vm::binding::Bindings` builder 提供，编译器清单由同一份声明派生。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
-- 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。
+- 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。`constructor_for::<T>` 导出的构造函数暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec 使用 `DecodeCx` 访问平台服务；服务 ID 进入声明指纹，缺失或版本不符整体拒绝恢复。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。

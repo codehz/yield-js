@@ -167,6 +167,7 @@ pub struct FunctionDecl {
     pub name: String,
     pub arity: usize,
     pub constructable: bool,
+    pub class: Option<&'static str>,
     pub call: HostCall,
 }
 
@@ -459,6 +460,13 @@ impl Bindings {
             .get(id.module as usize)?
             .exports
             .get(id.export as usize)
+    }
+
+    pub fn export_class(&self, id: ExportId) -> Option<ClassId> {
+        match self.export_decl(id)? {
+            ExportDecl::Function(function) => function.class.and_then(|tag| self.class_by_tag(tag)),
+            ExportDecl::Constant(_) => None,
+        }
     }
 
     pub fn class_tag(&self, class: ClassId) -> Option<&str> {
@@ -792,6 +800,7 @@ impl ModuleDecl {
             name: name.to_owned(),
             arity,
             constructable: false,
+            class: None,
             call,
         }));
         self
@@ -802,6 +811,23 @@ impl ModuleDecl {
             name: name.to_owned(),
             arity,
             constructable: true,
+            class: None,
+            call,
+        }));
+        self
+    }
+
+    pub fn constructor_for<T: HostClass>(
+        mut self,
+        name: &str,
+        arity: usize,
+        call: HostCall,
+    ) -> Self {
+        self.exports.push(ExportDecl::Function(FunctionDecl {
+            name: name.to_owned(),
+            arity,
+            constructable: true,
+            class: Some(T::TAG),
             call,
         }));
         self
@@ -833,8 +859,8 @@ fn fingerprint(
         for export in &module.exports {
             match export {
                 ExportDecl::Function(function) => line(format!(
-                    "export {} function arity={} constructable={}",
-                    function.name, function.arity, function.constructable
+                    "export {} function arity={} constructable={} class={:?}",
+                    function.name, function.arity, function.constructable, function.class
                 )),
                 ExportDecl::Constant(constant) => line(format!(
                     "export {} constant {:?}",

@@ -426,4 +426,4 @@ flowchart TB
 
 已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌与恢复期重新登记；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
 
-尚未定案或未实现：弱引用槽、`JsMap` 槽、恢复期访问器校验时机、绑定类继承、Symbol 成员名、C ABI、宏生成、TypeScript 定义生成、payload 二进制格式与流式读取、跨线程交付、恢复资源上限。构造器导出已能按普通函数声明并通过 `new` 调用，但 `instanceof` 依赖的 `prototype` 属性安装与继承规则仍留待 15 节第 4 项定案。
+尚未定案或未实现：弱引用槽、`JsMap` 槽、恢复期访问器校验时机、绑定类继承、Symbol 成员名、C ABI、宏生成、TypeScript 定义生成、payload 二进制格式与流式读取、跨线程交付、恢复资源上限。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用；绑定类被脚本 `class extends` 继承的规则仍留待 15 节第 4 项定案。
