@@ -28,13 +28,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Expression::NullLiteral(_) => self.emit_constant(Constant::Null),
             Expression::NumericLiteral(literal) => {
-                if !literal.value.is_finite() {
-                    return Err(unsupported(
-                        self.source_text(),
-                        literal.span,
-                        "non-finite numeric literal",
-                    ));
-                }
                 self.emit_constant(Constant::Number(literal.value))
             }
             Expression::StringLiteral(literal) => {

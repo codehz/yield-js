@@ -3,6 +3,10 @@
 import { expect } from 'test';
 
 export function run() {
+  expect(1e999).toBe(Infinity);
+  expect(-1e999).toBe(-Infinity);
+  expect(((Infinity) => Infinity)(7)).toBe(7);
+  expect(JSON.stringify(1e999)).toBe('null');
   expect(Number.EPSILON).toBe(2.220446049250313e-16);
   expect(Number.MAX_VALUE).toBe(1.7976931348623157e308);
   expect(Number.MIN_VALUE).toBe(5e-324);

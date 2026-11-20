@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 30;
+pub const BYTECODE_VERSION: u32 = 31;
 
 pub use crate::builtin::BUILTINS;
 
@@ -70,7 +70,7 @@ impl CallArgs {
 pub enum Constant {
     Null,
     Bool(bool),
-    Number(f64),
+    Number(#[serde(with = "crate::value::number_serde")] f64),
     String(JsString),
 }
 
@@ -575,14 +575,6 @@ impl Build {
         if self.build_id != self.compute_id() {
             return Err("build_id does not match the bytecode content".to_owned());
         }
-        for (index, constant) in self.constants.iter().enumerate() {
-            if let Constant::Number(value) = constant
-                && !value.is_finite()
-            {
-                return Err(format!("constant {index} is not a finite number"));
-            }
-        }
-
         let mut func_ids = std::collections::BTreeSet::new();
         let mut func_names = std::collections::BTreeSet::new();
         for function in &self.functions {

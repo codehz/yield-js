@@ -3,6 +3,20 @@ use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::Instr;
 
 #[test]
+fn compiles_overflowing_number_literals() {
+    let build = compile(
+        "export function run() { return [1e999, -1e999]; }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(build.constants.iter().any(|constant| matches!(
+        constant,
+        yield_vm::bytecode::Constant::Number(value) if *value == f64::INFINITY
+    )));
+    build.validate().unwrap();
+}
+
+#[test]
 fn compiles_preload_and_main_in_separate_module_scopes() {
     let options = CompileOptions::default();
     let build = yield_compiler::compile_with_preload(

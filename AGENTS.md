@@ -115,7 +115,7 @@ Easy to break:
 - Before `allocate`, every `Slot` is a logical register stuffed into `SlotKind::Transient`. `slot.kind` is meaningless until `FrameLayout` remaps it. `promote` rewrites one instruction to one instruction so jump, resume, and handler PCs stay valid.
 - `instr.rs::may_throw` must classify any opcode that can deliver a JavaScript exception, or exception edges never reach liveness or promotion. A `VmError` is not a JavaScript exception.
 - `Function::needs_environment` is derived from params and code (`GetBinding` and friends). Do not store a forgeable flag. Restore requires an env iff that function needs one.
-- `Build::validate` rejects non-finite constants. `Vm` also rejects non-finite host numbers.
+- Build constants and host numbers may be non-finite. Build JSON uses the same special-number markers as snapshot values; finite numbers stay JSON numbers.
 - IDs are counters (`ObjectId`, `ContinuationId`) with overflow checks. Snapshot JSON order follows `BTreeMap`.
 
 ## Important Files

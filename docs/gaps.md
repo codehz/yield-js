@@ -10,7 +10,6 @@
 
 | 缺口 | 现状 |
 | --- | --- |
-| 非有限数 | 非有限数字字面量编译拒绝；`Build::validate` 拒绝非有限常量；宿主传入非有限数拒绝。`NaN` / `Infinity` 作为全局原始值已提供，但仍是运行期值而非编译期常量。VM 内算术（如 `1/0`）和 `"Infinity"` 的 `ToNumber` 仍能产生非有限 `Value`，但宿主边界进不来 |
 | 数字和字符串转换 | 默认十进制数字转字符串（含 `Number.prototype.toString()`）仍沿用现有格式，不完全符合 JS 的指数表示规则；`toFixed`、`toExponential`、`toPrecision` 依赖 Rust 格式化，舍入结果可能与 ECMAScript 不同。超长非十进制字符串转数字未保证只舍入一次。函数转字符串有意使用通用文本而非源码 |
 | 原始值属性访问 | 不创建临时包装对象：严格模式下对原始值写入不存在的属性抛出可捕获的 `TypeError`（标准是静默忽略）。包装对象本身已支持，见 [`implemented.md`](implemented.md) |
 | `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |

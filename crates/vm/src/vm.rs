@@ -700,11 +700,6 @@ impl Vm {
             .operations
             .get(&token.id)
             .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
-        if matches!(value, Value::Number(number) if !number.is_finite()) {
-            return Err(VmError::Host(
-                "non-finite numbers are not supported by this PoC".to_owned(),
-            ));
-        }
         let promise = operation.promise;
         self.operations
             .remove(&token.id)
