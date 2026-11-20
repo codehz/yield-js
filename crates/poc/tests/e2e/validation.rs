@@ -427,7 +427,7 @@ fn restore_rejects_missing_or_mismatched_global_this_root() {
 
 #[test]
 fn array_iterator_snapshot_tampering_is_rejected() {
-    let source = include_str!("../cases/arrays/array_iterator_restore.js");
+    let source = include_str!("../cases/arrays/iterator_restore.js");
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
 
@@ -479,7 +479,7 @@ fn array_iterator_snapshot_tampering_is_rejected() {
 
 #[test]
 fn string_iterator_snapshot_rejects_invalid_offsets() {
-    let source = include_str!("../cases/strings/string_iteration_restore.js");
+    let source = include_str!("../cases/strings/iteration_restore.js");
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
     let iterator = snapshot
