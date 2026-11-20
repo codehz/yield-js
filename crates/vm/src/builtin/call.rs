@@ -189,6 +189,17 @@ impl Vm {
             Constructor::Script { func_id, env } => {
                 let prototype = prototype.unwrap_or(self.builtins.get("object.prototype"));
                 let instance = Value::Object(self.heap.alloc_plain_with(Some(prototype)));
+                if let Value::Object(class) = callee
+                    && self
+                        .heap
+                        .function(*class)
+                        .is_some_and(|f| f.class.is_some())
+                    && let Value::Object(receiver) = instance
+                    && let Some(error) =
+                        self.initialize_class_elements(host, *class, receiver, false)?
+                {
+                    return Ok(Invocation::Thrown(error));
+                }
                 match self.call_function(host, func_id, Some(env), args, &instance, new_target)? {
                     Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
                         Ok(Invocation::Value(instance))

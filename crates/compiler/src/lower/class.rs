@@ -33,13 +33,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         class: &'ast Class<'ast>,
         inferred_name: &str,
     ) -> Result<Reg, CompileError> {
-        if let Some(heritage) = &class.heritage {
-            return Err(unsupported(
-                self.source_text(),
-                heritage.expression.span(),
-                "class heritage",
-            ));
-        }
         if let Some(decorator) = class.decorators.first() {
             return Err(unsupported(
                 self.source_text(),
@@ -51,9 +44,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    let feature = if method.computed {
-                        Some("computed class key")
-                    } else if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
+                    let feature = if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
                         Some("private class method")
                     } else if !method.decorators.is_empty() {
                         Some("class method decorator")
@@ -83,13 +74,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         constructor = FunctionSource::Function(&method.value);
                     }
                 }
-                other => {
-                    let feature = if matches!(other, ClassElement::StaticBlock(_)) {
-                        "class static block"
+                ClassElement::StaticBlock(_) => {}
+                ClassElement::PropertyDefinition(field) => {
+                    let feature = if matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
+                        Some("private class field")
+                    } else if !field.decorators.is_empty() {
+                        Some("class field decorator")
                     } else {
-                        "class field"
+                        None
                     };
-                    return Err(unsupported(self.source_text(), other.span(), feature));
+                    if let Some(feature) = feature {
+                        return Err(unsupported(self.source_text(), field.span, feature));
+                    }
+                }
+                other => {
+                    return Err(unsupported(
+                        self.source_text(),
+                        other.span(),
+                        "class element",
+                    ));
                 }
             }
         }
@@ -130,16 +133,56 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         constructor: FunctionSource<'ast>,
         inner: Option<(Reg, yield_vm::BindingId)>,
     ) -> Result<Reg, CompileError> {
+        let heritage = class
+            .heritage
+            .as_ref()
+            .map(|heritage| self.compile_expression(&heritage.expression))
+            .transpose()?;
         let constructor = self.enqueue_function(constructor, name, constructor.span())?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CreateClass {
             dst: self.slot(dst),
             scope: self.class_scope.map(|scope| self.slot(scope)),
             constructor,
+            heritage: heritage.map(|reg| self.slot(reg)),
         });
         for element in &class.body.body {
-            let ClassElement::MethodDefinition(method) = element else {
-                unreachable!("class elements were checked before emission");
+            let method = match element {
+                ClassElement::MethodDefinition(method) => method,
+                ClassElement::PropertyDefinition(field) => {
+                    let key = self.compile_property_key(&field.key, field.computed)?;
+                    let initializer = if let Some(value) = &field.value {
+                        let function = self.enqueue_function(
+                            FunctionSource::ClassField(value),
+                            "<class field>",
+                            value.span(),
+                        )?;
+                        Some(self.emit_function_value(function)?)
+                    } else {
+                        None
+                    };
+                    self.emit(Instr::AddClassField {
+                        class: self.slot(dst),
+                        key: self.slot(key),
+                        initializer: initializer.map(|reg| self.slot(reg)),
+                        is_static: field.r#static,
+                    });
+                    continue;
+                }
+                ClassElement::StaticBlock(block) => {
+                    let function = self.enqueue_function(
+                        FunctionSource::ClassBlock(block),
+                        "<class static block>",
+                        block.span,
+                    )?;
+                    let body = self.emit_function_value(function)?;
+                    self.emit(Instr::AddClassBlock {
+                        class: self.slot(dst),
+                        body: self.slot(body),
+                    });
+                    continue;
+                }
+                _ => unreachable!("class elements were checked before emission"),
             };
             let (kind, prefix) = match method.kind {
                 MethodDefinitionKind::Constructor => continue,
@@ -147,7 +190,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 MethodDefinitionKind::Get => (PropertyDefinition::Get, "get "),
                 MethodDefinitionKind::Set => (PropertyDefinition::Set, "set "),
             };
-            let key = self.compile_property_key(&method.key, false)?;
+            let key = self.compile_property_key(&method.key, method.computed)?;
             let mut buffer = ryu_js::Buffer::new();
             let name = match &method.key {
                 PropertyKey::NumericLiteral(literal) => Some(buffer.format(literal.value).into()),
@@ -167,8 +210,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 kind,
             });
         }
-        // Nothing in this gated subset executes user code during member installation.
-        // The inner name remains uninitialized until all methods are installed.
         if let Some((scope, binding)) = inner {
             self.emit(Instr::InitClassBinding {
                 scope: self.slot(scope),
@@ -176,6 +217,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 src: self.slot(dst),
             });
         }
+        self.emit(Instr::RunClassStatic {
+            class: self.slot(dst),
+        });
         Ok(dst)
     }
 }

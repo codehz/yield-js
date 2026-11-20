@@ -72,6 +72,8 @@ enum FunctionSource<'ast> {
     Method(&'ast Function<'ast>),
     Arrow(&'ast ArrowFunctionExpression<'ast>),
     DefaultConstructor(Span),
+    ClassField(&'ast Expression<'ast>),
+    ClassBlock(&'ast StaticBlock<'ast>),
 }
 
 impl FunctionSource<'_> {
@@ -80,6 +82,8 @@ impl FunctionSource<'_> {
             Self::Function(function) | Self::Method(function) => function.span,
             Self::Arrow(arrow) => arrow.span,
             Self::DefaultConstructor(span) => span,
+            Self::ClassField(expression) => expression.span(),
+            Self::ClassBlock(block) => block.span,
             Self::Script(statements) => statements
                 .first()
                 .map(|statement| statement.span())
@@ -91,7 +95,10 @@ impl FunctionSource<'_> {
         match self {
             Self::Function(function) | Self::Method(function) => function.r#async,
             Self::Arrow(arrow) => arrow.r#async,
-            Self::Script(_) | Self::DefaultConstructor(_) => false,
+            Self::Script(_)
+            | Self::DefaultConstructor(_)
+            | Self::ClassField(_)
+            | Self::ClassBlock(_) => false,
         }
     }
 
@@ -162,7 +169,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             span,
             is_async,
             is_arrow: task.source.is_arrow(),
-            is_method: matches!(task.source, FunctionSource::Method(_)),
+            is_method: matches!(
+                task.source,
+                FunctionSource::Method(_)
+                    | FunctionSource::ClassField(_)
+                    | FunctionSource::ClassBlock(_)
+            ),
             is_script: matches!(task.source, FunctionSource::Script(_)),
             env: Env::new(task.outer),
             class_bindings: task.class_bindings,
@@ -186,6 +198,30 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let length = self.compile_parameters(source)?;
         match source {
             FunctionSource::DefaultConstructor(_) => self.emit_implicit_return()?,
+            FunctionSource::ClassField(_) | FunctionSource::ClassBlock(_)
+                if function_uses_arguments(source) =>
+            {
+                return Err(unsupported(
+                    self.source_text(),
+                    self.span,
+                    "arguments in a class initializer",
+                ));
+            }
+            FunctionSource::ClassField(expression) => {
+                let value = self.compile_expression(expression)?;
+                self.emit(Instr::Return {
+                    src: self.slot(value),
+                });
+            }
+            FunctionSource::ClassBlock(block) => {
+                // A separate function environment keeps even deeply nested var
+                // declarations local to this static block.
+                self.predeclare_function_body(&block.body)?;
+                for statement in &block.body {
+                    self.compile_statement(statement)?;
+                }
+                self.emit_implicit_return()?;
+            }
             FunctionSource::Script(statements) => {
                 self.init_imports(statements)?;
                 self.hoist_script(statements)?;
@@ -271,13 +307,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn install_new_target_binding(&mut self, source: FunctionSource<'ast>) {
-        let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
-            return;
-        };
         let mut scan = NewTargetScan { found: false };
-        scan.visit_formal_parameters(&function.params);
-        if let Some(body) = &function.body {
-            scan.visit_function_body(body);
+        match source {
+            FunctionSource::Function(function) | FunctionSource::Method(function) => {
+                scan.visit_formal_parameters(&function.params);
+                if let Some(body) = &function.body {
+                    scan.visit_function_body(body);
+                }
+            }
+            FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+            FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
+            _ => return,
         }
         if scan.found {
             let binding = self.alloc_binding();
@@ -296,7 +336,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.compile_parameter_list(&function.params)
             }
             FunctionSource::Arrow(arrow) => self.compile_parameter_list(&arrow.params),
-            FunctionSource::Script(_) | FunctionSource::DefaultConstructor(_) => Ok(0),
+            FunctionSource::Script(_)
+            | FunctionSource::DefaultConstructor(_)
+            | FunctionSource::ClassField(_)
+            | FunctionSource::ClassBlock(_) => Ok(0),
         }
     }
 
@@ -1030,6 +1073,20 @@ fn as_binding_kind(
 pub(super) const THIS_BINDING: &str = "\0this";
 const NEW_TARGET_BINDING: &str = "\0new.target";
 
+// Class element bodies have their own execution context. Heritage and
+// computed keys, including those of fields, still execute in the enclosing one.
+macro_rules! scan_class_keys {
+    () => {
+        fn visit_property_definition(&mut self, field: &PropertyDefinition<'a>) {
+            if field.computed {
+                self.visit_property_key(&field.key);
+            }
+        }
+
+        fn visit_static_block(&mut self, _: &StaticBlock<'a>) {}
+    };
+}
+
 struct NewTargetScan {
     found: bool,
 }
@@ -1041,16 +1098,21 @@ impl<'a> Visit<'a> for NewTargetScan {
 
     // Ordinary nested functions provide their own target; arrows inherit ours.
     fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+    scan_class_keys!();
 }
 
 fn function_uses_this(source: FunctionSource<'_>) -> bool {
-    let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
-        return false;
-    };
     let mut scan = ThisScan { found: false };
-    scan.visit_formal_parameters(&function.params);
-    if let Some(body) = &function.body {
-        scan.visit_function_body(body);
+    match source {
+        FunctionSource::Function(function) | FunctionSource::Method(function) => {
+            scan.visit_formal_parameters(&function.params);
+            if let Some(body) = &function.body {
+                scan.visit_function_body(body);
+            }
+        }
+        FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+        FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
+        _ => {}
     }
     scan.found
 }
@@ -1065,16 +1127,21 @@ impl<'a> Visit<'a> for ThisScan {
     }
 
     fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+    scan_class_keys!();
 }
 
 fn function_uses_arguments(source: FunctionSource<'_>) -> bool {
-    let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
-        return false;
-    };
     let mut scan = ArgumentsScan { found: false };
-    scan.visit_formal_parameters(&function.params);
-    if let Some(body) = &function.body {
-        scan.visit_function_body(body);
+    match source {
+        FunctionSource::Function(function) | FunctionSource::Method(function) => {
+            scan.visit_formal_parameters(&function.params);
+            if let Some(body) = &function.body {
+                scan.visit_function_body(body);
+            }
+        }
+        FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+        FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
+        _ => {}
     }
     scan.found
 }
@@ -1089,6 +1156,7 @@ impl<'a> Visit<'a> for ArgumentsScan {
     }
 
     fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+    scan_class_keys!();
 }
 
 struct ScriptScan<'ast> {

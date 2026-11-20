@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 33;
+pub const BYTECODE_VERSION: u32 = 34;
 
 pub use crate::builtin::BUILTINS;
 
@@ -208,6 +208,7 @@ pub enum Instr {
     CreateClass {
         dst: Slot,
         scope: Option<Slot>,
+        heritage: Option<Slot>,
         constructor: u32,
     },
     ScopedClosure {
@@ -221,6 +222,19 @@ pub enum Instr {
         src: Slot,
         is_static: bool,
         kind: PropertyDefinition,
+    },
+    AddClassField {
+        class: Slot,
+        key: Slot,
+        initializer: Option<Slot>,
+        is_static: bool,
+    },
+    AddClassBlock {
+        class: Slot,
+        body: Slot,
+    },
+    RunClassStatic {
+        class: Slot,
     },
     NewObject {
         dst: Slot,
@@ -954,11 +968,15 @@ impl Build {
                 Instr::CreateClass {
                     dst,
                     scope,
+                    heritage,
                     constructor,
                 } => {
                     check_slot(*dst, "CreateClass.dst")?;
                     if let Some(scope) = scope {
                         check_slot(*scope, "CreateClass.scope")?;
+                    }
+                    if let Some(heritage) = heritage {
+                        check_slot(*heritage, "CreateClass.heritage")?;
                     }
                     if self.is_initializer(*constructor)
                         || !self
@@ -990,6 +1008,23 @@ impl Build {
                     check_slot(*key, "DefineClassMethod.key")?;
                     check_slot(*src, "DefineClassMethod.src")?;
                 }
+                Instr::AddClassField {
+                    class,
+                    key,
+                    initializer,
+                    ..
+                } => {
+                    check_slot(*class, "AddClassField.class")?;
+                    check_slot(*key, "AddClassField.key")?;
+                    if let Some(slot) = initializer {
+                        check_slot(*slot, "AddClassField.initializer")?;
+                    }
+                }
+                Instr::AddClassBlock { class, body } => {
+                    check_slot(*class, "AddClassBlock.class")?;
+                    check_slot(*body, "AddClassBlock.body")?;
+                }
+                Instr::RunClassStatic { class } => check_slot(*class, "RunClassStatic.class")?,
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
                 Instr::NewRegExp { dst, source, flags } => {
                     check_slot(*dst, "NewRegExp.dst")?;

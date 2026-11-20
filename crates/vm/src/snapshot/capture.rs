@@ -772,6 +772,22 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                     "function object {id} has an invalid class record"
                 )));
             }
+            if let Some(class) = &function.class {
+                for element in &class.elements {
+                    if let Some(closure) = element.closure()
+                        && !heap
+                            .function(closure)
+                            .and_then(|f| build.function(f.func_id))
+                            .is_some_and(|f| {
+                                !build.is_initializer(f.func_id) && f.is_accessor_method()
+                            })
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "class {id} has an invalid initializer closure"
+                        )));
+                    }
+                }
+            }
         }
         // The shared edge walk below checks the bound receiver and arguments.
         if let Object::Bound(bound) = heap.get(id)? {

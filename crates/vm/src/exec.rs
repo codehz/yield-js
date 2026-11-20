@@ -14,8 +14,9 @@ use crate::bytecode::{
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{
-    Attributes, BoundObject, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject,
-    Object, OwnProperty, PlainObject, Property, ScriptClass, TO_PRIMITIVE_SYMBOL, object_id,
+    Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
+    NativeObject, Object, OwnProperty, PlainObject, Property, ScriptClass, TO_PRIMITIVE_SYMBOL,
+    object_id,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -452,15 +453,58 @@ impl Vm {
                 dst,
                 scope,
                 constructor,
+                heritage,
             } => {
                 let env = self.class_scope(frame, scope)?;
+                let derived = heritage.is_some();
+                let function_root = self.builtins.get("function.prototype");
+                let (static_parent, instance_parent) =
+                    match heritage.map(|slot| frame.read(slot)).transpose()? {
+                        None => (function_root, Some(self.builtins.get("object.prototype"))),
+                        Some(Value::Null) => (function_root, None),
+                        Some(parent) => {
+                            if !self.is_constructor(&parent)? {
+                                return Ok(Step::Throw(
+                                    self.type_error("class heritage is not a constructor")?,
+                                ));
+                            }
+                            let parent_id = object_id(&parent, "class heritage")?;
+                            match self.read_property(
+                                host,
+                                &parent,
+                                PropertyKeyRef::String("prototype"),
+                            )? {
+                                Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                                Invocation::Value(Value::Object(id)) => (parent_id, Some(id)),
+                                Invocation::Value(Value::Null) => (parent_id, None),
+                                Invocation::Value(_) => {
+                                    return Ok(Step::Throw(self.type_error(
+                                        "class heritage prototype must be an object or null",
+                                    )?));
+                                }
+                            }
+                        }
+                    };
                 let class = self.heap.alloc_function(constructor, env);
-                let prototype = self.heap.alloc_plain();
+                let prototype = self.heap.alloc_plain_with(instance_parent);
                 let Object::Function(function) = self.heap.get_mut(class)? else {
                     unreachable!()
                 };
-                function.class = Some(ScriptClass { prototype });
+                function.prototype = Some(static_parent);
+                function.class = Some(ScriptClass {
+                    prototype,
+                    derived,
+                    elements: Vec::new(),
+                });
                 function.home = Some(prototype);
+                let name = self.function_metadata(class, "name")?;
+                let length = self.function_metadata(class, "length")?;
+                let metadata = Attributes {
+                    configurable: true,
+                    ..Attributes::FIXED
+                };
+                self.heap.define_data(class, "name", name, metadata)?;
+                self.heap.define_data(class, "length", length, metadata)?;
                 self.heap.define_data(
                     class,
                     "prototype",
@@ -497,8 +541,52 @@ impl Vm {
                 let key = frame.read(key)?;
                 let key = converted_property_key(&key)?.to_owned();
                 let src = object_id(&frame.read(src)?, "class method closure")?;
+                if is_static && key.borrowed().is_str("prototype") {
+                    return Ok(Step::Throw(
+                        self.type_error("static class element cannot be named prototype")?,
+                    ));
+                }
                 self.define_class_method(class, key, src, is_static, kind)?;
                 Ok(Step::Next)
+            }
+            Instr::AddClassField {
+                class,
+                key,
+                initializer,
+                is_static,
+            } => {
+                let class = object_id(&frame.read(class)?, "class field target")?;
+                let key = converted_property_key(frame.read_ref(key)?)?.to_owned();
+                if is_static && key.borrowed().is_str("prototype") {
+                    return Ok(Step::Throw(
+                        self.type_error("static class element cannot be named prototype")?,
+                    ));
+                }
+                let initializer = initializer
+                    .map(|slot| object_id(frame.read_ref(slot)?, "field initializer"))
+                    .transpose()?;
+                self.add_class_element(
+                    class,
+                    ClassElement::Field {
+                        key,
+                        initializer,
+                        is_static,
+                    },
+                )?;
+                Ok(Step::Next)
+            }
+            Instr::AddClassBlock { class, body } => {
+                let class = object_id(frame.read_ref(class)?, "static block target")?;
+                let body = object_id(frame.read_ref(body)?, "static block body")?;
+                self.add_class_element(class, ClassElement::Block { body })?;
+                Ok(Step::Next)
+            }
+            Instr::RunClassStatic { class } => {
+                let class = object_id(frame.read_ref(class)?, "static initialization target")?;
+                match self.initialize_class_elements(host, class, class, true)? {
+                    Some(error) => Ok(Step::Throw(error)),
+                    None => Ok(Step::Next),
+                }
             }
             Instr::NewObject { dst } => {
                 let id = self.heap.alloc_plain();
@@ -1356,7 +1444,10 @@ impl Vm {
     ) -> Result<bool, VmError> {
         Ok((key.is_str("name") || key.is_str("length"))
             && (id == self.builtins.get("function.prototype")
-                || is_callable_object(self.heap.get(id)?)))
+                || (is_callable_object(self.heap.get(id)?)
+                    && !self.heap.function(id).is_some_and(|function| {
+                        function.class.is_some() || function.home.is_some()
+                    }))))
     }
 
     pub(crate) fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
@@ -1364,6 +1455,15 @@ impl Vm {
             Object::Bound(bound) => (self.heap.get(bound.target)?, bound.args.len(), "bound "),
             object => (object, 0, ""),
         };
+        if key == "name"
+            && !prefix.is_empty()
+            && let Some(OwnProperty::Stored(Property::Data(Value::String(name)), _)) =
+                object.own_property(PropertyKeyRef::String("name"))
+        {
+            let mut result = JsString::from(prefix);
+            result.push_str(name);
+            return Ok(Value::String(result));
+        }
         let (name, length) = match object {
             Object::Function(function) => {
                 let function = self.build.function(function.func_id).ok_or_else(|| {
@@ -1668,6 +1768,113 @@ impl Vm {
         Ok(env)
     }
 
+    fn add_class_element(&mut self, id: ObjectId, element: ClassElement) -> Result<(), VmError> {
+        let home = {
+            let Object::Function(function) = self.heap.get_mut(id)? else {
+                return Err(VmError::InvalidState(
+                    "class element requires a function".into(),
+                ));
+            };
+            let class = function
+                .class
+                .as_mut()
+                .ok_or_else(|| VmError::InvalidState("class element requires a class".into()))?;
+            match element {
+                ClassElement::Field {
+                    is_static: false, ..
+                } => class.prototype,
+                _ => id,
+            }
+        };
+        if let Some(closure) = element.closure() {
+            let Object::Function(function) = self.heap.get_mut(closure)? else {
+                return Err(VmError::InvalidState(
+                    "class element requires a closure".into(),
+                ));
+            };
+            if !self
+                .build
+                .function(function.func_id)
+                .is_some_and(Function::is_accessor_method)
+            {
+                return Err(VmError::InvalidState(
+                    "class element closure must be synchronous".into(),
+                ));
+            }
+            function.home = Some(home);
+        }
+        let Object::Function(function) = self.heap.get_mut(id)? else {
+            unreachable!()
+        };
+        function
+            .class
+            .as_mut()
+            .expect("validated class")
+            .elements
+            .push(element);
+        Ok(())
+    }
+
+    /// Initialize each own element in source order, stopping at the first throw.
+    pub(crate) fn initialize_class_elements(
+        &mut self,
+        host: &mut dyn Host,
+        class: ObjectId,
+        receiver: ObjectId,
+        is_static: bool,
+    ) -> Result<Option<Value>, VmError> {
+        let record = self
+            .heap
+            .function(class)
+            .and_then(|f| f.class.as_ref())
+            .ok_or_else(|| VmError::InvalidState("initialization requires a class".into()))?;
+        for index in 0..record.elements.len() {
+            let element = &self
+                .heap
+                .function(class)
+                .and_then(|f| f.class.as_ref())
+                .expect("class record")
+                .elements[index];
+            let (key, closure) = match element {
+                ClassElement::Field {
+                    key,
+                    initializer,
+                    is_static: field_static,
+                } if *field_static == is_static => (Some(key.clone()), *initializer),
+                ClassElement::Block { body } if is_static => (None, Some(*body)),
+                _ => continue,
+            };
+            let value = if let Some(closure) = closure {
+                match self.invoke(
+                    host,
+                    &Value::Object(closure),
+                    Vec::new(),
+                    &Value::Object(receiver),
+                )? {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => return Ok(Some(error)),
+                }
+            } else {
+                Value::Undefined
+            };
+            if let Some(key) = key {
+                let update = DescriptorUpdate {
+                    value: Some(value),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                    ..Default::default()
+                };
+                if let Invocation::Thrown(error) =
+                    self.apply_property_update(host, receiver, key, update)?
+                {
+                    return Ok(Some(error));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     fn define_class_method(
         &mut self,
         class: ObjectId,
@@ -1694,10 +1901,33 @@ impl Vm {
                 "class member requires a script method".into(),
             ));
         }
+        let mut name = JsString::from(match kind {
+            PropertyDefinition::Data => "",
+            PropertyDefinition::Get => "get ",
+            PropertyDefinition::Set => "set ",
+        });
+        match &key {
+            PropertyKey::String(key) => name.push_str(key),
+            PropertyKey::Symbol(symbol) => {
+                if let Some(Some(description)) = self.heap.symbols.get(symbol) {
+                    name.push_str(&"[".into());
+                    name.push_str(description);
+                    name.push_str(&"]".into());
+                }
+            }
+        }
+        let length = self.function_metadata(src, "length")?;
         let Object::Function(function) = self.heap.get_mut(src)? else {
             unreachable!()
         };
         function.home = Some(target);
+        let metadata = Attributes {
+            configurable: true,
+            ..Attributes::FIXED
+        };
+        self.heap
+            .define_data(src, "name", Value::String(name), metadata)?;
+        self.heap.define_data(src, "length", length, metadata)?;
         let mut update = DescriptorUpdate {
             enumerable: Some(false),
             configurable: Some(true),

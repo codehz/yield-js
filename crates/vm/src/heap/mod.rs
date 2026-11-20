@@ -18,7 +18,7 @@ pub use types::{
     PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, Resolution,
 };
 pub(crate) use types::{
-    Attributes, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
+    Attributes, ClassElement, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
     ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
     MATCH_DESCRIPTION, MATCH_SYMBOL, OwnProperty, REPLACE_DESCRIPTION, REPLACE_SYMBOL,
     SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,

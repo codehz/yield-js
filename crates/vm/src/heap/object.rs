@@ -494,6 +494,18 @@ impl Object {
                 }
                 if let Some(class) = &function.class {
                     out.push(OwnedEdge::Object(class.prototype));
+                    for element in &class.elements {
+                        if let Some(closure) = element.closure() {
+                            out.push(OwnedEdge::Object(closure));
+                        }
+                        if let super::types::ClassElement::Field {
+                            key: PropertyKey::Symbol(symbol),
+                            ..
+                        } = element
+                        {
+                            out.push(OwnedEdge::Symbol(*symbol));
+                        }
+                    }
                 }
             }
             Self::Bound(bound) => {

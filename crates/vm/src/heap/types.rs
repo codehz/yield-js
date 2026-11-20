@@ -10,7 +10,7 @@ use crate::builtin::string::utf16_unit_string;
 use crate::error::VmError;
 use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
-use crate::value::{BindingId, JsString, ObjectId, PropertyKeyRef, SymbolId, Value};
+use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
 
 /// Reserved well-known symbols. Ordinary symbols allocate after these IDs and
 /// are never interned by description; only the registry interns by key.
@@ -619,6 +619,29 @@ pub struct FunctionObject {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ScriptClass {
     pub prototype: ObjectId,
+    pub derived: bool,
+    pub elements: Vec<ClassElement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ClassElement {
+    Field {
+        key: PropertyKey,
+        initializer: Option<ObjectId>,
+        is_static: bool,
+    },
+    Block {
+        body: ObjectId,
+    },
+}
+
+impl ClassElement {
+    pub(crate) fn closure(&self) -> Option<ObjectId> {
+        match self {
+            Self::Field { initializer, .. } => *initializer,
+            Self::Block { body } => Some(*body),
+        }
+    }
 }
 
 /// One invocation environment. Bindings are addressed by compile-time IDs, so

@@ -22,6 +22,10 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::ThrowAssignmentToConst
         | Instr::CallValue { .. }
         | Instr::LoadClassBinding { .. }
+        | Instr::CreateClass { .. }
+        | Instr::DefineClassMethod { .. }
+        | Instr::AddClassField { .. }
+        | Instr::RunClassStatic { .. }
         | Instr::Construct { .. }
         | Instr::Await { .. }
         | Instr::GetMember { .. }
@@ -55,9 +59,8 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Closure { .. }
         | Instr::NewClassScope { .. }
         | Instr::InitClassBinding { .. }
-        | Instr::CreateClass { .. }
         | Instr::ScopedClosure { .. }
-        | Instr::DefineClassMethod { .. }
+        | Instr::AddClassBlock { .. }
         | Instr::NewObject { .. }
         | Instr::NewRegExp { .. }
         | Instr::NewArray { .. }
@@ -140,11 +143,17 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::NewClassScope { dst, parent }
         | Instr::LoadClassBinding {
             dst, scope: parent, ..
-        }
-        | Instr::CreateClass {
-            dst, scope: parent, ..
         } => {
             uses.extend(parent.map(|slot| slot.index));
+            defs.insert(dst.index);
+        }
+        Instr::CreateClass {
+            dst,
+            scope,
+            heritage,
+            ..
+        } => {
+            uses.extend(scope.iter().chain(heritage).map(|slot| slot.index));
             defs.insert(dst.index);
         }
         Instr::ScopedClosure { dst, scope, .. } => {
@@ -158,6 +167,21 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             class, key, src, ..
         } => {
             uses.extend([class.index, key.index, src.index]);
+        }
+        Instr::AddClassField {
+            class,
+            key,
+            initializer,
+            ..
+        } => {
+            uses.extend([class.index, key.index]);
+            uses.extend(initializer.map(|slot| slot.index));
+        }
+        Instr::AddClassBlock { class, body } => {
+            uses.extend([class.index, body.index]);
+        }
+        Instr::RunClassStatic { class } => {
+            uses.insert(class.index);
         }
         Instr::Closure { dst, .. }
         | Instr::NewObject { dst }
@@ -354,10 +378,12 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::CreateClass {
             dst,
             scope,
+            heritage,
             constructor,
         } => Instr::CreateClass {
             dst: remap(dst),
             scope: scope.map(remap),
+            heritage: heritage.map(remap),
             constructor,
         },
         Instr::ScopedClosure {
@@ -381,6 +407,24 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             src: remap(src),
             is_static,
             kind,
+        },
+        Instr::AddClassField {
+            class,
+            key,
+            initializer,
+            is_static,
+        } => Instr::AddClassField {
+            class: remap(class),
+            key: remap(key),
+            initializer: initializer.map(remap),
+            is_static,
+        },
+        Instr::AddClassBlock { class, body } => Instr::AddClassBlock {
+            class: remap(class),
+            body: remap(body),
+        },
+        Instr::RunClassStatic { class } => Instr::RunClassStatic {
+            class: remap(class),
         },
         Instr::NewObject { dst } => Instr::NewObject { dst: remap(dst) },
         Instr::NewRegExp { dst, source, flags } => Instr::NewRegExp {

@@ -845,11 +845,14 @@ fn rejects_unsupported_module_syntax() {
 #[test]
 fn rejects_gated_class_features() {
     for (source, feature) in [
-        ("class C extends C {}", "class heritage"),
-        ("class C { x = 1 }", "class field"),
         ("class C { #x() {} }", "private class method"),
-        ("class C { [C]() {} }", "computed class key"),
-        ("class C { static {} }", "class static block"),
+        ("class C { #x = 1 }", "private class field"),
+        (
+            "class C extends Object { constructor() { super(); } }",
+            "unsupported syntax",
+        ),
+        ("class C { x = arguments; }", "arguments"),
+        ("class C { static { (() => arguments)(); } }", "arguments"),
         ("class C { *m() {} }", "generator"),
     ] {
         let error = compile(source, &CompileOptions::default()).unwrap_err();
