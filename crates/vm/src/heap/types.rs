@@ -12,8 +12,8 @@ use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
 use crate::value::{BindingId, JsString, ObjectId, PropertyKeyRef, SymbolId, Value};
 
-/// Reserved well-known symbols. Ordinary symbols allocate from 2 and are never
-/// interned by description; only the registry interns by key.
+/// Reserved well-known symbols. Ordinary symbols allocate after these IDs and
+/// are never interned by description; only the registry interns by key.
 pub(crate) const ITERATOR_SYMBOL: SymbolId = 0;
 pub(crate) const ITERATOR_DESCRIPTION: &str = "Symbol.iterator";
 pub(crate) const TO_PRIMITIVE_SYMBOL: SymbolId = 1;
@@ -30,6 +30,8 @@ pub(crate) const SEARCH_SYMBOL: SymbolId = 6;
 pub(crate) const SEARCH_DESCRIPTION: &str = "Symbol.search";
 pub(crate) const SPLIT_SYMBOL: SymbolId = 7;
 pub(crate) const SPLIT_DESCRIPTION: &str = "Symbol.split";
+pub(crate) const HAS_INSTANCE_SYMBOL: SymbolId = 8;
+pub(crate) const HAS_INSTANCE_DESCRIPTION: &str = "Symbol.hasInstance";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

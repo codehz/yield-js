@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::object::{OwnedEdge, push_state, push_value};
 use super::types::{
     ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
-    ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
-    MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OrderedProperty, OwnProperty,
-    PlainObject, PromiseObject, PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION,
-    REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
-    SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, array_index,
+    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL,
+    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object,
+    OrderedProperty, OwnProperty, PlainObject, PromiseObject, PromiseState, Property,
+    PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
+    SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
+    TO_PRIMITIVE_SYMBOL, array_index,
 };
 use crate::error::VmError;
 use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
@@ -49,9 +50,10 @@ impl Heap {
                 (REPLACE_SYMBOL, Some(REPLACE_DESCRIPTION.into())),
                 (SEARCH_SYMBOL, Some(SEARCH_DESCRIPTION.into())),
                 (SPLIT_SYMBOL, Some(SPLIT_DESCRIPTION.into())),
+                (HAS_INSTANCE_SYMBOL, Some(HAS_INSTANCE_DESCRIPTION.into())),
             ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: 8,
+            next_symbol_id: HAS_INSTANCE_SYMBOL + 1,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,

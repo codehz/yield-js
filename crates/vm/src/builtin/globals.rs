@@ -14,9 +14,9 @@ use crate::builtin::string;
 use crate::builtin::{error_family, queue_family, symbol_family};
 use crate::error::VmError;
 use crate::exec;
-use crate::heap::Attributes;
+use crate::heap::{Attributes, HAS_INSTANCE_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::value::Value;
+use crate::value::{PropertyKey, Value};
 use crate::vm::Vm;
 
 pub(crate) struct Owner {
@@ -157,6 +157,14 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Function.prototype stores toString");
+        let has_instance = self.alloc_intrinsic(exec::FUNCTION_HAS_INSTANCE);
+        super::define_builtin_data(
+            self,
+            function_prototype,
+            PropertyKey::Symbol(HAS_INSTANCE_SYMBOL),
+            Value::Object(has_instance),
+            Attributes::FIXED,
+        );
         let identity = Value::Object(self.alloc_intrinsic(ITERATOR_IDENTITY));
         for owner in owners() {
             if let Some(install) = owner.install {

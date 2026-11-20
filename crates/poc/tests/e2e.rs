@@ -124,3 +124,21 @@ export async function run() {
         );
     }
 }
+
+#[test]
+fn restore_rejects_changed_has_instance_description() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Vm, VmError};
+
+    let build = build("export function run() { return 0; }");
+    let mut host = TestHost::default();
+    let vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut snapshot = vm.snapshot(&[]).unwrap();
+    let description = snapshot.symbols.get_mut(&8).expect("reserved symbol root");
+    assert_eq!(*description, Some("Symbol.hasInstance".into()));
+    *description = Some("tampered".into());
+    assert!(matches!(
+        Vm::restore(snapshot, build, &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("reserved symbol 8 has an invalid description")
+    ));
+}

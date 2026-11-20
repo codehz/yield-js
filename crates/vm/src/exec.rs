@@ -14,8 +14,8 @@ use crate::bytecode::{
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{
-    BoundObject, DescriptorUpdate, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty, PlainObject,
-    Property, TO_PRIMITIVE_SYMBOL, object_id,
+    BoundObject, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object,
+    OwnProperty, PlainObject, Property, TO_PRIMITIVE_SYMBOL, object_id,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -37,11 +37,16 @@ const FUNCTION_BIND: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind"),
     Vm::function_bind,
 );
+pub(crate) const FUNCTION_HAS_INSTANCE: IntrinsicKey =
+    IntrinsicKey::new("Function", IntrinsicSlot::PrototypeSymbol, "hasInstance");
 
 pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
     FUNCTION_CALL,
     FUNCTION_APPLY,
     FUNCTION_BIND,
+    IntrinsicDef::call(FUNCTION_HAS_INSTANCE, |vm, host, args, receiver| {
+        vm.ordinary_has_instance(host, args.first().unwrap_or(&Value::Undefined), receiver)
+    }),
     IntrinsicDef::call(
         IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
         Vm::function_to_string,
@@ -1059,15 +1064,78 @@ impl Vm {
         value: &Value,
         constructor: &Value,
     ) -> Result<Invocation, VmError> {
+        self.has_instance(host, value, constructor, false)
+    }
+
+    fn ordinary_has_instance(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+        constructor: &Value,
+    ) -> Result<Invocation, VmError> {
+        self.has_instance(host, value, constructor, true)
+    }
+
+    fn has_instance(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+        constructor: &Value,
+        mut ordinary: bool,
+    ) -> Result<Invocation, VmError> {
         let not_callable = "right-hand side of 'instanceof' is not callable";
         let Value::Object(mut target) = *constructor else {
-            return self.throw_type_error(not_callable);
+            return if ordinary {
+                Ok(Invocation::Value(Value::Bool(false)))
+            } else {
+                self.throw_type_error("right-hand side of 'instanceof' is not an object")
+            };
         };
         let mut remaining = self.heap.object_count();
         loop {
+            let receiver = Value::Object(target);
+            if !ordinary {
+                let hook = match self.read_property(
+                    host,
+                    &receiver,
+                    PropertyKeyRef::Symbol(HAS_INSTANCE_SYMBOL),
+                )? {
+                    Invocation::Value(hook) => hook,
+                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                };
+                if !matches!(hook, Value::Undefined | Value::Null) {
+                    if !self.is_callable(&hook) {
+                        return self.throw_type_error("Symbol.hasInstance is not callable");
+                    }
+                    // Inline the default intrinsic after lookup so a chain of
+                    // bound functions does not recurse through native calls.
+                    let Value::Object(hook_id) = hook else {
+                        unreachable!("callable hook")
+                    };
+                    ordinary = matches!(
+                        self.heap.get(hook_id)?,
+                        Object::Native(NativeObject::Intrinsic { intrinsic, .. })
+                            if *intrinsic == FUNCTION_HAS_INSTANCE.link()
+                    );
+                    if !ordinary {
+                        return Ok(
+                            match self.invoke(host, &hook, vec![value.clone()], &receiver)? {
+                                Invocation::Value(result) => {
+                                    Invocation::Value(Value::Bool(result.truthy()))
+                                }
+                                thrown @ Invocation::Thrown(_) => thrown,
+                            },
+                        );
+                    }
+                }
+            }
             let object = self.heap.get(target)?;
             if !is_callable_object(object) {
-                return self.throw_type_error(not_callable);
+                return if ordinary {
+                    Ok(Invocation::Value(Value::Bool(false)))
+                } else {
+                    self.throw_type_error(not_callable)
+                };
             }
             let Object::Bound(bound) = object else {
                 break;
@@ -1079,6 +1147,8 @@ impl Vm {
                 ));
             }
             target = bound.target;
+            // Bound targets re-enter the full protocol, including their hooks.
+            ordinary = false;
         }
 
         let Value::Object(mut current) = *value else {

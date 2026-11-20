@@ -1091,6 +1091,7 @@ fn member_key(opts: &HashMap<String, Meta>, span: Span) -> Result<((bool, String
                     | "Replace"
                     | "Search"
                     | "Split"
+                    | "HasInstance"
             ) {
                 return Err(Error::new_spanned(
                     variant,

@@ -12,7 +12,7 @@
 | --- | --- |
 | 函数转字符串 | 有意使用通用文本而非源码 |
 
-Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与一元 `+`/`-`/`~` 和二元强制转换时的可捕获 `TypeError`，已经落地。其余 well-known Symbol（`asyncIterator`、`hasInstance`、`match`、`toJSON` 等）均未提供，依赖它们的协议入口也不存在（如 `Symbol.hasInstance` 不参与 `instanceof`）。
+尚未提供部分 well-known Symbol（如 `Symbol.asyncIterator`）及其协议。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
 
 ## 2. 编译期拒绝（首版语法表要求，现在编不过）
 

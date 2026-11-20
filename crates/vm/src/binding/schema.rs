@@ -304,6 +304,7 @@ pub enum WellKnownSymbol {
     Replace,
     Search,
     Split,
+    HasInstance,
 }
 
 impl WellKnownSymbol {
@@ -317,6 +318,7 @@ impl WellKnownSymbol {
             Self::Replace => "Symbol.replace",
             Self::Search => "Symbol.search",
             Self::Split => "Symbol.split",
+            Self::HasInstance => "Symbol.hasInstance",
         }
     }
 
@@ -330,6 +332,7 @@ impl WellKnownSymbol {
             Self::Replace => crate::heap::REPLACE_SYMBOL,
             Self::Search => crate::heap::SEARCH_SYMBOL,
             Self::Split => crate::heap::SPLIT_SYMBOL,
+            Self::HasInstance => crate::heap::HAS_INSTANCE_SYMBOL,
         }
     }
 }

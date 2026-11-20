@@ -28,7 +28,7 @@
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。数组字面量的省略项产生真正的稀疏空洞：只增长 `length`，不创建索引属性，`map` / `forEach` / `JSON.stringify` / `join` 等按稀疏语义处理；展开 `[...a]` 仍通过迭代协议将洞读成显式 `undefined`。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - 对象字面量支持展开：按自有键顺序复制可枚举的字符串键和 Symbol 键，每次复制前重查描述符。来源 getter 以来源对象为 `this`，异常可捕获；结果总是自有数据属性，不调用目标 setter。跳过空值和无可枚举键的原始值；字符串按 UTF-16 索引逐码元复制。字面量在展开表达式中挂起时，已构建的属性可跨快照恢复。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。
-- `instanceof` 从左到右各求值一次，绑定函数沿绑定目标检查。右操作数不可调用，或对象左操作数对应的构造函数 `prototype` 不是对象时，抛出可捕获的 `TypeError`。原始值左操作数不读取 `prototype`，直接返回 `false`（右操作数仍须可调用）。通过普通属性读取 `prototype`，传播 getter 的异常，再按对象身份检查左操作数的内部原型链；不调用 `Symbol.hasInstance`。
+- `instanceof` 从左到右各求值一次；右操作数必须是对象。通过普通属性读取 `[Symbol.hasInstance]`（包括继承的 getter 和 Proxy），非空方法必须可调用，以右操作数为 `this`、左操作数为唯一实参，结果转为布尔值，异常原样传播。方法为空时要求右侧可调用。共享的 `Function.prototype` 提供固定、不可枚举的默认方法：非可调用接收者返回 `false`，绑定函数对其目标重新查找协议，普通函数在左侧为对象时读取 `prototype` 并沿原型链比较；非对象 `prototype` 抛出 `TypeError`。
 - `Reflect.get` / `set` 从目标查找属性，可显式指定接收者；省略时使用目标。访问器以接收者为 `this`，数据写入只更新或创建接收者的自有属性。对只读属性、缺少 setter 或不可扩展接收者的写入拒绝返回 `false`（同样的拒绝在严格成员赋值中抛出 `TypeError`）；键转换、访问器及数组长度检查的异常仍会抛出。`Reflect.has` 沿原型链检查而不调用 getter，`Reflect.getOwnPropertyDescriptor` 只检查自有属性。这四种操作都要求目标是对象。
 - `Reflect.apply` 转发 `this` 和参数；`Reflect.construct` 与 `new` 共用构造路径，可指定 `newTarget`。两者都要求参数列表是对象，按 `ToLength` 处理 `length` 后依次读取索引，传播访问器和目标抛出的异常。普通脚本构造器、`Array`、`Map`、`Set`、`Object`、`String`、`Number`、`Boolean`、错误构造器及 `Promise` 支持构造；箭头、异步和方法不可构造。绑定函数仅在目标可构造时支持构造，前置绑定参数而忽略绑定的 `this`；若当前绑定函数自身是 `newTarget`，则向目标转发时替换为其目标，否则保留显式指定的 `newTarget`。`newTarget.prototype` 是对象时作为实例原型，否则沿用 `new` 的行为；脚本构造器返回对象时优先采用该对象。
 - `for…in` 支持声明、已有绑定、成员或解构模式作为目标。按每层自有键顺序枚举对象及其原型的可枚举字符串键，不读取属性值；尚存在的不可枚举自有键会遮蔽继承的同名键。进入每层时记录键，访问前重查描述符，跳过已删除的键；不会枚举进入该层后新增的键。字符串原始值按 UTF-16 码元给出索引，其他非空原始值没有自有键；原始值的原型枚举仍从 `Object.prototype` 开始。`null` 和 `undefined` 不迭代。枚举位置和访问记录跨 `await` 及快照恢复；枚举本身不走 `Symbol.iterator` 或 `IteratorClose`，左侧的数组解构仍走同步迭代协议。
@@ -67,6 +67,7 @@
 - `Promise.resolve(p)` 与 `await p` 先读取真正 Promise 的 `constructor`，等于内建 `Promise` 时复用原 Promise，不读取 `then`。`constructor` getter 抛错会在调用点或 `await` 处同步进入脚本异常路径；成功准备的 `await` 始终经微任务恢复，即使输入已结算或不是 thenable。
 - Promise 决议（包括执行器的 `resolve` 和 async 返回值）不检查输入的 `constructor`，而是同步读取一次 `then`，包括真正 Promise 上覆写的 `then`；在微任务中以输入对象为接收者调用。`then` getter 或调用抛错进入拒绝路径，非可调用的 `then` 保留输入身份，直接自决议拒绝为 `TypeError`。
 - 内建包括 `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）、`Symbol`（`Symbol()`、`Symbol.for` / `keyFor`，以及 `Symbol.iterator` / `Symbol.toPrimitive` / `Symbol.species`），以及原始数值全局 `NaN` 与 `Infinity`（作为运行期 `Value::Number` 提供，支持一元负号得到 `-Infinity`；不是编译期常量，也不进入快照根）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
+- `Symbol.hasInstance` 是固定静态属性，宿主成员声明可使用 `WellKnownSymbol::HasInstance` 对应同一身份。
 - `catch` 和 `finally` 通过普通属性读取调用接收者的 `then`。`finally` 等待清理返回的 thenable，成功后传递原兑现值或重新抛出原拒绝原因。`then` 按 `constructor[Symbol.species]` 选择结果构造器，使用构造器提供的决议和拒绝函数；`finally` 也用 species 包装清理结果。
 - Promise 组合子接受同步可迭代值。每次调用先读取接收者的 `resolve` 一次，按输入顺序以同一接收者调用它，并调用每个返回值的 `then`。属性读取、调用与迭代错误拒绝结果 Promise。等待中的组合子可跨快照恢复；`Promise.any` 全拒绝时以真实 `AggregateError` 拒绝，`.errors` 按输入顺序保留拒绝原因。
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
@@ -75,13 +76,13 @@
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
-- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、类原型、模块状态槽、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
+- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、类原型、模块状态槽、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species`、`Symbol.hasInstance` 等保留 Symbol 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
 - 恢复校验：格式/字节码版本、构建 ID、绑定指纹、声明引用、类原型、实例槽种类与数量、payload schema 与解码、模块状态、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、operation 类型/schema/策略、Symbol 引用与注册表。平台资源在全部 payload 解码成功后才发布；任一失败整体拒绝，不启动脚本。
 - `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - 编译器接受溢出为无穷的数字字面量；`NaN` 和 `Infinity` 仍按作用域解析。字节码版本 **31** 的 Build 常量和快照值共用 JSON 数值编码：有限值保留数值形式和负零，非有限值用专用字符串标记，NaN 不保留 payload。宿主返回值、槽与异步操作的兑现值和拒绝原因均可包含非有限数。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。
 - `WeakMap` 构造器及其共享原型也是快照根。快照按 ephemeron 规则追踪：仅在 WeakMap 和键均已可达时追踪对应值，反复处理直至没有新增可达对象；不会仅因条目存在而保留键。不可达键的条目从快照省略，恢复拒绝条目中的悬空引用。这不表示运行期间会回收堆对象。
 - `Proxy` 构造器是快照根；代理到目标、handler 的边是强引用，handler 捕获的闭包环境沿普通堆边保存。保存和恢复直接处理记录，不通过 trap 查询代理。恢复拒绝缺失或类型不合法的代理引用。
-- 快照格式 **38** 保存包装对象的原始值、自有属性、原型和对象身份，并保存 `Boolean` 构造器及共享原型根；同时保存绑定指纹、类原型映射、可达宿主实例的槽/payload 和模块状态。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
-- 字节码格式 **30** 和快照格式 **38** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
+- 快照格式 **39** 保留 `Symbol.hasInstance` 的固定身份，并校验保留描述和注册表。快照保存包装对象的原始值、自有属性、原型和对象身份，以及共享内建根、绑定指纹、类原型映射、可达宿主实例的槽/payload 和模块状态。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
+- 字节码格式 **31** 和快照格式 **39** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
 - 快照要求微任务队列已排空。
