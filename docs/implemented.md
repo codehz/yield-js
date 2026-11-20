@@ -11,7 +11,8 @@
 - 普通宿主函数和方法可返回 `HostStep::Call`，由 VM 在当前 `CallCx` 结束后同步执行脚本调用。恢复使用新的调用 ID、原始 `this` 和显式保存的参数；脚本异常传给恢复函数，VM 错误直接上传。旧调用创建的请求不能重复分派。
 - 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
-- `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
+- `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy` / `toThrow`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
+- `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。

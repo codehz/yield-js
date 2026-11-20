@@ -497,6 +497,7 @@ pub struct PlainObject {
     /// Internal prototype.
     pub prototype: Option<ObjectId>,
     extensible: bool,
+    pub(crate) is_error: bool,
 }
 
 impl PlainObject {
@@ -506,6 +507,7 @@ impl PlainObject {
             symbol_props: PropertyTable::new(),
             prototype,
             extensible: true,
+            is_error: false,
         }
     }
 }

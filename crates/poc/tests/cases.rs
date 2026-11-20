@@ -23,6 +23,20 @@ fn case_matcher_failure_reports_arguments_after_restore() {
 }
 
 #[test]
+fn case_matcher_to_throw_reports_pattern_and_message() {
+    let source = r#"// @returns undefined
+import { expect } from 'test';
+export function run() {
+    expect(() => { throw new Error('out of stock'); }).toThrow(/available/i);
+}
+"#;
+    let error = yield_poc::run_case("matcher_to_throw_failure.js", source).unwrap_err();
+    for detail in ["toThrow", "/available/i", "out of stock"] {
+        assert!(error.contains(detail), "{error}");
+    }
+}
+
+#[test]
 fn case_assertion_failure_reports_checkpoint() {
     let source = r#"// @returns undefined
 import { assert } from 'test';

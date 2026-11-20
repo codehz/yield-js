@@ -177,6 +177,11 @@ impl JsString {
         matches!(self.0, StringStorage::Empty)
     }
 
+    /// Search for a substring by UTF-16 code units, including lone surrogates.
+    pub fn contains(&self, needle: &Self) -> bool {
+        crate::string::find_from(self, needle, 0).is_some()
+    }
+
     pub fn push_str(&mut self, text: &Self) {
         if text.is_empty() {
             return;

@@ -36,8 +36,8 @@ use crate::runtime::{
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// JavaScript strings retain arbitrary UTF-16 code units; string maps use pairs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 36;
+// Plain objects preserve the internal Error brand.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 37;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

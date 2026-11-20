@@ -1014,7 +1014,7 @@ fn matches_at(text: &JsString, needle: &JsString, start: usize) -> bool {
         .all(|(offset, unit)| text.unit_at(start + offset) == Some(unit))
 }
 
-fn find_from(text: &JsString, needle: &JsString, start: usize) -> Option<usize> {
+pub(crate) fn find_from(text: &JsString, needle: &JsString, start: usize) -> Option<usize> {
     let start = start.min(text.unit_len());
     if needle.is_empty() {
         return Some(start);

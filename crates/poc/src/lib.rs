@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectValue, Instance, JsResult, JsValue,
-    OperationStart, OperationToken, This,
+    Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectKey, InspectValue, Instance,
+    JsResult, JsValue, OperationStart, OperationToken, This,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
-use yield_vm::{Host, Vm};
+use yield_vm::{GuestOutcome, Host, HostStep, JsString, Vm};
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
@@ -134,6 +134,66 @@ impl Matcher {
         }
         Err(cx.throw_string(format!("toBeTruthy: expected truthy, actual {actual}")))
     }
+
+    #[method(name = "toThrow")]
+    fn to_throw(
+        cx: &mut CallCx<'_>,
+        this: This<Matcher>,
+        expected: Option<JsValue>,
+    ) -> JsResult<HostStep> {
+        let actual = this.actual(cx)?;
+        if !cx.is_callable(&actual)? {
+            return Err(cx.throw_string("toThrow: expected a callable"));
+        }
+        let mut saved = Vec::new();
+        if let Some(expected) = expected.filter(|value| !value.is_undefined()) {
+            if expected.as_string().is_none() && !cx.inspect(expected.clone())?.is_regexp() {
+                return Err(cx.throw_string("toThrow: expected a string or RegExp"));
+            }
+            saved.push(expected);
+        }
+        cx.request_call(actual, JsValue::undefined(), vec![], saved, resume_to_throw)
+    }
+}
+
+fn resume_to_throw(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
+    let GuestOutcome::Thrown(thrown) = outcome else {
+        return Err(cx.throw_string("toThrow: function returned without throwing"));
+    };
+    let success = HostStep::Return(JsValue::undefined());
+    let Some(expected) = cx.args().first() else {
+        return Ok(success);
+    };
+    let message = if let Some(text) = thrown.as_string() {
+        text.clone()
+    } else {
+        let inspect = cx.inspect(thrown)?;
+        let message = match inspect.get(&InspectKey::String("message".into())) {
+            Some(InspectValue::Data(value)) => value.as_string().cloned(),
+            None if inspect.is_error() => Some(JsString::new()),
+            _ => None,
+        };
+        message.ok_or_else(|| cx.throw_string("toThrow: thrown value has no string message"))?
+    };
+
+    if let Some(pattern) = expected.as_string() {
+        if message.contains(pattern) {
+            return Ok(success);
+        }
+        return Err(cx.throw_string(format!(
+            "toThrow: expected message containing \"{pattern}\", actual \"{message}\""
+        )));
+    }
+    let regexp = cx.inspect(expected.clone())?;
+    if regexp.regexp_matches(&message) == Some(true) {
+        return Ok(success);
+    }
+    let (source, flags) = regexp
+        .regexp_source_flags()
+        .expect("toThrow only saves a string or RegExp");
+    Err(cx.throw_string(format!(
+        "toThrow: expected message matching /{source}/{flags}, actual \"{message}\""
+    )))
 }
 
 fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {

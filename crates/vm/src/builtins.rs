@@ -2405,7 +2405,9 @@ impl Vm {
         name: &str,
         message: Option<JsString>,
     ) -> Result<Value, VmError> {
-        let id = self.heap.alloc_plain_with(Some(prototype));
+        let mut object = PlainObject::new(Some(prototype));
+        object.is_error = true;
+        let id = self.heap.alloc(Object::Plain(object));
         let mut stack = JsString::from(format!("{name}: "));
         if let Some(message) = message {
             stack.push_str(&message);
