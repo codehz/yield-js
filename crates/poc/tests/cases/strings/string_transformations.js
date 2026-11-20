@@ -12,6 +12,7 @@ export function run() {
   if ("abcabc".replace("b", "$$:$&:$`:$'") !== "a$:b:a:cabccabc") return false;
   if ("😀x😀".replace("x", (match, index, input) => match + index + input.length) !== "😀x25😀") return false;
   if ("abc".replace("x", () => { throw "unmatched"; }) !== "abc") return false;
+  if ("abc".replaceAll("x", "long replacement") !== "abc") return false;
   if ("x".padStart(2, "😀") !== "\uD83Dx" || "x".padEnd(2, "😀") !== "x\uD83D") return false;
   let errors = 0;
   try { "x".repeat(-1); } catch (error) { if (error.name === "RangeError") errors++; }

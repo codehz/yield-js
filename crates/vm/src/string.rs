@@ -749,16 +749,15 @@ impl Vm {
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
         };
-        let length = utf16_len(text);
         let search_length = utf16_len(&search);
+        let Some(mut position) = find_from(text, &search, 0) else {
+            return Ok(Invocation::Value(Value::String(text.clone())));
+        };
+        let has_substitution = !functional && pattern.units().any(|unit| unit == u16::from(b'$'));
         let mut out = Vec::new();
         let mut source = text.units();
         let mut last = 0usize;
-        let mut cursor = 0usize;
-        while cursor <= length {
-            let Some(position) = find_from(text, &search, cursor) else {
-                break;
-            };
+        loop {
             out.extend(source.by_ref().take(position - last));
             let replacement = if functional {
                 match self.invoke(
@@ -777,19 +776,25 @@ impl Vm {
                     },
                     thrown @ Invocation::Thrown(_) => return Ok(thrown),
                 }
-            } else {
+            } else if has_substitution {
                 substitute(&pattern, text, &search, position)
+            } else {
+                pattern.clone()
             };
             out.extend(replacement.units());
             if search_length != 0 {
                 source.nth(search_length - 1);
             }
             last = position + search_length;
-            cursor = if search_length == 0 {
+            let cursor = if search_length == 0 {
                 position.saturating_add(1)
             } else {
                 last
             };
+            let Some(next) = find_from(text, &search, cursor) else {
+                break;
+            };
+            position = next;
         }
         out.extend(source);
         Ok(Invocation::Value(Value::String(JsString::from_units(out))))
