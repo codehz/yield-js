@@ -1,5 +1,7 @@
 //! Number constructors, static functions, and prototype methods.
 
+use std::fmt::Write as _;
+
 use crate::builtin::globals::Owner;
 use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, RootKind, RootSpec,
@@ -241,11 +243,23 @@ impl Vm {
         string(match method {
             "toString" if digits == 10 => decimal(),
             "toString" => integer_radix(n, digits as u32).into(),
-            "toFixed" if n.abs() >= 1e21 => exponent_string(format!("{n:e}")).into(),
-            "toFixed" => format!("{n:.digits$}").into(),
-            "toExponential" if omitted => exponent_string(format!("{n:e}")).into(),
-            "toExponential" => exponent_string(format!("{n:.digits$e}")).into(),
-            "toPrecision" => precision_string(n, digits).into(),
+            "toFixed" if n.abs() >= 1e21 => decimal(),
+            "toFixed" => ryu_js::Buffer::new()
+                .format_to_fixed(n, digits as u8)
+                .into(),
+            "toExponential" if omitted => shortest_exponential(n).into(),
+            "toExponential" | "toPrecision" => {
+                let exponential = method == "toExponential";
+                let precision = digits + usize::from(exponential);
+                let (coefficient, exponent) = rounded_decimal(n.abs(), precision);
+                format_decimal(
+                    coefficient,
+                    exponent,
+                    n < 0.0,
+                    exponential || exponent < -6 || exponent >= precision as i32,
+                )
+                .into()
+            }
             _ => unreachable!("registered Number method"),
         })
     }
@@ -310,35 +324,133 @@ fn parse_int(text: &str, mut radix: i32) -> f64 {
         let end = digit_prefix(digits.as_bytes());
         digits[..end].parse().unwrap_or(f64::NAN)
     } else {
-        let mut values = digits.chars().map_while(|ch| ch.to_digit(radix as u32));
-        let Some(first) = values.next() else {
+        let radix = radix as u32;
+        let end = digits
+            .bytes()
+            .take_while(|&byte| char::from(byte).is_digit(radix))
+            .count();
+        if end == 0 {
             return f64::NAN;
-        };
-        values.fold(f64::from(first), |acc, digit| {
-            acc * f64::from(radix) + f64::from(digit)
-        })
+        }
+        ops::radix_digits_to_f64(&digits[..end], radix)
     };
     if text.starts_with('-') { -value } else { value }
 }
 
-fn exponent_string(mut text: String) -> String {
-    let end = text.find('e').expect("exponential formatting") + 1;
-    if !text[end..].starts_with('-') {
-        text.insert(end, '+');
+fn shortest_exponential(n: f64) -> String {
+    if n == 0.0 {
+        return "0e+0".to_owned();
     }
-    text
+    let mut buffer = ryu_js::Buffer::new();
+    let shortest = buffer.format(n.abs());
+    let (mantissa, exponent) = shortest.split_once('e').map_or((shortest, 0), |(m, e)| {
+        (m, e.parse::<i32>().expect("decimal exponent"))
+    });
+    let point = mantissa.find('.').unwrap_or(mantissa.len());
+    // Count leading zeros as digits, excluding the decimal point if it was skipped.
+    let significant = mantissa.trim_start_matches(['0', '.']);
+    let skipped = mantissa.len() - significant.len();
+    let leading_zeros = skipped - usize::from(skipped > point);
+    let significant = significant.trim_end_matches(['0', '.']);
+    let mut coefficient = String::with_capacity(significant.len() + 6);
+    coefficient.extend(significant.chars().filter(|&ch| ch != '.'));
+    format_decimal(
+        coefficient,
+        exponent + point as i32 - leading_zeros as i32 - 1,
+        n < 0.0,
+        true,
+    )
 }
 
-fn precision_string(n: f64, digits: usize) -> String {
-    let formatted = format!("{n:.places$e}", places = digits - 1);
-    let (_, exponent) = formatted.split_once('e').expect("exponential formatting");
-    let exponent: i32 = exponent.parse().expect("decimal exponent");
-    if exponent < -6 || exponent >= digits as i32 {
-        exponent_string(formatted)
-    } else {
-        let places = (digits as i32 - 1 - exponent) as usize;
-        format!("{n:.places$}")
+fn rounded_decimal(n: f64, precision: usize) -> (String, i32) {
+    if n == 0.0 {
+        return ("0".repeat(precision), 0);
     }
+
+    let bits = n.to_bits();
+    let biased_exponent = (bits >> 52) as i32;
+    let fraction = bits & ((1 << 52) - 1);
+    let (mut significand, mut exponent) = if biased_exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), biased_exponent - 1023 - 52)
+    };
+
+    if exponent < 0 {
+        // Cancel powers of two so they don't become trailing decimal zeros.
+        let shift = significand.trailing_zeros().min((-exponent) as u32);
+        significand >>= shift;
+        exponent += shift as i32;
+    }
+
+    // m * 2^e is an integer for e >= 0; otherwise it is m * 5^(-e) / 10^(-e).
+    const BASE: u64 = 1_000_000_000;
+    let mut limbs = [0; 86]; // 53 bits times 5^1074 takes at most 767 decimal digits.
+    limbs[0] = significand % BASE;
+    limbs[1] = significand / BASE;
+    let mut len = if limbs[1] == 0 { 1 } else { 2 };
+    let (factor, scale) = if exponent < 0 { (5, -exponent) } else { (2, 0) };
+    for _ in 0..exponent.abs() {
+        let mut carry = 0;
+        for limb in &mut limbs[..len] {
+            let product = *limb * factor + carry;
+            *limb = product % BASE;
+            carry = product / BASE;
+        }
+        if carry != 0 {
+            limbs[len] = carry;
+            len += 1;
+        }
+    }
+
+    // Only render enough of the exact coefficient to include the rounding digit.
+    let mut digits = String::with_capacity(precision + 9);
+    write!(digits, "{}", limbs[len - 1]).expect("writing to a String");
+    let mut exponent = (digits.len() + (len - 1) * 9) as i32 - scale - 1;
+    for limb in limbs[..len - 1].iter().rev() {
+        if digits.len() > precision {
+            break;
+        }
+        write!(digits, "{limb:09}").expect("writing to a String");
+    }
+    let round_up = digits
+        .as_bytes()
+        .get(precision)
+        .is_some_and(|&digit| digit >= b'5');
+    digits.truncate(precision);
+    if round_up {
+        let keep = digits.trim_end_matches('9').len();
+        digits.truncate(keep);
+        if let Some(digit) = digits.pop() {
+            digits.push(char::from(digit as u8 + 1));
+        } else {
+            digits.push('1');
+            exponent += 1;
+        }
+    }
+    digits.extend(std::iter::repeat_n('0', precision - digits.len()));
+    (digits, exponent)
+}
+
+fn format_decimal(mut digits: String, exponent: i32, negative: bool, scientific: bool) -> String {
+    if scientific {
+        if digits.len() > 1 {
+            digits.insert(1, '.');
+        }
+        write!(digits, "e{exponent:+}").expect("writing to a String");
+    } else if exponent < 0 {
+        // Fixed notation is only selected for exponents down to -6.
+        digits.insert_str(0, &"0.00000"[..(1 - exponent) as usize]);
+    } else {
+        let point = exponent as usize + 1;
+        if point < digits.len() {
+            digits.insert(point, '.');
+        }
+    }
+    if negative {
+        digits.insert(0, '-');
+    }
+    digits
 }
 
 fn integer_radix(n: f64, radix: u32) -> String {

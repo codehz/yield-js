@@ -56,6 +56,7 @@
 - `Boolean(value)` 返回布尔强制转换结果，无实参返回 `false`；`new Boolean(value)` 包装该结果。Symbol 包装只能通过 `Object` 创建，`new Symbol()` 抛出可捕获的 `TypeError`；Symbol 包装继承 `Symbol.prototype.description` 访问器。
 - `Number.isFinite` / `isInteger` / `isNaN` / `isSafeInteger` 不做强制转换；`Number.parseInt` / `parseFloat` 先做字符串转换，再解析有效前缀。数值常量包括 `EPSILON`、`MAX_SAFE_INTEGER` / `MIN_SAFE_INTEGER`、`MAX_VALUE` / `MIN_VALUE`、`POSITIVE_INFINITY` / `NEGATIVE_INFINITY` 和 `NaN`。
 - `Number.prototype` 提供 `valueOf`、`toString`（基数 `2..36`）、`toFixed` / `toExponential`（位数 `0..100`）、`toPrecision`（精度 `1..100`）和使用默认十进制输出的 `toLocaleString`。这些方法接受数值原始值和数值包装对象；超出范围的基数、位数或精度会触发可捕获的 `RangeError`，但 `toExponential` 和 `toPrecision` 对非有限数先返回其文本。格式兼容性限制见 [`gaps.md`](gaps.md)。
+- 默认十进制转换使用 ECMAScript 最短表示，供字符串转换、模板、拼接、JSON 数值和静态或动态数字属性键共用。`toFixed`、`toExponential` 和 `toPrecision` 按 ECMAScript 对实际二进制数值进行十进制舍入；非十进制整数字符串转数值仅在转换为 binary64 时舍入一次。
 - `Math` 是不可调用、不可构造的普通对象。八个标准数值常量是不可写、不可枚举、不可配置的自有属性。数值方法按从左到右的顺序使用现有 `ToNumber`；`max`、`min` 和 `hypot` 转换所有实参，其他数值方法只转换所需实参。`Math.random()` 使用 VM 自有的固定种子 PRNG，返回 `[0, 1)` 中的数值；快照保留 `Math` 根及 PRNG 状态，恢复后接续原序列。
 - `JSON` 是不可调用、不可构造的普通对象，提供 `parse` 与 `stringify`。非有限数字写成 `null`；顶层 `undefined`、函数和 Symbol 返回 `undefined`，对象中省略这些值，数组中写成 `null`。`stringify` 支持 `toJSON`、函数或数组 `replacer` 以及 `space`，循环抛可捕获的 `TypeError`；孤立代理码元用 `\uXXXX` 转义。`parse` 只接受 JSON 语法，`__proto__` 是普通自有属性，字符串保留转义的孤立代理码元。可选 `reviver` 自底向上调用，返回 `undefined` 时删除属性。
 - `for…of`、数组展开、实参展开和 Promise 组合子共用同步迭代协议：只读取一次 `next`，`done` 为真时不读 `value`。获取迭代器或推进迭代时的异常不触发 `return`；`for…of` 在循环体或赋值异常以及离开循环的跳转上执行 `IteratorClose`，继续同一循环和自然耗尽时不关闭。

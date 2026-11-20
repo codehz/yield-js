@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 oxc.workspace = true
+ryu-js.workspace = true
 serde.workspace = true
 yield-vm = { path = "../vm" }

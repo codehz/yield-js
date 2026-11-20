@@ -283,8 +283,7 @@ fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &JsString, indent: usize) 
         JsonValue::Bool(value) => {
             out.extend((if *value { "true" } else { "false" }).encode_utf16())
         }
-        JsonValue::Number(value) if *value == 0.0 => out.push(u16::from(b'0')),
-        JsonValue::Number(value) => out.extend(value.to_string().encode_utf16()),
+        JsonValue::Number(value) => out.extend(ryu_js::Buffer::new().format(*value).encode_utf16()),
         JsonValue::String(value) => quote(value, out),
         JsonValue::Array(values) => {
             encode_list(out, gap, indent, true, values.len(), |out, next| {

@@ -250,17 +250,10 @@ fn parse_js_number(value: &str) -> Result<f64, VmError> {
                 .map(|digits| (8, digits))
         });
     if let Some((base, digits)) = radix {
-        if digits.is_empty() {
+        if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(base)) {
             return Ok(f64::NAN);
         }
-        let mut number = 0.0;
-        for digit in digits.chars() {
-            let Some(value) = digit.to_digit(base) else {
-                return Ok(f64::NAN);
-            };
-            number = number * base as f64 + value as f64;
-        }
-        return Ok(number);
+        return Ok(radix_digits_to_f64(digits, base));
     }
     // Rust's parser also accepts aliases such as `inf`; JS does not.
     if !trimmed
@@ -270,6 +263,62 @@ fn parse_js_number(value: &str) -> Result<f64, VmError> {
         return Ok(f64::NAN);
     }
     Ok(trimmed.parse().unwrap_or(f64::NAN))
+}
+
+/// Convert a validated, unsigned digit sequence with one binary64 rounding.
+pub(crate) fn radix_digits_to_f64(digits: &str, radix: u32) -> f64 {
+    let radix = u64::from(radix);
+    let mut digits = digits
+        .chars()
+        .map(|digit| u64::from(digit.to_digit(radix as u32).unwrap()));
+    let mut small = 0u64;
+    let first_wide = loop {
+        let Some(digit) = digits.next() else {
+            return small as f64;
+        };
+        match small.checked_mul(radix).and_then(|n| n.checked_add(digit)) {
+            Some(next) => small = next,
+            None => break digit,
+        }
+    };
+
+    // Integers above 1024 bits cannot round to a finite binary64.
+    let mut limbs = [0u32; 32];
+    limbs[0] = small as u32;
+    limbs[1] = (small >> 32) as u32;
+    let mut len = 2;
+    for digit in std::iter::once(first_wide).chain(digits) {
+        let mut carry = digit;
+        for limb in &mut limbs[..len] {
+            let next = u64::from(*limb) * radix + carry;
+            *limb = next as u32;
+            carry = next >> 32;
+        }
+        if carry != 0 {
+            if len == limbs.len() {
+                return f64::INFINITY;
+            }
+            limbs[len] = carry as u32;
+            len += 1;
+        }
+    }
+
+    let bit_len = len * 32 - limbs[len - 1].leading_zeros() as usize;
+    let bit = |pos: usize| u64::from((limbs[pos / 32] >> (pos % 32)) & 1);
+    let shift = bit_len - 53;
+    let mut significand = 0;
+    for pos in (shift..bit_len).rev() {
+        significand = (significand << 1) | bit(pos);
+    }
+    let guard = shift - 1;
+    let sticky = limbs[..guard / 32].iter().any(|&limb| limb != 0)
+        || limbs[guard / 32] & ((1 << (guard % 32)) - 1) != 0;
+    if bit(guard) != 0 && (sticky || significand & 1 != 0) {
+        significand += 1;
+    }
+    // The implicit leading bit adds one to the biased exponent; a carry
+    // out of the significand can therefore produce infinity at the limit.
+    f64::from_bits((((bit_len as u64 - 1) + 1022) << 52) + significand)
 }
 
 fn to_int32(value: &Value) -> Result<i32, VmError> {
@@ -296,11 +345,7 @@ pub(crate) fn to_js_string(value: &Value) -> JsString {
         Value::Undefined => "undefined".into(),
         Value::Null => "null".into(),
         Value::Bool(value) => if *value { "true" } else { "false" }.into(),
-        Value::Number(value) if value.is_nan() => "NaN".into(),
-        Value::Number(value) if *value == f64::INFINITY => "Infinity".into(),
-        Value::Number(value) if *value == f64::NEG_INFINITY => "-Infinity".into(),
-        Value::Number(value) if *value == 0.0 => "0".into(),
-        Value::Number(value) => value.to_string().into(),
+        Value::Number(value) => ryu_js::Buffer::new().format(*value).into(),
         Value::String(value) => value.clone(),
         Value::Symbol(_) => "Symbol()".into(),
         Value::Object(_) => "[object Object]".into(),

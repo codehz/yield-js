@@ -3,6 +3,20 @@
 import { expect } from 'test';
 
 export function run() {
+  expect(String(1e20)).toBe('100000000000000000000');
+  expect(String(1e21)).toBe('1e+21');
+  expect(String(1e-6)).toBe('0.000001');
+  expect(String(1e-7)).toBe('1e-7');
+  expect(JSON.stringify(1e21)).toBe('1e+21');
+  expect(`${1e-7}` + 1e21).toBe('1e-71e+21');
+  expect(({1e21: 7})[1e21]).toBe(7);
+  expect((1.25).toFixed(1)).toBe('1.3');
+  expect((1e21).toFixed(1)).toBe('1e+21');
+  expect((-1.25).toExponential(1)).toBe('-1.3e+0');
+  expect((9.5).toPrecision(1)).toBe('1e+1');
+  expect((0.000000999).toPrecision(1)).toBe('0.000001');
+  expect(Number.MIN_VALUE.toExponential()).toBe('5e-324');
+  expect(Number.MIN_VALUE.toExponential(2)).toBe('4.94e-324');
   expect((12.5).toString()).toBe("12.5");
   expect((12.5).toString(10)).toBe("12.5");
   expect((12.5).toLocaleString()).toBe("12.5");

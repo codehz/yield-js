@@ -3,6 +3,18 @@
 import { expect } from 'test';
 
 export function run() {
+  const near = '1' + '0'.repeat(52);
+  expect(Number('0b' + near + '11')).toBe(18014398509481988);
+  expect(Number.parseInt(near + '11', 2)).toBe(18014398509481988);
+  expect(Number('0b' + near + '10')).toBe(18014398509481984);
+  expect(Number.parseInt(near + '10', 2)).toBe(18014398509481984);
+  const max = '1'.repeat(53) + '0'.repeat(971);
+  expect(Number('0b' + max)).toBe(Number.MAX_VALUE);
+  expect(Number.parseInt('1'.repeat(54) + '0'.repeat(970), 2)).toBe(Infinity);
+  const huge = '1'.repeat(1200);
+  expect(Number('0b' + huge)).toBe(Infinity);
+  expect(Number.parseInt(huge + 'x', 2)).toBe(Infinity);
+  expect(Number.isNaN(Number('0b' + huge + 'x'))).toBe(true);
   expect(Number.parseInt("\u00a0\t-0XfFtail")).toBe(-255);
   expect(Number.parseInt(" +015rest", 0)).toBe(15);
   expect(Number.parseInt("0x10", 16)).toBe(16);

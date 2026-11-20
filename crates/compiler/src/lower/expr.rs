@@ -254,6 +254,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         } else if let PropertyKey::StringLiteral(literal) = key {
             let text = self.string_literal_text(literal)?;
             self.emit_constant(Constant::String(text))
+        } else if let PropertyKey::NumericLiteral(literal) = key {
+            let mut buffer = ryu_js::Buffer::new();
+            self.emit_constant(Constant::String(buffer.format(literal.value).into()))
         } else if let Some(name) = key.static_name().and_then(|name| name.into_cow_str()) {
             self.emit_constant(Constant::String(name.as_ref().into()))
         } else {
@@ -1211,10 +1214,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         &format!("{hint} requires {arity} simple parameters"),
                     ));
                 }
-                let name = property
-                    .key
-                    .static_name()
-                    .and_then(|name| name.into_cow_str());
+                let mut buffer = ryu_js::Buffer::new();
+                let name = match &property.key {
+                    PropertyKey::NumericLiteral(literal) => {
+                        Some(buffer.format(literal.value).into())
+                    }
+                    key => key.static_name().and_then(|name| name.into_cow_str()),
+                };
                 let (prefix, name) = match (kind, name.as_deref()) {
                     (PropertyDefinition::Data, Some(name)) => ("", name),
                     (PropertyDefinition::Get, Some(name)) => ("get ", name),
