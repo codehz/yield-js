@@ -11,8 +11,6 @@
 | 缺口 | 现状 |
 | --- | --- |
 | 函数转字符串 | 有意使用通用文本而非源码 |
-| 原始值属性访问 | 不创建临时包装对象：严格模式下对原始值写入不存在的属性抛出可捕获的 `TypeError`（标准是静默忽略）。包装对象本身已支持，见 [`implemented.md`](implemented.md) |
-| `in` 的右操作数 | 不是对象就抛 `TypeError`，不 `ToObject`。字符串上的 `in` 因此失败 |
 
 Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与一元 `+`/`-`/`~` 和二元强制转换时的可捕获 `TypeError`，已经落地。其余 well-known Symbol（`asyncIterator`、`hasInstance`、`match`、`toJSON` 等）均未提供，依赖它们的协议入口也不存在（如 `Symbol.hasInstance` 不参与 `instanceof`）。
 

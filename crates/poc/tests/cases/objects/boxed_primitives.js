@@ -77,6 +77,50 @@ export function run() {
   expect(Boolean("false")).toBe(true);
   expect(Boolean(boolean)).toBe(true);
   expect(Object(symbol).description).toBe("token");
+  expect((true).valueOf()).toBe(true);
+  const {valueOf} = true;
+  expect(valueOf).toBe((true).valueOf);
+  expect(symbol.description).toBe('token');
+  const {description} = symbol;
+  expect(description).toBe('token');
+
+  let receiver;
+  let argument;
+  let keyCount = 0;
+  Object.defineProperty(Boolean.prototype, 'x', {
+    set(value) { receiver = this; argument = value; }
+  });
+  (true).x = 7;
+  expect(receiver).toBe(true);
+  expect(argument).toBe(7);
+  (false)[{toString() { keyCount++; return 'x'; }}] = 8;
+  expect(keyCount).toBe(1);
+  expect(receiver).toBe(false);
+  expect(argument).toBe(8);
+
+  const sentinel = {};
+  Object.defineProperty(Boolean.prototype, 'throwing', {set(value) { throw sentinel; }});
+  Object.defineProperty(Boolean.prototype, 'getterOnly', {get() { return this; }});
+  let setterCalls = 0;
+  Object.defineProperty(String.prototype, '0', {set(value) { setterCalls++; }});
+  Object.defineProperty(String.prototype, '4', {get() { return this; }});
+  expect('abc'[4]).toBe('abc');
+  const {4: inherited} = 'abc';
+  expect(inherited).toBe('abc');
+  for (const action of [
+    () => { (true).getterOnly = 1; },
+    () => { (true).missing = 1; },
+    () => { 'abc'[0] = 'x'; },
+    () => 'length' in 'abc',
+  ]) {
+    let error;
+    try { action(); } catch (caught) { error = caught; }
+    expect(error instanceof TypeError).toBe(true);
+  }
+  expect(setterCalls).toBe(0);
+  let error;
+  try { (true).throwing = 1; } catch (caught) { error = caught; }
+  expect(error).toBe(sentinel);
   expect(String(123)).toBe("123");
   expect(Number("2")).toBe(2);
 

@@ -923,10 +923,7 @@ impl Vm {
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
-        if !matches!(
-            object,
-            Value::Object(_) | Value::String(_) | Value::Number(_)
-        ) {
+        if matches!(object, Value::Null | Value::Undefined) {
             return self.throw_type_error("property access on a non-object");
         }
         match key {
@@ -951,29 +948,10 @@ impl Vm {
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
-        match object {
-            Value::Object(_) | Value::Number(_) => return self.read_property(host, object, key),
-            Value::Null | Value::Undefined => {
-                return self.throw_type_error("Cannot destructure null or undefined");
-            }
-            Value::String(text) => match key {
-                PropertyKeyRef::Symbol(ITERATOR_SYMBOL) => {
-                    return self.read_property(host, object, key);
-                }
-                _ if key.is_str("length") => {
-                    return Ok(Invocation::Value(Value::Number(text.unit_len() as f64)));
-                }
-                _ => {
-                    if let Some(unit) =
-                        ops::canonical_index_key(key).and_then(|index| text.unit_at(index))
-                    {
-                        return Ok(Invocation::Value(Value::String(utf16_unit_string(unit))));
-                    }
-                }
-            },
-            _ => {}
+        if matches!(object, Value::Null | Value::Undefined) {
+            return self.throw_type_error("Cannot destructure null or undefined");
         }
-        self.read_property_with_receiver(host, self.builtins.get("object.prototype"), object, key)
+        self.read_property(host, object, key)
     }
 
     pub(crate) fn read_property(
@@ -984,29 +962,13 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         // Primitive strings resolve indexed reads without allocating wrappers.
         if let Value::String(text) = object {
-            if matches!(key, PropertyKeyRef::Symbol(_)) {
-                return self.read_property_with_receiver(
-                    host,
-                    self.builtins.get("string.prototype"),
-                    object,
-                    key,
-                );
-            }
             if key.is_str("length") {
                 return Ok(Invocation::Value(Value::Number(text.unit_len() as f64)));
             }
-            if let Some(index) = ops::canonical_index_key(key) {
-                let value = text.unit_at(index).map_or(Value::Undefined, |unit| {
-                    Value::String(utf16_unit_string(unit))
-                });
-                return Ok(Invocation::Value(value));
+            if let Some(unit) = ops::canonical_index_key(key).and_then(|index| text.unit_at(index))
+            {
+                return Ok(Invocation::Value(Value::String(utf16_unit_string(unit))));
             }
-            return self.read_property_with_receiver(
-                host,
-                self.builtins.get("string.prototype"),
-                object,
-                key,
-            );
         }
         if let Some(prototype) = self.primitive_prototype(object) {
             return self.read_property_with_receiver(host, prototype, object, key);
@@ -1294,12 +1256,27 @@ impl Vm {
         key: &Value,
         value: Value,
     ) -> Result<Invocation, VmError> {
-        let Value::Object(id) = *object else {
+        if matches!(object, Value::Null | Value::Undefined) {
             return self.throw_type_error("property write on a non-object");
-        };
+        }
         let key = match self.coerce_property_key(host, key)? {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let id = match *object {
+            Value::Object(id) => id,
+            _ => {
+                let key = key.borrowed();
+                if let Value::String(text) = object
+                    && (key.is_str("length")
+                        || ops::canonical_index_key(key)
+                            .is_some_and(|index| index < text.unit_len()))
+                {
+                    return self.throw_type_error("Cannot assign to a read only string property");
+                }
+                self.primitive_prototype(object)
+                    .expect("non-nullish primitive")
+            }
         };
         self.set_property(host, id, object, key, value, true)
     }
