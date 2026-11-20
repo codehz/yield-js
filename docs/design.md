@@ -47,7 +47,7 @@
 | 控制流 | `if`、`switch`、`for`、`while`、`do…while`、`for…in`、同步 `for…of`（含提前退出时的 iterator close）；标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。 |
 | 异步 | `async` 函数与 `await`；thenable 同化、异常拒绝、Promise 微任务顺序与已结算 Promise 的异步恢复。 |
 
-`class`（含 `extends`、字段和私有成员）与标签模板应在离线构建降级，只接受落在上述子集内且保留所用语义的输出；原生 generator、async generator、`for await…of`、顶层 `await`、动态模块加载、`eval`、`Function` 动态构造、`with` 不在首版契约内。直接输入中不支持的语法在编译期报告特性名和源码位置；缺失声明的宿主绑定在装载时拒绝。普通 JS 的可选全局探测保留标准语义（如未声明的 `MessageChannel` 在 `typeof` 中返回 `"undefined"`）。
+`class`（含 `extends`、字段和私有成员）是一等支持的语法：字节码编译器直接编译类声明与类表达式，不经离线转译降级——转译私有字段会生成额外的弱映射/闭包代码，破坏快照可恢复性和代码量目标。类语义（构造器、继承链、`super`、静态成员、字段初始化、私有字段/方法/访问器）在编译器与 VM 内建层面实现；宿主类声明（`#[host_class]`）与脚本类共用同一套 VM 类对象表示。标签模板仍应在离线构建降级，只接受落在上述子集内且保留所用语义的输出；原生 generator、async generator、`for await…of`、顶层 `await`、动态模块加载、`eval`、`Function` 动态构造、`with` 不在首版契约内。直接输入中不支持的语法在编译期报告特性名和源码位置；缺失声明的宿主绑定在装载时拒绝。普通 JS 的可选全局探测保留标准语义（如未声明的 `MessageChannel` 在 `typeof` 中返回 `"undefined"`）。
 
 ### VM 内建与可观察语义
 

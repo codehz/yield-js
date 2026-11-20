@@ -19,14 +19,14 @@
 ### 2.2 表达式
 
 - `++` / `--` 只接受绑定或成员目标，包括括号括起的绑定/成员目标如 `(x)++`、`++(obj.x)`、`((obj.x))--`（非左值目标仍拒绝：`update target outside the PoC subset`）；解构赋值只支持 `=`
-- 私有字段（`private field access`）
+- 私有字段（`private field access`）。设计已将 `class`（含私有字段）提升为一等支持（见 [`design.md`](design.md)），当前拒绝是待实现的缺口，不再由离线构建降级
 - 标签模板。非标签模板已支持
 - 不支持的正则字面量模式与标志在编译时拒绝；若未被 Oxc 提前拒绝，报告带行列的 `unsupported syntax: ...`。模式子集见第 4 节。
-- 未单列的表达式形式落到 `expression form outside the PoC subset`：类表达式、`super`、`new.target`、`import.meta`、`import()`、`yield`、`bigint`
+- 未单列的表达式形式落到 `expression form outside the PoC subset`：`super`、`new.target`、`import.meta`、`import()`、`yield`、`bigint`（类表达式归入下方 `class` 缺口）
 
 ### 2.3 控制流与顶层
 
-- `class` 声明（`class declaration`）。首版约定由离线构建降级，编译器仍整段拒绝
+- `class` 声明与类表达式（`class declaration` 等）。设计已提升为一等支持（见 [`design.md`](design.md)），不再由离线构建降级；当前编译器仍整段拒绝，是待实现的缺口
 
 ## 3. 能编过，但语义不完整
 
@@ -83,7 +83,7 @@ flowchart LR
 
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造、`with`
-- `class` 与标签模板：首版由离线构建降级。编译器拒绝它们是符合契约的，不是 VM 还欠的语法
+- 标签模板：仍由离线构建降级。`class` 不再在此列——设计已提升为一等支持（见 [`design.md`](design.md)），当前编译器拒绝是待实现的缺口
 - 严格 ESM 支持本地命名导出（含本地宿主导入绑定）和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和带模块来源的再导出在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
