@@ -1,9 +1,10 @@
 //! RegExp objects and matching over JavaScript UTF-16 code units.
+use std::borrow::Cow;
 
 use crate::error::VmError;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;
-use crate::regexp::{compile_pattern, encode_input};
+use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
@@ -369,9 +370,16 @@ impl Vm {
             return Ok(Invocation::Thrown(error));
         }
         let unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
+        let encoded = encode_input_with_flags(&string, &flags).into_owned();
         let mut results = Vec::new();
         loop {
-            match self.regexp_exec(host, &receiver, id, string.clone())? {
+            match self.regexp_exec_with_encoded(
+                host,
+                &receiver,
+                id,
+                string.clone(),
+                Some(encoded.as_ref()),
+            )? {
                 Invocation::Value(Value::Null) => break,
                 Invocation::Value(Value::Object(array)) => {
                     let matched = match self.regexp_capture(host, array, 0)? {
@@ -554,8 +562,15 @@ impl Vm {
             if let Err(error) = self.regexp_set_last_index(host, id, 0.0)? {
                 return Ok(Invocation::Thrown(error));
             }
+            let encoded = encode_input_with_flags(&string, &flags).into_owned();
             loop {
-                match self.regexp_exec(host, &receiver, id, string.clone())? {
+                match self.regexp_exec_with_encoded(
+                    host,
+                    &receiver,
+                    id,
+                    string.clone(),
+                    Some(encoded.as_ref()),
+                )? {
                     Invocation::Value(Value::Null) => break,
                     Invocation::Value(Value::Object(array)) => {
                         results.push(Value::Object(array));
@@ -698,12 +713,19 @@ impl Vm {
             return Ok(created);
         };
         let size = string.unit_len();
+        let encoded = encode_input_with_flags(&string, &flags).into_owned();
         let mut parts = Vec::new();
         if limit == 0 {
             return self.array_result(parts);
         }
         if size == 0 {
-            match self.regexp_exec(host, &Value::Object(splitter), splitter, string.clone())? {
+            match self.regexp_exec_with_encoded(
+                host,
+                &Value::Object(splitter),
+                splitter,
+                string.clone(),
+                Some(encoded.as_ref()),
+            )? {
                 Invocation::Value(Value::Null) => parts.push(Value::String(string)),
                 Invocation::Value(_) => {}
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -717,8 +739,13 @@ impl Vm {
             if let Err(error) = self.regexp_set_last_index(host, splitter, cursor as f64)? {
                 return Ok(Invocation::Thrown(error));
             }
-            let result =
-                self.regexp_exec(host, &Value::Object(splitter), splitter, string.clone())?;
+            let result = self.regexp_exec_with_encoded(
+                host,
+                &Value::Object(splitter),
+                splitter,
+                string.clone(),
+                Some(encoded.as_ref()),
+            )?;
             let Invocation::Value(result) = result else {
                 return Ok(result);
             };
@@ -1092,6 +1119,17 @@ impl Vm {
         id: ObjectId,
         input: JsString,
     ) -> Result<Invocation, VmError> {
+        self.regexp_exec_with_encoded(host, receiver, id, input, None)
+    }
+
+    fn regexp_exec_with_encoded(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+        id: ObjectId,
+        input: JsString,
+        encoded: Option<&[u16]>,
+    ) -> Result<Invocation, VmError> {
         let exec = match self.read_property(host, receiver, PropertyKeyRef::String("exec"))? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -1108,7 +1146,7 @@ impl Vm {
         if !matches!(self.heap.get(id)?, Object::RegExp { .. }) {
             return self.throw_type_error("RegExpExec requires a RegExp receiver or callable exec");
         }
-        self.regexp_match(host, id, input)
+        self.regexp_match_with_encoded(host, id, input, encoded)
     }
 
     fn regexp_match(
@@ -1116,6 +1154,16 @@ impl Vm {
         host: &mut dyn Host,
         id: ObjectId,
         input: JsString,
+    ) -> Result<Invocation, VmError> {
+        self.regexp_match_with_encoded(host, id, input, None)
+    }
+
+    fn regexp_match_with_encoded(
+        &mut self,
+        host: &mut dyn Host,
+        id: ObjectId,
+        input: JsString,
+        encoded: Option<&[u16]>,
     ) -> Result<Invocation, VmError> {
         let Object::RegExp { flags, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
@@ -1136,7 +1184,9 @@ impl Vm {
         let Object::RegExp { compiled, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
         };
-        let encoded = encode_input(&input, flags);
+        let encoded = encoded
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| encode_input(&input, flags));
         let units = encoded.as_ref();
         let matched = if flags.unicode {
             compiled.find_from_utf16(units, start).next()

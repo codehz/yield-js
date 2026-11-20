@@ -101,6 +101,16 @@ pub(crate) fn encode_input(input: &JsString, flags: RegExpFlags) -> Cow<'_, [u16
     }
     units
 }
+pub(crate) fn encode_input_with_flags<'a>(input: &'a JsString, flags: &JsString) -> Cow<'a, [u16]> {
+    let mut units = input.to_utf16();
+    let ignore_case = flags.units().any(|unit| unit == u16::from(b'i'));
+    let unicode = flags.units().any(|unit| unit == u16::from(b'u'));
+    let unicode_sets = flags.units().any(|unit| unit == u16::from(b'v'));
+    if !unicode && !unicode_sets {
+        legacy_casefold_units(&mut units, ignore_case);
+    }
+    units
+}
 
 // Keep legacy folds excluded by ECMAScript separate; map surrogate halves to scalars
 // so the backend parser cannot pair them in non-Unicode mode.
