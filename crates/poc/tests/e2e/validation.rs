@@ -55,8 +55,14 @@ export async function run() {
 
     let set_label = s.host.count("setLabel");
     s.host.reject_restore_operation = true;
-    let error = s.restore(snapshot.clone()).expect_err("missing operation");
-    assert!(matches!(error, VmError::MissingOperation(id) if id.contains("restore rejected")));
+    s.restore(snapshot.clone())
+        .expect("restore publishes the VM");
+    s.vm.run_until_idle(&mut s.host)
+        .expect("settle rejected start");
+    assert_eq!(
+        s.state(),
+        PromiseState::Rejected(Value::String("wait rejected".into()))
+    );
     assert_eq!(
         count_delta(s.host.count("setLabel"), set_label),
         0,
@@ -637,6 +643,8 @@ export async function run() {
             .expect("snapshot"),
     );
     vm = Vm::restore(snapshot, build, &mut host).expect("restore imports");
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operations");
     host.complete(
         &mut vm,
         "wait:identity",

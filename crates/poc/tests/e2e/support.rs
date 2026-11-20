@@ -41,6 +41,7 @@ impl Suspended {
     #[track_caller]
     pub(super) fn restore(&mut self, snapshot: Snapshot) -> Result<(), VmError> {
         self.vm = Vm::restore(snapshot, self.vm.build().clone(), &mut self.host)?;
+        self.vm.start_recovered_operations(&mut self.host)?;
         Ok(())
     }
 

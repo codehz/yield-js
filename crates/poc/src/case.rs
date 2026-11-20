@@ -433,6 +433,10 @@ fn restore(
         Snapshot::from_json(&json).map_err(|error| located(name, line, "@restore", error))?;
     *vm = Vm::restore(snapshot, build.clone(), host)
         .map_err(|error| located(name, line, "@restore", error))?;
+    vm.start_recovered_operations(host)
+        .map_err(|error| located(name, line, "@restore", error))?;
+    vm.run_until_idle(host)
+        .map_err(|error| located(name, line, "@restore", error))?;
     Ok(())
 }
 

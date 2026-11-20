@@ -86,6 +86,9 @@ pub struct Vm {
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
+    /// Operations loaded by restore whose `Resume` / `Reissue` work has not
+    /// been handed to the host yet. Drained by `start_recovered_operations`.
+    pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) imports: Vec<ImportModule>,
@@ -131,6 +134,7 @@ impl Vm {
             continuations: BTreeMap::new(),
             imports: Vec::new(),
             operations: BTreeMap::new(),
+            recovered_operations: BTreeSet::new(),
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
             class_prototypes: Vec::new(),
@@ -191,7 +195,7 @@ impl Vm {
                     .name;
                 self.heap.define_data(
                     prototype,
-                    name,
+                    name.key(),
                     Value::Object(function),
                     crate::binding::PROTOTYPE_METHOD_ATTRIBUTES,
                 )?;
@@ -220,8 +224,16 @@ impl Vm {
                 });
                 self.heap.define_property(
                     prototype,
-                    crate::value::PropertyKey::from(declaration.name),
+                    declaration.name.key(),
                     crate::heap::Property::Accessor { get, set },
+                )?;
+            }
+        }
+        for (class, _) in bindings.classes() {
+            if let Some(parent) = bindings.class_parent(class) {
+                self.heap.set_prototype(
+                    self.class_prototypes[class],
+                    Some(self.class_prototypes[parent]),
                 )?;
             }
         }
@@ -269,7 +281,7 @@ impl Vm {
                 }
             },
             NativeTarget::Method(id) => match bindings.method(id) {
-                Some(method) => (method.call, false, method.name.to_owned()),
+                Some(method) => (method.call, false, method.name.to_string()),
                 None => {
                     return Err(VmError::Host(format!(
                         "host method at {id:?} is not declared"
@@ -293,7 +305,7 @@ impl Vm {
                             if set { "setter" } else { "getter" }
                         )));
                     };
-                    (call, false, declaration.name.to_owned())
+                    (call, false, declaration.name.to_string())
                 }
                 None => {
                     return Err(VmError::Host(format!(
@@ -662,6 +674,43 @@ impl Vm {
             .collect()
     }
 
+    /// Hands recovered `Resume` / `Reissue` operations to the host after
+    /// [`Vm::restore`] has published the new VM. Each operation is registered
+    /// at most once. A host failure rejects that operation's original Promise
+    /// with its declared rejection and does not discard the restored VM.
+    pub fn start_recovered_operations(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        let pending = std::mem::take(&mut self.recovered_operations);
+        for id in pending {
+            let Some(operation) = self.operations.get(&id) else {
+                continue;
+            };
+            let name = operation.name.clone();
+            let schema = operation.schema;
+            let recovery = operation.recovery;
+            let state = operation.state.clone();
+            let promise = operation.promise;
+            let rejection = operation.rejection;
+            let start = crate::binding::OperationStart {
+                token: crate::binding::OperationToken {
+                    epoch: self.epoch,
+                    id,
+                },
+                name: &name,
+                schema,
+                recovery,
+                state: &state,
+            };
+            if host.resume_operation(start).is_err() {
+                self.operations.remove(&id);
+                self.settle(
+                    promise,
+                    Settlement::Rejected(Value::String(rejection.into())),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn alloc_operation<O: crate::binding::Operation>(
         &mut self,
         state: Vec<u8>,
@@ -926,12 +975,23 @@ impl Vm {
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
         let next_operation_id = operations.keys().next_back().map_or(1, |id| id + 1);
+        let recovered_operations = operations
+            .iter()
+            .filter(|(_, operation)| {
+                matches!(
+                    operation.recovery,
+                    crate::binding::Recovery::Resume | crate::binding::Recovery::Reissue
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
         Self {
             build,
             bindings,
             heap,
             continuations,
             operations,
+            recovered_operations,
             microtasks: VecDeque::new(),
             globals,
             imports: Vec::new(),

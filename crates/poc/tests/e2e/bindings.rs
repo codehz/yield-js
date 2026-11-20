@@ -155,6 +155,15 @@ export async function run() {
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    assert!(
+        host.resumed.is_empty(),
+        "restore must not start external work before returning"
+    );
+    assert_eq!(vm.pending_operations().len(), 2);
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operations");
+    vm.start_recovered_operations(&mut host)
+        .expect("starting recovered operations is idempotent");
     vm.run_until_idle(&mut host)
         .expect("settle restored operations");
     assert_eq!(
@@ -196,6 +205,8 @@ export async function run() {
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operations");
     assert!(matches!(
         vm.complete_operation(stale, Completion::Fulfilled(JsValue::undefined())),
         Err(VmError::UnknownOperation(_))
@@ -383,6 +394,8 @@ export async function run() {
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operations");
     let token = host.tokens["wait"];
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
@@ -400,14 +413,11 @@ struct Point {
 impl HostClass for Point {
     const TAG: &'static str = "Point";
     const PAYLOAD_SCHEMA: Option<u32> = Some(1);
-    const METHODS: &'static [yield_vm::binding::MethodDecl] = &[yield_vm::binding::MethodDecl {
-        name: "x",
-        arity: 0,
-        call: |cx| {
+    const METHODS: &'static [yield_vm::binding::MethodDecl] =
+        &[yield_vm::binding::MethodDecl::new("x", 0, |cx| {
             let this = cx.this::<Point>()?;
             Ok(JsValue::number(this.instance().payload(cx)?.x))
-        },
-    }];
+        })];
 
     fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(&self.x.to_le_bytes());
@@ -524,5 +534,129 @@ export async function run() {
     assert!(
         matches!(&error, VmError::InvalidSnapshot(message) if message.contains("payload")),
         "{error:?}"
+    );
+}
+
+struct InheritWait;
+
+impl Operation for InheritWait {
+    const NAME: &'static str = "inherit-wait";
+    const SCHEMA: u32 = 1;
+    const RECOVERY: Recovery = Recovery::Resume;
+
+    fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
+        Ok(())
+    }
+
+    fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+        Ok(Self)
+    }
+}
+
+struct Base;
+
+impl HostClass for Base {
+    const TAG: &'static str = "Base";
+    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
+        name: "base",
+        kind: SlotKind::Js,
+    }];
+    const METHODS: &'static [yield_vm::binding::MethodDecl] =
+        &[yield_vm::binding::MethodDecl::new("read", 0, |cx| {
+            let this = cx.this::<Base>()?;
+            this.instance().slot(cx, 0)
+        })];
+}
+
+struct Derived;
+
+impl HostClass for Derived {
+    const TAG: &'static str = "Derived";
+    const PARENT: Option<&'static str> = Some("Base");
+    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
+        name: "value",
+        kind: SlotKind::Js,
+    }];
+    const METHODS: &'static [yield_vm::binding::MethodDecl] =
+        &[yield_vm::binding::MethodDecl::new("value", 0, |cx| {
+            let this = cx.this::<Derived>()?;
+            this.instance().slot(cx, 0)
+        })];
+}
+
+#[test]
+fn derived_host_classes_inherit_prototypes_and_slot_layout() {
+    let bindings = Bindings::builder()
+        .class::<Base>()
+        .class::<Derived>()
+        .operation::<InheritWait>()
+        .module(
+            ModuleDecl::new("inherit")
+                .function("wait", 0, |cx| cx.start_operation(InheritWait))
+                .function("assert", 2, |cx| {
+                    let value = cx.arg(0)?;
+                    if value.truthy() {
+                        return Ok(JsValue::undefined());
+                    }
+                    Err(cx.throw_string("assert failed".to_owned()))
+                })
+                .constructor_for::<Base>("Base", 0, |cx| {
+                    let base = cx.alloc(Base)?;
+                    base.set_slot(cx, 0, JsValue::number(1.0))?;
+                    Ok(base.value(cx))
+                })
+                .constructor_for::<Derived>("Derived", 0, |cx| {
+                    let derived = cx.alloc(Derived)?;
+                    derived.set_slot(cx, 0, JsValue::number(2.0))?;
+                    Ok(derived.value(cx))
+                }),
+        )
+        .build()
+        .expect("derived bindings");
+    let source = r#"
+import { assert, Base, Derived, wait } from "inherit";
+export async function run() {
+  const derived = new Derived();
+  const base = new Base();
+  await wait();
+  assert(derived.read() === undefined);
+  assert(derived.value() === 2);
+  assert(base.read() === 1);
+  assert(base instanceof Base);
+  assert(derived instanceof Base);
+  assert(derived instanceof Derived);
+  assert(!(base instanceof Derived));
+  assert(derived.read === base.read);
+  let naked = "missing";
+  try {
+    const read = derived.read;
+    read();
+  } catch (error) {
+    naked = error instanceof TypeError ? "type" : "other";
+  }
+  assert(naked === "type");
+  return true;
+}
+"#;
+    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let mut host = StrategyHost::new(bindings);
+    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let result = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host).expect("suspend");
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot derived instance");
+    drop(vm);
+
+    let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operation");
+    let token = host.tokens["inherit-wait"];
+    vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
+        .expect("complete wait");
+    vm.run_until_idle(&mut host).expect("drain");
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Bool(true))
     );
 }

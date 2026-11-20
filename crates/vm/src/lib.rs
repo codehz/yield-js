@@ -29,8 +29,9 @@ mod vm;
 
 pub use binding::{
     Bindings, BindingsBuilder, ClassId, ConstKind, ConstValue, ExportDecl, ExportId, HostClass,
-    HostFault, HostModuleState, Instance, JsError, JsResult, JsValue, MethodDecl, MethodId,
-    ModuleDecl, NativeTarget, Operation, OperationStart, OperationToken, Recovery, SlotDecl, This,
+    HostFault, HostModuleState, Instance, JsError, JsResult, JsValue, MemberName, MethodDecl,
+    MethodId, ModuleDecl, NativeTarget, Operation, OperationStart, OperationToken, Recovery,
+    SlotDecl, This, WellKnownSymbol,
 };
 pub use bytecode::{
     Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,

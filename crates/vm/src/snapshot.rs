@@ -540,18 +540,17 @@ impl Vm {
         check_heap_edges(&vm.build, &vm.heap, &bindings)?;
         validate_jobs(&vm.heap)?;
         validate_combines(&vm.heap)?;
-        vm.resume_operations(host)?;
+        vm.settle_restored_operations()?;
         vm.random_state = snapshot.random_state;
         Ok(vm)
     }
 
-    fn resume_operations(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    /// Apply the `Pause` and `Reject` strategies. `Resume` / `Reissue`
+    /// operations stay pending until [`Vm::start_recovered_operations`] is
+    /// called after the restored VM has been published.
+    fn settle_restored_operations(&mut self) -> Result<(), VmError> {
         let pending = std::mem::take(&mut self.operations);
         for (id, operation) in pending {
-            let token = crate::binding::OperationToken {
-                epoch: self.epoch,
-                id,
-            };
             match operation.recovery {
                 Recovery::Pause => {
                     self.settle(operation.promise, Settlement::Fulfilled(Value::Undefined))?;
@@ -563,15 +562,6 @@ impl Vm {
                     )?;
                 }
                 Recovery::Resume | Recovery::Reissue => {
-                    let start = crate::binding::OperationStart {
-                        token,
-                        name: &operation.name,
-                        schema: operation.schema,
-                        recovery: operation.recovery,
-                        state: &operation.state,
-                    };
-                    host.resume_operation(start)
-                        .map_err(|error| VmError::MissingOperation(error.0))?;
                     self.operations.insert(id, operation);
                 }
             }

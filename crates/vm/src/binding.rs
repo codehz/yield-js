@@ -205,24 +205,153 @@ pub struct SlotDecl {
     pub kind: SlotKind,
 }
 
+/// Well-known symbols that a host declaration may use as a prototype member
+/// key. Declarations name the stable enum variant, never a runtime symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WellKnownSymbol {
+    Iterator,
+    ToPrimitive,
+    Species,
+    Match,
+    MatchAll,
+    Replace,
+    Search,
+    Split,
+}
+
+impl WellKnownSymbol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Iterator => "Symbol.iterator",
+            Self::ToPrimitive => "Symbol.toPrimitive",
+            Self::Species => "Symbol.species",
+            Self::Match => "Symbol.match",
+            Self::MatchAll => "Symbol.matchAll",
+            Self::Replace => "Symbol.replace",
+            Self::Search => "Symbol.search",
+            Self::Split => "Symbol.split",
+        }
+    }
+
+    pub(crate) fn id(self) -> SymbolId {
+        match self {
+            Self::Iterator => crate::heap::ITERATOR_SYMBOL,
+            Self::ToPrimitive => crate::heap::TO_PRIMITIVE_SYMBOL,
+            Self::Species => crate::heap::SPECIES_SYMBOL,
+            Self::Match => crate::heap::MATCH_SYMBOL,
+            Self::MatchAll => crate::heap::MATCH_ALL_SYMBOL,
+            Self::Replace => crate::heap::REPLACE_SYMBOL,
+            Self::Search => crate::heap::SEARCH_SYMBOL,
+            Self::Split => crate::heap::SPLIT_SYMBOL,
+        }
+    }
+}
+
+/// Prototype member key: a string name or an explicitly declared well-known
+/// symbol. Arbitrary runtime symbols are not accepted as declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberName {
+    Name(&'static str),
+    Symbol(WellKnownSymbol),
+}
+
+impl MemberName {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name(name) => name,
+            Self::Symbol(symbol) => symbol.label(),
+        }
+    }
+
+    pub(crate) fn key(self) -> PropertyKey {
+        match self {
+            Self::Name(name) => PropertyKey::from(name),
+            Self::Symbol(symbol) => PropertyKey::Symbol(symbol.id()),
+        }
+    }
+}
+
+impl From<&'static str> for MemberName {
+    fn from(name: &'static str) -> Self {
+        Self::Name(name)
+    }
+}
+
+impl From<WellKnownSymbol> for MemberName {
+    fn from(symbol: WellKnownSymbol) -> Self {
+        Self::Symbol(symbol)
+    }
+}
+
+impl fmt::Display for MemberName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
 #[derive(Clone)]
 pub struct MethodDecl {
-    pub name: &'static str,
+    pub name: MemberName,
     pub arity: usize,
     pub call: HostCall,
 }
 
+impl MethodDecl {
+    pub const fn new(name: &'static str, arity: usize, call: HostCall) -> Self {
+        Self {
+            name: MemberName::Name(name),
+            arity,
+            call,
+        }
+    }
+
+    pub const fn symbol(symbol: WellKnownSymbol, arity: usize, call: HostCall) -> Self {
+        Self {
+            name: MemberName::Symbol(symbol),
+            arity,
+            call,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AccessorDecl {
-    pub name: &'static str,
+    pub name: MemberName,
     pub get: Option<HostCall>,
     pub set: Option<HostCall>,
+}
+
+impl AccessorDecl {
+    pub const fn new(name: &'static str, get: Option<HostCall>, set: Option<HostCall>) -> Self {
+        Self {
+            name: MemberName::Name(name),
+            get,
+            set,
+        }
+    }
+
+    pub const fn symbol(
+        symbol: WellKnownSymbol,
+        get: Option<HostCall>,
+        set: Option<HostCall>,
+    ) -> Self {
+        Self {
+            name: MemberName::Symbol(symbol),
+            get,
+            set,
+        }
+    }
 }
 
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
 /// hidden typed slots, and an optional non-JS payload.
 pub trait HostClass: Sized + 'static {
     const TAG: &'static str;
+    /// Tag of the class whose prototype and slot layout this class extends.
+    /// A derived instance is accepted by base-class methods, and base slots
+    /// occupy the leading part of its slot layout.
+    const PARENT: Option<&'static str> = None;
     const SLOTS: &'static [SlotDecl] = &[];
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
@@ -333,7 +462,12 @@ type EmptyFn = fn(&dyn Any) -> bool;
 
 struct ClassDecl {
     tag: String,
+    parent_tag: Option<&'static str>,
+    parent: Option<ClassId>,
+    /// Leading slots inherited from the parent chain, followed by this
+    /// class's own declarations. `slot_base` is the first own slot.
     slots: Vec<SlotDecl>,
+    slot_base: usize,
     methods: Vec<MethodDecl>,
     accessors: Vec<AccessorDecl>,
     payload_schema: Option<u32>,
@@ -492,6 +626,27 @@ impl Bindings {
 
     pub fn class_slots(&self, class: ClassId) -> &[SlotDecl] {
         &self.inner.classes[class].slots
+    }
+
+    /// Index of the class's first own slot in the combined layout.
+    pub fn class_slot_base(&self, class: ClassId) -> usize {
+        self.inner.classes[class].slot_base
+    }
+
+    pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
+        self.inner.classes[class].parent
+    }
+
+    /// Whether `class` is `base` or inherits from it.
+    pub fn class_is_a(&self, class: ClassId, base: ClassId) -> bool {
+        let mut current = Some(class);
+        while let Some(class) = current {
+            if class == base {
+                return true;
+            }
+            current = self.inner.classes[class].parent;
+        }
+        false
     }
 
     pub fn class_payload_schema(&self, class: ClassId) -> Option<u32> {
@@ -657,6 +812,9 @@ impl BindingsBuilder {
     pub fn class<T: HostClass>(mut self) -> Self {
         self.classes.push(ClassDecl {
             tag: T::TAG.to_owned(),
+            parent_tag: T::PARENT,
+            parent: None,
+            slot_base: 0,
             slots: T::SLOTS.to_vec(),
             methods: T::METHODS.to_vec(),
             accessors: T::ACCESSORS.to_vec(),
@@ -734,9 +892,10 @@ impl BindingsBuilder {
                 return Err(format!("duplicate host class {:?}", pair[0].tag));
             }
         }
+        resolve_class_layouts(&mut self.classes)?;
         for class in &mut self.classes {
-            class.methods.sort_by(|a, b| a.name.cmp(b.name));
-            class.accessors.sort_by(|a, b| a.name.cmp(b.name));
+            class.methods.sort_by_key(|method| method.name);
+            class.accessors.sort_by_key(|accessor| accessor.name);
             let mut names = BTreeSet::new();
             for method in &class.methods {
                 if !names.insert(method.name) {
@@ -853,6 +1012,80 @@ impl ModuleDecl {
     }
 }
 
+fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
+    let tags: BTreeMap<String, usize> = classes
+        .iter()
+        .enumerate()
+        .map(|(index, class)| (class.tag.clone(), index))
+        .collect();
+    let parents = classes
+        .iter()
+        .map(|class| {
+            class
+                .parent_tag
+                .map(|tag| {
+                    tags.get(tag)
+                        .copied()
+                        .ok_or_else(|| format!("class {:?} has unknown parent {tag:?}", class.tag))
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    fn visit(
+        index: usize,
+        parents: &[Option<usize>],
+        tags: &[String],
+        state: &mut [u8],
+        order: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        match state[index] {
+            2 => return Ok(()),
+            1 => {
+                return Err(format!("class inheritance cycle at {:?}", tags[index]));
+            }
+            _ => {}
+        }
+        state[index] = 1;
+        if let Some(parent) = parents[index] {
+            visit(parent, parents, tags, state, order)?;
+        }
+        state[index] = 2;
+        order.push(index);
+        Ok(())
+    }
+
+    let tags: Vec<String> = classes.iter().map(|class| class.tag.clone()).collect();
+    let mut state = vec![0u8; classes.len()];
+    let mut order = Vec::with_capacity(classes.len());
+    for index in 0..classes.len() {
+        visit(index, &parents, &tags, &mut state, &mut order)?;
+    }
+    for index in order {
+        let parent = parents[index];
+        let inherited = parent
+            .map(|parent| classes[parent].slots.clone())
+            .unwrap_or_default();
+        let slot_base = inherited.len();
+        let own = std::mem::take(&mut classes[index].slots);
+        let mut slots = inherited;
+        slots.extend(own);
+        let class = &mut classes[index];
+        class.parent = parent;
+        class.slot_base = slot_base;
+        class.slots = slots;
+    }
+    for class in classes {
+        let mut names = BTreeSet::new();
+        for slot in &class.slots {
+            if !names.insert(slot.name) {
+                return Err(format!("duplicate host slot {:?}.{}", class.tag, slot.name));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fingerprint(
     modules: &[ModuleDecl],
     classes: &[ClassDecl],
@@ -882,7 +1115,7 @@ fn fingerprint(
         }
     }
     for class in classes {
-        line(format!("class {}", class.tag));
+        line(format!("class {} parent={:?}", class.tag, class.parent_tag));
         for slot in &class.slots {
             line(format!("slot {} {:?}", slot.name, slot.kind));
         }
@@ -1081,26 +1314,30 @@ impl<T: HostClass> Instance<T> {
     }
 
     pub fn slot(&self, cx: &CallCx<'_>, index: usize) -> JsResult<JsValue> {
-        cx.slot_value(self.id, index)
+        cx.slot_value(self.id, cx.instance_slot::<T>(index)?)
     }
 
     pub fn set_slot(&self, cx: &mut CallCx<'_>, index: usize, value: JsValue) -> JsResult<()> {
+        let index = cx.instance_slot::<T>(index)?;
         cx.set_slot_value(self.id, index, value)
     }
 
     pub fn list_len(&self, cx: &CallCx<'_>, index: usize) -> JsResult<usize> {
-        cx.list_len_value(self.id, index)
+        cx.list_len_value(self.id, cx.instance_slot::<T>(index)?)
     }
 
     pub fn list_get(&self, cx: &CallCx<'_>, index: usize, position: usize) -> JsResult<JsValue> {
+        let index = cx.instance_slot::<T>(index)?;
         cx.list_get_value(self.id, index, position)
     }
 
     pub fn list_push(&self, cx: &mut CallCx<'_>, index: usize, value: JsValue) -> JsResult<()> {
+        let index = cx.instance_slot::<T>(index)?;
         cx.list_push_value(self.id, index, value)
     }
 
     pub fn list_clear(&self, cx: &mut CallCx<'_>, index: usize) -> JsResult<()> {
+        let index = cx.instance_slot::<T>(index)?;
         cx.list_clear_value(self.id, index)
     }
 
@@ -1370,8 +1607,7 @@ impl<'a> CallCx<'a> {
         let Some(instance) = self.vm.host_instances.get(&id) else {
             return Err(self.type_error(format!("{} called on incompatible receiver", T::TAG)));
         };
-        let instance_class = instance.class;
-        if instance_class != class {
+        if !self.bindings.class_is_a(instance.class, class) {
             return Err(self.type_error(format!("{} called on incompatible receiver", T::TAG)));
         }
         Ok(This {
@@ -1413,6 +1649,17 @@ impl<'a> CallCx<'a> {
 
     pub(crate) fn js_value(&self, value: Value) -> JsValue {
         JsValue::handle(value, self.epoch, self.call)
+    }
+
+    /// Translate a declaration-local slot index into the combined layout.
+    pub(crate) fn instance_slot<T: HostClass>(&self, index: usize) -> JsResult<usize> {
+        let class = self.bindings.class_by_tag(T::TAG).ok_or_else(|| {
+            JsError::Fault(HostFault::new(format!("unregistered class {}", T::TAG)))
+        })?;
+        self.bindings
+            .class_slot_base(class)
+            .checked_add(index)
+            .ok_or_else(|| JsError::Fault(HostFault::new("slot index out of range")))
     }
 
     pub(crate) fn check_value(&self, value: &JsValue) -> Result<(), JsError> {

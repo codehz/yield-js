@@ -6,6 +6,7 @@
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。声明由 `yield_vm::binding::Bindings` builder 提供，编译器清单由同一份声明派生。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。非零大小载荷必须声明 `PAYLOAD_SCHEMA` 与 codec，否则分配实例是 `HostFault`，避免恢复时静默丢失数据。`constructor_for::<T>` 导出的构造函数暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
+- 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与 `constructor_for` 导出的函数值仍由 VM 持有。声明 `HostClass::PARENT` 时，父类原型成为子类原型的原型，槽布局按父类在前合并，子类槽索引按自身布局计数；基类方法与访问器接受派生实例，`instanceof` 沿原型链检查，快照保存原型链和合并后的槽。payload 仍属于具体实例类，不沿继承链合并。脚本 `class` / `extends` 语法不在当前编译器子集内。
 - `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec 使用 `DecodeCx` 访问平台服务；服务 ID 进入声明指纹，缺失或版本不符整体拒绝恢复。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
@@ -64,7 +65,7 @@
 - Promise 组合子接受同步可迭代值。每次调用先读取接收者的 `resolve` 一次，按输入顺序以同一接收者调用它，并调用每个返回值的 `then`。属性读取、调用与迭代错误拒绝结果 Promise。等待中的组合子可跨快照恢复；`Promise.any` 全拒绝时以真实 `AggregateError` 拒绝，`.errors` 按输入顺序保留拒绝原因。
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
-- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 创建 Promise 与持久 operation 记录，宿主只收到声明名、schema、策略、状态字节和代际令牌。结算必须使用当前代际令牌；旧 VM 的令牌、重复结算和未知 operation 被拒绝。恢复按声明策略处理：`Pause` 以 `undefined` 兑现，`Reject` 拒绝，`Resume` / `Reissue` 在全部快照校验通过后重新登记并保留原 Promise。
+- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 创建 Promise 与持久 operation 记录，宿主只收到声明名、schema、策略、状态字节和代际令牌。结算必须使用当前代际令牌；旧 VM 的令牌、重复结算和未知 operation 被拒绝。恢复按声明策略处理：`Pause` 以 `undefined` 兑现，`Reject` 拒绝；`Resume` / `Reissue` 保持 pending，由宿主在 `Vm::restore` 返回后调用 `Vm::start_recovered_operations` 重新登记并保留原 Promise。登记失败以该 operation 的声明拒绝结算，不丢弃已恢复的 VM；重复调用不会重复登记。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
 - 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、类原型、模块状态槽、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。

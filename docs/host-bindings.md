@@ -93,9 +93,10 @@ impl Matcher {
 类声明包含：
 
 - **标签**：稳定字符串或宏生成的 ID，出现在快照与诊断中，不出现在 JS。
+- **父类**：可选的父类标签。声明层把原型链接到父类原型，并把父类槽排在子类槽之前；基类方法与访问器接收派生实例，子类声明的槽索引按自身布局计数。
 - **槽布局**：有序、带名字、带种类。首版槽种类只有 `Js`（单个 `JsValue`）与 `JsList`（有序 `JsValue` 列表）。`JsList` 用于事件监听器集合这类「数量可变、元素是 JS 值」的状态，避免把引用塞进 payload。是否需要 `JsMap`、弱引用槽见[未决问题](#15-未决问题)。
-- **payload**：可选的 `T` 及其 schema 版本与 codec。`T` 不得包含 `JsValue`。
-- **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号也在声明期内静态给出。
+- **payload**：可选的 `T` 及其 schema 版本与 codec。`T` 不得包含 `JsValue`。payload 属于具体实例类，不沿继承链合并。
+- **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号由稳定的枚举（`WellKnownSymbol`）在声明期内静态给出，不接受运行期 Symbol。
 - **可选构造器**：只有声明了 `Constructor` 的类才导出可 `new` 的函数。未声明时，类只作为返回类型和原型存在。
 
 实例是普通 JavaScript 对象，可以有普通自有属性；槽与 payload 不可枚举、不可由 `Object.getOwnPropertyNames`、`Object.getOwnPropertySymbols` 或 `Reflect` 观察到，也不能借 `Object.create(prototype)` 伪造。原型上的方法与访问器是普通属性，脚本可以读取、改写或删除；快照保存玩家修改后的原型，而不是每个 VM 重建静态模板。
@@ -281,7 +282,7 @@ struct Wait {
 
 - 快照只能在微任务队列排空后创建；已有约束不变。
 - 快照记录 pending operation 的类型、状态、原 Promise 引用和代际之外的标识。恢复后 VM 使用新代际，旧宿主持有的交付令牌永久失效。
-- 恢复成功后，`Pause` 与 `Reject` 的结算进入微任务队列，按正常顺序执行；`Resume`/`Reissue` 的重新登记可以同步发生，但任何外部交付都在恢复完成之后。
+- 恢复成功后，`Pause` 与 `Reject` 的结算进入微任务队列，按正常顺序执行；`Resume`/`Reissue` 保持 pending，由宿主在 `Vm::restore` 返回后调用 `Vm::start_recovered_operations` 重新登记。任何外部交付都在恢复完成之后。
 - 恢复不得重跑发起 operation 的函数，也不得重放该函数之前的副作用。
 
 ## 8. 快照
@@ -411,19 +412,19 @@ flowchart TB
 
 1. **弱引用槽与 `JsMap` 槽：暂不增加。** 宿主实例槽维持 `Js` / `JsList`；弱键缓存使用 VM 已有的 `WeakMap`。出现具体绑定需求后再评估是否扩展槽种类。
 2. **访问器失败时机：延迟到脚本访问。** 恢复只做结构和声明校验，不执行 getter/setter 或其他脚本可观察逻辑。
-3. **绑定类继承：允许 `class extends` 并调用 `super`。** 派生类可复用基类构造路径和基类槽初始化；脚本定义的派生类不增加 `HostClass` 槽或 payload。`new.target`、派生实例初始化及非法构造路径须按此约束验证。
+3. **绑定类继承：允许 `class extends` 并调用 `super`。** 派生类可复用基类构造路径和基类槽初始化；脚本定义的派生类不增加 `HostClass` 槽或 payload。`new.target`、派生实例初始化及非法构造路径须按此约束验证。声明层的 `HostClass::PARENT` 已实现原型链、槽合并、基类接收者校验与快照往返；脚本 `class extends` 仍随首版约定由编译器拒绝，脚本派生类路径尚未存在。
 4. **符号成员：支持显式列出的 well-known Symbol。** 声明使用稳定的符号枚举 ID，不接受任意运行期 Symbol；宿主私有状态仍走隐藏槽，不映射为 JS 私有名。
 5. **C ABI：暂缓。** Rust 应用链接 VM、实现 `Host` 并调用平台服务；本库不提供 C ABI 或移动端绑定。若未来需要外部语言直接声明绑定，再单独设计 ABI。
 6. **声明入口：宏是最终用户 API，builder 是过渡/内部实现工具。** 最终由宏生成或校验规范声明结构；不保留公开 builder 作为平行的声明逃生口。codec、operation 等行为可由 Rust trait 实现。
 7. **TypeScript 定义生成：暂缓。** 待声明和签名模型稳定后再确定生成范围，不引入手工补丁机制。
 8. **payload 编码：继续使用自定义 codec。** 不绑定 postcard、bincode 或 CBOR；规范编码、字段顺序、长度与版本规则由 codec 契约明确。
 9. **流式 payload：暂缓。** 维持整段写入/读取接口；只有实测证明峰值内存构成问题时再改为流式 API。
-10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；恢复返回后由 VM 所在线程启动。启动失败按对应 operation 的失败结果处理，不回滚已恢复的 VM。当前 `Vm::restore` 会在返回前调用 `Host::resume_operation`，后续须调整以符合此策略。
+10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `Vm::start_recovered_operations` 启动。启动失败按对应 operation 的声明拒绝结算原 Promise，不回滚已恢复的 VM。
 11. **恢复资源限制：暂不由 VM 设通用上限。** 前提是快照仅来自可信本地存档；接入方须在读取/解析前限制文件大小。若快照转为导入、同步或其他不可信输入，必须重新评估解析前的大小、对象数、payload 大小和嵌套深度限制。
 
 ## 16. 首版落地状态
 
-已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌与恢复期重新登记；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
+已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明（`HostClass::PARENT`）的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
 
-尚未实现或需按决策调整：宿主成员使用 well-known Symbol；绑定类继承规则；宏声明入口（当前 builder 仍是实际 API）；恢复成功后再启动 `Resume` / `Reissue` 工作。TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用。
+尚未实现：宏声明入口（当前 builder 仍是实际 API）；脚本 `class` / `extends` / `super`（编译器按首版契约拒绝，因此脚本派生类路径不存在，声明层父类已经可用）；TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用。
 

@@ -5,7 +5,7 @@ use yield_compiler::{CompileOptions, compile};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, DecodeCx, HostClass, HostFault, InspectValue, JsResult, JsValue,
     MethodDecl, ModuleDecl, Operation, OperationStart, OperationToken, Recovery, SlotDecl,
-    SlotKind,
+    SlotKind, WellKnownSymbol,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
@@ -49,11 +49,10 @@ pub struct Node {
 impl HostClass for Node {
     const TAG: &'static str = "Node";
     const PAYLOAD_SCHEMA: Option<u32> = Some(1);
-    const METHODS: &'static [MethodDecl] = &[MethodDecl {
-        name: "label",
-        arity: 0,
-        call: node_label,
-    }];
+    const METHODS: &'static [MethodDecl] = &[
+        MethodDecl::new("label", 0, node_label),
+        MethodDecl::symbol(WellKnownSymbol::ToPrimitive, 1, node_to_primitive),
+    ];
 
     fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(self.label.as_bytes());
@@ -77,6 +76,12 @@ fn node_label(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
     Ok(JsValue::string(label))
 }
 
+fn node_to_primitive(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+    let this = cx.this::<Node>()?;
+    let label = this.instance().payload(cx)?.label.clone();
+    Ok(JsValue::string(label))
+}
+
 pub struct Matcher;
 
 impl HostClass for Matcher {
@@ -86,28 +91,16 @@ impl HostClass for Matcher {
         kind: SlotKind::Js,
     }];
     const METHODS: &'static [MethodDecl] = &[
-        MethodDecl {
-            name: "toBe",
-            arity: 1,
-            call: matcher_to_be,
-        },
-        MethodDecl {
-            name: "toEqual",
-            arity: 1,
-            call: matcher_to_equal,
-        },
-        MethodDecl {
-            name: "toBeTruthy",
-            arity: 0,
-            call: matcher_to_be_truthy,
-        },
+        MethodDecl::new("toBe", 1, matcher_to_be),
+        MethodDecl::new("toEqual", 1, matcher_to_equal),
+        MethodDecl::new("toBeTruthy", 0, matcher_to_be_truthy),
     ];
     const ACCESSORS: &'static [yield_vm::binding::AccessorDecl] =
-        &[yield_vm::binding::AccessorDecl {
-            name: "value",
-            get: Some(matcher_get_value),
-            set: Some(matcher_set_value),
-        }];
+        &[yield_vm::binding::AccessorDecl::new(
+            "value",
+            Some(matcher_get_value),
+            Some(matcher_set_value),
+        )];
 }
 
 fn matcher_get_value(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
@@ -225,6 +218,42 @@ impl Operation for Wait {
     }
 }
 
+macro_rules! labelled_operation {
+    ($type:ident, $wire:literal, $recovery:expr, $rejection:literal) => {
+        pub struct $type {
+            pub label: String,
+        }
+
+        impl Operation for $type {
+            const NAME: &'static str = $wire;
+            const SCHEMA: u32 = 1;
+            const RECOVERY: Recovery = $recovery;
+            const REJECTION: &'static str = $rejection;
+
+            fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+                out.extend_from_slice(self.label.as_bytes());
+                Ok(())
+            }
+
+            fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+                let label = std::str::from_utf8(input)
+                    .map_err(|_| CodecError::new("operation label is not UTF-8"))?
+                    .to_owned();
+                Ok(Self { label })
+            }
+        }
+    };
+}
+
+labelled_operation!(Pause, "pause", Recovery::Pause, "pause rejected");
+labelled_operation!(
+    Reject,
+    "reject",
+    Recovery::Reject,
+    "reject rejected during restore"
+);
+labelled_operation!(Reissue, "reissue", Recovery::Reissue, "reissue rejected");
+
 pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
@@ -263,17 +292,11 @@ impl TestHost {
     }
 
     pub fn pending_labels(&self) -> Vec<String> {
-        self.operations
-            .keys()
-            .map(|label| format!("wait:{label}"))
-            .collect()
+        self.operations.keys().cloned().collect()
     }
 
     pub fn token(&self, label: &str) -> Option<OperationToken> {
-        self.operations
-            .get(label)
-            .or_else(|| self.operations.get(label.strip_prefix("wait:")?))
-            .copied()
+        self.operations.get(label).copied()
     }
 
     pub fn complete(
@@ -287,11 +310,7 @@ impl TestHost {
             .ok_or_else(|| format!("unknown operation {label:?}"))?;
         vm.complete_operation(token, completion)
             .map_err(|error| error.to_string())?;
-        if let Some(label) = label.strip_prefix("wait:") {
-            self.operations.remove(label);
-        } else {
-            self.operations.remove(label);
-        }
+        self.operations.remove(label);
         Ok(())
     }
 }
@@ -302,13 +321,13 @@ impl Host for TestHost {
     }
 
     fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        let label = match start.name {
-            "wait" => std::str::from_utf8(start.state)
-                .map_err(|_| HostFault::new("wait state is not UTF-8"))?
-                .to_owned(),
-            other => return Err(HostFault::new(format!("unknown operation {other}"))),
-        };
-        self.operations.insert(label, start.token);
+        if !matches!(start.name, "wait" | "pause" | "reject" | "reissue") {
+            return Err(HostFault::new(format!("unknown operation {}", start.name)));
+        }
+        let label = std::str::from_utf8(start.state)
+            .map_err(|_| HostFault::new("operation state is not UTF-8"))?;
+        self.operations
+            .insert(format!("{}:{label}", start.name), start.token);
         Ok(())
     }
 
@@ -331,6 +350,9 @@ fn test_bindings(counters: Arc<Counters>) -> Result<Bindings, String> {
         .class::<Node>()
         .class::<Matcher>()
         .operation::<Wait>()
+        .operation::<Pause>()
+        .operation::<Reject>()
+        .operation::<Reissue>()
         .module(
             ModuleDecl::new("test")
                 .function("inspect", 1, |cx| {
@@ -355,6 +377,30 @@ fn test_bindings(counters: Arc<Counters>) -> Result<Bindings, String> {
                         .to_utf8()
                         .map_err(|_| cx.type_error("wait requires a valid UTF-16 label"))?;
                     cx.start_operation(Wait { label })
+                })
+                .function("pause", 1, |cx| {
+                    let arg = cx.arg(0)?;
+                    let label = cx
+                        .string(&arg)?
+                        .to_utf8()
+                        .map_err(|_| cx.type_error("pause requires a valid UTF-16 label"))?;
+                    cx.start_operation(Pause { label })
+                })
+                .function("rejectAfterRestore", 1, |cx| {
+                    let arg = cx.arg(0)?;
+                    let label = cx
+                        .string(&arg)?
+                        .to_utf8()
+                        .map_err(|_| cx.type_error("reject requires a valid UTF-16 label"))?;
+                    cx.start_operation(Reject { label })
+                })
+                .function("reissue", 1, |cx| {
+                    let arg = cx.arg(0)?;
+                    let label = cx
+                        .string(&arg)?
+                        .to_utf8()
+                        .map_err(|_| cx.type_error("reissue requires a valid UTF-16 label"))?;
+                    cx.start_operation(Reissue { label })
                 })
                 .function("bind", 1, |cx| {
                     let arg = cx.arg(0)?;

@@ -227,6 +227,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(vm);
 
     let mut vm = Vm::restore(first, build.clone(), &mut host)?;
+    vm.start_recovered_operations(&mut host)?;
     println!(
         "restored snapshot 1; inspect/seed calls = {}/{}",
         host.calls("inspect"),
@@ -244,6 +245,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(vm);
 
     let mut vm = Vm::restore(second, build, &mut host)?;
+    vm.start_recovered_operations(&mut host)?;
     host.complete_mut(&mut vm, "b", JsValue::number(3.0))?;
     vm.run_until_idle(&mut host)?;
     match vm.promise_state(&result)? {
