@@ -409,6 +409,17 @@ impl Vm {
                 let invocation = self.construct_with(host, &callee, args, &callee)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::GetDerivedThis { dst, context } => {
+                let context = object_id(frame.read_ref(context)?, "derived this context")?;
+                let invocation = self.derived_this(context)?;
+                store_invocation(frame, dst, invocation)
+            }
+            Instr::SuperConstruct { dst, context, args } => {
+                let context = object_id(frame.read_ref(context)?, "super construction context")?;
+                let args = self.read_call_args(frame, &args)?;
+                let invocation = self.super_construct(host, context, args)?;
+                store_invocation(frame, dst, invocation)
+            }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
             Instr::NewClassScope { dst, parent } => {
                 let parent = self.class_scope(frame, parent)?;
@@ -454,6 +465,7 @@ impl Vm {
                 scope,
                 constructor,
                 heritage,
+                default_constructor,
             } => {
                 let env = self.class_scope(frame, scope)?;
                 let derived = heritage.is_some();
@@ -494,6 +506,7 @@ impl Vm {
                 function.class = Some(ScriptClass {
                     prototype,
                     derived,
+                    default_constructor,
                     elements: Vec::new(),
                 });
                 function.home = Some(prototype);

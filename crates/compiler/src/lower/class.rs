@@ -71,7 +71,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                                 "async constructor",
                             ));
                         }
-                        constructor = FunctionSource::Function(&method.value);
+                        constructor = if class.heritage.is_some() {
+                            FunctionSource::DerivedConstructor(&method.value)
+                        } else {
+                            FunctionSource::Function(&method.value)
+                        };
                     }
                 }
                 ClassElement::StaticBlock(_) => {}
@@ -138,12 +142,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             .as_ref()
             .map(|heritage| self.compile_expression(&heritage.expression))
             .transpose()?;
+        let default_constructor = matches!(constructor, FunctionSource::DefaultConstructor(_));
         let constructor = self.enqueue_function(constructor, name, constructor.span())?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CreateClass {
             dst: self.slot(dst),
             scope: self.class_scope.map(|scope| self.slot(scope)),
             constructor,
+            default_constructor,
             heritage: heritage.map(|reg| self.slot(reg)),
         });
         for element in &class.body.body {

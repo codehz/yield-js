@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use yield_compiler::{CompileOptions, compile};
-use yield_vm::bytecode::Instr;
+use yield_vm::bytecode::{CallArgs, Instr};
 
 #[test]
 fn compiles_overflowing_number_literals() {
@@ -848,7 +848,7 @@ fn rejects_gated_class_features() {
         ("class C { #x() {} }", "private class method"),
         ("class C { #x = 1 }", "private class field"),
         (
-            "class C extends Object { constructor() { super(); } }",
+            "class C extends Object { m() { return super.x; } }",
             "unsupported syntax",
         ),
         ("class C { x = arguments; }", "arguments"),
@@ -858,6 +858,89 @@ fn rejects_gated_class_features() {
         let error = compile(source, &CompileOptions::default()).unwrap_err();
         assert!(error.message().contains(feature), "{error}");
     }
+}
+
+#[test]
+fn rejects_super_calls_outside_derived_constructor_context() {
+    for source in [
+        "class C extends Object { constructor() { return super; } }",
+        "super();",
+        "class C { constructor() { super(); } }",
+        "class C extends Object { method() { super(); } }",
+        "class C extends Object { constructor() { function f() { super(); } } }",
+        "class C extends Object { constructor() { function f() { return () => super(); } } }",
+        "class C extends Object { x = () => super(); }",
+        "class C extends Object { static { super(); } }",
+    ] {
+        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        assert!(
+            error.message().to_ascii_lowercase().contains("super"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn derived_constructor_lowering_captures_context_only_in_lexical_arrows() {
+    let build = compile(
+        "class Default extends Object {}\n\
+         class Explicit extends Object {\n\
+           constructor(...args) {\n\
+             function ownThis() { return this; }\n\
+             const init = () => () => super(...args);\n\
+             init()();\n\
+             return (() => this)();\n\
+           }\n\
+         }\n\
+         class NoThis extends null { constructor() { return {}; } }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    build.validate().unwrap();
+    let constructors: Vec<_> = build.functions[0]
+        .code
+        .iter()
+        .filter_map(|op| match op {
+            Instr::CreateClass {
+                constructor,
+                default_constructor,
+                ..
+            } => Some((
+                *default_constructor,
+                build.functions[*constructor as usize].this_param.is_some(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(constructors, [(true, false), (false, true), (false, true)]);
+    for function in &build.functions {
+        for op in &function.code {
+            if matches!(
+                op,
+                Instr::SuperConstruct { .. } | Instr::GetDerivedThis { .. }
+            ) {
+                assert!(function.is_arrow);
+                assert!(function.this_param.is_none());
+            }
+        }
+    }
+    let arrow_ops = build
+        .functions
+        .iter()
+        .filter(|f| f.is_arrow)
+        .flat_map(|f| &f.code);
+    assert!(arrow_ops.clone().any(|op| matches!(
+        op,
+        Instr::SuperConstruct {
+            args: CallArgs::Spread(_),
+            ..
+        }
+    )));
+    assert!(
+        arrow_ops
+            .clone()
+            .any(|op| matches!(op, Instr::GetDerivedThis { .. }))
+    );
 }
 
 #[test]

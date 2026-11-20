@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 34;
+pub const BYTECODE_VERSION: u32 = 35;
 
 pub use crate::builtin::BUILTINS;
 
@@ -186,6 +186,15 @@ pub enum Instr {
         callee: Slot,
         args: CallArgs,
     },
+    GetDerivedThis {
+        dst: Slot,
+        context: Slot,
+    },
+    SuperConstruct {
+        dst: Slot,
+        context: Slot,
+        args: CallArgs,
+    },
     /// Creates a closure that captures the frame's current environment.
     Closure {
         dst: Slot,
@@ -210,6 +219,7 @@ pub enum Instr {
         scope: Option<Slot>,
         heritage: Option<Slot>,
         constructor: u32,
+        default_constructor: bool,
     },
     ScopedClosure {
         dst: Slot,
@@ -806,6 +816,13 @@ impl Build {
             }
             Ok(())
         };
+        let check_binding = |binding: BindingId| {
+            if binding >= crate::builtin::call::DERIVED_THIS {
+                Err(format!("{location}: reserved binding {binding}"))
+            } else {
+                Ok(())
+            }
+        };
 
         if function.params.len() > u16::MAX as usize {
             return Err(format!("{location}: too many parameters"));
@@ -835,6 +852,7 @@ impl Build {
         {
             match param {
                 ParamTarget::Binding(binding) => {
+                    check_binding(*binding)?;
                     if !seen_bindings.insert(*binding) {
                         return Err(format!("{location}: duplicate parameter binding {binding}"));
                     }
@@ -941,6 +959,16 @@ impl Build {
                         check_slot(*arg, "Construct.arg")?;
                     }
                 }
+                Instr::GetDerivedThis { dst, context }
+                | Instr::SuperConstruct { dst, context, .. } => {
+                    check_slot(*dst, "derived constructor result")?;
+                    check_slot(*context, "derived constructor context")?;
+                    if let Instr::SuperConstruct { args, .. } = instr {
+                        for arg in args.slots() {
+                            check_slot(*arg, "SuperConstruct.arg")?;
+                        }
+                    }
+                }
                 Instr::Closure {
                     dst,
                     function: callee,
@@ -956,12 +984,20 @@ impl Build {
                 | Instr::LoadClassBinding {
                     dst, scope: parent, ..
                 } => {
+                    if let Instr::LoadClassBinding { binding, .. } = instr {
+                        check_binding(*binding)?;
+                    }
                     check_slot(*dst, "class scope result")?;
                     if let Some(parent) = parent {
                         check_slot(*parent, "class scope")?;
                     }
                 }
-                Instr::InitClassBinding { scope, src, .. } => {
+                Instr::InitClassBinding {
+                    scope,
+                    src,
+                    binding,
+                } => {
+                    check_binding(*binding)?;
                     check_slot(*scope, "InitClassBinding.scope")?;
                     check_slot(*src, "InitClassBinding.src")?;
                 }
@@ -970,6 +1006,7 @@ impl Build {
                     scope,
                     heritage,
                     constructor,
+                    ..
                 } => {
                     check_slot(*dst, "CreateClass.dst")?;
                     if let Some(scope) = scope {
@@ -1151,9 +1188,15 @@ impl Build {
                     check_slot(*key, "DefineProperty.key")?;
                     check_slot(*src, "DefineProperty.src")?;
                 }
-                Instr::GetBinding { dst, .. } => check_slot(*dst, "GetBinding.dst")?,
-                Instr::SetBinding { src, .. } => check_slot(*src, "SetBinding.src")?,
-                Instr::DeclareBinding { .. } => {}
+                Instr::GetBinding { dst, binding } => {
+                    check_binding(*binding)?;
+                    check_slot(*dst, "GetBinding.dst")?;
+                }
+                Instr::SetBinding { src, binding } => {
+                    check_binding(*binding)?;
+                    check_slot(*src, "SetBinding.src")?;
+                }
+                Instr::DeclareBinding { binding } => check_binding(*binding)?,
                 Instr::Await { dst, input, resume } => {
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));

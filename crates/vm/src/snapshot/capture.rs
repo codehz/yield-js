@@ -745,6 +745,33 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
+        use crate::builtin::call::{DERIVED_CLASS, DERIVED_TARGET, DERIVED_THIS};
+        if let Object::Environment(env) = heap.get(id)?
+            && env.bindings.range(DERIVED_THIS..).next().is_some()
+        {
+            let valid_class = matches!(env.bindings.get(&DERIVED_CLASS), Some(Value::Object(class))
+                if heap.function(*class).and_then(|f| f.class.as_ref()).is_some_and(|c| c.derived && !c.default_constructor));
+            let valid_target = matches!(env.bindings.get(&DERIVED_TARGET), Some(Value::Object(target))
+                if heap.get(*target).is_ok_and(crate::builtin::is_callable_object));
+            let valid_this = match env.bindings.get(&DERIVED_THIS) {
+                None => true,
+                Some(Value::Object(receiver)) => !matches!(
+                    heap.get(*receiver),
+                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                ),
+                _ => false,
+            };
+            if env.parent.is_some()
+                || env.bindings.keys().any(|key| *key < DERIVED_THIS)
+                || !valid_class
+                || !valid_target
+                || !valid_this
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "invalid derived constructor context {id}"
+                )));
+            }
+        }
         if let Object::Function(function) = heap.get(id)? {
             let code = build
                 .function(function.func_id)

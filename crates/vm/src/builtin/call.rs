@@ -14,6 +14,11 @@ use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
+// Reserved keys for the opaque, shared derived invocation cell.
+pub(crate) const DERIVED_CLASS: u32 = u32::MAX;
+pub(crate) const DERIVED_TARGET: u32 = u32::MAX - 1;
+pub(crate) const DERIVED_THIS: u32 = u32::MAX - 2;
+
 pub(crate) enum Dispatch<'a> {
     Script {
         func_id: u32,
@@ -171,6 +176,40 @@ impl Vm {
                 "value is not a constructor"
             });
         };
+        if let Value::Object(class) = *callee
+            && let Some(record) = self.heap.function(class).and_then(|f| f.class.as_ref())
+            && record.derived
+        {
+            let default = record.default_constructor;
+            let Constructor::Script { func_id, env } = constructor else {
+                unreachable!()
+            };
+            if default {
+                return self.construct_super_and_initialize(host, class, new_target, args, None);
+            }
+            let context = self.heap.alloc_environment(
+                None,
+                std::collections::BTreeMap::from([
+                    (DERIVED_CLASS, Value::Object(class)),
+                    (DERIVED_TARGET, new_target.clone()),
+                ]),
+            );
+            return match self.call_function(
+                host,
+                func_id,
+                Some(env),
+                args,
+                &Value::Object(context),
+                new_target,
+            )? {
+                Invocation::Value(Value::Undefined) => self.derived_this(context),
+                Invocation::Value(value) if !matches!(value, Value::Object(_)) => self
+                    .throw_type_error(
+                        "derived constructor returned a primitive other than undefined",
+                    ),
+                result => Ok(result),
+            };
+        }
         let distinct_new_target = !ops::strict_equal(callee, new_target);
         let skip_prototype = matches!(constructor, Constructor::Native(CallableTarget::Intrinsic(id))
             if id.definition().skip_new_target_prototype);
@@ -216,6 +255,72 @@ impl Vm {
                 )
             }
         }
+    }
+
+    pub(crate) fn derived_this(&mut self, context: ObjectId) -> Result<Invocation, VmError> {
+        let record = self.heap.environment(context)?;
+        if !record.bindings.contains_key(&DERIVED_CLASS) {
+            return Err(VmError::InvalidState(
+                "invalid derived constructor context".into(),
+            ));
+        }
+        match record.bindings.get(&DERIVED_THIS) {
+            Some(receiver) => Ok(Invocation::Value(receiver.clone())),
+            None => Ok(Invocation::Thrown(
+                self.reference_error("this is not initialized")?,
+            )),
+        }
+    }
+
+    pub(crate) fn super_construct(
+        &mut self,
+        host: &mut dyn Host,
+        context: ObjectId,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
+        let bindings = &self.heap.environment(context)?.bindings;
+        let (Some(Value::Object(class)), Some(new_target @ Value::Object(_))) =
+            (bindings.get(&DERIVED_CLASS), bindings.get(&DERIVED_TARGET))
+        else {
+            return Err(VmError::InvalidState(
+                "invalid derived constructor context".into(),
+            ));
+        };
+        self.construct_super_and_initialize(host, *class, &new_target.clone(), args, Some(context))
+    }
+
+    fn construct_super_and_initialize(
+        &mut self,
+        host: &mut dyn Host,
+        class: ObjectId,
+        new_target: &Value,
+        args: Vec<Value>,
+        context: Option<ObjectId>,
+    ) -> Result<Invocation, VmError> {
+        let Some(parent) = self.heap.prototype_of(class)? else {
+            return self.throw_type_error("super is not a constructor");
+        };
+        let receiver = match self.construct_with(host, &Value::Object(parent), args, new_target)? {
+            Invocation::Value(Value::Object(id)) => id,
+            Invocation::Value(_) => {
+                return self.throw_type_error("super constructor must return an object");
+            }
+            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        };
+        if let Some(context) = context {
+            let bindings = &mut self.heap.environment_mut(context)?.bindings;
+            let std::collections::btree_map::Entry::Vacant(entry) = bindings.entry(DERIVED_THIS)
+            else {
+                return Ok(Invocation::Thrown(
+                    self.reference_error("this is already initialized")?,
+                ));
+            };
+            entry.insert(Value::Object(receiver));
+        }
+        if let Some(error) = self.initialize_class_elements(host, class, receiver, false)? {
+            return Ok(Invocation::Thrown(error));
+        }
+        Ok(Invocation::Value(Value::Object(receiver)))
     }
 
     pub(crate) fn reflect_call(

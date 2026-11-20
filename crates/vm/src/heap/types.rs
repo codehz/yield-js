@@ -620,6 +620,7 @@ pub struct FunctionObject {
 pub(crate) struct ScriptClass {
     pub prototype: ObjectId,
     pub derived: bool,
+    pub default_constructor: bool,
     pub elements: Vec<ClassElement>,
 }
 

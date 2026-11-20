@@ -9,7 +9,7 @@ use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Native callables persist stable intrinsic keys, not linked IDs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 42;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 43;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

@@ -139,7 +139,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(dst)
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
-            Expression::ThisExpression(expression) => self.compile_this(expression.span),
+            Expression::ThisExpression(_) => self.compile_this(),
             Expression::NewTarget(property) => {
                 let binding = self.lookup(NEW_TARGET_BINDING).ok_or_else(|| {
                     unsupported(
@@ -725,6 +725,24 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         while let Expression::ParenthesizedExpression(paren) = callee {
             callee = &paren.expression;
         }
+        if let Expression::Super(super_expr) = callee {
+            if !self.derived_this {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    super_expr.span,
+                    "super() is only allowed in a derived constructor or its lexical arrows",
+                ));
+            }
+            let context = self.load_derived_context()?;
+            let args = self.compile_arguments(&expression.arguments)?;
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::SuperConstruct {
+                dst: self.slot(dst),
+                context: self.slot(context),
+                args,
+            });
+            return Ok(dst);
+        }
 
         let (callee, receiver) = if let Expression::Identifier(identifier) = callee {
             let name = identifier.name.as_str();
@@ -843,16 +861,30 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
-    fn compile_this(&mut self, span: oxc::span::Span) -> Result<Reg, CompileError> {
+    fn load_derived_context(&mut self) -> Result<Reg, CompileError> {
+        let binding = self
+            .lookup(THIS_BINDING)
+            .expect("derived this binding installed");
+        let context = self.alloc_reg()?;
+        self.emit_binding_read(context, binding);
+        Ok(context)
+    }
+
+    fn compile_this(&mut self) -> Result<Reg, CompileError> {
+        if self.derived_this {
+            let context = self.load_derived_context()?;
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::GetDerivedThis {
+                dst: self.slot(dst),
+                context: self.slot(context),
+            });
+            return Ok(dst);
+        }
         let Some(binding) = self.lookup(THIS_BINDING) else {
             return self.emit_undefined();
         };
-        let _ = span;
         let dst = self.alloc_reg()?;
-        self.emit(Instr::GetBinding {
-            dst: self.slot(dst),
-            binding,
-        });
+        self.emit_binding_read(dst, binding);
         Ok(dst)
     }
 

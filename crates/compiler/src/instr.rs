@@ -27,6 +27,8 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::AddClassField { .. }
         | Instr::RunClassStatic { .. }
         | Instr::Construct { .. }
+        | Instr::GetDerivedThis { .. }
+        | Instr::SuperConstruct { .. }
         | Instr::Await { .. }
         | Instr::GetMember { .. }
         | Instr::GetDestructuredMember { .. }
@@ -139,6 +141,13 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(callee.index);
             uses.extend(args.slots().iter().map(|arg| arg.index));
             defs.insert(dst.index);
+        }
+        Instr::GetDerivedThis { dst, context } | Instr::SuperConstruct { dst, context, .. } => {
+            uses.insert(context.index);
+            defs.insert(dst.index);
+            if let Instr::SuperConstruct { args, .. } = instruction {
+                uses.extend(args.slots().iter().map(|arg| arg.index));
+            }
         }
         Instr::NewClassScope { dst, parent }
         | Instr::LoadClassBinding {
@@ -349,6 +358,15 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             callee: remap(callee),
             args: remap_args(args, remap),
         },
+        Instr::GetDerivedThis { dst, context } => Instr::GetDerivedThis {
+            dst: remap(dst),
+            context: remap(context),
+        },
+        Instr::SuperConstruct { dst, context, args } => Instr::SuperConstruct {
+            dst: remap(dst),
+            context: remap(context),
+            args: remap_args(args, remap),
+        },
         Instr::Closure { dst, function } => Instr::Closure {
             dst: remap(dst),
             function,
@@ -380,11 +398,13 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             scope,
             heritage,
             constructor,
+            default_constructor,
         } => Instr::CreateClass {
             dst: remap(dst),
             scope: scope.map(remap),
             heritage: heritage.map(remap),
             constructor,
+            default_constructor,
         },
         Instr::ScopedClosure {
             dst,
