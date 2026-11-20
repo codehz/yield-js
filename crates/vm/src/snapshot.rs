@@ -95,12 +95,10 @@ pub(crate) mod ordered_pairs {
 }
 
 fn valid_string_position(string: &JsString, position: usize) -> bool {
-    let units = string.as_units();
-    position <= units.len()
+    position <= string.unit_len()
         && (position == 0
-            || position == units.len()
-            || !(matches!(units[position - 1], 0xd800..=0xdbff)
-                && matches!(units[position], 0xdc00..=0xdfff)))
+            || !(matches!(string.unit_at(position - 1), Some(0xd800..=0xdbff))
+                && matches!(string.unit_at(position), Some(0xdc00..=0xdfff))))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,13 +561,9 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             _ => None,
         };
         if let Some(expected) = reserved
-            && !description.as_ref().is_some_and(|description| {
-                description
-                    .as_units()
-                    .iter()
-                    .copied()
-                    .eq(expected.encode_utf16())
-            })
+            && !description
+                .as_ref()
+                .is_some_and(|description| description.units().eq(expected.encode_utf16()))
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "reserved symbol {id} has an invalid description"
@@ -590,13 +584,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             .symbols
             .get(&id)
             .and_then(Option::as_ref)
-            .is_some_and(|actual| {
-                actual
-                    .as_units()
-                    .iter()
-                    .copied()
-                    .eq(description.encode_utf16())
-            })
+            .is_some_and(|actual| actual.units().eq(description.encode_utf16()))
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "snapshot is missing reserved symbol {description}"

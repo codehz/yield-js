@@ -452,7 +452,7 @@ fn host_value_serde_preserves_utf16_units() {
         else {
             panic!("expected host string");
         };
-        assert_eq!(decoded.as_units(), units.as_slice());
+        assert_eq!(decoded.to_utf16().as_ref(), units.as_slice());
     }
     for invalid in [-1, 65536] {
         let json = serde_json::json!({"string": {"utf16": [invalid]}});

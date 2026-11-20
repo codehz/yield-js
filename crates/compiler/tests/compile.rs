@@ -692,7 +692,7 @@ fn emits_utf16_for_string_literals_templates_and_property_keys() {
     ] {
         assert!(
             build.constants.iter().any(|constant| {
-                matches!(constant, Constant::String(value) if value.as_units() == expected)
+                matches!(constant, Constant::String(value) if value.units().eq(expected.iter().copied()))
             }),
             "missing UTF-16 constant {expected:x?}"
         );

@@ -237,7 +237,7 @@ impl Parser<'_> {
 
 fn quote(text: &JsString, out: &mut Vec<u16>) {
     out.push(u16::from(b'"'));
-    for ch in char::decode_utf16(text.as_units().iter().copied()) {
+    for ch in char::decode_utf16(text.units()) {
         match ch {
             Ok('"') => out.extend("\\\"".encode_utf16()),
             Ok('\\') => out.extend("\\\\".encode_utf16()),
@@ -262,7 +262,7 @@ fn unicode_escape(unit: u16, out: &mut Vec<u16>) {
     }
 }
 
-fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &[u16], indent: usize) {
+fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &JsString, indent: usize) {
     match value {
         JsonValue::Null => out.extend("null".encode_utf16()),
         JsonValue::Bool(value) => {
@@ -295,25 +295,25 @@ fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &[u16], indent: usize) {
     }
 }
 
-fn separate(out: &mut Vec<u16>, gap: &[u16], indent: usize, index: usize) {
+fn separate(out: &mut Vec<u16>, gap: &JsString, indent: usize, index: usize) {
     if index > 0 {
         out.push(u16::from(b','));
     }
     newline(out, gap, indent);
 }
 
-fn newline(out: &mut Vec<u16>, gap: &[u16], indent: usize) {
+fn newline(out: &mut Vec<u16>, gap: &JsString, indent: usize) {
     if !gap.is_empty() {
         out.push(u16::from(b'\n'));
         for _ in 0..indent {
-            out.extend_from_slice(gap);
+            out.extend(gap.units());
         }
     }
 }
 
 fn encode_list(
     out: &mut Vec<u16>,
-    gap: &[u16],
+    gap: &JsString,
     indent: usize,
     array: bool,
     len: usize,
@@ -355,8 +355,9 @@ impl Vm {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
+        let units = text.to_utf16();
         let mut parser = Parser {
-            text: text.as_units(),
+            text: &units,
             pos: 0,
         };
         let parsed = parser.value(0).and_then(|value| {
@@ -434,7 +435,7 @@ impl Vm {
             Ok(None) => Ok(Invocation::Value(Value::Undefined)),
             Ok(Some(tree)) => {
                 let mut output = Vec::new();
-                encode(&tree, &mut output, gap.as_units(), 0);
+                encode(&tree, &mut output, &gap, 0);
                 Ok(Invocation::Value(Value::String(JsString::from_units(
                     output,
                 ))))
@@ -475,7 +476,7 @@ impl Vm {
                 number.trunc().clamp(0.0, 10.0)
                     as usize
             ]),
-            Value::String(text) => text.as_units()[..text.unit_len().min(10)].into(),
+            Value::String(text) => text.slice_units(0..text.unit_len().min(10)),
             _ => JsString::new(),
         }))
     }
@@ -495,7 +496,7 @@ impl Vm {
             let item = match self.read_property(
                 host,
                 &Value::Object(id),
-                PropertyKeyRef::JsString(name.as_units()),
+                PropertyKeyRef::JsString(&name),
             )? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
@@ -525,7 +526,7 @@ impl Vm {
         let mut value = match self.read_property(
             host,
             &Value::Object(holder),
-            PropertyKeyRef::JsString(key.as_units()),
+            PropertyKeyRef::JsString(key),
         )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
@@ -747,7 +748,7 @@ impl Vm {
         };
         if matches!(replaced, Value::Undefined) {
             self.heap
-                .delete_own(holder, PropertyKeyRef::JsString(key.as_units()))?;
+                .delete_own(holder, PropertyKeyRef::JsString(key))?;
         } else {
             self.heap
                 .set_own(holder, PropertyKey::String(key.clone()), replaced)?;
@@ -759,7 +760,7 @@ impl Vm {
         let property = self
             .heap
             .get(id)?
-            .own_property(PropertyKeyRef::JsString(key.as_units()));
+            .own_property(PropertyKeyRef::JsString(key));
         let property = property.map(crate::heap::OwnProperty::into_owned);
         Ok(Invocation::Value(match property {
             Some(crate::heap::Property::Data(value)) => value,

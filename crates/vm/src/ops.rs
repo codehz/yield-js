@@ -34,18 +34,23 @@ fn check_no_symbol(message: &'static str, values: &[&Value]) -> Result<(), Binar
 
 pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
     Ok(match operator {
-        BinaryOp::Add => match (&lhs, &rhs) {
-            (Value::String(_), _) | (_, Value::String(_)) => {
+        BinaryOp::Add => {
+            if matches!(&lhs, Value::String(_)) || matches!(&rhs, Value::String(_)) {
                 check_no_symbol(SYMBOL_TO_STRING, &[&lhs, &rhs])?;
-                let mut text = to_js_string(&lhs);
-                text.push_str(&to_js_string(&rhs));
+                let mut text = match lhs {
+                    Value::String(text) => text,
+                    other => to_js_string(&other),
+                };
+                match rhs {
+                    Value::String(right) => text.push_str(&right),
+                    other => text.push_str(&to_js_string(&other)),
+                }
                 Value::String(text)
+            } else {
+                check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
+                Value::Number(to_number(&lhs)? + to_number(&rhs)?)
             }
-            (lhs, rhs) => {
-                check_no_symbol(SYMBOL_TO_NUMBER, &[lhs, rhs])?;
-                Value::Number(to_number(lhs)? + to_number(rhs)?)
-            }
-        },
+        }
         BinaryOp::Sub => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::Number(to_number(&lhs)? - to_number(&rhs)?)
@@ -123,14 +128,15 @@ pub(crate) fn canonical_index(key: &str) -> Option<usize> {
 }
 
 pub(crate) fn canonical_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
-    let units = match key {
+    let text = match key {
         PropertyKeyRef::String(text) => return canonical_index(text),
-        PropertyKeyRef::JsString(units) => units,
+        PropertyKeyRef::JsString(text) => text,
         PropertyKeyRef::Symbol(_) => return None,
     };
-    match units {
-        [48] => Some(0),
-        [49..=57, ..] => units.iter().try_fold(0usize, |n, &unit| {
+    let mut units = text.units();
+    match units.next()? {
+        48 if units.len() == 0 => Some(0),
+        first @ 49..=57 => units.try_fold(usize::from(first - 48), |n, unit| {
             (48..=57).contains(&unit).then_some(())?;
             n.checked_mul(10)?.checked_add(usize::from(unit - 48))
         }),

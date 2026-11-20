@@ -280,7 +280,7 @@ impl Vm {
                     || unwrap_script!(self.own_descriptor(
                         host,
                         id,
-                        PropertyKeyRef::JsString(key.as_units())
+                        PropertyKeyRef::JsString(&key)
                     ))
                     .is_some_and(|(_, attrs)| attrs.enumerable))
             {
@@ -400,7 +400,7 @@ impl Vm {
             if let Some(keys) = pending {
                 if let Some(key) = keys.pop_front() {
                     if visited.contains(&key)
-                        || ops::canonical_index_key(PropertyKeyRef::JsString(key.as_units()))
+                        || ops::canonical_index_key(PropertyKeyRef::JsString(&key))
                             .is_some_and(|index| index < string_indices.end)
                     {
                         continue;
@@ -408,7 +408,7 @@ impl Vm {
                     let Some((_, attrs)) = unwrap_script!(self.own_descriptor(
                         host,
                         id,
-                        PropertyKeyRef::JsString(key.as_units())
+                        PropertyKeyRef::JsString(&key)
                     )) else {
                         continue;
                     };
@@ -453,7 +453,7 @@ impl Vm {
 fn key_value(key: PropertyKeyRef<'_>) -> Value {
     match key {
         PropertyKeyRef::String(key) => Value::String(key.into()),
-        PropertyKeyRef::JsString(key) => Value::String(key.into()),
+        PropertyKeyRef::JsString(key) => Value::String(key.clone()),
         PropertyKeyRef::Symbol(key) => Value::Symbol(key),
     }
 }

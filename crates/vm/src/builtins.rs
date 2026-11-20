@@ -1675,7 +1675,7 @@ impl Vm {
             1
         };
         let end = *position + width;
-        let value = JsString::from(&string.as_units()[*position..end]);
+        let value = string.slice_units(*position..end);
         *position = end;
         if end == utf16_len(string) {
             *string = JsString::default();

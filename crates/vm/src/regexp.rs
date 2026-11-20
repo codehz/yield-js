@@ -1,5 +1,7 @@
 //! ECMAScript regexp flags and code-unit matching backed by the pinned `regress` parser.
 
+use std::borrow::Cow;
+
 use crate::value::JsString;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,11 +35,11 @@ impl RegExpFlags {
 }
 
 pub fn validate_regexp(source: &str, flags: &str) -> Result<(), String> {
-    compile_pattern(&source.into(), flags).map(|_| ())
+    validate_regexp_string(&source.into(), flags)
 }
 
-pub(crate) fn validate_regexp_units(source: &[u16], flags: &str) -> Result<(), String> {
-    compile_pattern(&source.into(), flags).map(|_| ())
+pub(crate) fn validate_regexp_string(source: &JsString, flags: &str) -> Result<(), String> {
+    compile_pattern(source, flags).map(|_| ())
 }
 
 pub(crate) fn compile_pattern(
@@ -83,11 +85,7 @@ pub(crate) fn compile_pattern(
         if parsed.unicode { "u" } else { "" },
         if parsed.unicode_sets { "v" } else { "" }
     );
-    let pattern = if parsed.unicode || parsed.unicode_sets {
-        source.as_units().to_vec()
-    } else {
-        legacy_casefold_units(source.as_units(), parsed.ignore_case)
-    };
+    let pattern = encode_input(source, parsed);
     let regex = regress::Regex::from_unicode(
         pattern.iter().map(|&unit| u32::from(unit)),
         backend_flags.as_str(),
@@ -96,18 +94,18 @@ pub(crate) fn compile_pattern(
     Ok((parsed, regex))
 }
 
-pub(crate) fn encode_input(input: &[u16], flags: RegExpFlags) -> Vec<u16> {
-    if flags.unicode || flags.unicode_sets {
-        input.to_vec()
-    } else {
-        legacy_casefold_units(input, flags.ignore_case)
+pub(crate) fn encode_input(input: &JsString, flags: RegExpFlags) -> Cow<'_, [u16]> {
+    let mut units = input.to_utf16();
+    if !flags.unicode && !flags.unicode_sets {
+        legacy_casefold_units(&mut units, flags.ignore_case);
     }
+    units
 }
 
 // Keep legacy folds excluded by ECMAScript separate; map surrogate halves to scalars
 // so the backend parser cannot pair them in non-Unicode mode.
-fn legacy_casefold_units(units: &[u16], ignore_case: bool) -> Vec<u16> {
-    let mut mapped = Vec::with_capacity(units.len());
+fn legacy_casefold_units(units: &mut Cow<'_, [u16]>, ignore_case: bool) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut index = 0;
     while index < units.len() {
         let unit = units[index];
@@ -115,14 +113,21 @@ fn legacy_casefold_units(units: &[u16], ignore_case: bool) -> Vec<u16> {
             && units.get(index + 1) == Some(&b'u'.into())
             && let Some(value) = escaped_special_unit(units, index, ignore_case)
         {
-            mapped.extend(format!("\\u{value:04X}").encode_utf16());
+            for (digit, shift) in units.to_mut()[index + 2..index + 6]
+                .iter_mut()
+                .zip([12, 8, 4, 0])
+            {
+                *digit = u16::from(HEX[usize::from((value >> shift) & 0xf)]);
+            }
             index += 6;
             continue;
         }
-        mapped.push(map_special_unit(unit, ignore_case));
+        let mapped = map_special_unit(unit, ignore_case);
+        if mapped != unit {
+            units.to_mut()[index] = mapped;
+        }
         index += 1;
     }
-    mapped
 }
 
 fn escaped_special_unit(units: &[u16], index: usize, ignore_case: bool) -> Option<u16> {

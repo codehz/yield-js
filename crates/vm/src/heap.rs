@@ -16,7 +16,7 @@ use crate::JsString;
 use crate::error::VmError;
 use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
-use crate::string::{utf16_len, utf16_unit, utf16_unit_string};
+use crate::string::utf16_unit_string;
 use crate::value::{
     BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
@@ -296,7 +296,7 @@ fn collect_own_keys<'a, V>(
             .iter()
             .filter(|(_, property)| !enumerable_strings_only || property.attributes.enumerable)
             .map(|(key, property)| {
-                let key = PropertyKeyRef::JsString(key.as_units());
+                let key = PropertyKeyRef::JsString(key);
                 let order = match array_index(key) {
                     Some(index) => (0, index),
                     None => (2, property.ordinal),
@@ -433,7 +433,7 @@ impl DescriptorUpdate {
                         )
                     }
                     (OwnProperty::StringIndex(unit), Value::String(text)) => {
-                        text.as_units() == [unit]
+                        text.unit_len() == 1 && text.unit_at(0) == Some(unit)
                     }
                     _ => false,
                 })
@@ -1206,9 +1206,10 @@ impl Object {
     fn string_own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'static>> {
         let text = self.boxed_string()?;
         if key.is_str("length") {
-            return Some(OwnProperty::StringLength(utf16_len(text)));
+            return Some(OwnProperty::StringLength(text.unit_len()));
         }
-        utf16_unit(text, canonical_index_key(key)?).map(OwnProperty::StringIndex)
+        text.unit_at(canonical_index_key(key)?)
+            .map(OwnProperty::StringIndex)
     }
 
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
@@ -1238,7 +1239,7 @@ impl Object {
         if let Some((props, symbols)) = self.tables() {
             collect_own_keys(&mut keys, props, symbols, enumerable_strings_only);
         }
-        let string_length = self.boxed_string().map(utf16_len);
+        let string_length = self.boxed_string().map(JsString::unit_len);
         if string_length.is_some() && !enumerable_strings_only {
             keys.push(((1, 0), PropertyKeyRef::String("length")));
         }
@@ -1284,7 +1285,7 @@ impl Object {
                         .last_key_value()
                         .is_none_or(|(&index, _)| index < array.length)
                     && array.props.0.keys().all(|key| {
-                        let key = PropertyKeyRef::JsString(key.as_units());
+                        let key = PropertyKeyRef::JsString(key);
                         !key.is_str("length") && array_index(key).is_none()
                     })
             }
@@ -1292,9 +1293,9 @@ impl Object {
                 primitive: BoxedPrimitive::String(text),
                 object,
             } => {
-                let length = utf16_len(text);
+                let length = text.unit_len();
                 object.props.0.keys().all(|key| {
-                    let key = PropertyKeyRef::JsString(key.as_units());
+                    let key = PropertyKeyRef::JsString(key);
                     !key.is_str("length")
                         && canonical_index_key(key).is_none_or(|index| index >= length)
                 })
@@ -1685,7 +1686,7 @@ impl Heap {
             _ => self.object_prototype,
         };
         let string_length = match source {
-            Value::String(string) => utf16_len(string),
+            Value::String(string) => string.unit_len(),
             _ => 0,
         };
         self.alloc(Object::ForInIterator {
@@ -1924,9 +1925,7 @@ impl Heap {
             return Ok(true);
         };
         Ok(match key {
-            PropertyKeyRef::String(key) => {
-                props.remove_configurable(JsString::from(key).as_units())
-            }
+            PropertyKeyRef::String(key) => props.remove_configurable(&JsString::from(key)),
             PropertyKeyRef::JsString(key) => props.remove_configurable(key),
             PropertyKeyRef::Symbol(id) => symbols.remove_configurable(&id),
         })
@@ -2149,7 +2148,7 @@ fn lookup_tables<'m, V>(
     key: PropertyKeyRef<'_>,
 ) -> Option<&'m OrderedProperty<V>> {
     match key {
-        PropertyKeyRef::String(key) => props.entry(JsString::from(key).as_units()),
+        PropertyKeyRef::String(key) => props.entry(&JsString::from(key)),
         PropertyKeyRef::JsString(key) => props.entry(key),
         PropertyKeyRef::Symbol(id) => symbol_props.entry(&id),
     }

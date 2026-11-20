@@ -98,7 +98,7 @@ impl Vm {
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 // A lone surrogate ends a numeric prefix; it need not invalidate digits before it.
-                let prefix: String = char::decode_utf16(text.as_units().iter().copied())
+                let prefix: String = char::decode_utf16(text.units())
                     .map_while(Result::ok)
                     .collect();
                 let text = prefix.trim_start_matches(ops::is_js_whitespace);

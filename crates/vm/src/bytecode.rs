@@ -860,9 +860,9 @@ impl Build {
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
                 Instr::NewRegExp { dst, source, flags } => {
                     check_slot(*dst, "NewRegExp.dst")?;
-                    crate::regexp::validate_regexp_units(source.as_units(), flags).map_err(
-                        |message| format!("{location}: invalid NewRegExp at pc {pc}: {message}"),
-                    )?;
+                    crate::regexp::validate_regexp_string(source, flags).map_err(|message| {
+                        format!("{location}: invalid NewRegExp at pc {pc}: {message}")
+                    })?;
                 }
                 Instr::CopyDataProperties { target, source } => {
                     check_slot(*target, "CopyDataProperties.target")?;

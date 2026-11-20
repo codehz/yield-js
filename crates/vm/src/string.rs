@@ -298,15 +298,14 @@ impl Vm {
                 _ => length,
             }
         };
-        let units = text.as_units();
         let matched = if start {
             let offset = match self.clamp_index(host, arg(args, 1), length)? {
                 Ok(offset) => offset,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            units[offset..].starts_with(search.as_units())
+            search.unit_len() <= length - offset && matches_at(text, &search, offset)
         } else {
-            units[..end].ends_with(search.as_units())
+            search.unit_len() <= end && matches_at(text, &search, end - search.unit_len())
         };
         Ok(Invocation::Value(Value::Bool(matched)))
     }
@@ -403,9 +402,7 @@ impl Vm {
                 };
                 if separator.is_empty() {
                     parts.extend(
-                        text.as_units()
-                            .iter()
-                            .copied()
+                        text.units()
                             .take(limit)
                             .map(|unit| Value::String(utf16_unit_string(unit))),
                     );
@@ -432,21 +429,36 @@ impl Vm {
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let mut out = text.to_owned();
+        let mut parts = Vec::with_capacity(args.len() + 1);
+        parts.push(text.to_owned());
         let mut length = text.len();
         for arg in args {
             match self.coerce_string(host, arg)? {
                 Ok(part) => {
-                    length = length.saturating_add(part.len()) - pair_savings(&out, &part);
+                    length = length.saturating_add(part.len())
+                        - pair_savings(parts.last().unwrap(), &part);
                     if length > MAX_LENGTH {
                         return self.range_error("Invalid string length");
                     }
-                    out.push_str(&part);
+                    parts.push(part);
                 }
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
         }
-        Ok(Invocation::Value(Value::String(out)))
+        let unit_len = parts.iter().map(JsString::unit_len).sum();
+        if parts.iter().all(JsString::is_latin1) {
+            let mut out = Vec::with_capacity(unit_len);
+            for part in &parts {
+                out.extend(part.units().map(|unit| unit as u8));
+            }
+            Ok(Invocation::Value(Value::String(JsString::from_latin1(out))))
+        } else {
+            let mut out = Vec::with_capacity(unit_len);
+            for part in &parts {
+                out.extend(part.units());
+            }
+            Ok(Invocation::Value(Value::String(JsString::from_wide(out))))
+        }
     }
 
     fn string_repeat(
@@ -471,9 +483,19 @@ impl Vm {
         if first.saturating_add(extra.saturating_mul(count - 1)) > MAX_LENGTH {
             return self.range_error("Invalid string length");
         }
-        Ok(Invocation::Value(Value::String(JsString::from_units(
-            text.as_units().repeat(count),
-        ))))
+        if text.is_latin1() {
+            let mut out = Vec::with_capacity(text.unit_len() * count);
+            for _ in 0..count {
+                out.extend(text.units().map(|unit| unit as u8));
+            }
+            Ok(Invocation::Value(Value::String(JsString::from_latin1(out))))
+        } else {
+            let mut out = Vec::with_capacity(text.unit_len() * count);
+            for _ in 0..count {
+                out.extend(text.units());
+            }
+            Ok(Invocation::Value(Value::String(JsString::from_wide(out))))
+        }
     }
 
     fn string_pad(
@@ -504,25 +526,43 @@ impl Vm {
         if target > MAX_LENGTH {
             return self.range_error("Invalid string length");
         }
-        let fill = fill.as_units();
-        let text = text.as_units();
-        let (copies, tail) = (pad_len / fill.len(), pad_len % fill.len());
-        let mut out = Vec::with_capacity(target);
-        if !start {
-            out.extend_from_slice(text);
+        let (copies, tail) = (pad_len / fill.unit_len(), pad_len % fill.unit_len());
+        let wide = !text.is_latin1() || fill.units().take(pad_len).any(|unit| unit > 0xff);
+        if wide {
+            let mut out = Vec::with_capacity(target);
+            if !start {
+                out.extend(text.units());
+            }
+            for _ in 0..copies {
+                out.extend(fill.units());
+            }
+            out.extend(fill.units().take(tail));
+            if start {
+                out.extend(text.units());
+            }
+            let out = JsString::from_wide(out);
+            if out.len() > MAX_LENGTH {
+                return self.range_error("Invalid string length");
+            }
+            Ok(Invocation::Value(Value::String(out)))
+        } else {
+            let mut out = Vec::with_capacity(target);
+            if !start {
+                out.extend(text.units().map(|unit| unit as u8));
+            }
+            for _ in 0..copies {
+                out.extend(fill.units().map(|unit| unit as u8));
+            }
+            out.extend(fill.units().take(tail).map(|unit| unit as u8));
+            if start {
+                out.extend(text.units().map(|unit| unit as u8));
+            }
+            let out = JsString::from_latin1(out);
+            if out.len() > MAX_LENGTH {
+                return self.range_error("Invalid string length");
+            }
+            Ok(Invocation::Value(Value::String(out)))
         }
-        for _ in 0..copies {
-            out.extend_from_slice(fill);
-        }
-        out.extend_from_slice(&fill[..tail]);
-        if start {
-            out.extend_from_slice(text);
-        }
-        let out = JsString::from_units(out);
-        if out.len() > MAX_LENGTH {
-            return self.range_error("Invalid string length");
-        }
-        Ok(Invocation::Value(Value::String(out)))
     }
 
     fn string_replace(
@@ -604,7 +644,7 @@ impl Vm {
                         Ok(flags) => flags,
                         Err(error) => return Ok(Some(Invocation::Thrown(error))),
                     };
-                    if !flags.as_units().contains(&u16::from(b'g')) {
+                    if !flags.units().any(|unit| unit == u16::from(b'g')) {
                         return Ok(Some(self.throw_type_error(
                             "String.prototype method requires a global RegExp argument",
                         )?));
@@ -707,13 +747,14 @@ impl Vm {
         let length = utf16_len(text);
         let search_length = utf16_len(&search);
         let mut out = Vec::new();
+        let mut source = text.units();
         let mut last = 0usize;
         let mut cursor = 0usize;
         while cursor <= length {
             let Some(position) = find_from(text, &search, cursor) else {
                 break;
             };
-            out.extend_from_slice(&text.as_units()[last..position]);
+            out.extend(source.by_ref().take(position - last));
             let replacement = if functional {
                 match self.invoke(
                     host,
@@ -734,7 +775,10 @@ impl Vm {
             } else {
                 substitute(&pattern, text, &search, position)
             };
-            out.extend_from_slice(replacement.as_units());
+            out.extend(replacement.units());
+            if search_length != 0 {
+                source.nth(search_length - 1);
+            }
             last = position + search_length;
             cursor = if search_length == 0 {
                 position.saturating_add(1)
@@ -742,7 +786,7 @@ impl Vm {
                 last
             };
         }
-        out.extend_from_slice(&text.as_units()[last.min(length)..]);
+        out.extend(source);
         Ok(Invocation::Value(Value::String(JsString::from_units(out))))
     }
 
@@ -918,7 +962,7 @@ pub(crate) fn utf16_len(text: &JsString) -> usize {
 }
 
 pub(crate) fn utf16_unit(text: &JsString, index: usize) -> Option<u16> {
-    text.as_units().get(index).copied()
+    text.unit_at(index)
 }
 
 pub(crate) fn utf16_unit_string(unit: u16) -> JsString {
@@ -926,8 +970,8 @@ pub(crate) fn utf16_unit_string(unit: u16) -> JsString {
 }
 
 fn pair_savings(left: &JsString, right: &JsString) -> usize {
-    if matches!(left.as_units().last().copied(), Some(0xd800..=0xdbff))
-        && matches!(right.as_units().first().copied(), Some(0xdc00..=0xdfff))
+    if matches!(left.units().next_back(), Some(0xd800..=0xdbff))
+        && matches!(right.units().next(), Some(0xdc00..=0xdfff))
     {
         2 // Three WTF-8 bytes per lone surrogate, four for the joined pair.
     } else {
@@ -947,20 +991,23 @@ fn code_point_at(text: &JsString, index: usize) -> Option<u32> {
 }
 
 fn slice_units(text: &JsString, start: usize, end: usize) -> JsString {
-    JsString::from(&text.as_units()[start..end])
+    text.slice_units(start..end)
+}
+
+fn matches_at(text: &JsString, needle: &JsString, start: usize) -> bool {
+    needle
+        .units()
+        .enumerate()
+        .all(|(offset, unit)| text.unit_at(start + offset) == Some(unit))
 }
 
 fn find_from(text: &JsString, needle: &JsString, start: usize) -> Option<usize> {
-    let text = text.as_units();
-    let needle = needle.as_units();
-    let start = start.min(text.len());
+    let start = start.min(text.unit_len());
     if needle.is_empty() {
         return Some(start);
     }
-    text[start..]
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|position| start + position)
+    let last = text.unit_len().checked_sub(needle.unit_len())?;
+    (start..=last).find(|&position| matches_at(text, needle, position))
 }
 
 fn find_first(text: &JsString, needle: &JsString, start: f64, length: usize) -> f64 {
@@ -970,17 +1017,18 @@ fn find_first(text: &JsString, needle: &JsString, start: f64, length: usize) -> 
 }
 
 fn find_last(text: &JsString, needle: &JsString, start: f64) -> f64 {
-    let text = text.as_units();
-    let needle = needle.as_units();
-    let end = (start as usize)
-        .saturating_add(needle.len())
-        .min(text.len());
+    let length = text.unit_len();
+    let needle_length = needle.unit_len();
+    let end = (start as usize).saturating_add(needle_length).min(length);
     if needle.is_empty() {
         return end as f64;
     }
-    text[..end]
-        .windows(needle.len())
-        .rposition(|window| window == needle)
+    let Some(last) = end.checked_sub(needle_length) else {
+        return -1.0;
+    };
+    (0..=last)
+        .rev()
+        .find(|&position| matches_at(text, needle, position))
         .map(|position| position as f64)
         .unwrap_or(-1.0)
 }
@@ -997,7 +1045,7 @@ fn string_case(text: &JsString, upper: bool) -> Result<Invocation, VmError> {
             run.to_lowercase()
         }
     };
-    for item in char::decode_utf16(text.as_units().iter().copied()) {
+    for item in char::decode_utf16(text.units()) {
         match item {
             Ok(ch) => run.push(ch),
             Err(surrogate) => {
@@ -1016,22 +1064,23 @@ fn string_case(text: &JsString, upper: bool) -> Result<Invocation, VmError> {
 }
 
 fn string_trim(text: &JsString, start: bool, end: bool) -> Result<Invocation, VmError> {
-    let units = text.as_units();
+    let length = text.unit_len();
     let whitespace = |unit: &u16| char::from_u32(u32::from(*unit)).is_some_and(is_trim_whitespace);
     let first = if start {
-        units.iter().take_while(|unit| whitespace(unit)).count()
+        text.units().take_while(whitespace).count()
     } else {
         0
     };
     let last = if end {
-        units.len()
-            - units[first..]
-                .iter()
+        length
+            - text
+                .units()
                 .rev()
-                .take_while(|unit| whitespace(unit))
+                .take(length - first)
+                .take_while(whitespace)
                 .count()
     } else {
-        units.len()
+        length
     };
     Ok(Invocation::Value(Value::String(slice_units(
         text, first, last,
@@ -1060,9 +1109,8 @@ fn substitute(
     matched: &JsString,
     position: usize,
 ) -> JsString {
-    let mut units = pattern.as_units().iter().copied().peekable();
+    let mut units = pattern.units().peekable();
     let mut out = Vec::new();
-    let text = text.as_units();
     while let Some(unit) = units.next() {
         if unit != u16::from(b'$') {
             out.push(unit);
@@ -1070,9 +1118,9 @@ fn substitute(
         }
         match units.peek().copied() {
             Some(0x24) => out.push(unit),
-            Some(0x26) => out.extend_from_slice(matched.as_units()),
-            Some(0x60) => out.extend_from_slice(&text[..position]),
-            Some(0x27) => out.extend_from_slice(&text[position + utf16_len(matched)..]),
+            Some(0x26) => out.extend(matched.units()),
+            Some(0x60) => out.extend(text.units().take(position)),
+            Some(0x27) => out.extend(text.units().skip(position + utf16_len(matched))),
             _ => {
                 out.push(unit);
                 continue;

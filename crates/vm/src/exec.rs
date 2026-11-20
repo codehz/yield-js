@@ -19,7 +19,7 @@ use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
-use crate::string::{utf16_len, utf16_unit, utf16_unit_string};
+use crate::string::utf16_unit_string;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
@@ -783,7 +783,7 @@ impl Vm {
         }
         match key {
             Value::String(key) => {
-                return self.read_property(host, object, PropertyKeyRef::JsString(key.as_units()));
+                return self.read_property(host, object, PropertyKeyRef::JsString(key));
             }
             Value::Symbol(id) => {
                 return self.read_property(host, object, PropertyKeyRef::Symbol(*id));
@@ -813,11 +813,11 @@ impl Vm {
                     return self.read_property(host, object, key);
                 }
                 _ if key.is_str("length") => {
-                    return Ok(Invocation::Value(Value::Number(utf16_len(text) as f64)));
+                    return Ok(Invocation::Value(Value::Number(text.unit_len() as f64)));
                 }
                 _ => {
                     if let Some(unit) =
-                        ops::canonical_index_key(key).and_then(|index| utf16_unit(text, index))
+                        ops::canonical_index_key(key).and_then(|index| text.unit_at(index))
                     {
                         return Ok(Invocation::Value(Value::String(utf16_unit_string(unit))));
                     }
@@ -845,10 +845,10 @@ impl Vm {
                 );
             }
             if key.is_str("length") {
-                return Ok(Invocation::Value(Value::Number(utf16_len(text) as f64)));
+                return Ok(Invocation::Value(Value::Number(text.unit_len() as f64)));
             }
             if let Some(index) = ops::canonical_index_key(key) {
-                let value = utf16_unit(text, index).map_or(Value::Undefined, |unit| {
+                let value = text.unit_at(index).map_or(Value::Undefined, |unit| {
                     Value::String(utf16_unit_string(unit))
                 });
                 return Ok(Invocation::Value(value));
@@ -1038,7 +1038,7 @@ impl Vm {
         }
         let coerced;
         let key = match key {
-            Value::String(key) => PropertyKeyRef::JsString(key.as_units()),
+            Value::String(key) => PropertyKeyRef::JsString(key),
             Value::Symbol(id) => PropertyKeyRef::Symbol(*id),
             _ => {
                 coerced = match self.coerce_property_key(host, key)? {
@@ -1061,7 +1061,7 @@ impl Vm {
             // ToObject on a string would expose fixed UTF-16 indices and length.
             (Value::String(string), key) => {
                 !key.is_str("length")
-                    && !ops::canonical_index_key(key).is_some_and(|index| index < utf16_len(string))
+                    && !ops::canonical_index_key(key).is_some_and(|index| index < string.unit_len())
             }
             _ => true,
         };
@@ -1311,7 +1311,7 @@ impl Vm {
                 }
             }
             Value::String(text) => {
-                for (index, &unit) in text.as_units().iter().enumerate() {
+                for (index, unit) in text.units().enumerate() {
                     let key = index.to_string();
                     if excluded.contains(&PropertyKeyRef::String(&key)) {
                         continue;
@@ -1513,7 +1513,7 @@ impl Vm {
 
 fn converted_property_key(value: &Value) -> Result<PropertyKeyRef<'_>, VmError> {
     match value {
-        Value::String(key) => Ok(PropertyKeyRef::JsString(key.as_units())),
+        Value::String(key) => Ok(PropertyKeyRef::JsString(key)),
         Value::Symbol(id) => Ok(PropertyKeyRef::Symbol(*id)),
         _ => Err(VmError::InvalidState(
             "destructuring requires an already converted property key".to_owned(),

@@ -5,7 +5,6 @@ use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;
 use crate::regexp::{compile_pattern, encode_input};
 use crate::runtime::Invocation;
-use crate::string::{utf16_len, utf16_unit};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
@@ -687,9 +686,7 @@ impl Vm {
         let unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
         let mut splitter_flags = flags.clone();
         if !flags_contains(&flags, b'y') {
-            let mut units = flags.as_units().to_vec();
-            units.push(u16::from(b'y'));
-            splitter_flags = JsString::from_units(units);
+            splitter_flags.push('y');
         }
         let created = self.construct_regexp(
             host,
@@ -701,7 +698,7 @@ impl Vm {
             return Ok(created);
         };
         let splitter_value = Value::Object(splitter);
-        let size = utf16_len(&string);
+        let size = string.unit_len();
         let mut parts = Vec::new();
         if limit == 0 {
             return self.array_result(parts);
@@ -738,7 +735,7 @@ impl Vm {
             };
             let end = match self.regexp_capture(host, array, 0)? {
                 Ok(value) => match self.coerce_string(host, &value)? {
-                    Ok(matched) => (index + utf16_len(&matched)).min(size),
+                    Ok(matched) => (index + matched.unit_len()).min(size),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 },
                 Err(error) => return Ok(Invocation::Thrown(error)),
@@ -749,7 +746,7 @@ impl Vm {
             }
             let index = index.min(size);
             if start <= index {
-                parts.push(Value::String(slice(text_units(&string), last, index)));
+                parts.push(Value::String(string.slice_units(last.min(index)..index)));
             } else {
                 parts.push(Value::String(JsString::default()));
             }
@@ -778,7 +775,7 @@ impl Vm {
             }
         }
         if last <= size {
-            parts.push(Value::String(slice(text_units(&string), last, size)));
+            parts.push(Value::String(string.slice_units(last..size)));
         }
         self.array_result(parts)
     }
@@ -792,7 +789,7 @@ impl Vm {
         replace_value: &Value,
         replacement: &JsString,
     ) -> Result<Result<JsString, Value>, VmError> {
-        let length = utf16_len(string);
+        let length = string.unit_len();
         let mut out = Vec::new();
         let mut next = 0usize;
         for result in results {
@@ -820,7 +817,7 @@ impl Vm {
             } else {
                 index as usize
             };
-            let tail = (position + utf16_len(&matched)).min(length);
+            let tail = (position + matched.unit_len()).min(length);
             let count = match self.regexp_element(host, array, "length")? {
                 Ok(value) => match self.coerce_number(host, &value)? {
                     Ok(number) => to_integer(number).clamp(0.0, u32::MAX as f64) as usize,
@@ -839,7 +836,8 @@ impl Vm {
                 Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             };
-            out.extend_from_slice(&text_units(string)[next.min(position)..position]);
+            let start = next.min(position);
+            out.extend(string.units().skip(start).take(position - start));
             if functional {
                 let mut argv = Vec::with_capacity(captures.len() + 4);
                 argv.push(Value::String(matched.clone()));
@@ -857,7 +855,7 @@ impl Vm {
                     },
                 };
                 match self.coerce_string(host, &value)? {
-                    Ok(value) => out.extend_from_slice(value.as_units()),
+                    Ok(value) => out.extend(value.units()),
                     Err(error) => return Ok(Err(error)),
                 }
             } else {
@@ -869,13 +867,13 @@ impl Vm {
                     named: &groups,
                 };
                 match self.regexp_substitution(host, replacement, &parts)? {
-                    Ok(value) => out.extend_from_slice(value.as_units()),
+                    Ok(value) => out.extend(value.units()),
                     Err(error) => return Ok(Err(error)),
                 }
             }
             next = tail;
         }
-        out.extend_from_slice(&text_units(string)[next.min(length)..]);
+        out.extend(string.units().skip(next.min(length)));
         Ok(Ok(JsString::from_units(out)))
     }
 
@@ -892,95 +890,95 @@ impl Vm {
             captures,
             named,
         } = *parts;
-        let units = replaced.as_units();
-        let source = text_units(string);
-        let length = source.len();
-        let tail = (position + utf16_len(matched)).min(length);
+        let mut units = replaced.units().enumerate().peekable();
+        let mut last_close = None;
+        let length = string.unit_len();
+        let tail = (position + matched.unit_len()).min(length);
         let mut out = Vec::new();
-        let mut index = 0;
-        while index < units.len() {
-            let unit = units[index];
-            if unit != u16::from(b'$') || index + 1 >= units.len() {
+        while let Some((index, unit)) = units.next() {
+            if unit != u16::from(b'$') {
                 out.push(unit);
-                index += 1;
                 continue;
             }
-            match units[index + 1] as u8 {
-                b'$' => {
+            match units.peek().map(|&(_, unit)| unit as u8) {
+                Some(b'$') => {
+                    units.next();
                     out.push(u16::from(b'$'));
-                    index += 2;
                 }
-                b'&' => {
-                    out.extend_from_slice(matched.as_units());
-                    index += 2;
+                Some(b'&') => {
+                    units.next();
+                    out.extend(matched.units());
                 }
-                b'`' => {
-                    out.extend_from_slice(&source[..position.min(length)]);
-                    index += 2;
+                Some(b'`') => {
+                    units.next();
+                    out.extend(string.units().take(position.min(length)));
                 }
-                b'\'' => {
-                    out.extend_from_slice(&source[tail..]);
-                    index += 2;
+                Some(b'\'') => {
+                    units.next();
+                    out.extend(string.units().skip(tail));
                 }
-                digit @ b'0'..=b'9' => {
+                Some(digit @ b'0'..=b'9') => {
+                    let (_, digit_unit) = units.next().expect("peeked a capture digit");
                     let mut number = usize::from(digit - b'0');
-                    let mut digits = 1;
-                    if index + 2 < units.len() && (0x30..=0x39).contains(&units[index + 2]) {
-                        let two = number * 10 + usize::from(units[index + 2] as u8 - b'0');
+                    if let Some((_, next)) = units.peek()
+                        && (0x30..=0x39).contains(next)
+                    {
+                        let two = number * 10 + usize::from(*next - 0x30);
                         if two >= 1 && two <= captures.len() {
                             number = two;
-                            digits = 2;
+                            units.next();
                         }
                     }
                     if number >= 1 && number <= captures.len() {
-                        if let Value::Undefined = captures[number - 1] {
-                        } else {
+                        if !matches!(captures[number - 1], Value::Undefined) {
                             match self.coerce_string(host, &captures[number - 1])? {
-                                Ok(value) => out.extend_from_slice(value.as_units()),
+                                Ok(value) => out.extend(value.units()),
                                 Err(error) => return Ok(Err(error)),
                             }
                         }
-                        index += 1 + digits;
                     } else {
-                        out.push(unit);
-                        index += 1;
+                        out.extend([unit, digit_unit]);
                     }
                 }
-                b'<' => {
-                    let close = units[index + 2..]
-                        .iter()
-                        .position(|unit| *unit == u16::from(b'>'))
-                        .map(|offset| index + 2 + offset);
-                    let Some(close) = close else {
+                Some(b'<') => {
+                    let close = *last_close.get_or_insert_with(|| {
+                        replaced.units().rposition(|unit| unit == u16::from(b'>'))
+                    });
+                    if !close.is_some_and(|close| close > index + 1) {
                         out.push(unit);
-                        index += 1;
-                        continue;
-                    };
-                    if matches!(named, Value::Undefined) {
-                        out.extend_from_slice(&units[index..=close]);
-                        index = close + 1;
                         continue;
                     }
-                    let value = match self.read_property(
-                        host,
-                        named,
-                        PropertyKeyRef::JsString(&units[index + 2..close]),
-                    )? {
-                        Invocation::Value(value) => value,
-                        Invocation::Thrown(error) => return Ok(Err(error)),
-                    };
+                    let (_, open) = units.next().expect("peeked opening delimiter");
+                    if matches!(named, Value::Undefined) {
+                        out.extend([unit, open]);
+                        for (_, unit) in units.by_ref() {
+                            out.push(unit);
+                            if unit == u16::from(b'>') {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    let key = JsString::from_units(
+                        units
+                            .by_ref()
+                            .map(|(_, unit)| unit)
+                            .take_while(|&unit| unit != u16::from(b'>'))
+                            .collect(),
+                    );
+                    let value =
+                        match self.read_property(host, named, PropertyKeyRef::JsString(&key))? {
+                            Invocation::Value(value) => value,
+                            Invocation::Thrown(error) => return Ok(Err(error)),
+                        };
                     if !matches!(value, Value::Undefined) {
                         match self.coerce_string(host, &value)? {
-                            Ok(value) => out.extend_from_slice(value.as_units()),
+                            Ok(value) => out.extend(value.units()),
                             Err(error) => return Ok(Err(error)),
                         }
                     }
-                    index = close + 1;
                 }
-                _ => {
-                    out.push(unit);
-                    index += 1;
-                }
+                _ => out.push(unit),
             }
         }
         Ok(Ok(JsString::from_units(out)))
@@ -1138,12 +1136,14 @@ impl Vm {
         let Object::RegExp { compiled, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
         };
-        let encoded = encode_input(input.as_units(), flags);
-        let units = encoded.as_slice();
-        let matched = if flags.unicode {
-            compiled.find_from_utf16(units, start).next()
-        } else {
-            compiled.find_from_ucs2(units, start).next()
+        let matched = {
+            let encoded = encode_input(&input, flags);
+            let units = encoded.as_ref();
+            if flags.unicode {
+                compiled.find_from_utf16(units, start).next()
+            } else {
+                compiled.find_from_ucs2(units, start).next()
+            }
         }
         .filter(|matched| !flags.sticky || matched.start() == start);
         let groups = matched.as_ref().map(|matched| {
@@ -1181,7 +1181,7 @@ impl Vm {
         let mut named_indices = Vec::new();
         for (name, range) in groups.expect("exec match has capture ranges") {
             let value = range.as_ref().map_or(Value::Undefined, |range| {
-                Value::String(input.as_units()[range.clone()].into())
+                Value::String(input.slice_units(range.clone()))
             });
             let pair = if flags.has_indices {
                 range.map_or(Value::Undefined, |range| {
@@ -1266,16 +1266,7 @@ struct Substitution<'a> {
 }
 
 fn flags_contains(flags: &JsString, unit: u8) -> bool {
-    flags.as_units().contains(&u16::from(unit))
-}
-
-fn text_units(text: &JsString) -> &[u16] {
-    text.as_units()
-}
-
-fn slice(units: &[u16], start: usize, end: usize) -> JsString {
-    let end = end.min(units.len());
-    JsString::from(&units[start.min(end)..end])
+    flags.units().any(|flag| flag == u16::from(unit))
 }
 
 fn to_integer(number: f64) -> f64 {
@@ -1290,7 +1281,7 @@ fn to_integer(number: f64) -> f64 {
 
 /// `AdvanceStringIndex`: one code unit, or one code point in Unicode modes.
 fn advance_string_index(text: &JsString, index: f64, unicode: bool) -> usize {
-    let length = utf16_len(text);
+    let length = text.unit_len();
     let index = if index.is_nan() || index < 0.0 {
         0
     } else if index > length as f64 {
@@ -1301,8 +1292,8 @@ fn advance_string_index(text: &JsString, index: f64, unicode: bool) -> usize {
     if !unicode {
         return index + 1;
     }
-    match utf16_unit(text, index) {
-        Some(first) if (0xd800..=0xdbff).contains(&first) => match utf16_unit(text, index + 1) {
+    match text.unit_at(index) {
+        Some(first) if (0xd800..=0xdbff).contains(&first) => match text.unit_at(index + 1) {
             Some(second) if (0xdc00..=0xdfff).contains(&second) => index + 2,
             _ => index + 1,
         },
@@ -1316,7 +1307,7 @@ fn escaped_source(source: &JsString) -> JsString {
     }
     let mut escaped = Vec::with_capacity(source.unit_len());
     let mut in_class = false;
-    let mut units = source.as_units().iter().copied().peekable();
+    let mut units = source.units().peekable();
     while let Some(unit) = units.next() {
         let escape = match unit {
             92 if units
@@ -1349,11 +1340,9 @@ fn escaped_source(source: &JsString) -> JsString {
 }
 
 fn regexp_escape(input: &JsString) -> JsString {
-    let units = input.as_units();
+    let mut units = input.units().enumerate().peekable();
     let mut out = Vec::new();
-    let mut index = 0;
-    while index < units.len() {
-        let unit = units[index];
+    while let Some((index, unit)) = units.next() {
         if index == 0 && unit <= 0x7f && (unit as u8).is_ascii_alphanumeric() {
             push_hex_escape(&mut out, 'x', unit);
         } else {
@@ -1402,17 +1391,16 @@ fn regexp_escape(input: &JsString) -> JsString {
                 }
                 0xd800..=0xdbff
                     if units
-                        .get(index + 1)
-                        .is_some_and(|next| (0xdc00..=0xdfff).contains(next)) =>
+                        .peek()
+                        .is_some_and(|(_, next)| (0xdc00..=0xdfff).contains(next)) =>
                 {
-                    out.extend_from_slice(&units[index..index + 2]);
-                    index += 1;
+                    let (_, next) = units.next().expect("peeked a low surrogate");
+                    out.extend([unit, next]);
                 }
                 0xd800..=0xdfff => push_hex_escape(&mut out, 'u', unit),
                 _ => out.push(unit),
             }
         }
-        index += 1;
     }
     JsString::from_units(out)
 }
