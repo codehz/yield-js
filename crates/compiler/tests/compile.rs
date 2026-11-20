@@ -671,6 +671,22 @@ fn rejects_unsupported_module_syntax() {
 }
 
 #[test]
+fn interns_repeated_string_constants() {
+    use yield_vm::bytecode::Constant;
+    let build = compile(
+        "function run() { return { foo: \"foo\", value: \"foo\" }.foo; }",
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let matches = build
+        .constants
+        .iter()
+        .filter(|constant| matches!(constant, Constant::String(value) if value == "foo"))
+        .count();
+    assert_eq!(matches, 1);
+}
+
+#[test]
 fn emits_utf16_for_string_literals_templates_and_property_keys() {
     use yield_vm::bytecode::Constant;
 

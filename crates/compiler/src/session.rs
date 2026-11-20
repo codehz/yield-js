@@ -21,6 +21,7 @@ pub(crate) struct Session<'src> {
     top_level_functions: BTreeMap<String, BindingId>,
     exports: BTreeMap<String, BindingId>,
     constants: Vec<Constant>,
+    string_constants: BTreeMap<yield_vm::JsString, u32>,
     functions: Vec<BytecodeFunction>,
     imports: Vec<ImportDecl>,
     next_func_id: u32,
@@ -48,9 +49,9 @@ impl<'src> Session<'src> {
             top_level_functions: BTreeMap::new(),
             exports: BTreeMap::new(),
             constants: Vec::new(),
+            string_constants: BTreeMap::new(),
             functions: Vec::new(),
             imports,
-            // Function 0 is the synthetic script.
             next_func_id: 1,
             next_binding_id: 0,
         })
@@ -89,6 +90,15 @@ impl<'src> Session<'src> {
     }
 
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
+        if let Constant::String(value) = constant {
+            if let Some(&index) = self.string_constants.get(&value) {
+                return index;
+            }
+            let index = self.constants.len() as u32;
+            self.string_constants.insert(value.clone(), index);
+            self.constants.push(Constant::String(value));
+            return index;
+        }
         let index = self.constants.len() as u32;
         self.constants.push(constant);
         index
