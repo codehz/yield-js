@@ -15,7 +15,7 @@ use crate::vm::Vm;
 const MAX_LENGTH: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
-pub(crate) enum StringMethod {
+enum StringMethod {
     CharAt,
     CharCodeAt,
     CodePointAt,
@@ -47,10 +47,69 @@ pub(crate) enum StringMethod {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum StringStatic {
+enum StringStatic {
     FromCharCode,
     FromCodePoint,
     Raw,
+}
+
+#[yield_binding_macros::builtin_global(name = "String", root = "string", kind = "constructor")]
+pub(crate) mod members {
+    use super::{Host, Invocation, StringMethod, StringStatic, Value, Vm, VmError};
+
+    #[methods(
+        charAt = StringMethod::CharAt,
+        charCodeAt = StringMethod::CharCodeAt,
+        codePointAt = StringMethod::CodePointAt,
+        at = StringMethod::At,
+        indexOf = StringMethod::IndexOf,
+        lastIndexOf = StringMethod::LastIndexOf,
+        includes = StringMethod::Includes,
+        startsWith = StringMethod::StartsWith,
+        endsWith = StringMethod::EndsWith,
+        slice = StringMethod::Slice,
+        substring = StringMethod::Substring,
+        toUpperCase = StringMethod::ToUpperCase,
+        toLowerCase = StringMethod::ToLowerCase,
+        trim = StringMethod::Trim,
+        trimStart = StringMethod::TrimStart,
+        trimEnd = StringMethod::TrimEnd,
+        split = StringMethod::Split,
+        concat = StringMethod::Concat,
+        repeat = StringMethod::Repeat,
+        padStart = StringMethod::PadStart,
+        padEnd = StringMethod::PadEnd,
+        replace = StringMethod::Replace,
+        replaceAll = StringMethod::ReplaceAll,
+        matchAll = StringMethod::MatchAll,
+        r#match = StringMethod::Match,
+        search = StringMethod::Search,
+        toString = StringMethod::ToString,
+        valueOf = StringMethod::ValueOf,
+    )]
+    fn call_method(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        key: StringMethod,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.call_string_method(host, key, receiver, args)
+    }
+
+    #[functions(
+        fromCharCode = StringStatic::FromCharCode,
+        fromCodePoint = StringStatic::FromCodePoint,
+        raw = StringStatic::Raw,
+    )]
+    fn call_static(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        key: StringStatic,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.call_string_static(host, key, args)
+    }
 }
 
 impl Vm {
@@ -65,7 +124,7 @@ impl Vm {
         self.string_value(host, value)
     }
 
-    pub(crate) fn call_string_method(
+    fn call_string_method(
         &mut self,
         host: &mut dyn Host,
         method: StringMethod,
@@ -126,7 +185,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn call_string_static(
+    fn call_string_static(
         &mut self,
         host: &mut dyn Host,
         method: StringStatic,

@@ -23,11 +23,11 @@ use crate::heap::{
 use crate::host::Host;
 use crate::json::namespace as json_namespace;
 use crate::math::namespace as math_namespace;
-use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
+use crate::number::members as number_members;
 use crate::ops;
 use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::string::{StringMethod, StringStatic, utf16_len, utf16_unit};
+use crate::string::{members as string_members, utf16_len, utf16_unit};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
@@ -76,7 +76,7 @@ macro_rules! builtin_globals {
             }
         }
 
-        fn namespace_handler(owner: &str, member: &str) -> Option<BuiltinHandler> {
+        fn registered_handler(owner: &str, member: &str) -> Option<BuiltinHandler> {
             $(builtin_globals!(@resolve owner, member, $kind($($args)*));)*
             None
         }
@@ -84,11 +84,15 @@ macro_rules! builtin_globals {
     (@name root($name:literal)) => { $name };
     (@name number($name:literal, $value:expr)) => { $name };
     (@name namespace($module:ident)) => { $module::NAME };
+    (@name constructor($module:ident)) => { builtin_globals!(@name namespace($module)) };
     (@value $vm:ident, $field:ident, root($name:literal)) => {
         Value::Object($vm.builtins.$field)
     };
     (@value $vm:ident, $field:ident, namespace($module:ident)) => {
         Value::Object($vm.builtins.$field)
+    };
+    (@value $vm:ident, $field:ident, constructor($module:ident)) => {
+        builtin_globals!(@value $vm, $field, namespace($module))
     };
     (@value $vm:ident, $field:ident, number($name:literal, $value:expr)) => {
         Value::Number($value)
@@ -97,6 +101,9 @@ macro_rules! builtin_globals {
         if $owner == $module::NAME {
             return $module::resolve($member);
         }
+    };
+    (@resolve $owner:ident, $member:ident, constructor($module:ident)) => {
+        builtin_globals!(@resolve $owner, $member, namespace($module))
     };
     (@resolve $owner:ident, $member:ident, root($name:literal)) => {};
     (@resolve $owner:ident, $member:ident, number($name:literal, $value:expr)) => {};
@@ -113,14 +120,14 @@ builtin_globals!(
     nan: number("NaN", f64::NAN),
     infinity: number("Infinity", f64::INFINITY),
     array: root("Array"),
-    string: root("String"),
+    string: constructor(string_members),
     rangeerror: root("RangeError"),
     referenceerror: root("ReferenceError"),
     syntaxerror: root("SyntaxError"),
     evalerror: root("EvalError"),
     urierror: root("URIError"),
     aggregateerror: root("AggregateError"),
-    number: root("Number"),
+    number: constructor(number_members),
     math: namespace(math_namespace),
     json: namespace(json_namespace),
     map: root("Map"),
@@ -140,11 +147,9 @@ pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_ARRAY: &str = "array";
 pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
 pub(crate) const ROOT_ARRAY_VALUES: &str = "array.values";
-pub(crate) const ROOT_STRING: &str = "string";
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
 pub(crate) const ROOT_REGEXP: &str = "regexp";
 pub(crate) const ROOT_REGEXP_PROTOTYPE: &str = "regexp.prototype";
-pub(crate) const ROOT_NUMBER: &str = "number";
 pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
 pub(crate) const ROOT_BOOLEAN: &str = "boolean";
 pub(crate) const ROOT_BOOLEAN_PROTOTYPE: &str = "boolean.prototype";
@@ -258,11 +263,11 @@ impl BuiltinRoots {
             (ROOT_ARRAY.to_owned(), self.array),
             (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
             (ROOT_ARRAY_VALUES.to_owned(), self.array_values),
-            (ROOT_STRING.to_owned(), self.string),
+            (string_members::ROOT.to_owned(), self.string),
             (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
             (ROOT_REGEXP.to_owned(), self.regexp),
             (ROOT_REGEXP_PROTOTYPE.to_owned(), self.regexp_prototype),
-            (ROOT_NUMBER.to_owned(), self.number),
+            (number_members::ROOT.to_owned(), self.number),
             (ROOT_NUMBER_PROTOTYPE.to_owned(), self.number_prototype),
             (ROOT_BOOLEAN.to_owned(), self.boolean_constructor),
             (ROOT_BOOLEAN_PROTOTYPE.to_owned(), self.boolean_prototype),
@@ -325,7 +330,7 @@ impl BuiltinRoots {
 }
 
 pub(crate) type BuiltinHandler =
-    fn(&mut Vm, &mut dyn Host, &[Value]) -> Result<Invocation, VmError>;
+    fn(&mut Vm, &mut dyn Host, &Value, &[Value]) -> Result<Invocation, VmError>;
 
 #[yield_binding_macros::builtin_global(name = "Reflect", root = "reflect")]
 pub(crate) mod reflect_namespace {
@@ -497,13 +502,9 @@ pub(crate) enum BuiltinCall {
     ArrayValues,
     ArrayIteratorNext,
     StringConstructor,
-    StringMethod(StringMethod),
-    StringStatic(StringStatic),
     RegExpConstructor,
     RegExpMethod(RegExpMethod),
     NumberConstructor,
-    NumberMethod(&'static str),
-    NumberStatic(&'static str),
     StringIterator,
     StringIteratorNext,
     RegExpStringIteratorNext,
@@ -561,42 +562,6 @@ enum Constructor {
 const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
 const PROMISE_METHODS: [&str; 3] = ["then", "catch", "finally"];
 
-const STRING_METHODS: &[(&str, StringMethod)] = &[
-    ("charAt", StringMethod::CharAt),
-    ("charCodeAt", StringMethod::CharCodeAt),
-    ("codePointAt", StringMethod::CodePointAt),
-    ("at", StringMethod::At),
-    ("indexOf", StringMethod::IndexOf),
-    ("lastIndexOf", StringMethod::LastIndexOf),
-    ("includes", StringMethod::Includes),
-    ("startsWith", StringMethod::StartsWith),
-    ("endsWith", StringMethod::EndsWith),
-    ("slice", StringMethod::Slice),
-    ("substring", StringMethod::Substring),
-    ("toUpperCase", StringMethod::ToUpperCase),
-    ("toLowerCase", StringMethod::ToLowerCase),
-    ("trim", StringMethod::Trim),
-    ("trimStart", StringMethod::TrimStart),
-    ("trimEnd", StringMethod::TrimEnd),
-    ("split", StringMethod::Split),
-    ("concat", StringMethod::Concat),
-    ("repeat", StringMethod::Repeat),
-    ("padStart", StringMethod::PadStart),
-    ("padEnd", StringMethod::PadEnd),
-    ("replace", StringMethod::Replace),
-    ("replaceAll", StringMethod::ReplaceAll),
-    ("matchAll", StringMethod::MatchAll),
-    ("match", StringMethod::Match),
-    ("search", StringMethod::Search),
-    ("toString", StringMethod::ToString),
-    ("valueOf", StringMethod::ValueOf),
-];
-const STRING_STATICS: &[(&str, StringStatic)] = &[
-    ("fromCharCode", StringStatic::FromCharCode),
-    ("fromCodePoint", StringStatic::FromCodePoint),
-    ("raw", StringStatic::Raw),
-];
-
 impl Vm {
     fn init_wrapper_prototype(&mut self, name: &str, constructor: ObjectId) -> ObjectId {
         let prototype = self.heap.alloc_plain();
@@ -631,7 +596,7 @@ impl Vm {
     }
 
     fn init_string_constructor(&mut self, prototype: ObjectId, iterator: ObjectId) -> ObjectId {
-        let constructor = self.heap.alloc_builtin("String", None);
+        let constructor = self.heap.alloc_builtin(string_members::NAME, None);
         self.heap
             .define_data(
                 constructor,
@@ -656,18 +621,7 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("String.prototype stores Symbol.iterator");
-        for name in STRING_METHODS.iter().map(|(name, _)| *name) {
-            let method = self.heap.alloc_builtin("String", Some(name));
-            self.heap
-                .define_data(prototype, name, Value::Object(method), Attributes::METHOD)
-                .expect("String.prototype stores methods");
-        }
-        for name in STRING_STATICS.iter().map(|(name, _)| *name) {
-            let method = self.heap.alloc_builtin("String", Some(name));
-            self.heap
-                .define_data(constructor, name, Value::Object(method), Attributes::METHOD)
-                .expect("String stores statics");
-        }
+        string_members::install_members(self, constructor, prototype);
         constructor
     }
 
@@ -1442,10 +1396,6 @@ impl Vm {
             BuiltinCall::RegExpMethod(method) => {
                 self.call_regexp_method(host, method, receiver, &args)
             }
-            BuiltinCall::StringMethod(method) => {
-                self.call_string_method(host, method, receiver, &args)
-            }
-            BuiltinCall::StringStatic(method) => self.call_string_static(host, method, &args),
             BuiltinCall::NumberConstructor => self.call_number(host, &args),
             BuiltinCall::BooleanConstructor => Ok(Invocation::Value(Value::Bool(
                 args.first().is_some_and(Value::truthy),
@@ -1468,10 +1418,6 @@ impl Vm {
                     Value::Bool(value)
                 }))
             }
-            BuiltinCall::NumberMethod(method) => {
-                self.call_number_method(host, method, receiver, &args)
-            }
-            BuiltinCall::NumberStatic(method) => self.call_number_static(host, method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::RegExpStringIteratorNext => {
@@ -1479,7 +1425,7 @@ impl Vm {
             }
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
-            BuiltinCall::Registered(handler) => handler(self, host, &args),
+            BuiltinCall::Registered(handler) => handler(self, host, receiver, &args),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(host, args),
@@ -3355,16 +3301,6 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Symbol", Some("valueOf")) => Some(BuiltinCall::SymbolMethod("valueOf")),
         ("Symbol", Some("toString")) => Some(BuiltinCall::SymbolMethod("toString")),
         ("Symbol", Some("get description")) => Some(BuiltinCall::SymbolMethod("get description")),
-        ("Number", Some(name)) => NUMBER_METHODS
-            .iter()
-            .find(|&&key| key == name)
-            .map(|&key| BuiltinCall::NumberMethod(key))
-            .or_else(|| {
-                NUMBER_STATICS
-                    .iter()
-                    .find(|&&key| key == name)
-                    .map(|&key| BuiltinCall::NumberStatic(key))
-            }),
         ("RegExp", None) => Some(BuiltinCall::RegExpConstructor),
         ("RegExp", Some(name)) => REGEXP_METHODS
             .iter()
@@ -3384,16 +3320,6 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
             }),
         ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
-        ("String", Some(name)) => STRING_METHODS
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, method)| BuiltinCall::StringMethod(*method))
-            .or_else(|| {
-                STRING_STATICS
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, method)| BuiltinCall::StringStatic(*method))
-            }),
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("RegExpStringIterator", Some("next")) => Some(BuiltinCall::RegExpStringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
@@ -3408,7 +3334,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Symbol", None) => Some(BuiltinCall::SymbolConstructor),
         ("Symbol", Some("for")) => Some(BuiltinCall::SymbolFor),
         ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
-        (owner, Some(member)) => namespace_handler(owner, member).map(BuiltinCall::Registered),
+        (owner, Some(member)) => registered_handler(owner, member).map(BuiltinCall::Registered),
         _ => None,
     }
 }

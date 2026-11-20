@@ -364,10 +364,24 @@ fn nonempty_string(meta: &Meta) -> Result<LitStr> {
 
 pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut module: ItemMod = syn::parse2(item)?;
-    let opts = options(args, &["name", "root"])?;
+    let opts = options(args, &["name", "root", "kind"])?;
     let span = module.ident.span();
     let name = nonempty_string(required(&opts, "name", span)?)?;
     let root = nonempty_string(required(&opts, "root", span)?)?;
+    let constructor = if let Some(kind) = opts.get("kind") {
+        let kind = string(kind)?;
+        if kind.value() != "constructor" {
+            return Err(Error::new_spanned(kind, "expected `constructor` kind"));
+        }
+        true
+    } else {
+        false
+    };
+    let object = if constructor {
+        quote!(constructor)
+    } else {
+        quote!(object)
+    };
     let Some((_, items)) = &mut module.content else {
         return Err(Error::new_spanned(
             module,
@@ -379,7 +393,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     let mut install = Vec::new();
     let mut resolve = Vec::new();
     for item in &mut *items {
-        const MARKERS: &[&str] = &["function", "constant", "functions"];
+        const MARKERS: &[&str] = &["function", "constant", "functions", "methods"];
         let attrs = match item {
             Item::Fn(item) => &mut item.attrs,
             Item::Const(item) => &mut item.attrs,
@@ -387,6 +401,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 for (marker, diagnostic) in [
                     ("function", "function marker requires a function"),
                     ("functions", "functions marker requires a function"),
+                    ("methods", "methods marker requires a function"),
                     ("constant", "constant marker requires a const item"),
                 ] {
                     reject_markers(item_attrs(other), &[marker], diagnostic)?;
@@ -397,27 +412,48 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         let Some((kind, marker)) = take_marker(attrs, MARKERS)? else {
             continue;
         };
+        if kind == "methods" && !constructor {
+            return Err(Error::new_spanned(
+                marker,
+                "methods marker requires a constructor builtin",
+            ));
+        }
         let cfg = item_attrs(item)
             .iter()
             .filter(|attr| attr.path().is_ident("cfg"));
-        let members = if kind == "functions" {
-            let names = marker.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+        let members = if matches!(kind.as_str(), "functions" | "methods") {
+            let names = marker.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+                input.parse_terminated(
+                    |input| {
+                        let ident: Ident = input.parse()?;
+                        let mapped = if input.peek(Token![=]) {
+                            input.parse::<Token![=]>()?;
+                            Some(input.parse::<Path>()?)
+                        } else {
+                            None
+                        };
+                        let name = LitStr::new(&plain_ident(&ident), ident.span());
+                        Ok((name, mapped))
+                    },
+                    Token![,],
+                )
+            })?;
             if names.is_empty() {
                 return Err(Error::new_spanned(
                     marker,
-                    "functions marker requires at least one member",
+                    format!("{kind} marker requires at least one member"),
                 ));
             }
-            names
-                .iter()
-                .map(|ident| LitStr::new(&plain_ident(ident), ident.span()))
-                .collect()
+            names.into_iter().collect::<Vec<_>>()
         } else {
             let opts = options(marker.parse_args()?, &["name"])?;
-            vec![nonempty_string(required(&opts, "name", marker.span())?)?]
+            vec![(
+                nonempty_string(required(&opts, "name", marker.span())?)?,
+                None,
+            )]
         };
 
-        for member in members {
+        for (member, mapped) in members {
             if !keys.insert(member.value()) {
                 return Err(Error::new_spanned(member, "duplicate builtin member name"));
             }
@@ -428,21 +464,26 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                     install.push(quote! {
                         #(#cfg)*
                         vm.heap.define_data(
-                            object,
+                            #object,
                             #member,
                             crate::value::Value::Number(self::#ident),
                             crate::heap::Attributes::FIXED,
-                        ).expect("fresh builtin namespace stores constants");
+                        ).expect("builtin stores constants");
                     });
                     continue;
                 }
                 (Item::Fn(item), "function") => {
                     let ident = &item.sig.ident;
-                    quote!(self::#ident)
+                    quote!(|vm, host, _, args| self::#ident(vm, host, args))
                 }
-                (Item::Fn(item), "functions") => {
+                (Item::Fn(item), "functions" | "methods") => {
                     let ident = &item.sig.ident;
-                    quote!(|vm, host, args| self::#ident(vm, host, #member, args))
+                    let key = mapped.map_or_else(|| quote!(#member), |path| quote!(#path));
+                    if kind == "methods" {
+                        quote!(|vm, host, receiver, args| self::#ident(vm, host, #key, receiver, args))
+                    } else {
+                        quote!(|vm, host, _, args| self::#ident(vm, host, #key, args))
+                    }
                 }
                 (_, "constant") => {
                     return Err(Error::new_spanned(
@@ -457,17 +498,22 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                     ));
                 }
             };
+            let target = if kind == "methods" {
+                quote!(prototype)
+            } else {
+                object.clone()
+            };
             let resolve_cfg = cfg.clone();
             install.push(quote! {
                 #(#cfg)*
                 {
                     let method = vm.heap.alloc_builtin(NAME, Some(#member));
                     vm.heap.define_data(
-                        object,
+                        #target,
                         #member,
                         crate::value::Value::Object(method),
                         crate::heap::Attributes::METHOD,
-                    ).expect("fresh builtin namespace stores methods");
+                    ).expect("builtin stores methods");
                 }
             });
             resolve.push(quote! {
@@ -482,13 +528,25 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
 
     items.push(syn::parse_quote!(pub(crate) const NAME: &str = #name;));
     items.push(syn::parse_quote!(pub(crate) const ROOT: &str = #root;));
-    items.push(syn::parse_quote! {
-        pub(crate) fn install(vm: &mut crate::vm::Vm) -> crate::value::ObjectId {
-            let object = vm.heap.alloc_plain();
-            #(#install)*
-            object
-        }
-    });
+    if constructor {
+        items.push(syn::parse_quote! {
+            pub(crate) fn install_members(
+                vm: &mut crate::vm::Vm,
+                constructor: crate::value::ObjectId,
+                prototype: crate::value::ObjectId,
+            ) {
+                #(#install)*
+            }
+        });
+    } else {
+        items.push(syn::parse_quote! {
+            pub(crate) fn install(vm: &mut crate::vm::Vm) -> crate::value::ObjectId {
+                let object = vm.heap.alloc_plain();
+                #(#install)*
+                object
+            }
+        });
+    }
     items.push(syn::parse_quote! {
         pub(crate) fn resolve(member: &str) -> Option<crate::builtins::BuiltinHandler> {
             match member {
@@ -1204,6 +1262,10 @@ mod tests {
                 "unknown attribute option",
             ),
             (
+                quote!(name = "JSON", root = "json", kind = "namespace"),
+                "expected `constructor` kind",
+            ),
+            (
                 quote!(name = "JSON", root = "json", root = "other"),
                 "duplicate attribute option",
             ),
@@ -1277,6 +1339,62 @@ mod tests {
             quote! { mod namespace {} },
         )
         .expect("empty builtin namespace should expand");
+    }
+
+    #[test]
+    fn builtin_global_validates_constructor_methods() {
+        let args = quote!(name = "String", root = "string", kind = "constructor");
+        for (items, message) in [
+            (
+                quote! {
+                    #[functions(shared = Static::Shared)]
+                    fn call_static() {}
+                    #[methods(shared = Method::Shared)]
+                    fn call_method() {}
+                },
+                "duplicate builtin member name",
+            ),
+            (
+                quote! {
+                    #[methods()]
+                    fn call_method() {}
+                },
+                "methods marker requires at least one member",
+            ),
+            (
+                quote! {
+                    #[methods(charAt)]
+                    const CHAR_AT: f64 = 0.0;
+                },
+                "methods marker requires a function",
+            ),
+        ] {
+            diagnostic(
+                builtin_global(args.clone(), quote!(mod members { #items })),
+                message,
+            );
+        }
+        diagnostic(
+            builtin_global(
+                quote!(name = "String", root = "string"),
+                quote! {
+                    mod members {
+                        #[methods(charAt)]
+                        fn call_method() {}
+                    }
+                },
+            ),
+            "methods marker requires a constructor builtin",
+        );
+    }
+
+    #[test]
+    fn builtin_global_accepts_empty_constructor() {
+        builtin_global(
+            quote!(name = "String", root = "string", kind = "constructor"),
+            quote! { mod members {} },
+        )
+        .expect("empty builtin constructor should expand");
     }
 
     #[test]

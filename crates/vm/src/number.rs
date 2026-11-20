@@ -9,26 +9,53 @@ use crate::value::{ObjectId, Value};
 use crate::vm::Vm;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-pub(crate) const NUMBER_STATICS: &[&str] = &[
-    "isFinite",
-    "isInteger",
-    "isNaN",
-    "isSafeInteger",
-    "parseFloat",
-    "parseInt",
-];
-pub(crate) const NUMBER_METHODS: &[&str] = &[
-    "toString",
-    "valueOf",
-    "toFixed",
-    "toExponential",
-    "toPrecision",
-    "toLocaleString",
-];
+
+#[yield_binding_macros::builtin_global(name = "Number", root = "number", kind = "constructor")]
+pub(crate) mod members {
+    use super::{Host, Invocation, Value, Vm, VmError};
+
+    #[functions(isFinite, isInteger, isNaN, isSafeInteger, parseFloat, parseInt)]
+    fn call_static(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        key: &str,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.call_number_static(host, key, args)
+    }
+
+    #[methods(toString, valueOf, toFixed, toExponential, toPrecision, toLocaleString)]
+    fn call_method(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        key: &str,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.call_number_method(host, key, receiver, args)
+    }
+
+    #[constant(name = "EPSILON")]
+    const EPSILON: f64 = f64::EPSILON;
+    #[constant(name = "MAX_SAFE_INTEGER")]
+    const MAX_SAFE_INTEGER: f64 = super::MAX_SAFE_INTEGER;
+    #[constant(name = "MIN_SAFE_INTEGER")]
+    const MIN_SAFE_INTEGER: f64 = -MAX_SAFE_INTEGER;
+    #[constant(name = "MAX_VALUE")]
+    const MAX_VALUE: f64 = f64::MAX;
+    #[constant(name = "MIN_VALUE")]
+    const MIN_VALUE: f64 = f64::from_bits(1);
+    #[constant(name = "POSITIVE_INFINITY")]
+    const POSITIVE_INFINITY: f64 = f64::INFINITY;
+    #[constant(name = "NEGATIVE_INFINITY")]
+    const NEGATIVE_INFINITY: f64 = f64::NEG_INFINITY;
+    #[constant(name = "NaN")]
+    const NAN: f64 = f64::NAN;
+}
 
 impl Vm {
     pub(crate) fn init_number_constructor(&mut self, prototype: ObjectId) -> ObjectId {
-        let constructor = self.heap.alloc_builtin("Number", None);
+        let constructor = self.heap.alloc_builtin(members::NAME, None);
         self.heap
             .define_data(
                 constructor,
@@ -45,28 +72,7 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Number.prototype stores its constructor");
-        for (target, names) in [(constructor, NUMBER_STATICS), (prototype, NUMBER_METHODS)] {
-            for &name in names {
-                let id = self.heap.alloc_builtin("Number", Some(name));
-                self.heap
-                    .define_data(target, name, Value::Object(id), Attributes::METHOD)
-                    .expect("Number stores its builtin methods");
-            }
-        }
-        for (name, number) in [
-            ("EPSILON", f64::EPSILON),
-            ("MAX_SAFE_INTEGER", MAX_SAFE_INTEGER),
-            ("MIN_SAFE_INTEGER", -MAX_SAFE_INTEGER),
-            ("MAX_VALUE", f64::MAX),
-            ("MIN_VALUE", f64::from_bits(1)),
-            ("POSITIVE_INFINITY", f64::INFINITY),
-            ("NEGATIVE_INFINITY", f64::NEG_INFINITY),
-            ("NaN", f64::NAN),
-        ] {
-            self.heap
-                .define_data(constructor, name, Value::Number(number), Attributes::FIXED)
-                .expect("Number stores its constants");
-        }
+        members::install_members(self, constructor, prototype);
         constructor
     }
 
@@ -84,7 +90,7 @@ impl Vm {
         })
     }
 
-    pub(crate) fn call_number_static(
+    fn call_number_static(
         &mut self,
         host: &mut dyn Host,
         method: &str,
@@ -129,7 +135,7 @@ impl Vm {
         Ok(Invocation::Value(value))
     }
 
-    pub(crate) fn call_number_method(
+    fn call_number_method(
         &mut self,
         host: &mut dyn Host,
         method: &str,
