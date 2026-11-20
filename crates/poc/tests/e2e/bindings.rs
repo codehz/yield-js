@@ -2,13 +2,15 @@
 //! operation recovery strategies, and deterministic snapshots.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::CompileOptions;
 use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationStart, OperationToken};
 use yield_vm::{
-    Bindings, Completion, Host, Instance, JsError, JsResult, JsValue, PromiseState, This, Value,
-    Vm, VmError, host_bindings, host_class, host_module, host_state, methods, operation,
+    Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
+    PromiseState, This, Value, Vm, VmError, host_bindings, host_class, host_module, host_state,
+    methods, operation,
 };
 
 #[path = "signature_fingerprint.rs"]
@@ -326,6 +328,153 @@ export function run() {
         matches!(&error, VmError::HostFault(message) if message.contains("outside the call")),
         "{error:?}"
     );
+}
+
+mod guest_call_fixture {
+    use super::*;
+
+    type Stash = Mutex<Option<HostStep>>;
+
+    #[host_module(name = "guest")]
+    mod guest {
+        use super::*;
+
+        #[function(name = "later")]
+        fn later(cx: &mut CallCx<'_>, callee: JsValue) -> JsResult<HostStep> {
+            cx.request_call(
+                callee,
+                JsValue::undefined(),
+                vec![],
+                vec![],
+                unexpected_resume,
+            )
+        }
+
+        #[function(name = "stash")]
+        fn stash(cx: &mut CallCx<'_>, callee: JsValue) -> JsResult<()> {
+            let request = later(cx, callee)?;
+            *cx.service::<Stash>("stash").unwrap().lock().unwrap() = Some(request);
+            Ok(())
+        }
+
+        #[function(name = "replay")]
+        fn replay(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+            Ok(cx
+                .service::<Stash>("stash")
+                .unwrap()
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap())
+        }
+
+        #[function(name = "fault")]
+        fn fault(cx: &mut CallCx<'_>) -> JsResult<()> {
+            Err(JsError::Fault(cx.fault("guest host fault")))
+        }
+
+        #[function(name = "mark")]
+        fn mark(cx: &mut CallCx<'_>) -> JsResult<()> {
+            cx.service::<Arc<AtomicUsize>>("runs")
+                .unwrap()
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        #[function(name = "twice")]
+        fn twice(cx: &mut CallCx<'_>, callee: JsValue, seed: JsValue) -> JsResult<HostStep> {
+            cx.request_call(
+                callee.clone(),
+                cx.this_value(),
+                vec![seed],
+                vec![callee],
+                again,
+            )
+        }
+    }
+
+    fn unexpected_resume(_: &mut CallCx<'_>, _: GuestOutcome) -> JsResult<HostStep> {
+        panic!("faulting or stale requests must not resume")
+    }
+
+    fn again(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
+        let GuestOutcome::Returned(value) = outcome else {
+            panic!("callback should return")
+        };
+        assert_eq!(cx.args().len(), 1);
+        assert!(!cx.is_construct());
+        let callee = cx.arg(0)?;
+        cx.request_call(callee, cx.this_value(), vec![value], vec![], finish)
+    }
+
+    fn finish(_: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
+        let GuestOutcome::Returned(value) = outcome else {
+            panic!("callback should return")
+        };
+        Ok(HostStep::Return(value))
+    }
+
+    pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let bindings = host_bindings! {
+            modules: [guest],
+            classes: [],
+            states: [],
+            operations: [],
+            services: [("stash", 1, Stash::default()), ("runs", 1, runs.clone())],
+        }
+        .expect("guest bindings");
+        let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+        let mut host = StrategyHost::new(bindings);
+        let mut vm = Vm::new(build, &mut host).expect("create VM");
+        let result = vm.start(&mut host, "run", vec![]);
+        (result, runs.load(Ordering::Relaxed))
+    }
+}
+
+#[test]
+fn guest_call_cannot_be_replayed() {
+    let (result, runs) = guest_call_fixture::run(
+        r#"
+        import { stash, replay, mark } from 'guest';
+        export function run() {
+            stash(() => mark());
+            return replay();
+        }
+    "#,
+    );
+    assert!(
+        matches!(result, Err(VmError::HostFault(message)) if message.contains("GuestCall used outside the call"))
+    );
+    assert_eq!(runs, 0);
+}
+
+#[test]
+fn guest_call_host_fault_bypasses_resume_and_script_catch() {
+    let (result, _) = guest_call_fixture::run(
+        r#"
+        import { later, fault } from 'guest';
+        export function run() {
+            try { return later(() => fault()); }
+            catch (e) { return 'caught'; }
+        }
+    "#,
+    );
+    assert!(matches!(result, Err(VmError::HostFault(message)) if message == "guest host fault"));
+}
+
+#[test]
+fn guest_call_resume_can_request_another_call() {
+    let (result, _) = guest_call_fixture::run(
+        r#"
+        import { twice } from 'guest';
+        export function run() {
+            const receiver = { delta: 3, twice };
+            return receiver.twice(function(value) { return value + this.delta; }, 2);
+        }
+    "#,
+    );
+    assert_eq!(result.expect("chained guest calls"), Value::Number(8.0));
 }
 
 mod counter_fixture {

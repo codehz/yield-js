@@ -1,8 +1,8 @@
 use super::{StrategyHost, options};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
-    Bindings, Completion, Instance, JsResult, JsValue, PromiseState, This, Value, Vm, VmError,
-    host_bindings, host_class, host_module, methods,
+    Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
+    VmError, host_bindings, host_class, host_module, methods,
 };
 
 mod original {
@@ -96,6 +96,8 @@ independent_contract!(reordered, probe(_cx, value): [JsValue] -> [JsValue] { Ok(
     getter(_cx) -> [JsValue] { Ok(JsValue::undefined()) });
 independent_contract!(instance_result, probe(cx, _value): [JsValue] -> [Instance<Entity>] { cx.alloc(Entity) },
     getter(_cx) -> [JsValue] { Ok(JsValue::undefined()) });
+independent_contract!(step_result, probe(_cx, value): [JsValue] -> [HostStep] { Ok(HostStep::Return(value)) },
+    getter(_cx) -> [JsValue] { Ok(JsValue::undefined()) });
 independent_contract!(optional_argument, probe(_cx, value): [Option<JsValue>] -> [JsValue] { Ok(value.unwrap_or_else(JsValue::undefined)) },
     getter(_cx) -> [JsValue] { Ok(JsValue::undefined()) });
 independent_contract!(instance_getter, probe(_cx, value): [JsValue] -> [JsValue] { Ok(value) },
@@ -137,6 +139,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
 
     for (change, bindings) in [
         ("function return kind", instance_result::bindings()),
+        ("step return kind", step_result::bindings()),
         ("function parameter kind", optional_argument::bindings()),
         ("getter return kind", instance_getter::bindings()),
     ] {

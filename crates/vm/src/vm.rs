@@ -1,5 +1,8 @@
 use crate::JsString;
-use crate::binding::{Bindings, ExportDecl, ExportId, JsError, JsValue, NativeTarget};
+use crate::binding::{
+    Bindings, CallCx, ExportDecl, ExportId, GuestOutcome, GuestResume, HostStep, JsError, JsValue,
+    NativeTarget,
+};
 use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
@@ -321,38 +324,55 @@ impl Vm {
                 declaration.2
             )));
         }
-        let call_id = self.next_host_call;
-        self.next_host_call = self.next_host_call.checked_add(1).unwrap_or(1);
-        let epoch = self.epoch;
-        let args = args
-            .iter()
-            .map(|value| JsValue::handle(value.clone(), epoch, call_id))
-            .collect();
-        let this = JsValue::handle(receiver.clone(), epoch, call_id);
-        let mut cx = crate::binding::CallCx {
-            vm: self,
-            host,
-            bindings,
-            epoch,
-            call: call_id,
-            args,
-            this,
-            construct,
-        };
-        match call(&mut cx) {
-            Ok(value) => {
-                let value = cx
-                    .into_value(value)
-                    .map_err(|error| VmError::Host(error.0))?;
-                Ok(Invocation::Value(value))
-            }
-            Err(JsError::Throw(value)) => {
-                let value = cx
-                    .into_value(value)
-                    .map_err(|error| VmError::Host(error.0))?;
-                Ok(Invocation::Thrown(value))
-            }
-            Err(JsError::Fault(fault)) => Err(VmError::HostFault(fault.0)),
+        let mut next_args = args;
+        let mut pending: Option<(GuestResume, Invocation)> = None;
+        loop {
+            let call_id = self.next_host_call;
+            self.next_host_call = self.next_host_call.checked_add(1).unwrap_or(1);
+            let epoch = self.epoch;
+            let wrap = |value| JsValue::handle(value, epoch, call_id);
+            let mut cx = CallCx {
+                vm: self,
+                host,
+                bindings: &bindings,
+                epoch,
+                call: call_id,
+                args: next_args.into_iter().map(wrap).collect(),
+                this: wrap(receiver.clone()),
+                construct: construct && pending.is_none(),
+            };
+            let step = match pending.take() {
+                Some((resume, outcome)) => {
+                    let outcome = match outcome {
+                        Invocation::Value(value) => GuestOutcome::Returned(wrap(value)),
+                        Invocation::Thrown(value) => GuestOutcome::Thrown(wrap(value)),
+                    };
+                    resume(&mut cx, outcome)
+                }
+                None => call(&mut cx),
+            };
+            let request = match step {
+                Ok(HostStep::Return(value)) => {
+                    return cx
+                        .into_value(value)
+                        .map(Invocation::Value)
+                        .map_err(|error| VmError::Host(error.0));
+                }
+                Err(JsError::Throw(value)) => {
+                    return cx
+                        .into_value(value)
+                        .map(Invocation::Thrown)
+                        .map_err(|error| VmError::Host(error.0));
+                }
+                Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
+                Ok(HostStep::Call(request)) => request,
+            };
+            let (callee, guest_this, args, saved, resume) = request
+                .into_parts(cx)
+                .map_err(|fault| VmError::HostFault(fault.0))?;
+            let outcome = self.invoke(host, &callee, args, &guest_this)?;
+            pending = Some((resume, outcome));
+            next_args = saved;
         }
     }
 

@@ -130,6 +130,7 @@ enum Output {
     Value,
     Void,
     Instance(Box<Type>),
+    Step,
 }
 
 struct Call {
@@ -212,6 +213,7 @@ impl Call {
         };
         let output = match wrapped(ty, "JsResult") {
             Some(inner) if simple(inner, "JsValue") => Output::Value,
+            Some(inner) if simple(inner, "HostStep") => Output::Step,
             Some(Type::Tuple(tuple)) if tuple.elems.is_empty() => Output::Void,
             Some(inner)
                 if wrapped(inner, "Instance")
@@ -229,7 +231,7 @@ impl Call {
             _ => {
                 return Err(Error::new_spanned(
                     ty,
-                    "expected JsResult<JsValue>, JsResult<()> or JsResult<Instance<Class>>",
+                    "expected JsResult<JsValue>, JsResult<()>, JsResult<Instance<Class>> or JsResult<HostStep>",
                 ));
             }
         };
@@ -248,6 +250,7 @@ impl Call {
             Output::Value => quote!(Value),
             Output::Void => quote!(Void),
             Output::Instance(class) => quote!(Instance(<#class as ::yield_vm::HostClass>::TAG)),
+            Output::Step => quote!(Step),
         };
         quote! {
             ::yield_vm::__macro_support::CallSignature {
@@ -276,12 +279,17 @@ impl Call {
             });
         let call = quote!(#target(cx, #pass_this #(#names),*));
         let result = match &self.output {
-            Output::Value => call,
-            Output::Void => quote!({ #call?; Ok(::yield_vm::JsValue::undefined()) }),
-            Output::Instance(_) => quote!({ let instance = #call?; Ok(instance.value(cx)) }),
+            Output::Value => quote!(#call.map(::yield_vm::HostStep::Return)),
+            Output::Void => {
+                quote!({ #call?; Ok(::yield_vm::HostStep::Return(::yield_vm::JsValue::undefined())) })
+            }
+            Output::Instance(_) => {
+                quote!({ let instance = #call?; Ok(::yield_vm::HostStep::Return(instance.value(cx))) })
+            }
+            Output::Step => call,
         };
         quote! {
-            fn __yield_call(cx: &mut ::yield_vm::binding::CallCx<'_>) -> ::yield_vm::JsResult<::yield_vm::JsValue> {
+            fn __yield_call(cx: &mut ::yield_vm::binding::CallCx<'_>) -> ::yield_vm::JsResult<::yield_vm::HostStep> {
                 #decode_this
                 #(#decode)*
                 #result
@@ -860,6 +868,12 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
             return Err(Error::new_spanned(
                 &method.sig,
                 "getter must take no JavaScript parameters",
+            ));
+        }
+        if kind == "get" && matches!(call.output, Output::Step) {
+            return Err(Error::new_spanned(
+                &method.sig,
+                "getter cannot return JsResult<HostStep>",
             ));
         }
         if kind == "set" && (call.optional != [false] || !matches!(call.output, Output::Void)) {

@@ -95,7 +95,53 @@ impl JsError {
     }
 }
 
-pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<JsValue>;
+pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<HostStep>;
+
+/// The result of one synchronous host binding step.
+#[derive(Debug)]
+pub enum HostStep {
+    Return(JsValue),
+    Call(GuestCall),
+}
+
+/// A script call's completion, rewrapped for the resume context.
+#[derive(Debug)]
+pub enum GuestOutcome {
+    Returned(JsValue),
+    Thrown(JsValue),
+}
+
+pub(crate) type GuestResume = fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>;
+type GuestCallParts = (Value, Value, Vec<Value>, Vec<Value>, GuestResume);
+
+/// An opaque request valid only as a result of the step that created it.
+#[derive(Debug)]
+pub struct GuestCall {
+    epoch: u32,
+    call: u64,
+    callee: Value,
+    receiver: Value,
+    args: Vec<Value>,
+    saved: Vec<Value>,
+    resume: GuestResume,
+}
+
+impl GuestCall {
+    pub(crate) fn into_parts(self, cx: CallCx<'_>) -> Result<GuestCallParts, HostFault> {
+        if self.epoch != cx.epoch || self.call != cx.call {
+            return Err(HostFault::new(
+                "GuestCall used outside the call that produced it",
+            ));
+        }
+        Ok((
+            self.callee,
+            self.receiver,
+            self.args,
+            self.saved,
+            self.resume,
+        ))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum ArgKind {
@@ -108,6 +154,7 @@ pub enum ReturnKind {
     Value,
     Void,
     Instance(&'static str),
+    Step,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1147,6 +1194,7 @@ fn hash_signature(hasher: &mut Sha256, direction: u8, signature: CallSignature) 
             hasher.update((tag.len() as u64).to_le_bytes());
             hasher.update(tag.as_bytes());
         }
+        ReturnKind::Step => hasher.update([3]),
     }
 }
 
@@ -1456,7 +1504,7 @@ impl<T: HostClass> This<T> {
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut Vm,
     pub(crate) host: &'a mut dyn crate::host::Host,
-    pub(crate) bindings: Arc<Bindings>,
+    pub(crate) bindings: &'a Bindings,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
     pub(crate) args: Vec<JsValue>,
@@ -1482,8 +1530,38 @@ impl<'a> CallCx<'a> {
         self.construct
     }
 
+    pub fn is_callable(&self, value: &JsValue) -> JsResult<bool> {
+        self.check_value(value)?;
+        Ok(self.vm.is_callable(&value.value))
+    }
+
+    /// Request a script call after this context ends. The resume context has
+    /// the original `this` and receives `saved` as its positional arguments.
+    pub fn request_call(
+        &self,
+        callee: JsValue,
+        receiver: JsValue,
+        args: Vec<JsValue>,
+        saved: Vec<JsValue>,
+        resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
+    ) -> JsResult<HostStep> {
+        let unpack = |value: JsValue| {
+            self.check_value(&value)?;
+            Ok(value.value)
+        };
+        Ok(HostStep::Call(GuestCall {
+            epoch: self.epoch,
+            call: self.call,
+            callee: unpack(callee)?,
+            receiver: unpack(receiver)?,
+            args: args.into_iter().map(unpack).collect::<JsResult<_>>()?,
+            saved: saved.into_iter().map(unpack).collect::<JsResult<_>>()?,
+            resume,
+        }))
+    }
+
     pub fn bindings(&self) -> &Bindings {
-        &self.bindings
+        self.bindings
     }
 
     pub fn throw(&self, value: JsValue) -> JsError {
@@ -1713,7 +1791,7 @@ impl<'a> CallCx<'a> {
         self.check_value(&value)?;
         Ok(Inspect {
             vm: self.vm,
-            bindings: &self.bindings,
+            bindings: self.bindings,
             value,
             epoch: self.epoch,
             call: self.call,
