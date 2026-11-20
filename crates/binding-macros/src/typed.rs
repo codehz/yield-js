@@ -379,45 +379,105 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     let mut install = Vec::new();
     let mut resolve = Vec::new();
     for item in &mut *items {
-        let Item::Fn(item) = item else {
-            reject_markers(
-                item_attrs(item),
-                &["function"],
-                "function marker requires a function",
-            )?;
-            continue;
-        };
-        let Some((_, marker)) = take_marker(&mut item.attrs, &["function"])? else {
-            continue;
-        };
-        let opts = options(marker.parse_args()?, &["name"])?;
-        let member = nonempty_string(required(&opts, "name", marker.span())?)?;
-        if !keys.insert(member.value()) {
-            return Err(Error::new_spanned(member, "duplicate builtin member name"));
-        }
-
-        let ident = &item.sig.ident;
-        let cfg = item.attrs.iter().filter(|attr| attr.path().is_ident("cfg"));
-        let resolve_cfg = cfg.clone();
-        install.push(quote! {
-            #(#cfg)*
-            {
-                let method = vm.heap.alloc_builtin(NAME, Some(#member));
-                vm.heap.define_data(
-                    object,
-                    #member,
-                    crate::value::Value::Object(method),
-                    crate::heap::Attributes::METHOD,
-                ).expect("fresh builtin namespace stores methods");
+        const MARKERS: &[&str] = &["function", "constant", "functions"];
+        let attrs = match item {
+            Item::Fn(item) => &mut item.attrs,
+            Item::Const(item) => &mut item.attrs,
+            other => {
+                for (marker, diagnostic) in [
+                    ("function", "function marker requires a function"),
+                    ("functions", "functions marker requires a function"),
+                    ("constant", "constant marker requires a const item"),
+                ] {
+                    reject_markers(item_attrs(other), &[marker], diagnostic)?;
+                }
+                continue;
             }
-        });
-        resolve.push(quote! {
-            #(#resolve_cfg)*
-            #member => {
-                let handler: crate::builtins::BuiltinHandler = self::#ident;
-                Some(handler)
-            },
-        });
+        };
+        let Some((kind, marker)) = take_marker(attrs, MARKERS)? else {
+            continue;
+        };
+        let cfg = item_attrs(item)
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"));
+        let members = if kind == "functions" {
+            let names = marker.parse_args_with(Punctuated::<Ident, Token![,]>::parse_terminated)?;
+            if names.is_empty() {
+                return Err(Error::new_spanned(
+                    marker,
+                    "functions marker requires at least one member",
+                ));
+            }
+            names
+                .iter()
+                .map(|ident| LitStr::new(&plain_ident(ident), ident.span()))
+                .collect()
+        } else {
+            let opts = options(marker.parse_args()?, &["name"])?;
+            vec![nonempty_string(required(&opts, "name", marker.span())?)?]
+        };
+
+        for member in members {
+            if !keys.insert(member.value()) {
+                return Err(Error::new_spanned(member, "duplicate builtin member name"));
+            }
+            let cfg = cfg.clone();
+            let handler = match (&*item, kind.as_str()) {
+                (Item::Const(item), "constant") => {
+                    let ident = &item.ident;
+                    install.push(quote! {
+                        #(#cfg)*
+                        vm.heap.define_data(
+                            object,
+                            #member,
+                            crate::value::Value::Number(self::#ident),
+                            crate::heap::Attributes::FIXED,
+                        ).expect("fresh builtin namespace stores constants");
+                    });
+                    continue;
+                }
+                (Item::Fn(item), "function") => {
+                    let ident = &item.sig.ident;
+                    quote!(self::#ident)
+                }
+                (Item::Fn(item), "functions") => {
+                    let ident = &item.sig.ident;
+                    quote!(|vm, host, args| self::#ident(vm, host, #member, args))
+                }
+                (_, "constant") => {
+                    return Err(Error::new_spanned(
+                        &marker,
+                        "constant marker requires a const item",
+                    ));
+                }
+                _ => {
+                    return Err(Error::new_spanned(
+                        &marker,
+                        format!("{kind} marker requires a function"),
+                    ));
+                }
+            };
+            let resolve_cfg = cfg.clone();
+            install.push(quote! {
+                #(#cfg)*
+                {
+                    let method = vm.heap.alloc_builtin(NAME, Some(#member));
+                    vm.heap.define_data(
+                        object,
+                        #member,
+                        crate::value::Value::Object(method),
+                        crate::heap::Attributes::METHOD,
+                    ).expect("fresh builtin namespace stores methods");
+                }
+            });
+            resolve.push(quote! {
+                #(#resolve_cfg)*
+                #member => {
+                    let handler: crate::builtins::BuiltinHandler = #handler;
+                    Some(handler)
+                },
+            });
+        }
     }
 
     items.push(syn::parse_quote!(pub(crate) const NAME: &str = #name;));
@@ -1157,6 +1217,56 @@ mod tests {
             ),
         ] {
             diagnostic(builtin_global(args, quote! { mod namespace {} }), message);
+        }
+    }
+
+    #[test]
+    fn builtin_global_validates_constants_and_function_lists() {
+        let args = quote!(name = "Math", root = "math");
+        for (items, message) in [
+            (
+                quote! {
+                    #[constant(name = "abs")]
+                    const ABS: f64 = 1.0;
+                    #[functions(abs, acos)]
+                    fn dispatch() {}
+                },
+                "duplicate builtin member name",
+            ),
+            (
+                quote!(
+                    #[constant(name = "PI")]
+                    fn pi() {}
+                ),
+                "constant marker requires a const item",
+            ),
+            (
+                quote!(
+                    #[functions(abs)]
+                    const ABS: f64 = 1.0;
+                ),
+                "functions marker requires a function",
+            ),
+            (
+                quote!(
+                    #[functions()]
+                    fn dispatch() {}
+                ),
+                "functions marker requires at least one member",
+            ),
+            (
+                quote!(
+                    #[functions(abs)]
+                    #[function(name = "abs")]
+                    fn dispatch() {}
+                ),
+                "conflicting or repeated binding attributes",
+            ),
+        ] {
+            diagnostic(
+                builtin_global(args.clone(), quote!(mod namespace { #items })),
+                message,
+            );
         }
     }
 

@@ -4,19 +4,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::JsString;
 use crate::binding::{Bindings, Recovery};
+use crate::builtins::reflect_namespace;
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
     ROOT_BOOLEAN_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR,
-    ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_GLOBAL_THIS, ROOT_MATH, ROOT_NUMBER,
+    ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_GLOBAL_THIS, ROOT_NUMBER,
     ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
     ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
-    ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
-    ROOT_REGEXP, ROOT_REGEXP_ITERATOR_PROTOTYPE, ROOT_REGEXP_PROTOTYPE, ROOT_STRING,
-    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
-    ROOT_SYMBOL_PROTOTYPE, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
-    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP,
-    ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
+    ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REGEXP,
+    ROOT_REGEXP_ITERATOR_PROTOTYPE, ROOT_REGEXP_PROTOTYPE, ROOT_STRING, ROOT_STRING_ITERATOR,
+    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE,
+    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE,
+    is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -29,6 +30,7 @@ use crate::heap::{
 };
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::Host;
+use crate::math::namespace as math_namespace;
 use crate::regexp::compile_pattern;
 use crate::runtime::{
     Continuation, HostInstance, HostSlot, ModuleState, PendingOperation, Settlement,
@@ -1121,9 +1123,9 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         aggregateerror,
         symbol,
         symbol_prototype,
-        reflect: plain_root(ROOT_REFLECT)?,
+        reflect: plain_root(reflect_namespace::ROOT)?,
         object,
-        math: plain_root(ROOT_MATH)?,
+        math: plain_root(math_namespace::ROOT)?,
         json,
     })
 }

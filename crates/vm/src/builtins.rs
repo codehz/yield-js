@@ -21,7 +21,8 @@ use crate::heap::{
     SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
-use crate::math::MATH_METHODS;
+use crate::json::namespace as json_namespace;
+use crate::math::namespace as math_namespace;
 use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
 use crate::ops;
 use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
@@ -31,11 +32,16 @@ use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 macro_rules! builtin_globals {
-    (|$roots:ident| [$($name:expr => $value:expr),* $(,)?]) => {
+    ($($field:ident: $kind:ident($($args:tt)*)),* $(,)?) => {
+        #[allow(non_camel_case_types)]
+        enum GlobalIndex { $($field),* }
+
+        const GLOBAL_INDICES: &[GlobalIndex] = &[$(GlobalIndex::$field),*];
+
         /// VM-provided global names, in bytecode builtin-index order.
         /// Append new entries; never reorder existing ones.
-        pub const BUILTINS: [&str; [$(builtin_globals!(@unit $name)),*].len()] = [
-            $($name),*
+        pub const BUILTINS: [&str; GLOBAL_INDICES.len()] = [
+            $(builtin_globals!(@name $kind($($args)*))),*
         ];
 
         const _: () = {
@@ -61,53 +67,70 @@ macro_rules! builtin_globals {
 
         impl Vm {
             pub(crate) fn builtin_value(&self, builtin: u32) -> Result<Value, VmError> {
-                let $roots = &self.builtins;
-                builtin_globals!(@lookup builtin, 0u32; $($value),*)
+                let Some(index) = GLOBAL_INDICES.get(builtin as usize) else {
+                    return Err(VmError::InvalidState(format!("builtin {} does not exist", builtin)));
+                };
+                Ok(match index {
+                    $(GlobalIndex::$field => builtin_globals!(@value self, $field, $kind($($args)*))),*
+                })
             }
         }
-    };
-    (@unit $name:expr) => { () };
-    (@lookup $builtin:ident, $index:expr; $value:expr $(, $rest:expr)*) => {{
-        const INDEX: u32 = $index;
-        if $builtin == INDEX {
-            return Ok($value);
+
+        fn namespace_handler(owner: &str, member: &str) -> Option<BuiltinHandler> {
+            $(builtin_globals!(@resolve owner, member, $kind($($args)*));)*
+            None
         }
-        builtin_globals!(@lookup $builtin, $index + 1; $($rest),*)
-    }};
-    (@lookup $builtin:ident, $index:expr;) => {{
-        Err(VmError::InvalidState(format!("builtin {} does not exist", $builtin)))
-    }};
+    };
+    (@name root($name:literal)) => { $name };
+    (@name number($name:literal, $value:expr)) => { $name };
+    (@name namespace($module:ident)) => { $module::NAME };
+    (@value $vm:ident, $field:ident, root($name:literal)) => {
+        Value::Object($vm.builtins.$field)
+    };
+    (@value $vm:ident, $field:ident, namespace($module:ident)) => {
+        Value::Object($vm.builtins.$field)
+    };
+    (@value $vm:ident, $field:ident, number($name:literal, $value:expr)) => {
+        Value::Number($value)
+    };
+    (@resolve $owner:ident, $member:ident, namespace($module:ident)) => {
+        if $owner == $module::NAME {
+            return $module::resolve($member);
+        }
+    };
+    (@resolve $owner:ident, $member:ident, root($name:literal)) => {};
+    (@resolve $owner:ident, $member:ident, number($name:literal, $value:expr)) => {};
 }
 
-builtin_globals!(|roots| [
-    "Promise" => Value::Object(roots.promise),
-    "queueMicrotask" => Value::Object(roots.queue_microtask),
-    "Error" => Value::Object(roots.error),
-    "TypeError" => Value::Object(roots.typeerror),
-    "Symbol" => Value::Object(roots.symbol),
-    "Reflect" => Value::Object(roots.reflect),
-    "Object" => Value::Object(roots.object),
-    "NaN" => Value::Number(f64::NAN),
-    "Infinity" => Value::Number(f64::INFINITY),
-    "Array" => Value::Object(roots.array),
-    "String" => Value::Object(roots.string),
-    "RangeError" => Value::Object(roots.rangeerror),
-    "ReferenceError" => Value::Object(roots.referenceerror),
-    "SyntaxError" => Value::Object(roots.syntaxerror),
-    "EvalError" => Value::Object(roots.evalerror),
-    "URIError" => Value::Object(roots.urierror),
-    "AggregateError" => Value::Object(roots.aggregateerror),
-    "Number" => Value::Object(roots.number),
-    "Math" => Value::Object(roots.math),
-    crate::json::namespace::NAME => Value::Object(roots.json),
-    "Map" => Value::Object(roots.map),
-    "Set" => Value::Object(roots.set),
-    "WeakMap" => Value::Object(roots.weakmap),
-    "Proxy" => Value::Object(roots.proxy),
-    "Boolean" => Value::Object(roots.boolean_constructor),
-    "globalThis" => Value::Object(roots.global_this),
-    "RegExp" => Value::Object(roots.regexp),
-]);
+builtin_globals!(
+    promise: root("Promise"),
+    queue_microtask: root("queueMicrotask"),
+    error: root("Error"),
+    typeerror: root("TypeError"),
+    symbol: root("Symbol"),
+    reflect: namespace(reflect_namespace),
+    object: root("Object"),
+    nan: number("NaN", f64::NAN),
+    infinity: number("Infinity", f64::INFINITY),
+    array: root("Array"),
+    string: root("String"),
+    rangeerror: root("RangeError"),
+    referenceerror: root("ReferenceError"),
+    syntaxerror: root("SyntaxError"),
+    evalerror: root("EvalError"),
+    urierror: root("URIError"),
+    aggregateerror: root("AggregateError"),
+    number: root("Number"),
+    math: namespace(math_namespace),
+    json: namespace(json_namespace),
+    map: root("Map"),
+    set: root("Set"),
+    weakmap: root("WeakMap"),
+    proxy: root("Proxy"),
+    boolean_constructor: root("Boolean"),
+    global_this: root("globalThis"),
+    regexp: root("RegExp"),
+);
 
 pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
 pub(crate) const ROOT_PROMISE: &str = "promise";
@@ -148,9 +171,7 @@ pub(crate) const ROOT_URIERROR_PROTOTYPE: &str = "urierror.prototype";
 pub(crate) const ROOT_AGGREGATEERROR: &str = "aggregateerror";
 pub(crate) const ROOT_AGGREGATEERROR_PROTOTYPE: &str = "aggregateerror.prototype";
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
-pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
-pub(crate) const ROOT_MATH: &str = "math";
 pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
 pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
 pub(crate) const ROOT_PROXY: &str = "proxy";
@@ -295,9 +316,9 @@ impl BuiltinRoots {
                 self.aggregateerror_prototype,
             ),
             (ROOT_SYMBOL.to_owned(), self.symbol),
-            (ROOT_REFLECT.to_owned(), self.reflect),
+            (reflect_namespace::ROOT.to_owned(), self.reflect),
             (ROOT_OBJECT.to_owned(), self.object),
-            (ROOT_MATH.to_owned(), self.math),
+            (math_namespace::ROOT.to_owned(), self.math),
             (crate::json::namespace::ROOT.to_owned(), self.json),
         ])
     }
@@ -305,6 +326,149 @@ impl BuiltinRoots {
 
 pub(crate) type BuiltinHandler =
     fn(&mut Vm, &mut dyn Host, &[Value]) -> Result<Invocation, VmError>;
+
+#[yield_binding_macros::builtin_global(name = "Reflect", root = "reflect")]
+pub(crate) mod reflect_namespace {
+    use super::{Host, Invocation, PropertyKey, Value, Vm, VmError};
+
+    #[function(name = "ownKeys")]
+    fn own_keys(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(id)) = args.first() else {
+            return vm.throw_type_error("Reflect.ownKeys requires an object");
+        };
+        let keys = match vm.own_keys(host, *id, false)? {
+            Ok(keys) => keys,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let keys = keys
+            .into_iter()
+            .map(|key| match key {
+                PropertyKey::String(key) => Value::String(key),
+                PropertyKey::Symbol(id) => Value::Symbol(id),
+            })
+            .collect();
+        Ok(Invocation::Value(Value::Object(vm.heap.alloc_array(keys))))
+    }
+
+    #[function(name = "deleteProperty")]
+    fn delete_property(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Some(target @ Value::Object(_)) = args.first() else {
+            return vm.throw_type_error("Reflect.deleteProperty requires an object");
+        };
+        vm.delete_property(host, target, args.get(1).unwrap_or(&Value::Undefined))
+    }
+
+    #[function(name = "defineProperty")]
+    fn define_property(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.define_property_builtin(host, args, true)
+    }
+
+    #[function(name = "preventExtensions")]
+    fn prevent_extensions(
+        vm: &mut Vm,
+        _host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.prevent_extensions_builtin_impl(args, true)
+    }
+
+    #[function(name = "isExtensible")]
+    fn is_extensible(
+        vm: &mut Vm,
+        _host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.is_extensible_builtin_impl(args, true)
+    }
+
+    #[function(name = "getPrototypeOf")]
+    fn get_prototype_of(
+        vm: &mut Vm,
+        _host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.get_prototype_of(args, true)
+    }
+
+    #[function(name = "setPrototypeOf")]
+    fn set_prototype_of(
+        vm: &mut Vm,
+        _host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.set_prototype_of(args, true)
+    }
+
+    #[function(name = "get")]
+    fn get(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return vm.throw_type_error("Reflect.get requires an object");
+        };
+        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+        };
+        vm.read_property_with_receiver(
+            host,
+            *target,
+            args.get(2).unwrap_or(&args[0]),
+            key.borrowed(),
+        )
+    }
+
+    #[function(name = "set")]
+    fn set(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return vm.throw_type_error("Reflect.set requires an object");
+        };
+        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+        };
+        let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+        let receiver = args.get(3).unwrap_or(&args[0]);
+        vm.set_property(host, *target, receiver, key, value, false)
+    }
+
+    #[function(name = "has")]
+    fn has(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return vm.throw_type_error("Reflect.has requires an object");
+        };
+        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
+            Ok(key) => key,
+            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+        };
+        vm.has_property_key(host, *target, key.borrowed())
+    }
+
+    #[function(name = "getOwnPropertyDescriptor")]
+    fn get_own_property_descriptor(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.get_own_property_descriptor(host, args)
+    }
+
+    #[function(name = "apply")]
+    fn apply(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        vm.reflect_call(host, args, false)
+    }
+
+    #[function(name = "construct")]
+    fn construct(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        vm.reflect_call(host, args, true)
+    }
+}
 
 pub(crate) enum BuiltinCall {
     Constructor,
@@ -340,33 +504,24 @@ pub(crate) enum BuiltinCall {
     NumberConstructor,
     NumberMethod(&'static str),
     NumberStatic(&'static str),
-    MathMethod(String),
     StringIterator,
     StringIteratorNext,
     RegExpStringIteratorNext,
     ArrayJoin,
     ArrayToString,
     IteratorIdentity,
-    ReflectApply,
-    ReflectConstruct,
-    ReflectOwnKeys,
-    ReflectDeleteProperty,
-    ReflectGet,
-    ReflectSet,
-    ReflectHas,
-    ReflectGetOwnPropertyDescriptor,
     ObjectConstructor,
     ProxyConstructor,
     ObjectCreate,
-    GetPrototypeOf { reflect: bool },
-    SetPrototypeOf { reflect: bool },
+    GetPrototypeOf,
+    SetPrototypeOf,
     ObjectKeys,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetOwnPropertyDescriptors,
-    DefineProperty { reflect: bool },
+    DefineProperty,
     ObjectDefineProperties,
-    PreventExtensions { reflect: bool },
-    IsExtensible { reflect: bool },
+    PreventExtensions,
+    IsExtensible,
     SetIntegrityLevel(IntegrityLevel),
     TestIntegrityLevel(IntegrityLevel),
     ObjectAssign,
@@ -609,7 +764,7 @@ impl Vm {
         let number = self.init_number_constructor(number_prototype);
         let boolean_constructor = self.heap.alloc_builtin("Boolean", None);
         let boolean_prototype = self.init_wrapper_prototype("Boolean", boolean_constructor);
-        let math = self.init_math();
+        let math = math_namespace::install(self);
         let json = crate::json::namespace::install(self);
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
@@ -816,27 +971,7 @@ impl Vm {
                 .define_data(symbol, name, Value::Symbol(symbol_id), Attributes::FIXED)
                 .expect("Symbol constructor stores regex protocol symbols");
         }
-        let reflect = self.heap.alloc_plain();
-        for name in [
-            "ownKeys",
-            "deleteProperty",
-            "defineProperty",
-            "preventExtensions",
-            "isExtensible",
-            "getPrototypeOf",
-            "setPrototypeOf",
-            "get",
-            "set",
-            "has",
-            "getOwnPropertyDescriptor",
-            "apply",
-            "construct",
-        ] {
-            let method = self.heap.alloc_builtin("Reflect", Some(name));
-            self.heap
-                .define_data(reflect, name, Value::Object(method), Attributes::METHOD)
-                .expect("Reflect stores methods");
-        }
+        let reflect = reflect_namespace::install(self);
         let (map, map_prototype, map_iterator_prototype) =
             self.init_collection(CollectionKind::Map, &identity);
         let (set, set_prototype, set_iterator_prototype) =
@@ -1219,8 +1354,8 @@ impl Vm {
             BuiltinCall::ObjectConstructor => self.construct_object(&args),
             BuiltinCall::ProxyConstructor => self.throw_type_error("Proxy requires new"),
             BuiltinCall::ObjectCreate => self.object_create(host, &args),
-            BuiltinCall::GetPrototypeOf { reflect } => self.get_prototype_of(&args, reflect),
-            BuiltinCall::SetPrototypeOf { reflect } => self.set_prototype_of(&args, reflect),
+            BuiltinCall::GetPrototypeOf => self.get_prototype_of(&args, false),
+            BuiltinCall::SetPrototypeOf => self.set_prototype_of(&args, false),
             BuiltinCall::ObjectKeys => self.object_keys(host, &args),
             BuiltinCall::ObjectGetOwnPropertyDescriptors => {
                 self.get_own_property_descriptors(host, &args)
@@ -1233,12 +1368,7 @@ impl Vm {
             BuiltinCall::ObjectGetOwnPropertyDescriptor => {
                 self.get_own_property_descriptor(host, &args)
             }
-            BuiltinCall::ReflectGetOwnPropertyDescriptor => {
-                self.get_own_property_descriptor(host, &args)
-            }
-            BuiltinCall::DefineProperty { reflect } => {
-                self.define_property_builtin(host, &args, reflect)
-            }
+            BuiltinCall::DefineProperty => self.define_property_builtin(host, &args, false),
             BuiltinCall::ObjectDefineProperties => {
                 let Some(Value::Object(target)) = args.first() else {
                     return self
@@ -1246,32 +1376,8 @@ impl Vm {
                 };
                 self.define_properties(host, *target, args.get(1))
             }
-            BuiltinCall::PreventExtensions { reflect } => {
-                let target = args.first().unwrap_or(&Value::Undefined);
-                if let Value::Object(id) = target {
-                    let id = self.heap.proxy_target(*id)?;
-                    self.heap.get_mut(id)?.prevent_extensions();
-                } else if reflect {
-                    return self.throw_type_error("Reflect.preventExtensions requires an object");
-                }
-                Ok(Invocation::Value(if reflect {
-                    Value::Bool(true)
-                } else {
-                    target.clone()
-                }))
-            }
-            BuiltinCall::IsExtensible { reflect } => {
-                let extensible = match args.first() {
-                    Some(Value::Object(id)) => {
-                        self.heap.get(self.heap.proxy_target(*id)?)?.is_extensible()
-                    }
-                    _ if reflect => {
-                        return self.throw_type_error("Reflect.isExtensible requires an object");
-                    }
-                    _ => false,
-                };
-                Ok(Invocation::Value(Value::Bool(extensible)))
-            }
+            BuiltinCall::PreventExtensions => self.prevent_extensions_builtin_impl(&args, false),
+            BuiltinCall::IsExtensible => self.is_extensible_builtin_impl(&args, false),
             BuiltinCall::SetIntegrityLevel(level) => self.set_integrity(host, &args, level),
             BuiltinCall::TestIntegrityLevel(level) => self.test_integrity(host, &args, level),
             BuiltinCall::ErrorConstructor { name } => self.construct_error(host, &name, args),
@@ -1366,7 +1472,6 @@ impl Vm {
                 self.call_number_method(host, method, receiver, &args)
             }
             BuiltinCall::NumberStatic(method) => self.call_number_static(host, method, &args),
-            BuiltinCall::MathMethod(method) => self.call_math_method(host, &method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
             BuiltinCall::RegExpStringIteratorNext => {
@@ -1376,76 +1481,6 @@ impl Vm {
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
             BuiltinCall::Registered(handler) => handler(self, host, &args),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
-            BuiltinCall::ReflectApply => self.reflect_call(host, &args, false),
-            BuiltinCall::ReflectConstruct => self.reflect_call(host, &args, true),
-            BuiltinCall::ReflectOwnKeys => {
-                let Some(Value::Object(id)) = args.first() else {
-                    return self.throw_type_error("Reflect.ownKeys requires an object");
-                };
-                let keys = match self.own_keys(host, *id, false)? {
-                    Ok(keys) => keys,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                };
-                let keys = keys
-                    .into_iter()
-                    .map(|key| match key {
-                        PropertyKey::String(key) => Value::String(key),
-                        PropertyKey::Symbol(id) => Value::Symbol(id),
-                    })
-                    .collect();
-                Ok(Invocation::Value(Value::Object(
-                    self.heap.alloc_array(keys),
-                )))
-            }
-            BuiltinCall::ReflectDeleteProperty => {
-                let Some(target @ Value::Object(_)) = args.first() else {
-                    return self.throw_type_error("Reflect.deleteProperty requires an object");
-                };
-                self.delete_property(host, target, args.get(1).unwrap_or(&Value::Undefined))
-            }
-            BuiltinCall::ReflectGet => {
-                let Some(Value::Object(target)) = args.first() else {
-                    return self.throw_type_error("Reflect.get requires an object");
-                };
-                let key = match self
-                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
-                {
-                    Ok(key) => key,
-                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-                };
-                self.read_property_with_receiver(
-                    host,
-                    *target,
-                    args.get(2).unwrap_or(&args[0]),
-                    key.borrowed(),
-                )
-            }
-            BuiltinCall::ReflectHas => {
-                let Some(Value::Object(target)) = args.first() else {
-                    return self.throw_type_error("Reflect.has requires an object");
-                };
-                let key = match self
-                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
-                {
-                    Ok(key) => key,
-                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-                };
-                self.has_property_key(host, *target, key.borrowed())
-            }
-            BuiltinCall::ReflectSet => {
-                let Some(Value::Object(target)) = args.first() else {
-                    return self.throw_type_error("Reflect.set requires an object");
-                };
-                let key = match self
-                    .coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))?
-                {
-                    Ok(key) => key,
-                    Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-                };
-                let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-                let receiver = args.get(3).unwrap_or(&args[0]);
-                self.set_property(host, *target, receiver, key, value, false)
-            }
             BuiltinCall::QueueMicrotask => self.queue_microtask(args),
             BuiltinCall::SymbolConstructor => self.symbol_constructor(host, args),
             BuiltinCall::SymbolMethod(method) => self.symbol_method(receiver, method),
@@ -1909,6 +1944,40 @@ impl Vm {
             None | Some(Value::Undefined) => Ok(Invocation::Value(Value::Object(object))),
             properties => self.define_properties(host, object, properties),
         }
+    }
+
+    fn prevent_extensions_builtin_impl(
+        &mut self,
+        args: &[Value],
+        reflect: bool,
+    ) -> Result<Invocation, VmError> {
+        let target = args.first().unwrap_or(&Value::Undefined);
+        if let Value::Object(id) = target {
+            let id = self.heap.proxy_target(*id)?;
+            self.heap.get_mut(id)?.prevent_extensions();
+        } else if reflect {
+            return self.throw_type_error("Reflect.preventExtensions requires an object");
+        }
+        Ok(Invocation::Value(if reflect {
+            Value::Bool(true)
+        } else {
+            target.clone()
+        }))
+    }
+
+    fn is_extensible_builtin_impl(
+        &mut self,
+        args: &[Value],
+        reflect: bool,
+    ) -> Result<Invocation, VmError> {
+        let extensible = match args.first() {
+            Some(Value::Object(id)) => self.heap.get(self.heap.proxy_target(*id)?)?.is_extensible(),
+            _ if reflect => {
+                return self.throw_type_error("Reflect.isExtensible requires an object");
+            }
+            _ => false,
+        };
+        Ok(Invocation::Value(Value::Bool(extensible)))
     }
 
     fn get_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
@@ -3236,40 +3305,18 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
 
         ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
         ("Object", Some("create")) => Some(BuiltinCall::ObjectCreate),
-        (owner @ ("Object" | "Reflect"), Some("getPrototypeOf")) => {
-            Some(BuiltinCall::GetPrototypeOf {
-                reflect: owner == "Reflect",
-            })
-        }
-        (owner @ ("Object" | "Reflect"), Some("setPrototypeOf")) => {
-            Some(BuiltinCall::SetPrototypeOf {
-                reflect: owner == "Reflect",
-            })
-        }
-        (owner @ ("Object" | "Reflect"), Some("getOwnPropertyDescriptor")) => {
-            Some(if owner == "Reflect" {
-                BuiltinCall::ReflectGetOwnPropertyDescriptor
-            } else {
-                BuiltinCall::ObjectGetOwnPropertyDescriptor
-            })
+        ("Object", Some("getPrototypeOf")) => Some(BuiltinCall::GetPrototypeOf),
+        ("Object", Some("setPrototypeOf")) => Some(BuiltinCall::SetPrototypeOf),
+        ("Object", Some("getOwnPropertyDescriptor")) => {
+            Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
         }
         ("Object", Some("getOwnPropertyDescriptors")) => {
             Some(BuiltinCall::ObjectGetOwnPropertyDescriptors)
         }
-        (owner @ ("Object" | "Reflect"), Some("defineProperty")) => {
-            Some(BuiltinCall::DefineProperty {
-                reflect: owner == "Reflect",
-            })
-        }
+        ("Object", Some("defineProperty")) => Some(BuiltinCall::DefineProperty),
         ("Object", Some("defineProperties")) => Some(BuiltinCall::ObjectDefineProperties),
-        (owner @ ("Object" | "Reflect"), Some("preventExtensions")) => {
-            Some(BuiltinCall::PreventExtensions {
-                reflect: owner == "Reflect",
-            })
-        }
-        (owner @ ("Object" | "Reflect"), Some("isExtensible")) => Some(BuiltinCall::IsExtensible {
-            reflect: owner == "Reflect",
-        }),
+        ("Object", Some("preventExtensions")) => Some(BuiltinCall::PreventExtensions),
+        ("Object", Some("isExtensible")) => Some(BuiltinCall::IsExtensible),
         ("Object", Some("seal")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Sealed)),
         ("Object", Some("freeze")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Frozen)),
         ("Object", Some("isSealed")) => {
@@ -3318,9 +3365,6 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                     .find(|&&key| key == name)
                     .map(|&key| BuiltinCall::NumberStatic(key))
             }),
-        ("Math", Some(name)) if MATH_METHODS.contains(&name) => {
-            Some(BuiltinCall::MathMethod(name.to_owned()))
-        }
         ("RegExp", None) => Some(BuiltinCall::RegExpConstructor),
         ("RegExp", Some(name)) => REGEXP_METHODS
             .iter()
@@ -3353,16 +3397,6 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("RegExpStringIterator", Some("next")) => Some(BuiltinCall::RegExpStringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
-        ("Reflect", Some("apply")) => Some(BuiltinCall::ReflectApply),
-        ("Reflect", Some("construct")) => Some(BuiltinCall::ReflectConstruct),
-        ("Reflect", Some("ownKeys")) => Some(BuiltinCall::ReflectOwnKeys),
-        ("Reflect", Some("deleteProperty")) => Some(BuiltinCall::ReflectDeleteProperty),
-        ("Reflect", Some("get")) => Some(BuiltinCall::ReflectGet),
-        ("Reflect", Some("set")) => Some(BuiltinCall::ReflectSet),
-        ("Reflect", Some("has")) => Some(BuiltinCall::ReflectHas),
-        (crate::json::namespace::NAME, Some(member)) => {
-            crate::json::namespace::resolve(member).map(BuiltinCall::Registered)
-        }
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
         }
@@ -3374,6 +3408,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Symbol", None) => Some(BuiltinCall::SymbolConstructor),
         ("Symbol", Some("for")) => Some(BuiltinCall::SymbolFor),
         ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
+        (owner, Some(member)) => namespace_handler(owner, member).map(BuiltinCall::Registered),
         _ => None,
     }
 }

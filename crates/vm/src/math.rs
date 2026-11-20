@@ -1,51 +1,54 @@
 //! Math uses the VM's numeric coercion and owns no script-visible constructor.
 
-use std::f64::consts;
-
 use crate::error::VmError;
-use crate::heap::Attributes;
 use crate::host::Host;
 use crate::ops::number_to_uint32;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, Value};
+use crate::value::Value;
 use crate::vm::Vm;
 
 pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
-pub(crate) const MATH_METHODS: &[&str] = &[
-    "abs", "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil", "clz32",
-    "cos", "cosh", "exp", "expm1", "floor", "fround", "hypot", "imul", "log", "log1p", "log10",
-    "log2", "max", "min", "pow", "random", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh",
-    "trunc",
-];
+#[yield_binding_macros::builtin_global(name = "Math", root = "math")]
+pub(crate) mod namespace {
+    use std::f64::consts;
+
+    use super::{Host, Invocation, Value, Vm, VmError};
+
+    #[constant(name = "E")]
+    const E: f64 = consts::E;
+    #[constant(name = "LN10")]
+    const LN10: f64 = consts::LN_10;
+    #[constant(name = "LN2")]
+    const LN2: f64 = consts::LN_2;
+    #[constant(name = "LOG10E")]
+    const LOG10E: f64 = consts::LOG10_E;
+    #[constant(name = "LOG2E")]
+    const LOG2E: f64 = consts::LOG2_E;
+    #[constant(name = "PI")]
+    const PI: f64 = consts::PI;
+    #[constant(name = "SQRT1_2")]
+    const SQRT1_2: f64 = consts::FRAC_1_SQRT_2;
+    #[constant(name = "SQRT2")]
+    const SQRT2: f64 = consts::SQRT_2;
+
+    #[functions(
+        abs, acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, ceil, clz32, cos, cosh, exp,
+        expm1, floor, fround, hypot, imul, log, log1p, log10, log2, max, min, pow, random, round,
+        sign, sin, sinh, sqrt, tan, tanh, trunc
+    )]
+    fn dispatch(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        member: &'static str,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.call_math_method(host, member, args)
+    }
+}
 
 impl Vm {
-    pub(crate) fn init_math(&mut self) -> ObjectId {
-        let math = self.heap.alloc_plain();
-        for (name, number) in [
-            ("E", consts::E),
-            ("LN10", consts::LN_10),
-            ("LN2", consts::LN_2),
-            ("LOG10E", consts::LOG10_E),
-            ("LOG2E", consts::LOG2_E),
-            ("PI", consts::PI),
-            ("SQRT1_2", consts::FRAC_1_SQRT_2),
-            ("SQRT2", consts::SQRT_2),
-        ] {
-            self.heap
-                .define_data(math, name, Value::Number(number), Attributes::FIXED)
-                .expect("Math stores its constants");
-        }
-        for &name in MATH_METHODS {
-            let method = self.heap.alloc_builtin("Math", Some(name));
-            self.heap
-                .define_data(math, name, Value::Object(method), Attributes::METHOD)
-                .expect("Math stores its methods");
-        }
-        math
-    }
-
-    pub(crate) fn call_math_method(
+    fn call_math_method(
         &mut self,
         host: &mut dyn Host,
         method: &str,
