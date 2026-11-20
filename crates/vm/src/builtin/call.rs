@@ -82,6 +82,10 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
+                if matches!(callee, Value::Object(id) if self.heap.function(*id).is_some_and(|f| f.class.is_some()))
+                {
+                    return self.throw_type_error("class constructor requires new");
+                }
                 if self.build.is_initializer(func_id) {
                     return Err(VmError::InvalidState(
                         "script function is not callable".to_owned(),
@@ -522,6 +526,13 @@ impl Vm {
         )
     }
 
+    pub(crate) fn reference_error(&mut self, message: &str) -> Result<Value, VmError> {
+        self.alloc_error(
+            self.builtins.get("referenceerror.prototype"),
+            "ReferenceError",
+            Some(message.into()),
+        )
+    }
     pub(crate) fn throw_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
         self.type_error(message).map(Invocation::Thrown)
     }

@@ -606,12 +606,19 @@ impl ArrayObject {
 pub struct FunctionObject {
     pub func_id: u32,
     pub env: ObjectId,
+    pub(crate) home: Option<ObjectId>,
+    pub(crate) class: Option<ScriptClass>,
     #[serde(with = "property_pairs")]
     pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
     pub(super) extensible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ScriptClass {
+    pub prototype: ObjectId,
 }
 
 /// One invocation environment. Bindings are addressed by compile-time IDs, so

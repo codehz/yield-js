@@ -26,7 +26,7 @@
 
 ### 2.3 控制流与顶层
 
-- `class` 声明与类表达式（`class declaration` 等）。设计已提升为一等支持（见 [`design.md`](design.md)），不再由离线构建降级；当前编译器仍整段拒绝，是待实现的缺口
+- 无 `extends` 的类支持构造器及非计算名称的公共方法和访问器；`extends`、计算键、字段和静态块仍拒绝。
 
 ## 3. 能编过，但语义不完整
 
@@ -83,7 +83,7 @@ flowchart LR
 
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造、`with`
-- 标签模板：仍由离线构建降级。`class` 不再在此列——设计已提升为一等支持（见 [`design.md`](design.md)），当前编译器拒绝是待实现的缺口
+- 标签模板：仍由离线构建降级。`class` 由 VM 原生执行，不再离线降级。
 - 严格 ESM 支持本地命名导出（含本地宿主导入绑定）和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和带模块来源的再导出在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入

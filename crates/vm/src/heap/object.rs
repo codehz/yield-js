@@ -489,6 +489,12 @@ impl Object {
                     id: function.env,
                     role: EnvRole::Closure,
                 });
+                if let Some(home) = function.home {
+                    out.push(OwnedEdge::Object(home));
+                }
+                if let Some(class) = &function.class {
+                    out.push(OwnedEdge::Object(class.prototype));
+                }
             }
             Self::Bound(bound) => {
                 out.push(OwnedEdge::Object(bound.target));

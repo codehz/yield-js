@@ -14,8 +14,8 @@ use crate::bytecode::{
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{
-    BoundObject, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object,
-    OwnProperty, PlainObject, Property, TO_PRIMITIVE_SYMBOL, object_id,
+    Attributes, BoundObject, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject,
+    Object, OwnProperty, PlainObject, Property, ScriptClass, TO_PRIMITIVE_SYMBOL, object_id,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -409,6 +409,97 @@ impl Vm {
                 store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
+            Instr::NewClassScope { dst, parent } => {
+                let parent = self.class_scope(frame, parent)?;
+                let env = self
+                    .heap
+                    .alloc_environment(Some(parent), Default::default());
+                frame.write(dst, Value::Object(env))?;
+                Ok(Step::Next)
+            }
+            Instr::LoadClassBinding {
+                dst,
+                scope,
+                binding,
+            } => {
+                let scope = self.class_scope(frame, scope)?;
+                let Some(value) = self.heap.find_binding(scope, binding)? else {
+                    return Ok(Step::Throw(
+                        self.reference_error("class name is not initialized")?,
+                    ));
+                };
+                frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
+            Instr::InitClassBinding {
+                scope,
+                binding,
+                src,
+            } => {
+                let scope = self.class_scope(frame, Some(scope))?;
+                let value = frame.read(src)?;
+                let bindings = &mut self.heap.environment_mut(scope)?.bindings;
+                let std::collections::btree_map::Entry::Vacant(entry) = bindings.entry(binding)
+                else {
+                    return Err(VmError::InvalidState(
+                        "class binding initialized twice".into(),
+                    ));
+                };
+                entry.insert(value);
+                Ok(Step::Next)
+            }
+            Instr::CreateClass {
+                dst,
+                scope,
+                constructor,
+            } => {
+                let env = self.class_scope(frame, scope)?;
+                let class = self.heap.alloc_function(constructor, env);
+                let prototype = self.heap.alloc_plain();
+                let Object::Function(function) = self.heap.get_mut(class)? else {
+                    unreachable!()
+                };
+                function.class = Some(ScriptClass { prototype });
+                function.home = Some(prototype);
+                self.heap.define_data(
+                    class,
+                    "prototype",
+                    Value::Object(prototype),
+                    Attributes::FIXED,
+                )?;
+                self.heap.define_data(
+                    prototype,
+                    "constructor",
+                    Value::Object(class),
+                    Attributes::METHOD,
+                )?;
+                frame.write(dst, Value::Object(class))?;
+                Ok(Step::Next)
+            }
+            Instr::ScopedClosure {
+                dst,
+                scope,
+                function,
+            } => {
+                let env = self.class_scope(frame, Some(scope))?;
+                let closure = self.materialize_function(function, env)?;
+                frame.write(dst, Value::Object(closure))?;
+                Ok(Step::Next)
+            }
+            Instr::DefineClassMethod {
+                class,
+                key,
+                src,
+                is_static,
+                kind,
+            } => {
+                let class = object_id(&frame.read(class)?, "class method target")?;
+                let key = frame.read(key)?;
+                let key = converted_property_key(&key)?.to_owned();
+                let src = object_id(&frame.read(src)?, "class method closure")?;
+                self.define_class_method(class, key, src, is_static, kind)?;
+                Ok(Step::Next)
+            }
             Instr::NewObject { dst } => {
                 let id = self.heap.alloc_plain();
                 frame.write(dst, Value::Object(id))?;
@@ -1564,6 +1655,68 @@ impl Vm {
             }
         };
         self.heap.define_property(id, key, property)
+    }
+
+    fn class_scope(&self, frame: &Frame, scope: Option<Slot>) -> Result<ObjectId, VmError> {
+        let env = match scope {
+            Some(scope) => object_id(&frame.read(scope)?, "class scope")?,
+            None => frame.env.ok_or_else(|| {
+                VmError::InvalidState("class scope without an environment".into())
+            })?,
+        };
+        self.heap.environment(env)?;
+        Ok(env)
+    }
+
+    fn define_class_method(
+        &mut self,
+        class: ObjectId,
+        key: PropertyKey,
+        src: ObjectId,
+        is_static: bool,
+        kind: PropertyDefinition,
+    ) -> Result<(), VmError> {
+        let prototype = self
+            .heap
+            .function(class)
+            .and_then(|f| f.class.as_ref())
+            .ok_or_else(|| VmError::InvalidState("class member requires a class".into()))?
+            .prototype;
+        let target = if is_static { class } else { prototype };
+        let method = self
+            .heap
+            .function(src)
+            .and_then(|f| self.build.function(f.func_id));
+        if !method.is_some_and(|f| {
+            f.is_method && (kind == PropertyDefinition::Data || f.is_accessor_method())
+        }) {
+            return Err(VmError::InvalidState(
+                "class member requires a script method".into(),
+            ));
+        }
+        let Object::Function(function) = self.heap.get_mut(src)? else {
+            unreachable!()
+        };
+        function.home = Some(target);
+        let mut update = DescriptorUpdate {
+            enumerable: Some(false),
+            configurable: Some(true),
+            ..Default::default()
+        };
+        match kind {
+            PropertyDefinition::Data => {
+                update.value = Some(Value::Object(src));
+                update.writable = Some(true);
+            }
+            PropertyDefinition::Get => update.get = Some(Some(src)),
+            PropertyDefinition::Set => update.set = Some(Some(src)),
+        }
+        if !self.heap.apply_descriptor(target, key, update)? {
+            return Err(VmError::InvalidState(
+                "invalid class method definition".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn make_closure(

@@ -8,6 +8,27 @@ use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]
+fn loader_rejects_invalid_class_constructor_reference() {
+    let mut corrupt = build("export class C {}");
+    let constructor = corrupt
+        .functions
+        .iter_mut()
+        .flat_map(|f| &mut f.code)
+        .find_map(|instr| {
+            if let Instr::CreateClass { constructor, .. } = instr {
+                Some(constructor)
+            } else {
+                None
+            }
+        })
+        .expect("class instruction");
+    *constructor = u32::MAX;
+    corrupt.finalize();
+    assert!(matches!(Vm::new(corrupt, &mut TestHost::default()),
+        Err(VmError::InvalidBuild(detail)) if detail.contains("invalid class constructor")));
+}
+
+#[test]
 fn host_identifiers_require_well_formed_utf16() {
     let source = r#"
 import { wait } from "test";

@@ -292,8 +292,8 @@ async function run() {
 
 #[test]
 fn rejects_unsupported_syntax_with_location() {
-    let error = compile("function run() { class A {} }", &CompileOptions::default())
-        .expect_err("class is outside the PoC subset");
+    let error = compile("function run() { tag`value`; }", &CompileOptions::default())
+        .expect_err("tagged templates are outside the PoC subset");
     assert!(error.message().contains("unsupported syntax"));
     assert_eq!(error.line(), 1);
     assert!(error.column() > 1);
@@ -831,7 +831,6 @@ fn rejects_unsupported_module_syntax() {
         ("export { x } from 'dep';", "re-export"),
         ("export * from 'dep';", "re-export"),
         ("export * as ns from 'dep';", "re-export"),
-        ("export class C {}", "class declaration"),
     ] {
         let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
@@ -841,6 +840,89 @@ fn rejects_unsupported_module_syntax() {
         );
         assert!(error.message().contains(feature), "{error}");
     }
+}
+
+#[test]
+fn rejects_gated_class_features() {
+    for (source, feature) in [
+        ("class C extends C {}", "class heritage"),
+        ("class C { x = 1 }", "class field"),
+        ("class C { #x() {} }", "private class method"),
+        ("class C { [C]() {} }", "computed class key"),
+        ("class C { static {} }", "class static block"),
+        ("class C { *m() {} }", "generator"),
+    ] {
+        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        assert!(error.message().contains(feature), "{error}");
+    }
+}
+
+#[test]
+fn class_lowering_keeps_the_inner_name_out_of_ordinary_bindings() {
+    let build = compile(
+        "export class C { static read() { return () => C; } } C = null;",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    build.validate().unwrap();
+    let script = &build.functions[build.script as usize];
+    let class_ops = script
+        .code
+        .iter()
+        .filter(|op| {
+            matches!(
+                op,
+                Instr::NewClassScope { .. }
+                    | Instr::CreateClass { .. }
+                    | Instr::ScopedClosure { .. }
+                    | Instr::DefineClassMethod { .. }
+                    | Instr::InitClassBinding { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let [
+        Instr::NewClassScope {
+            dst: scope,
+            parent: None,
+        },
+        Instr::CreateClass {
+            scope: Some(constructor_scope),
+            constructor,
+            ..
+        },
+        Instr::ScopedClosure {
+            scope: method_scope,
+            function,
+            ..
+        },
+        Instr::DefineClassMethod {
+            is_static: true, ..
+        },
+        Instr::InitClassBinding {
+            scope: init_scope,
+            binding,
+            ..
+        },
+    ] = class_ops.as_slice()
+    else {
+        panic!("unexpected class lowering: {class_ops:?}");
+    };
+    assert_eq!(scope, constructor_scope);
+    assert_eq!(scope, method_scope);
+    assert_eq!(scope, init_scope);
+    assert!(!build.functions[*constructor as usize].is_method);
+    assert!(build.functions[*function as usize].is_method);
+    let arrow = build
+        .functions
+        .iter()
+        .find(|function| function.is_arrow)
+        .unwrap();
+    assert!(arrow.code.iter().any(|op| matches!(op,
+        Instr::LoadClassBinding { scope: None, binding: inner, .. } if inner == binding
+    )));
+    assert!(!script.code.iter().any(|op| matches!(op,
+        Instr::DeclareBinding { binding: outer } if outer == binding
+    )));
 }
 
 #[test]

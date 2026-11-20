@@ -15,6 +15,21 @@ use crate::error::{CompileError, unsupported};
 use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
+    pub(super) fn compile_named_expression(
+        &mut self,
+        mut expression: &'ast Expression<'ast>,
+        name: &str,
+    ) -> Result<Reg, CompileError> {
+        while let Expression::ParenthesizedExpression(paren) = expression {
+            expression = &paren.expression;
+        }
+        if let Expression::ClassExpression(class) = expression {
+            self.compile_class(class, name)
+        } else {
+            self.compile_expression(expression)
+        }
+    }
+
     pub(super) fn compile_expression<'node>(
         &mut self,
         expression: &'node Expression<'node>,
@@ -109,6 +124,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ChainExpression(expression) => Ok(self.compile_chain(expression, false)?.0),
             Expression::AssignmentExpression(expression) => self.compile_assignment(expression),
             Expression::UpdateExpression(expression) => self.compile_update(expression),
+            Expression::ClassExpression(class) => self.compile_class(class, ""),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
             Expression::StaticMemberExpression(member) => self.compile_static_member_value(member),
@@ -305,10 +321,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match self.session.names().value(&self.env, name) {
             ValueName::Binding(binding) => {
                 let dst = self.alloc_reg()?;
-                self.emit(Instr::GetBinding {
-                    dst: self.slot(dst),
-                    binding,
-                });
+                self.emit_binding_read(dst, binding);
                 Ok(dst)
             }
             ValueName::ReadOnly(read_only) => self.emit_read_only(read_only),
@@ -719,10 +732,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Callee::Binding(binding) => {
                     self.check_tdz(binding, name, identifier.span)?;
                     let value = self.alloc_reg()?;
-                    self.emit(Instr::GetBinding {
-                        dst: self.slot(value),
-                        binding,
-                    });
+                    self.emit_binding_read(value, binding);
                     value
                 }
                 Callee::ReadOnly(read_only) => self.emit_read_only(read_only)?,
@@ -886,12 +896,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             self.check_tdz(binding, name, identifier.span)?;
             if let Some(op) = logical_assignment_operator(expression.operator) {
                 let result = self.alloc_reg()?;
-                self.emit(Instr::GetBinding {
-                    dst: self.slot(result),
-                    binding,
-                });
+                self.emit_binding_read(result, binding);
                 let end = self.begin_logical_rhs(op, result)?;
-                let right = self.compile_expression(&expression.right)?;
+                let right = self.compile_named_expression(&expression.right, name)?;
                 self.put_binding(binding, right);
                 self.emit(Instr::Move {
                     dst: self.slot(result),
@@ -901,13 +908,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 return Ok(result);
             }
             let value = if matches!(expression.operator, AssignmentOperator::Assign) {
-                self.compile_expression(&expression.right)?
+                self.compile_named_expression(&expression.right, name)?
             } else {
                 let old = self.alloc_reg()?;
-                self.emit(Instr::GetBinding {
-                    dst: self.slot(old),
-                    binding,
-                });
+                self.emit_binding_read(old, binding);
                 let right = self.compile_expression(&expression.right)?;
                 let op = binary_assignment_operator(expression.operator);
                 let value = self.alloc_reg()?;
@@ -1095,10 +1099,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Target::Member(object, key) => self.emit_get_member(*object, *key)?,
             Target::Binding(binding) => {
                 let old = self.alloc_reg()?;
-                self.emit(Instr::GetBinding {
-                    dst: self.slot(old),
-                    binding: *binding,
-                });
+                self.emit_binding_read(old, *binding);
                 old
             }
         };
@@ -1202,6 +1203,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 continue;
             };
             let key = self.compile_property_key(&property.key, property.computed)?;
+            let mut buffer = ryu_js::Buffer::new();
+            let name = match &property.key {
+                PropertyKey::NumericLiteral(literal) => Some(buffer.format(literal.value).into()),
+                key => key.static_name().and_then(|name| name.into_cow_str()),
+            };
             let kind = match property.kind {
                 PropertyKind::Init => PropertyDefinition::Data,
                 PropertyKind::Get => PropertyDefinition::Get,
@@ -1229,13 +1235,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         &format!("{hint} requires {arity} simple parameters"),
                     ));
                 }
-                let mut buffer = ryu_js::Buffer::new();
-                let name = match &property.key {
-                    PropertyKey::NumericLiteral(literal) => {
-                        Some(buffer.format(literal.value).into())
-                    }
-                    key => key.static_name().and_then(|name| name.into_cow_str()),
-                };
                 let (prefix, name) = match (kind, name.as_deref()) {
                     (PropertyDefinition::Data, Some(name)) => ("", name),
                     (PropertyDefinition::Get, Some(name)) => ("get ", name),
@@ -1249,7 +1248,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 )?;
                 self.emit_function_value(id)?
             } else {
-                self.compile_expression(&property.value)?
+                self.compile_named_expression(&property.value, name.as_deref().unwrap_or(""))?
             };
             self.emit(Instr::DefineProperty {
                 object: self.slot(dst),

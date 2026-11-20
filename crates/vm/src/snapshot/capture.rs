@@ -745,12 +745,33 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
-        if let Object::Function(function) = heap.get(id)?
-            && build.is_initializer(function.func_id)
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "function object {id} references the script function"
-            )));
+        if let Object::Function(function) = heap.get(id)? {
+            let code = build
+                .function(function.func_id)
+                .filter(|_| !build.is_initializer(function.func_id));
+            let Some(code) = code else {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "function object {id} references an invalid function"
+                )));
+            };
+            if function.home.is_some_and(|home| {
+                !matches!(heap.get(home), Ok(Object::Function(_) | Object::Plain(_)))
+            }) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "function object {id} has an invalid home object"
+                )));
+            }
+            if let Some(class) = &function.class
+                && (!code.is_constructable()
+                    || !matches!(heap.get(class.prototype), Ok(Object::Plain(_)))
+                    || !matches!(heap.get(id)?.own_property(PropertyKeyRef::String("prototype")),
+                        Some(OwnProperty::Stored(Property::Data(Value::Object(prototype)), attributes))
+                            if *prototype == class.prototype && attributes == crate::heap::Attributes::FIXED))
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "function object {id} has an invalid class record"
+                )));
+            }
         }
         // The shared edge walk below checks the bound receiver and arguments.
         if let Object::Bound(bound) = heap.get(id)? {

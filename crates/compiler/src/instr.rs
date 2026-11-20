@@ -21,6 +21,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Throw { .. }
         | Instr::ThrowAssignmentToConst
         | Instr::CallValue { .. }
+        | Instr::LoadClassBinding { .. }
         | Instr::Construct { .. }
         | Instr::Await { .. }
         | Instr::GetMember { .. }
@@ -52,6 +53,11 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Move { .. }
         | Instr::GetImport { .. }
         | Instr::Closure { .. }
+        | Instr::NewClassScope { .. }
+        | Instr::InitClassBinding { .. }
+        | Instr::CreateClass { .. }
+        | Instr::ScopedClosure { .. }
+        | Instr::DefineClassMethod { .. }
         | Instr::NewObject { .. }
         | Instr::NewRegExp { .. }
         | Instr::NewArray { .. }
@@ -130,6 +136,28 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(callee.index);
             uses.extend(args.slots().iter().map(|arg| arg.index));
             defs.insert(dst.index);
+        }
+        Instr::NewClassScope { dst, parent }
+        | Instr::LoadClassBinding {
+            dst, scope: parent, ..
+        }
+        | Instr::CreateClass {
+            dst, scope: parent, ..
+        } => {
+            uses.extend(parent.map(|slot| slot.index));
+            defs.insert(dst.index);
+        }
+        Instr::ScopedClosure { dst, scope, .. } => {
+            uses.insert(scope.index);
+            defs.insert(dst.index);
+        }
+        Instr::InitClassBinding { scope, src, .. } => {
+            uses.extend([scope.index, src.index]);
+        }
+        Instr::DefineClassMethod {
+            class, key, src, ..
+        } => {
+            uses.extend([class.index, key.index, src.index]);
         }
         Instr::Closure { dst, .. }
         | Instr::NewObject { dst }
@@ -300,6 +328,59 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::Closure { dst, function } => Instr::Closure {
             dst: remap(dst),
             function,
+        },
+        Instr::NewClassScope { dst, parent } => Instr::NewClassScope {
+            dst: remap(dst),
+            parent: parent.map(remap),
+        },
+        Instr::LoadClassBinding {
+            dst,
+            scope,
+            binding,
+        } => Instr::LoadClassBinding {
+            dst: remap(dst),
+            scope: scope.map(remap),
+            binding,
+        },
+        Instr::InitClassBinding {
+            scope,
+            binding,
+            src,
+        } => Instr::InitClassBinding {
+            scope: remap(scope),
+            binding,
+            src: remap(src),
+        },
+        Instr::CreateClass {
+            dst,
+            scope,
+            constructor,
+        } => Instr::CreateClass {
+            dst: remap(dst),
+            scope: scope.map(remap),
+            constructor,
+        },
+        Instr::ScopedClosure {
+            dst,
+            scope,
+            function,
+        } => Instr::ScopedClosure {
+            dst: remap(dst),
+            scope: remap(scope),
+            function,
+        },
+        Instr::DefineClassMethod {
+            class,
+            key,
+            src,
+            is_static,
+            kind,
+        } => Instr::DefineClassMethod {
+            class: remap(class),
+            key: remap(key),
+            src: remap(src),
+            is_static,
+            kind,
         },
         Instr::NewObject { dst } => Instr::NewObject { dst: remap(dst) },
         Instr::NewRegExp { dst, source, flags } => Instr::NewRegExp {

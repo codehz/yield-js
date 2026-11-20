@@ -197,11 +197,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 )?;
                 self.init_function_binding(binding, func_id)
             }
-            Declaration::ClassDeclaration(class) => Err(unsupported(
-                self.source_text(),
-                class.span,
-                "class declaration",
-            )),
+            Declaration::ClassDeclaration(class) => self.compile_class_declaration(class),
             other => Err(unsupported(
                 self.source_text(),
                 other.span(),

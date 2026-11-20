@@ -198,6 +198,8 @@ impl Heap {
         self.alloc(Object::Function(FunctionObject {
             func_id,
             env,
+            home: None,
+            class: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.function_prototype,
@@ -583,6 +585,17 @@ impl Heap {
             .get(&binding)
             .cloned()
             .ok_or_else(|| VmError::InvalidState(format!("binding {binding} is not initialized")))
+    }
+
+    pub(crate) fn find_binding(
+        &self,
+        env: ObjectId,
+        binding: BindingId,
+    ) -> Result<Option<Value>, VmError> {
+        Ok(match self.binding_owner(env, binding)? {
+            Some(owner) => self.environment(owner)?.bindings.get(&binding).cloned(),
+            None => None,
+        })
     }
 
     pub(crate) fn set_binding(

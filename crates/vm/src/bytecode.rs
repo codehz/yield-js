@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 32;
+pub const BYTECODE_VERSION: u32 = 33;
 
 pub use crate::builtin::BUILTINS;
 
@@ -190,6 +190,37 @@ pub enum Instr {
     Closure {
         dst: Slot,
         function: u32,
+    },
+    NewClassScope {
+        dst: Slot,
+        parent: Option<Slot>,
+    },
+    LoadClassBinding {
+        dst: Slot,
+        scope: Option<Slot>,
+        binding: BindingId,
+    },
+    InitClassBinding {
+        scope: Slot,
+        binding: BindingId,
+        src: Slot,
+    },
+    CreateClass {
+        dst: Slot,
+        scope: Option<Slot>,
+        constructor: u32,
+    },
+    ScopedClosure {
+        dst: Slot,
+        scope: Slot,
+        function: u32,
+    },
+    DefineClassMethod {
+        class: Slot,
+        key: Slot,
+        src: Slot,
+        is_static: bool,
+        kind: PropertyDefinition,
     },
     NewObject {
         dst: Slot,
@@ -430,6 +461,9 @@ impl Function {
                     | Instr::SetBinding { .. }
                     | Instr::DeclareBinding { .. }
                     | Instr::Closure { .. }
+                    | Instr::NewClassScope { .. }
+                    | Instr::LoadClassBinding { .. }
+                    | Instr::CreateClass { .. }
             )
         })
     }
@@ -903,6 +937,58 @@ impl Build {
                             "{location}: Closure at pc {pc} references function {callee}"
                         ));
                     }
+                }
+                Instr::NewClassScope { dst, parent }
+                | Instr::LoadClassBinding {
+                    dst, scope: parent, ..
+                } => {
+                    check_slot(*dst, "class scope result")?;
+                    if let Some(parent) = parent {
+                        check_slot(*parent, "class scope")?;
+                    }
+                }
+                Instr::InitClassBinding { scope, src, .. } => {
+                    check_slot(*scope, "InitClassBinding.scope")?;
+                    check_slot(*src, "InitClassBinding.src")?;
+                }
+                Instr::CreateClass {
+                    dst,
+                    scope,
+                    constructor,
+                } => {
+                    check_slot(*dst, "CreateClass.dst")?;
+                    if let Some(scope) = scope {
+                        check_slot(*scope, "CreateClass.scope")?;
+                    }
+                    if self.is_initializer(*constructor)
+                        || !self
+                            .function(*constructor)
+                            .is_some_and(Function::is_constructable)
+                    {
+                        return Err(format!(
+                            "{location}: invalid class constructor {constructor} at pc {pc}"
+                        ));
+                    }
+                }
+                Instr::ScopedClosure {
+                    dst,
+                    scope,
+                    function,
+                } => {
+                    check_slot(*dst, "ScopedClosure.dst")?;
+                    check_slot(*scope, "ScopedClosure.scope")?;
+                    if self.is_initializer(*function) || self.function(*function).is_none() {
+                        return Err(format!(
+                            "{location}: invalid scoped closure function {function} at pc {pc}"
+                        ));
+                    }
+                }
+                Instr::DefineClassMethod {
+                    class, key, src, ..
+                } => {
+                    check_slot(*class, "DefineClassMethod.class")?;
+                    check_slot(*key, "DefineClassMethod.key")?;
+                    check_slot(*src, "DefineClassMethod.src")?;
                 }
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
                 Instr::NewRegExp { dst, source, flags } => {

@@ -4,6 +4,7 @@
 //! [`LoweredFunction`]. Nested functions are a worklist of Oxc nodes plus the
 //! scope chain captured at the definition, not a recursive borrow of the lowerer.
 
+mod class;
 mod control;
 mod expr;
 mod pattern;
@@ -44,6 +45,7 @@ pub(crate) fn lower_program<'ast>(
             func_id: initializer,
             name: name.to_owned(),
             outer: CapturedEnv::default(),
+            class_bindings: BTreeSet::new(),
         },
     )?);
     while let Some(task) = tasks.pop_front() {
@@ -69,6 +71,7 @@ enum FunctionSource<'ast> {
     Function(&'ast Function<'ast>),
     Method(&'ast Function<'ast>),
     Arrow(&'ast ArrowFunctionExpression<'ast>),
+    DefaultConstructor(Span),
 }
 
 impl FunctionSource<'_> {
@@ -76,6 +79,7 @@ impl FunctionSource<'_> {
         match self {
             Self::Function(function) | Self::Method(function) => function.span,
             Self::Arrow(arrow) => arrow.span,
+            Self::DefaultConstructor(span) => span,
             Self::Script(statements) => statements
                 .first()
                 .map(|statement| statement.span())
@@ -87,7 +91,7 @@ impl FunctionSource<'_> {
         match self {
             Self::Function(function) | Self::Method(function) => function.r#async,
             Self::Arrow(arrow) => arrow.r#async,
-            Self::Script(_) => false,
+            Self::Script(_) | Self::DefaultConstructor(_) => false,
         }
     }
 
@@ -101,6 +105,7 @@ struct Task<'ast> {
     func_id: u32,
     name: String,
     outer: CapturedEnv,
+    class_bindings: BTreeSet<BindingId>,
 }
 
 struct Lowerer<'ast, 'borrow, 'src> {
@@ -115,6 +120,10 @@ struct Lowerer<'ast, 'borrow, 'src> {
     is_method: bool,
     is_script: bool,
     env: Env,
+    // Inner names live in the class-scope chain, never in ordinary binding cells.
+    class_bindings: BTreeSet<BindingId>,
+    // None uses the ambient scope inherited by the current closure.
+    class_scope: Option<Reg>,
     emit: Emitter<'src>,
     control: Control<'ast>,
     param_bindings: Vec<BindingId>,
@@ -156,6 +165,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_method: matches!(task.source, FunctionSource::Method(_)),
             is_script: matches!(task.source, FunctionSource::Script(_)),
             env: Env::new(task.outer),
+            class_bindings: task.class_bindings,
+            class_scope: None,
             emit: Emitter::new(source_text, span),
             control: Control::new(),
             param_bindings: Vec::new(),
@@ -174,6 +185,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.install_new_target_binding(source);
         let length = self.compile_parameters(source)?;
         match source {
+            FunctionSource::DefaultConstructor(_) => self.emit_implicit_return()?,
             FunctionSource::Script(statements) => {
                 self.init_imports(statements)?;
                 self.hoist_script(statements)?;
@@ -284,7 +296,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.compile_parameter_list(&function.params)
             }
             FunctionSource::Arrow(arrow) => self.compile_parameter_list(&arrow.params),
-            FunctionSource::Script(_) => Ok(0),
+            FunctionSource::Script(_) | FunctionSource::DefaultConstructor(_) => Ok(0),
         }
     }
 
@@ -439,6 +451,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.env.lookup(name)
     }
 
+    fn emit_binding_read(&mut self, dst: Reg, binding: BindingId) {
+        let dst = self.slot(dst);
+        self.emit(if self.class_bindings.contains(&binding) {
+            Instr::LoadClassBinding {
+                dst,
+                scope: self.class_scope.map(|scope| self.slot(scope)),
+                binding,
+            }
+        } else {
+            Instr::GetBinding { dst, binding }
+        });
+    }
+
     /// Emit the PutValue step after evaluating an assignment's inputs.
     pub(super) fn put_binding(&mut self, binding: BindingId, value: Reg) -> usize {
         if self.env.is_const(binding) {
@@ -493,15 +518,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             func_id,
             name: format!("{hint}@{func_id}"),
             outer: self.env.capture(),
+            class_bindings: self.class_bindings.clone(),
         });
         Ok(func_id)
     }
 
     pub(super) fn emit_function_value(&mut self, func_id: u32) -> Result<Reg, CompileError> {
         let dst = self.alloc_reg()?;
-        self.emit(Instr::Closure {
-            dst: self.slot(dst),
-            function: func_id,
+        let dst_slot = self.slot(dst);
+        self.emit(if let Some(scope) = self.class_scope {
+            Instr::ScopedClosure {
+                dst: dst_slot,
+                scope: self.slot(scope),
+                function: func_id,
+            }
+        } else {
+            Instr::Closure {
+                dst: dst_slot,
+                function: func_id,
+            }
         });
         Ok(dst)
     }
@@ -535,6 +570,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 format!("{name}@{func_id}")
             },
             outer: self.env.capture(),
+            class_bindings: self.class_bindings.clone(),
         });
         Ok(func_id)
     }
@@ -645,6 +681,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for statement in statements {
             match statement {
                 Statement::ExportDeclaration(export) => match &export.declaration {
+                    Declaration::ClassDeclaration(class) => {
+                        if let Some(id) = &class.id {
+                            self.export_binding(
+                                id.name.as_str(),
+                                id.span,
+                                id.name.as_str(),
+                                id.span,
+                            )?;
+                        }
+                    }
                     Declaration::FunctionDeclaration(function) => {
                         if let Some(id) = &function.id {
                             self.export_binding(
@@ -761,6 +807,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         let name = identifier.name.as_str();
                         function_names.insert(name.to_owned());
                         self.predeclare_name(name, VariableDeclarationKind::Let, function.span)?;
+                    }
+                }
+                Some(Declaration::ClassDeclaration(class)) => {
+                    if let Some(id) = &class.id {
+                        let name = id.name.as_str();
+                        if let Some(binding) =
+                            self.predeclare_name(name, VariableDeclarationKind::Let, id.span)?
+                        {
+                            lexical.push((binding, name.to_owned()));
+                        }
                     }
                 }
                 _ => {}
@@ -923,7 +979,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let (binding, _) = self.declare(name, declaration.kind, declarator.span)?;
             if lexical {
                 let value = if let Some(expression) = &declarator.init {
-                    self.compile_expression(expression)?
+                    self.compile_named_expression(expression, name)?
                 } else {
                     // A closure may have written this binding before the
                     // declaration. The declaration overwrites that write.
@@ -937,7 +993,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             } else {
                 self.emit(Instr::DeclareBinding { binding });
                 if let Some(expression) = &declarator.init {
-                    let value = self.compile_expression(expression)?;
+                    let value = self.compile_named_expression(expression, name)?;
                     self.emit(Instr::SetBinding {
                         binding,
                         src: self.slot(value),
