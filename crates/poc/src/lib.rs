@@ -136,7 +136,7 @@ impl Matcher {
     }
 
     #[method(name = "toThrow")]
-    fn to_throw(
+    async fn to_throw(
         cx: &mut CallCx<'_>,
         this: This<Matcher>,
         expected: Option<JsValue>,
@@ -145,25 +145,30 @@ impl Matcher {
         if !cx.is_callable(&actual)? {
             return Err(cx.throw_string("toThrow: expected a callable"));
         }
-        let mut saved = Vec::new();
-        if let Some(expected) = expected.filter(|value| !value.is_undefined()) {
-            if expected.as_string().is_none() && !cx.inspect(expected.clone())?.is_regexp() {
-                return Err(cx.throw_string("toThrow: expected a string or RegExp"));
-            }
-            saved.push(expected);
+        let expected = expected.unwrap_or_else(JsValue::undefined);
+        if !expected.is_undefined()
+            && expected.as_string().is_none()
+            && !cx.inspect(expected.clone())?.is_regexp()
+        {
+            return Err(cx.throw_string("toThrow: expected a string or RegExp"));
         }
-        cx.request_call(actual, JsValue::undefined(), vec![], saved, resume_to_throw)
+        let outcome = cx.call(actual, JsValue::undefined(), vec![]).await;
+        match_to_throw(cx, outcome, expected)
     }
 }
 
-fn resume_to_throw(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
+fn match_to_throw(
+    cx: &mut CallCx<'_>,
+    outcome: GuestOutcome,
+    expected: JsValue,
+) -> JsResult<HostStep> {
     let GuestOutcome::Thrown(thrown) = outcome else {
         return Err(cx.throw_string("toThrow: function returned without throwing"));
     };
     let success = HostStep::Return(JsValue::undefined());
-    let Some(expected) = cx.args().first() else {
+    if expected.is_undefined() {
         return Ok(success);
-    };
+    }
     let message = if let Some(text) = thrown.as_string() {
         text.clone()
     } else {
@@ -184,7 +189,7 @@ fn resume_to_throw(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostS
             "toThrow: expected message containing \"{pattern}\", actual \"{message}\""
         )));
     }
-    let regexp = cx.inspect(expected.clone())?;
+    let regexp = cx.inspect(expected)?;
     if regexp.regexp_matches(&message) == Some(true) {
         return Ok(success);
     }

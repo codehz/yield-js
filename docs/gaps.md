@@ -78,7 +78,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 1. **隐式装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **代理仅覆盖六种 trap。** 支持的属性操作及边界见上表和已实现清单，不等同于完整 ECMAScript Proxy。
 3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由快照追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
-4. **宿主绑定首版仍有未决项。** 已实现 Rust 宏声明入口、静态模块/类/原型/方法/访问器、字符串与 well-known Symbol 成员名、声明层绑定类继承（原型链、槽合并、基类接收者校验）、`Js` / `JsList` 槽、payload codec、服务指纹、模块状态和四种 operation 恢复策略；带 `class` 的 `#[constructor]` 导出会暴露类原型的虚拟 `prototype` 属性，因此 `new` 与 `instanceof` 可用。尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付；脚本 `class` / `extends` / `super` 仍按首版契约在编译期拒绝，因此声明层父类是唯一可用的绑定类继承入口。
+4. **宿主绑定首版仍有未决项。** 已实现 Rust 宏声明入口、静态模块/类/原型/方法/访问器、字符串与 well-known Symbol 成员名、声明层绑定类继承（原型链、槽合并、基类接收者校验）、`Js` / `JsList` 槽、payload codec、服务指纹、模块状态和四种 operation 恢复策略；`#[function]` / `#[method]` 支持返回 `JsResult<HostStep>` 的受限 async CPS guest-call 写法，不执行 Rust Future，也不使 guest 调用变成 JS Promise；带 `class` 的 `#[constructor]` 导出会暴露类原型的虚拟 `prototype` 属性，因此 `new` 与 `instanceof` 可用。尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付；脚本 `class` / `extends` / `super` 仍按首版契约在编译期拒绝，因此声明层父类是唯一可用的绑定类继承入口。
 5. **宿主回调只同步恢复。** `HostStep::Call` 不等待 Promise，不排空微任务，也不把 Rust 恢复函数写入快照。需要跨异步边界的宿主工作仍使用 operation。
 
 ## 6. 依赖关系（现状组织，非承诺）

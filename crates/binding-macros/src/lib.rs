@@ -2,6 +2,7 @@
 
 use proc_macro::TokenStream;
 
+mod cps;
 mod registry;
 mod typed;
 

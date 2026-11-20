@@ -391,6 +391,28 @@ mod guest_call_fixture {
                 again,
             )
         }
+
+        #[function(name = "catchThenCompare")]
+        async fn catch_then_compare(
+            cx: &mut CallCx<'_>,
+            original: JsValue,
+            throwing: JsValue,
+            returning: JsValue,
+        ) -> JsResult<HostStep> {
+            let first = cx.call(throwing, JsValue::undefined(), vec![]).await;
+            match first {
+                GuestOutcome::Thrown(_) => {}
+                GuestOutcome::Returned(_) => return Err(cx.type_error("expected guest throw")),
+            }
+
+            let second = cx.call(returning, JsValue::undefined(), Vec::new()).await;
+            match second {
+                GuestOutcome::Returned(value) => Ok(HostStep::Return(JsValue::boolean(
+                    cx.same_value(&value, &original),
+                ))),
+                GuestOutcome::Thrown(value) => Err(JsError::Throw(value)),
+            }
+        }
     }
 
     fn unexpected_resume(_: &mut CallCx<'_>, _: GuestOutcome) -> JsResult<HostStep> {
@@ -475,6 +497,34 @@ fn guest_call_resume_can_request_another_call() {
     "#,
     );
     assert_eq!(result.expect("chained guest calls"), Value::Number(8.0));
+}
+
+#[test]
+fn async_guest_calls_catch_throw_and_preserve_object_identity() {
+    let (result, runs) = guest_call_fixture::run(
+        r#"
+        import { catchThenCompare, mark } from 'guest';
+        export function run() {
+            const original = {};
+            let throwingRuns = 0;
+            let returningRuns = 0;
+            const same = catchThenCompare(original, () => {
+                throwingRuns += 1;
+                mark();
+                throw 'guest throw';
+            }, () => {
+                returningRuns += 1;
+                mark();
+                return original;
+            });
+            if (throwingRuns !== 1) throw 'throwing guest must run exactly once';
+            if (returningRuns !== 1) throw 'returning guest must run exactly once';
+            return same;
+        }
+    "#,
+    );
+    assert_eq!(result.expect("two awaited guest calls"), Value::Bool(true));
+    assert_eq!(runs, 2);
 }
 
 mod counter_fixture {

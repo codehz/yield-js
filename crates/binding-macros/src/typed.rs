@@ -8,6 +8,8 @@ use syn::{
     Signature, Token, Type, parse::Parser, punctuated::Punctuated, spanned::Spanned,
 };
 
+use super::cps;
+
 fn options(tokens: TokenStream, allowed: &[&str]) -> Result<HashMap<String, Meta>> {
     let mut options = HashMap::new();
     for meta in Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)? {
@@ -110,6 +112,29 @@ fn wrapped<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
         return Some(inner);
     }
     None
+}
+
+fn lower_async(sig: &mut Signature, block: &mut syn::Block, kind: &str) -> Result<()> {
+    let Some(asyncness) = &sig.asyncness else {
+        return Ok(());
+    };
+    if !matches!(kind, "function" | "method") {
+        return Err(Error::new_spanned(
+            asyncness,
+            "async is only supported on #[function] and #[method]",
+        ));
+    }
+    if !matches!(&sig.output, ReturnType::Type(_, ty)
+        if wrapped(ty, "JsResult").is_some_and(|inner| simple(inner, "HostStep")))
+    {
+        return Err(Error::new_spanned(
+            &sig.output,
+            "async bindings must return JsResult<HostStep>",
+        ));
+    }
+    *block = syn::parse2(cps::lower(sig, block)?)?;
+    sig.asyncness = None;
+    Ok(())
 }
 
 fn same_type(left: &Type, right: &Type) -> bool {
@@ -324,9 +349,17 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let mut exports = Vec::new();
     let mut keys = HashSet::new();
     for item in items {
-        let (attrs, ident, sig) = match item {
-            Item::Fn(item) => (&mut item.attrs, &item.sig.ident, Some(&item.sig)),
-            Item::Const(item) => (&mut item.attrs, &item.ident, None),
+        let attrs = match item {
+            Item::Fn(item) => {
+                if item.sig.ident == "__yield_module" {
+                    return Err(Error::new_spanned(
+                        &item.sig.ident,
+                        "reserved module registration function name",
+                    ));
+                }
+                &mut item.attrs
+            }
+            Item::Const(item) => &mut item.attrs,
             other => {
                 let attrs = match other {
                     Item::Enum(item) => &item.attrs,
@@ -352,12 +385,6 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 continue;
             }
         };
-        if sig.is_some() && ident == "__yield_module" {
-            return Err(Error::new_spanned(
-                ident,
-                "reserved module registration function name",
-            ));
-        }
         reject_markers(
             attrs,
             MEMBER_MARKERS,
@@ -377,8 +404,11 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         if !keys.insert(name.value()) {
             return Err(Error::new_spanned(name, "duplicate module export name"));
         }
-        let export = match sig {
-            Some(sig) if kind != "constant" => {
+        let (attrs, export) = match item {
+            Item::Fn(item) if kind != "constant" => {
+                lower_async(&mut item.sig, &mut item.block, &kind)?;
+                let sig = &item.sig;
+                let ident = &sig.ident;
                 let call = Call::parse(sig, None)?;
                 let class = if let Some(class) = opts.get("class") {
                     let class_path = path(class)?;
@@ -398,13 +428,20 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 };
                 let adapter = call.adapter(quote!(self::#ident), None);
                 let signature = call.signature();
-                quote!({
-                    #adapter
-                    ::yield_vm::__macro_support::function(#name, #constructable, #class, __yield_call, #signature)
-                })
+                (
+                    &item.attrs,
+                    quote!({
+                        #adapter
+                        ::yield_vm::__macro_support::function(#name, #constructable, #class, __yield_call, #signature)
+                    }),
+                )
             }
-            None if kind == "constant" => {
-                quote!(::yield_vm::__macro_support::constant(#name, self::#ident))
+            Item::Const(item) if kind == "constant" => {
+                let ident = &item.ident;
+                (
+                    &item.attrs,
+                    quote!(::yield_vm::__macro_support::constant(#name, self::#ident)),
+                )
             }
             _ => {
                 return Err(Error::new_spanned(
@@ -863,6 +900,7 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
         };
         let opts = options(attr.parse_args()?, &["name", "symbol"])?;
         let (id, key) = member_key(&opts, attr.span())?;
+        lower_async(&mut method.sig, &mut method.block, &kind)?;
         let call = Call::parse(&method.sig, Some(&class))?;
         if kind == "get" && !call.optional.is_empty() {
             return Err(Error::new_spanned(
@@ -965,6 +1003,112 @@ mod tests {
         assert!(
             error.contains(expected),
             "expected {expected:?}, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn lowers_async_step_functions_and_methods() {
+        let function = host_module(
+            quote!(name = "x"),
+            quote! {
+                mod x {
+                    #[function(name = "f")]
+                    async fn f(cx: &mut CallCx<'_>, f: JsValue) -> JsResult<HostStep> {
+                        let outcome = cx.call(f, JsValue::undefined(), Vec::new()).await;
+                        finish(cx, outcome)
+                    }
+                    async fn helper() {}
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert!(function.contains("fn f"));
+        assert!(!function.contains("async fn f"));
+        assert!(function.contains("async fn helper"));
+        assert!(function.contains("request_call"));
+        assert!(!function.contains(". await"));
+
+        let method = methods(
+            quote!(C),
+            quote! {
+                impl C {
+                    #[method(name = "f")]
+                    async fn f(cx: &mut CallCx<'_>, this: This<C>, f: JsValue) -> JsResult<HostStep> {
+                        let outcome = cx.call(f, JsValue::undefined(), Vec::new()).await;
+                        finish(cx, outcome)
+                    }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert!(method.contains("fn f"));
+        assert!(!method.contains("async"));
+        assert!(method.contains("request_call"));
+        assert!(!method.contains(". await"));
+    }
+
+    #[test]
+    fn rejects_async_constructors_and_accessors() {
+        let expected = "async is only supported on #[function] and #[method]";
+        diagnostic(
+            host_module(
+                quote!(name = "x"),
+                quote! {
+                    mod x {
+                        #[constructor(name = "C", class = C)]
+                        async fn new(cx: &mut CallCx<'_>) -> JsResult<Instance<C>> { make(cx) }
+                    }
+                },
+            ),
+            expected,
+        );
+        diagnostic(
+            methods(
+                quote!(C),
+                quote! {
+                    impl C {
+                        #[get(name = "f")]
+                        async fn f(cx: &mut CallCx<'_>, this: This<C>) -> JsResult<HostStep> {
+                            finish(cx, this)
+                        }
+                    }
+                },
+            ),
+            expected,
+        );
+        diagnostic(
+            methods(
+                quote!(C),
+                quote! {
+                    impl C {
+                        #[set(name = "f")]
+                        async fn f(cx: &mut CallCx<'_>, this: This<C>, value: JsValue) -> JsResult<()> {
+                            set(cx, this, value)
+                        }
+                    }
+                },
+            ),
+            expected,
+        );
+    }
+
+    #[test]
+    fn rejects_async_method_with_wrong_output() {
+        diagnostic(
+            methods(
+                quote!(C),
+                quote! {
+                    impl C {
+                        #[method(name = "f")]
+                        async fn f(cx: &mut CallCx<'_>, this: This<C>) -> JsResult<JsValue> {
+                            get(cx, this)
+                        }
+                    }
+                },
+            ),
+            "async bindings must return JsResult<HostStep>",
         );
     }
 
@@ -1078,7 +1222,7 @@ mod tests {
                     }
                 ),
             ),
-            "synchronous safe Rust function",
+            "async bindings must return JsResult<HostStep>",
         );
         diagnostic(
             host_module(
