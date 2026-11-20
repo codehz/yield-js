@@ -4,19 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::JsString;
 use crate::binding::{Bindings, Recovery};
-use crate::builtins::reflect_namespace;
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
     ROOT_BOOLEAN_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR,
     ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_GLOBAL_THIS, ROOT_NUMBER_PROTOTYPE,
-    ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE, ROOT_PROMISE_PROTOTYPE, ROOT_PROXY,
-    ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR,
-    ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REGEXP, ROOT_REGEXP_ITERATOR_PROTOTYPE,
-    ROOT_REGEXP_PROTOTYPE, ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE,
-    ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE, ROOT_SYNTAXERROR,
-    ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR,
-    ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
+    ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK,
+    ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE,
+    ROOT_REGEXP, ROOT_REGEXP_ITERATOR_PROTOTYPE, ROOT_REGEXP_PROTOTYPE, ROOT_STRING_ITERATOR,
+    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE,
+    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
+    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE,
+    is_callable_object, object_members, promise_members, reflect_namespace,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
@@ -854,12 +853,12 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             roots.len()
         )));
     }
-    let promise = required_root(roots, ROOT_PROMISE)?;
+    let promise = required_root(roots, promise_members::ROOT)?;
     let prototype = required_root(roots, ROOT_PROMISE_PROTOTYPE)?;
     let queue = required_root(roots, ROOT_QUEUE_MICROTASK)?;
     match heap.get(promise)? {
         Object::BuiltinStatic(function)
-            if function.name == "Promise" && function.member.is_none() => {}
+            if function.name == promise_members::NAME && function.member.is_none() => {}
         _ => {
             return Err(VmError::InvalidSnapshot(
                 "promise root is not the Promise constructor".to_owned(),
@@ -880,7 +879,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
             ));
         }
     }
-    require_fixed_prototype(heap, promise, prototype, "Promise")?;
+    require_fixed_prototype(heap, promise, prototype, promise_members::NAME)?;
     let plain_root = |name| {
         let id = required_root(roots, name)?;
         if !matches!(heap.get(id), Ok(Object::Plain(_))) {
@@ -907,8 +906,8 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         ));
     }
     let json = plain_root(crate::json::namespace::ROOT)?;
-    let object = builtin_root(ROOT_OBJECT, "Object")?;
-    require_fixed_prototype(heap, object, object_prototype, "Object")?;
+    let object = builtin_root(object_members::ROOT, object_members::NAME)?;
+    require_fixed_prototype(heap, object, object_prototype, object_members::NAME)?;
     let map = builtin_root("map", "Map")?;
     let map_prototype = plain_root("map.prototype")?;
     let map_iterator_prototype = plain_root("mapIterator.prototype")?;

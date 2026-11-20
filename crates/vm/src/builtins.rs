@@ -71,65 +71,55 @@ macro_rules! builtin_globals {
                     return Err(VmError::InvalidState(format!("builtin {} does not exist", builtin)));
                 };
                 Ok(match index {
-                    $(GlobalIndex::$field => builtin_globals!(@value self, $field, $kind($($args)*))),*
+                    $(GlobalIndex::$field => builtin_globals!(@value self, $field, $kind $($args)*)),*
                 })
             }
         }
 
-        fn registered_handler(owner: &str, member: &str) -> Option<BuiltinHandler> {
+        fn registered_call(owner: &str, member: &str) -> Option<BuiltinCall> {
             $(builtin_globals!(@resolve owner, member, $kind($($args)*));)*
             None
         }
     };
     (@name root($name:literal)) => { $name };
     (@name number($name:literal, $value:expr)) => { $name };
-    (@name namespace($module:ident)) => { $module::NAME };
-    (@name constructor($module:ident)) => { builtin_globals!(@name namespace($module)) };
-    (@value $vm:ident, $field:ident, root($name:literal)) => {
+    (@name module($module:ident)) => { $module::NAME };
+    (@value $vm:ident, $field:ident, $kind:ident $arg:tt) => {
         Value::Object($vm.builtins.$field)
     };
-    (@value $vm:ident, $field:ident, namespace($module:ident)) => {
-        Value::Object($vm.builtins.$field)
-    };
-    (@value $vm:ident, $field:ident, constructor($module:ident)) => {
-        builtin_globals!(@value $vm, $field, namespace($module))
-    };
-    (@value $vm:ident, $field:ident, number($name:literal, $value:expr)) => {
+    (@value $vm:ident, $field:ident, number $name:literal, $value:expr) => {
         Value::Number($value)
     };
-    (@resolve $owner:ident, $member:ident, namespace($module:ident)) => {
+    (@resolve $owner:ident, $member:ident, module($module:ident)) => {
         if $owner == $module::NAME {
             return $module::resolve($member);
         }
-    };
-    (@resolve $owner:ident, $member:ident, constructor($module:ident)) => {
-        builtin_globals!(@resolve $owner, $member, namespace($module))
     };
     (@resolve $owner:ident, $member:ident, root($name:literal)) => {};
     (@resolve $owner:ident, $member:ident, number($name:literal, $value:expr)) => {};
 }
 
 builtin_globals!(
-    promise: root("Promise"),
+    promise: module(promise_members),
     queue_microtask: root("queueMicrotask"),
     error: root("Error"),
     typeerror: root("TypeError"),
     symbol: root("Symbol"),
-    reflect: namespace(reflect_namespace),
-    object: root("Object"),
+    reflect: module(reflect_namespace),
+    object: module(object_members),
     nan: number("NaN", f64::NAN),
     infinity: number("Infinity", f64::INFINITY),
     array: root("Array"),
-    string: constructor(string_members),
+    string: module(string_members),
     rangeerror: root("RangeError"),
     referenceerror: root("ReferenceError"),
     syntaxerror: root("SyntaxError"),
     evalerror: root("EvalError"),
     urierror: root("URIError"),
     aggregateerror: root("AggregateError"),
-    number: constructor(number_members),
-    math: namespace(math_namespace),
-    json: namespace(json_namespace),
+    number: module(number_members),
+    math: module(math_namespace),
+    json: module(json_namespace),
     map: root("Map"),
     set: root("Set"),
     weakmap: root("WeakMap"),
@@ -140,7 +130,6 @@ builtin_globals!(
 );
 
 pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
-pub(crate) const ROOT_PROMISE: &str = "promise";
 pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
 pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
@@ -176,7 +165,6 @@ pub(crate) const ROOT_URIERROR_PROTOTYPE: &str = "urierror.prototype";
 pub(crate) const ROOT_AGGREGATEERROR: &str = "aggregateerror";
 pub(crate) const ROOT_AGGREGATEERROR_PROTOTYPE: &str = "aggregateerror.prototype";
 pub(crate) const ROOT_SYMBOL: &str = "symbol";
-pub(crate) const ROOT_OBJECT: &str = "object";
 pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
 pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
 pub(crate) const ROOT_PROXY: &str = "proxy";
@@ -256,7 +244,7 @@ impl BuiltinRoots {
             (ROOT_WEAK_MAP.to_owned(), self.weakmap),
             (ROOT_WEAK_MAP_PROTOTYPE.to_owned(), self.weakmap_prototype),
             (ROOT_PROXY.to_owned(), self.proxy),
-            (ROOT_PROMISE.to_owned(), self.promise),
+            (promise_members::ROOT.to_owned(), self.promise),
             (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
             (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
             (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
@@ -322,7 +310,7 @@ impl BuiltinRoots {
             ),
             (ROOT_SYMBOL.to_owned(), self.symbol),
             (reflect_namespace::ROOT.to_owned(), self.reflect),
-            (ROOT_OBJECT.to_owned(), self.object),
+            (object_members::ROOT.to_owned(), self.object),
             (math_namespace::ROOT.to_owned(), self.math),
             (crate::json::namespace::ROOT.to_owned(), self.json),
         ])
@@ -475,15 +463,56 @@ pub(crate) mod reflect_namespace {
     }
 }
 
+#[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
+pub(crate) mod object_members {
+    use super::{BuiltinCall, IntegrityLevel};
+
+    static_calls! {
+        assign => BuiltinCall::ObjectAssign;
+        is => BuiltinCall::ObjectIs;
+        keys => BuiltinCall::ObjectKeys;
+        create => BuiltinCall::ObjectCreate;
+        getPrototypeOf => BuiltinCall::GetPrototypeOf;
+        setPrototypeOf => BuiltinCall::SetPrototypeOf;
+        getOwnPropertyDescriptor => BuiltinCall::ObjectGetOwnPropertyDescriptor;
+        getOwnPropertyDescriptors => BuiltinCall::ObjectGetOwnPropertyDescriptors;
+        defineProperty => BuiltinCall::DefineProperty;
+        defineProperties => BuiltinCall::ObjectDefineProperties;
+        preventExtensions => BuiltinCall::PreventExtensions;
+        isExtensible => BuiltinCall::IsExtensible;
+        seal => BuiltinCall::SetIntegrityLevel(IntegrityLevel::Sealed);
+        isSealed => BuiltinCall::TestIntegrityLevel(IntegrityLevel::Sealed);
+        freeze => BuiltinCall::SetIntegrityLevel(IntegrityLevel::Frozen);
+        isFrozen => BuiltinCall::TestIntegrityLevel(IntegrityLevel::Frozen);
+    }
+
+    prototype_calls! {
+        hasOwnProperty | valueOf | toString as key => BuiltinCall::ObjectMethod { name: key };
+    }
+}
+
+#[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
+pub(crate) mod promise_members {
+    use super::BuiltinCall;
+
+    static_calls! {
+        resolve | reject | all | allSettled | race | any as key => BuiltinCall::Static(key);
+    }
+
+    prototype_calls! {
+        then | catch | finally as key => BuiltinCall::Method { name: key };
+    }
+}
+
 pub(crate) enum BuiltinCall {
     Constructor,
     PromiseSpecies,
     ErrorConstructor { name: String },
     FunctionMethod { name: String },
-    ObjectMethod { name: String },
+    ObjectMethod { name: &'static str },
     QueueMicrotask,
-    Static(String),
-    Method { name: String },
+    Static(&'static str),
+    Method { name: &'static str },
     Resolution { id: ObjectId },
     PromiseCallback { id: ObjectId },
     SymbolConstructor,
@@ -558,9 +587,6 @@ enum Constructor {
     WeakMap,
     Error { name: String },
 }
-
-const PROMISE_STATICS: [&str; 6] = ["resolve", "reject", "all", "allSettled", "race", "any"];
-const PROMISE_METHODS: [&str; 3] = ["then", "catch", "finally"];
 
 impl Vm {
     fn init_wrapper_prototype(&mut self, name: &str, constructor: ObjectId) -> ObjectId {
@@ -639,7 +665,7 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Function.prototype stores toString");
-        let object = self.heap.alloc_builtin("Object", None);
+        let object = self.heap.alloc_builtin(object_members::NAME, None);
         self.heap
             .define_data(
                 object,
@@ -656,40 +682,7 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Object.prototype stores its constructor");
-        for name in [
-            "assign",
-            "is",
-            "keys",
-            "create",
-            "getPrototypeOf",
-            "setPrototypeOf",
-            "getOwnPropertyDescriptor",
-            "getOwnPropertyDescriptors",
-            "defineProperty",
-            "defineProperties",
-            "preventExtensions",
-            "isExtensible",
-            "seal",
-            "isSealed",
-            "freeze",
-            "isFrozen",
-        ] {
-            let method = self.heap.alloc_builtin("Object", Some(name));
-            self.heap
-                .define_data(object, name, Value::Object(method), Attributes::METHOD)
-                .expect("Object stores statics");
-        }
-        for name in ["hasOwnProperty", "valueOf", "toString"] {
-            let method = self.heap.alloc_builtin("Object", Some(name));
-            self.heap
-                .define_data(
-                    object_prototype,
-                    name,
-                    Value::Object(method),
-                    Attributes::METHOD,
-                )
-                .expect("Object.prototype stores methods");
-        }
+        object_members::install_members(self, object, object_prototype);
 
         let array_prototype = self.heap.alloc_array(Vec::new());
         self.heap
@@ -757,8 +750,10 @@ impl Vm {
         }
 
         let prototype = self.heap.alloc_plain();
-        let promise = self.heap.alloc_builtin("Promise", None);
-        let species = self.heap.alloc_builtin("Promise", Some("get species"));
+        let promise = self.heap.alloc_builtin(promise_members::NAME, None);
+        let species = self
+            .heap
+            .alloc_builtin(promise_members::NAME, Some("get species"));
         assert!(
             self.heap
                 .apply_descriptor(
@@ -773,18 +768,7 @@ impl Vm {
                 .expect("Promise stores its species getter")
         );
         let queue = self.heap.alloc_builtin("queueMicrotask", None);
-        for name in PROMISE_STATICS {
-            let id = self.heap.alloc_builtin("Promise", Some(name));
-            self.heap
-                .define_data(promise, name, Value::Object(id), Attributes::METHOD)
-                .expect("Promise constructor stores statics");
-        }
-        for name in PROMISE_METHODS {
-            let id = self.heap.alloc_builtin("Promise", Some(name));
-            self.heap
-                .define_data(prototype, name, Value::Object(id), Attributes::METHOD)
-                .expect("Promise.prototype stores methods");
-        }
+        promise_members::install_members(self, promise, prototype);
         self.heap
             .define_data(
                 prototype,
@@ -1338,7 +1322,7 @@ impl Vm {
             BuiltinCall::FunctionMethod { name } => {
                 self.call_function_method(host, &name, args, receiver)
             }
-            BuiltinCall::ObjectMethod { name } => match name.as_str() {
+            BuiltinCall::ObjectMethod { name } => match name {
                 "hasOwnProperty" => {
                     let id = match *receiver {
                         Value::Object(id) if self.heap.is_environment(id) == Some(false) => id,
@@ -1440,7 +1424,7 @@ impl Vm {
                 if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
                     return self.throw_type_error("incompatible Promise receiver");
                 }
-                self.call_promise_static(host, receiver, &name, args)
+                self.call_promise_static(host, receiver, name, args)
             }
             BuiltinCall::Method { name } => {
                 let Value::Object(id) = receiver else {
@@ -1449,7 +1433,7 @@ impl Vm {
                 if self.heap.get(*id)?.as_promise().is_none() {
                     return self.throw_type_error("incompatible Promise receiver");
                 }
-                self.call_promise_method(host, *id, &name, args)
+                self.call_promise_method(host, *id, name, args)
             }
             BuiltinCall::Resolution { id } => {
                 let value = args.first().cloned().unwrap_or(Value::Undefined);
@@ -2607,7 +2591,7 @@ impl Vm {
     pub(crate) fn is_intrinsic_promise_then(&self, value: &Value) -> bool {
         matches!(value, Value::Object(id) if matches!(self.heap.get(*id),
             Ok(Object::BuiltinStatic(function))
-                if function.name == "Promise" && function.member.as_deref() == Some("then")))
+                if function.name == promise_members::NAME && function.member.as_deref() == Some("then")))
     }
 
     fn call_promise_static(
@@ -3224,8 +3208,8 @@ pub(crate) fn is_callable_object(object: &Object) -> bool {
 
 fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
     match (function.name.as_str(), function.member.as_deref()) {
-        ("Promise", None) => Some(BuiltinCall::Constructor),
-        ("Promise", Some("get species")) => Some(BuiltinCall::PromiseSpecies),
+        (promise_members::NAME, None) => Some(BuiltinCall::Constructor),
+        (promise_members::NAME, Some("get species")) => Some(BuiltinCall::PromiseSpecies),
         ("queueMicrotask", None) => Some(BuiltinCall::QueueMicrotask),
         (
             name @ ("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
@@ -3239,38 +3223,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                 name: name.to_owned(),
             })
         }
-        ("Object", Some(name @ ("hasOwnProperty" | "valueOf" | "toString"))) => {
-            Some(BuiltinCall::ObjectMethod {
-                name: name.to_owned(),
-            })
-        }
-        ("Object", None) => Some(BuiltinCall::ObjectConstructor),
+        (object_members::NAME, None) => Some(BuiltinCall::ObjectConstructor),
         ("Proxy", None) => Some(BuiltinCall::ProxyConstructor),
-        ("Object", Some("assign")) => Some(BuiltinCall::ObjectAssign),
-        ("Object", Some("is")) => Some(BuiltinCall::ObjectIs),
-
-        ("Object", Some("keys")) => Some(BuiltinCall::ObjectKeys),
-        ("Object", Some("create")) => Some(BuiltinCall::ObjectCreate),
-        ("Object", Some("getPrototypeOf")) => Some(BuiltinCall::GetPrototypeOf),
-        ("Object", Some("setPrototypeOf")) => Some(BuiltinCall::SetPrototypeOf),
-        ("Object", Some("getOwnPropertyDescriptor")) => {
-            Some(BuiltinCall::ObjectGetOwnPropertyDescriptor)
-        }
-        ("Object", Some("getOwnPropertyDescriptors")) => {
-            Some(BuiltinCall::ObjectGetOwnPropertyDescriptors)
-        }
-        ("Object", Some("defineProperty")) => Some(BuiltinCall::DefineProperty),
-        ("Object", Some("defineProperties")) => Some(BuiltinCall::ObjectDefineProperties),
-        ("Object", Some("preventExtensions")) => Some(BuiltinCall::PreventExtensions),
-        ("Object", Some("isExtensible")) => Some(BuiltinCall::IsExtensible),
-        ("Object", Some("seal")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Sealed)),
-        ("Object", Some("freeze")) => Some(BuiltinCall::SetIntegrityLevel(IntegrityLevel::Frozen)),
-        ("Object", Some("isSealed")) => {
-            Some(BuiltinCall::TestIntegrityLevel(IntegrityLevel::Sealed))
-        }
-        ("Object", Some("isFrozen")) => {
-            Some(BuiltinCall::TestIntegrityLevel(IntegrityLevel::Frozen))
-        }
         ("Map", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Map)),
         ("Set", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Set)),
         ("WeakMap", None) => Some(BuiltinCall::WeakMapConstructor),
@@ -3323,18 +3277,10 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
         ("RegExpStringIterator", Some("next")) => Some(BuiltinCall::RegExpStringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
-        ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
-            Some(BuiltinCall::Static(member.to_owned()))
-        }
-        ("Promise", Some(member)) if PROMISE_METHODS.contains(&member) => {
-            Some(BuiltinCall::Method {
-                name: member.to_owned(),
-            })
-        }
         ("Symbol", None) => Some(BuiltinCall::SymbolConstructor),
         ("Symbol", Some("for")) => Some(BuiltinCall::SymbolFor),
         ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
-        (owner, Some(member)) => registered_handler(owner, member).map(BuiltinCall::Registered),
+        (owner, Some(member)) => registered_call(owner, member),
         _ => None,
     }
 }
