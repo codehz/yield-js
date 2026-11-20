@@ -432,13 +432,18 @@ impl Vm {
         let mut parts = Vec::with_capacity(args.len() + 1);
         parts.push(text.to_owned());
         let mut length = text.len();
+        let mut last_unit = text.units().next_back();
         for arg in args {
             match self.coerce_string(host, arg)? {
                 Ok(part) => {
-                    length = length.saturating_add(part.len())
-                        - pair_savings(parts.last().unwrap(), &part);
+                    let saves_pair = matches!(last_unit, Some(0xd800..=0xdbff))
+                        && matches!(part.units().next(), Some(0xdc00..=0xdfff));
+                    length = length.saturating_add(part.len()) - if saves_pair { 2 } else { 0 };
                     if length > MAX_LENGTH {
                         return self.range_error("Invalid string length");
+                    }
+                    if let Some(unit) = part.units().next_back() {
+                        last_unit = Some(unit);
                     }
                     parts.push(part);
                 }
