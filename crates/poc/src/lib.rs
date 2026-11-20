@@ -3,19 +3,17 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, DecodeCx, HostClass, HostFault, InspectValue, JsResult, JsValue,
-    MethodDecl, ModuleDecl, Operation, OperationStart, OperationToken, Recovery, SlotDecl,
-    SlotKind, WellKnownSymbol,
+    Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectValue, Instance, JsResult, JsValue,
+    OperationStart, OperationToken, This,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{Host, Vm};
+use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
 
 pub use case::run_case;
-
-const MATCHER_ACTUAL: usize = 0;
 
 #[derive(Default)]
 pub struct Counters(Mutex<BTreeMap<String, usize>>);
@@ -42,17 +40,27 @@ impl Counters {
 
 pub struct NodeFactory;
 
+#[host_class(tag = "Node", methods, schema = 1, encode = Node::encode_payload, decode = Node::decode_payload)]
 pub struct Node {
     pub label: String,
 }
 
-impl HostClass for Node {
-    const TAG: &'static str = "Node";
-    const PAYLOAD_SCHEMA: Option<u32> = Some(1);
-    const METHODS: &'static [MethodDecl] = &[
-        MethodDecl::new("label", 0, node_label),
-        MethodDecl::symbol(WellKnownSymbol::ToPrimitive, 1, node_to_primitive),
-    ];
+#[methods(Node)]
+impl Node {
+    #[method(name = "label")]
+    fn label(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        let label = this.instance().payload(cx)?.label.clone();
+        Ok(JsValue::string(label))
+    }
+
+    #[method(symbol = ToPrimitive)]
+    fn to_primitive(
+        cx: &mut CallCx<'_>,
+        this: This<Node>,
+        _hint: Option<JsValue>,
+    ) -> JsResult<JsValue> {
+        Self::label(cx, this)
+    }
 
     fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(self.label.as_bytes());
@@ -70,78 +78,62 @@ impl HostClass for Node {
     }
 }
 
-fn node_label(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Node>()?;
-    let label = this.instance().payload(cx)?.label.clone();
-    Ok(JsValue::string(label))
+#[host_class(tag = "Matcher", methods)]
+pub struct Matcher {
+    #[js_slot]
+    actual: JsValue,
 }
 
-fn node_to_primitive(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Node>()?;
-    let label = this.instance().payload(cx)?.label.clone();
-    Ok(JsValue::string(label))
-}
-
-pub struct Matcher;
-
-impl HostClass for Matcher {
-    const TAG: &'static str = "Matcher";
-    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
-        name: "actual",
-        kind: SlotKind::Js,
-    }];
-    const METHODS: &'static [MethodDecl] = &[
-        MethodDecl::new("toBe", 1, matcher_to_be),
-        MethodDecl::new("toEqual", 1, matcher_to_equal),
-        MethodDecl::new("toBeTruthy", 0, matcher_to_be_truthy),
-    ];
-    const ACCESSORS: &'static [yield_vm::binding::AccessorDecl] =
-        &[yield_vm::binding::AccessorDecl::new(
-            "value",
-            Some(matcher_get_value),
-            Some(matcher_set_value),
-        )];
-}
-
-fn matcher_get_value(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Matcher>()?;
-    this.instance().slot(cx, MATCHER_ACTUAL)
-}
-
-fn matcher_set_value(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Matcher>()?;
-    let value = cx.arg(0)?;
-    this.instance().set_slot(cx, MATCHER_ACTUAL, value)?;
-    Ok(JsValue::undefined())
-}
-
-fn matcher_to_be(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Matcher>()?;
-    let actual = this.instance().slot(cx, MATCHER_ACTUAL)?;
-    let expected = cx.arg(0)?;
-    if cx.same_value(&actual, &expected) {
-        return Ok(JsValue::undefined());
+#[methods(Matcher)]
+impl Matcher {
+    #[get(name = "value")]
+    fn get_value(cx: &mut CallCx<'_>, this: This<Matcher>) -> JsResult<JsValue> {
+        this.actual(cx)
     }
-    Err(cx.throw_string(format!("toBe: expected {expected}, actual {actual}")))
-}
 
-fn matcher_to_equal(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Matcher>()?;
-    let actual = this.instance().slot(cx, MATCHER_ACTUAL)?;
-    let expected = cx.arg(0)?;
-    if structural_equal(cx, &actual, &expected) {
-        return Ok(JsValue::undefined());
+    #[set(name = "value")]
+    fn set_value(cx: &mut CallCx<'_>, this: This<Matcher>, value: JsValue) -> JsResult<()> {
+        this.set_actual(cx, value)
     }
-    Err(cx.throw_string(format!("toEqual: expected {expected}, actual {actual}")))
-}
 
-fn matcher_to_be_truthy(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let this = cx.this::<Matcher>()?;
-    let actual = this.instance().slot(cx, MATCHER_ACTUAL)?;
-    if actual.truthy() {
-        return Ok(JsValue::undefined());
+    #[method(name = "toBe")]
+    fn to_be(cx: &mut CallCx<'_>, this: This<Matcher>, expected: Option<JsValue>) -> JsResult<()> {
+        let actual = this.actual(cx)?;
+        let expected = match expected {
+            Some(value) => value,
+            None => cx.arg(0)?,
+        };
+        if cx.same_value(&actual, &expected) {
+            return Ok(());
+        }
+        Err(cx.throw_string(format!("toBe: expected {expected}, actual {actual}")))
     }
-    Err(cx.throw_string(format!("toBeTruthy: expected truthy, actual {actual}")))
+
+    #[method(name = "toEqual")]
+    fn to_equal(
+        cx: &mut CallCx<'_>,
+        this: This<Matcher>,
+        expected: Option<JsValue>,
+    ) -> JsResult<()> {
+        let actual = this.actual(cx)?;
+        let expected = match expected {
+            Some(value) => value,
+            None => cx.arg(0)?,
+        };
+        if structural_equal(cx, &actual, &expected) {
+            return Ok(());
+        }
+        Err(cx.throw_string(format!("toEqual: expected {expected}, actual {actual}")))
+    }
+
+    #[method(name = "toBeTruthy")]
+    fn to_be_truthy(cx: &mut CallCx<'_>, this: This<Matcher>) -> JsResult<()> {
+        let actual = this.actual(cx)?;
+        if actual.truthy() {
+            return Ok(());
+        }
+        Err(cx.throw_string(format!("toBeTruthy: expected truthy, actual {actual}")))
+    }
 }
 
 fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
@@ -195,16 +187,12 @@ fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
     equal(cx, left.clone(), right.clone(), &mut BTreeSet::new())
 }
 
+#[operation(name = "wait", schema = 1, recovery = resume, rejection = "wait rejected", encode = Wait::encode, decode = Wait::decode)]
 pub struct Wait {
     pub label: String,
 }
 
-impl Operation for Wait {
-    const NAME: &'static str = "wait";
-    const SCHEMA: u32 = 1;
-    const RECOVERY: Recovery = Recovery::Resume;
-    const REJECTION: &'static str = "wait rejected";
-
+impl Wait {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(self.label.as_bytes());
         Ok(())
@@ -218,41 +206,59 @@ impl Operation for Wait {
     }
 }
 
-macro_rules! labelled_operation {
-    ($type:ident, $wire:literal, $recovery:expr, $rejection:literal) => {
-        pub struct $type {
-            pub label: String,
-        }
-
-        impl Operation for $type {
-            const NAME: &'static str = $wire;
-            const SCHEMA: u32 = 1;
-            const RECOVERY: Recovery = $recovery;
-            const REJECTION: &'static str = $rejection;
-
-            fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-                out.extend_from_slice(self.label.as_bytes());
-                Ok(())
-            }
-
-            fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-                let label = std::str::from_utf8(input)
-                    .map_err(|_| CodecError::new("operation label is not UTF-8"))?
-                    .to_owned();
-                Ok(Self { label })
-            }
-        }
-    };
+#[operation(name = "pause", schema = 1, recovery = pause, rejection = "pause rejected", encode = Pause::encode, decode = Pause::decode)]
+pub struct Pause {
+    pub label: String,
 }
 
-labelled_operation!(Pause, "pause", Recovery::Pause, "pause rejected");
-labelled_operation!(
-    Reject,
-    "reject",
-    Recovery::Reject,
-    "reject rejected during restore"
-);
-labelled_operation!(Reissue, "reissue", Recovery::Reissue, "reissue rejected");
+impl Pause {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+        out.extend_from_slice(self.label.as_bytes());
+        Ok(())
+    }
+
+    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+        decode_operation_label(input).map(|label| Self { label })
+    }
+}
+
+#[operation(name = "reject", schema = 1, recovery = reject, rejection = "reject rejected during restore", encode = Reject::encode, decode = Reject::decode)]
+pub struct Reject {
+    pub label: String,
+}
+
+impl Reject {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+        out.extend_from_slice(self.label.as_bytes());
+        Ok(())
+    }
+
+    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+        decode_operation_label(input).map(|label| Self { label })
+    }
+}
+
+#[operation(name = "reissue", schema = 1, recovery = reissue, rejection = "reissue rejected", encode = Reissue::encode, decode = Reissue::decode)]
+pub struct Reissue {
+    pub label: String,
+}
+
+impl Reissue {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+        out.extend_from_slice(self.label.as_bytes());
+        Ok(())
+    }
+
+    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+        decode_operation_label(input).map(|label| Self { label })
+    }
+}
+
+fn decode_operation_label(input: &[u8]) -> Result<String, CodecError> {
+    std::str::from_utf8(input)
+        .map(str::to_owned)
+        .map_err(|_| CodecError::new("operation label is not UTF-8"))
+}
 
 pub struct TestHost {
     bindings: Arc<Bindings>,
@@ -344,110 +350,134 @@ impl Host for TestHost {
 }
 
 fn test_bindings(counters: Arc<Counters>) -> Result<Bindings, String> {
-    Bindings::builder()
-        .service("counters", 1, counters)
-        .service("node-factory", 1, NodeFactory)
-        .class::<Node>()
-        .class::<Matcher>()
-        .operation::<Wait>()
-        .operation::<Pause>()
-        .operation::<Reject>()
-        .operation::<Reissue>()
-        .module(
-            ModuleDecl::new("test")
-                .function("inspect", 1, |cx| {
-                    if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
-                        counters.hit("inspect");
-                    }
-                    Ok(JsValue::undefined())
-                })
-                .function("seed", 0, |cx| {
-                    if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
-                        counters.hit("seed");
-                    }
-                    Ok(JsValue::number(10.0))
-                })
-                .function("wait", 1, |cx| {
-                    if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
-                        counters.hit("wait");
-                    }
-                    let arg = cx.arg(0)?;
-                    let label = cx
-                        .string(&arg)?
-                        .to_utf8()
-                        .map_err(|_| cx.type_error("wait requires a valid UTF-16 label"))?;
-                    cx.start_operation(Wait { label })
-                })
-                .function("pause", 1, |cx| {
-                    let arg = cx.arg(0)?;
-                    let label = cx
-                        .string(&arg)?
-                        .to_utf8()
-                        .map_err(|_| cx.type_error("pause requires a valid UTF-16 label"))?;
-                    cx.start_operation(Pause { label })
-                })
-                .function("rejectAfterRestore", 1, |cx| {
-                    let arg = cx.arg(0)?;
-                    let label = cx
-                        .string(&arg)?
-                        .to_utf8()
-                        .map_err(|_| cx.type_error("reject requires a valid UTF-16 label"))?;
-                    cx.start_operation(Reject { label })
-                })
-                .function("reissue", 1, |cx| {
-                    let arg = cx.arg(0)?;
-                    let label = cx
-                        .string(&arg)?
-                        .to_utf8()
-                        .map_err(|_| cx.type_error("reissue requires a valid UTF-16 label"))?;
-                    cx.start_operation(Reissue { label })
-                })
-                .function("bind", 1, |cx| {
-                    let arg = cx.arg(0)?;
-                    let label = cx
-                        .string(&arg)?
-                        .to_utf8()
-                        .map_err(|_| cx.type_error("bind requires a valid UTF-16 label"))?;
-                    let node = cx.alloc(Node { label })?;
-                    Ok(node.value(cx))
-                })
-                .function("setLabel", 2, |cx| {
-                    if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
-                        counters.hit("setLabel");
-                    }
-                    Ok(JsValue::undefined())
-                })
-                .function("expect", 1, |cx| {
-                    if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
-                        counters.hit("expect");
-                    }
-                    let actual = cx.arg(0).unwrap_or_else(|_| JsValue::undefined());
-                    let matcher = cx.alloc(Matcher)?;
-                    if !actual.is_undefined()
-                        && let Some(counters) = cx.service::<Arc<Counters>>("counters")
-                    {
-                        counters.hit("expect:value");
-                    }
-                    matcher.set_slot(cx, MATCHER_ACTUAL, actual)?;
-                    Ok(matcher.value(cx))
-                })
-                .function("assert", 2, |cx| {
-                    let actual = cx.arg(0).unwrap_or_else(|_| JsValue::undefined());
-                    if actual.truthy() {
-                        return Ok(JsValue::undefined());
-                    }
-                    let message = match cx.arg(1) {
-                        Ok(value) => match cx.string(&value) {
-                            Ok(text) => format!(": {text}"),
-                            Err(_) => format!(": {value}"),
-                        },
-                        Err(_) => String::new(),
-                    };
-                    Err(cx
-                        .throw_string(format!("assert: expected truthy, actual {actual}{message}")))
-                }),
-        )
-        .build()
+    host_bindings! {
+        modules: [test],
+        classes: [Node, Matcher],
+        states: [],
+        operations: [Wait, Pause, Reject, Reissue],
+        services: [("counters", 1, counters), ("node-factory", 1, NodeFactory)],
+    }
+}
+
+#[host_module(name = "test")]
+mod test {
+    use super::*;
+
+    #[function(name = "inspect")]
+    fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+            counters.hit("inspect");
+        }
+        Ok(())
+    }
+
+    #[function(name = "seed")]
+    fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+            counters.hit("seed");
+        }
+        Ok(JsValue::number(10.0))
+    }
+
+    #[function(name = "wait")]
+    fn wait(cx: &mut CallCx<'_>, arg: Option<JsValue>) -> JsResult<JsValue> {
+        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+            counters.hit("wait");
+        }
+        let arg = match arg {
+            Some(value) => value,
+            None => cx.arg(0)?,
+        };
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("wait requires a valid UTF-16 label"))?;
+        cx.start_operation(Wait { label })
+    }
+
+    #[function(name = "pause")]
+    fn pause(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("pause requires a valid UTF-16 label"))?;
+        cx.start_operation(Pause { label })
+    }
+
+    #[function(name = "rejectAfterRestore")]
+    fn reject_after_restore(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("reject requires a valid UTF-16 label"))?;
+        cx.start_operation(Reject { label })
+    }
+
+    #[function(name = "reissue")]
+    fn reissue(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("reissue requires a valid UTF-16 label"))?;
+        cx.start_operation(Reissue { label })
+    }
+
+    #[function(name = "bind")]
+    fn bind(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<Instance<Node>> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("bind requires a valid UTF-16 label"))?;
+        cx.alloc(Node { label })
+    }
+
+    #[function(name = "setLabel")]
+    fn set_label(
+        cx: &mut CallCx<'_>,
+        _node: Option<JsValue>,
+        _label: Option<JsValue>,
+    ) -> JsResult<()> {
+        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+            counters.hit("setLabel");
+        }
+        Ok(())
+    }
+
+    #[function(name = "expect")]
+    fn expect(cx: &mut CallCx<'_>, actual: Option<JsValue>) -> JsResult<Instance<Matcher>> {
+        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+            counters.hit("expect");
+        }
+        let actual = actual.unwrap_or_else(JsValue::undefined);
+        let matcher = cx.alloc(Matcher)?;
+        if !actual.is_undefined()
+            && let Some(counters) = cx.service::<Arc<Counters>>("counters")
+        {
+            counters.hit("expect:value");
+        }
+        matcher.set_actual(cx, actual)?;
+        Ok(matcher)
+    }
+
+    #[function(name = "assert")]
+    fn assert(
+        cx: &mut CallCx<'_>,
+        actual: Option<JsValue>,
+        message: Option<JsValue>,
+    ) -> JsResult<()> {
+        let actual = actual.unwrap_or_else(JsValue::undefined);
+        if actual.truthy() {
+            return Ok(());
+        }
+        let message = match message {
+            Some(value) => match cx.string(&value) {
+                Ok(text) => format!(": {text}"),
+                Err(_) => format!(": {value}"),
+            },
+            None => String::new(),
+        };
+        Err(cx.throw_string(format!("assert: expected truthy, actual {actual}{message}")))
+    }
 }
 
 pub(crate) fn compile_options() -> CompileOptions {

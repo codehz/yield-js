@@ -5,11 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::CompileOptions;
-use yield_vm::binding::{
-    Bindings, CodecError, HostClass, HostFault, JsError, JsValue, ModuleDecl, Operation,
-    OperationStart, OperationToken, Recovery, SlotDecl, SlotKind,
+use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationStart, OperationToken};
+use yield_vm::{
+    Bindings, Completion, Host, Instance, JsError, JsResult, JsValue, PromiseState, This, Value,
+    Vm, VmError, host_bindings, host_class, host_module, host_state, methods, operation,
 };
-use yield_vm::{Completion, Host, PromiseState, Value, Vm, VmError};
+
+#[path = "signature_fingerprint.rs"]
+mod signature_fingerprint;
 
 fn options(bindings: &Bindings) -> CompileOptions {
     let mut imports = BTreeMap::new();
@@ -63,62 +66,66 @@ impl Host for StrategyHost {
     }
 }
 
-macro_rules! strategy_operation {
-    ($name:ident, $wire:literal, $recovery:expr, $message:literal) => {
-        struct $name;
+mod strategy_fixture {
+    use super::*;
 
-        impl Operation for $name {
-            const NAME: &'static str = $wire;
-            const SCHEMA: u32 = 1;
-            const RECOVERY: Recovery = $recovery;
-            const REJECTION: &'static str = $message;
+    macro_rules! strategy_operation {
+        ($name:ident, $wire:tt, $recovery:ident, $message:tt) => {
+            #[operation(name = $wire, schema = 1, recovery = $recovery, rejection = $message, encode = $name::encode, decode = $name::decode)]
+            struct $name;
 
-            fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
-                Ok(())
+            impl $name {
+                fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
+                    Ok(())
+                }
+
+                fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+                    Ok(Self)
+                }
             }
+        };
+    }
 
-            fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-                Ok(Self)
-            }
+    strategy_operation!(PauseOperation, "pause", pause, "pause rejected");
+    strategy_operation!(ResumeOperation, "resume", resume, "resume rejected");
+    strategy_operation!(ReissueOperation, "reissue", reissue, "reissue rejected");
+    strategy_operation!(RejectOperation, "reject", reject, "strategy rejected");
+
+    #[host_module(name = "ops")]
+    mod ops {
+        use super::*;
+
+        #[function(name = "pause")]
+        fn pause(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            cx.start_operation(PauseOperation)
         }
-    };
-}
 
-strategy_operation!(PauseOperation, "pause", Recovery::Pause, "pause rejected");
-strategy_operation!(
-    ResumeOperation,
-    "resume",
-    Recovery::Resume,
-    "resume rejected"
-);
-strategy_operation!(
-    ReissueOperation,
-    "reissue",
-    Recovery::Reissue,
-    "reissue rejected"
-);
-strategy_operation!(
-    RejectOperation,
-    "reject",
-    Recovery::Reject,
-    "strategy rejected"
-);
+        #[function(name = "resume")]
+        fn resume(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            cx.start_operation(ResumeOperation)
+        }
 
-fn strategy_bindings() -> Bindings {
-    Bindings::builder()
-        .operation::<PauseOperation>()
-        .operation::<ResumeOperation>()
-        .operation::<ReissueOperation>()
-        .operation::<RejectOperation>()
-        .module(
-            ModuleDecl::new("ops")
-                .function("pause", 0, |cx| cx.start_operation(PauseOperation))
-                .function("resume", 0, |cx| cx.start_operation(ResumeOperation))
-                .function("reissue", 0, |cx| cx.start_operation(ReissueOperation))
-                .function("reject", 0, |cx| cx.start_operation(RejectOperation)),
-        )
-        .build()
+        #[function(name = "reissue")]
+        fn reissue(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            cx.start_operation(ReissueOperation)
+        }
+
+        #[function(name = "reject")]
+        fn reject(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            cx.start_operation(RejectOperation)
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [ops],
+            classes: [],
+            states: [],
+            operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
+            services: [],
+        }
         .expect("strategy bindings")
+    }
 }
 
 #[test]
@@ -142,7 +149,7 @@ export async function run() {
   return seen;
 }
 "#;
-    let bindings = strategy_bindings();
+    let bindings = strategy_fixture::bindings();
     let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
@@ -251,49 +258,57 @@ export async function run() {
     assert_eq!(first, second);
 }
 
-struct Sink;
+mod stale_fixture {
+    use super::*;
 
-impl HostClass for Sink {
-    const TAG: &'static str = "Sink";
-    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
-        name: "value",
-        kind: SlotKind::Js,
-    }];
-}
+    #[host_class(tag = "Sink")]
+    struct Sink {
+        #[js_slot]
+        value: JsValue,
+    }
 
-type Stash = Arc<Mutex<Option<JsValue>>>;
+    type Stash = Arc<Mutex<Option<JsValue>>>;
 
-fn stale_bindings() -> Bindings {
-    Bindings::builder()
-        .service("stash", 1, Arc::new(Mutex::new(None::<JsValue>)))
-        .class::<Sink>()
-        .module(
-            ModuleDecl::new("stale")
-                .function("stash", 1, |cx| {
-                    let value = cx.arg(0)?;
-                    let stash = cx
-                        .service::<Stash>("stash")
-                        .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
-                    *stash.lock().expect("stash lock") = Some(value);
-                    Ok(JsValue::undefined())
-                })
-                .function("unstash", 0, |cx| {
-                    let value = cx
-                        .service::<Stash>("stash")
-                        .and_then(|stash| stash.lock().expect("stash lock").clone())
-                        .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
-                    let sink = cx.alloc(Sink)?;
-                    sink.set_slot(cx, 0, value)?;
-                    Ok(sink.value(cx))
-                }),
-        )
-        .build()
+    #[host_module(name = "stale")]
+    mod stale {
+        use super::*;
+
+        #[function(name = "stash")]
+        fn stash(cx: &mut CallCx<'_>, value: JsValue) -> JsResult<()> {
+            let stash = cx
+                .service::<Stash>("stash")
+                .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
+            *stash.lock().expect("stash lock") = Some(value);
+            Ok(())
+        }
+
+        #[function(name = "unstash")]
+        fn unstash(cx: &mut CallCx<'_>) -> JsResult<Instance<Sink>> {
+            let value = cx
+                .service::<Stash>("stash")
+                .and_then(|stash| stash.lock().expect("stash lock").clone())
+                .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
+            let sink = cx.alloc(Sink)?;
+            sink.set_value(cx, value)?;
+            Ok(sink)
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [stale],
+            classes: [Sink],
+            states: [],
+            operations: [],
+            services: [("stash", 1, Arc::new(Mutex::new(None::<JsValue>)))],
+        }
         .expect("stale bindings")
+    }
 }
 
 #[test]
 fn handles_cannot_cross_calls() {
-    let bindings = stale_bindings();
+    let bindings = stale_fixture::bindings();
     let source = r#"
 import { stash, unstash } from "stale";
 export function run() {
@@ -313,33 +328,76 @@ export function run() {
     );
 }
 
-struct CounterState {
-    count: u32,
-}
+mod counter_fixture {
+    use super::*;
+    use yield_poc::Wait;
 
-impl yield_vm::binding::HostModuleState for CounterState {
-    const MODULE: &'static str = "counter";
-    const PAYLOAD_SCHEMA: u32 = 1;
-
-    fn new() -> Self {
-        Self { count: 0 }
+    #[host_state(module = "counter", schema = 1, init = CounterState::new, encode = CounterState::encode_payload, decode = CounterState::decode_payload)]
+    struct CounterState {
+        count: u32,
     }
 
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(&self.count.to_le_bytes());
-        Ok(())
+    impl CounterState {
+        fn new() -> Self {
+            Self { count: 0 }
+        }
+
+        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+            out.extend_from_slice(&self.count.to_le_bytes());
+            Ok(())
+        }
+
+        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
+            let bytes: [u8; 4] = input
+                .try_into()
+                .map_err(|_| CodecError::new("counter state must be four bytes"))?;
+            Ok(Self {
+                count: u32::from_le_bytes(bytes),
+            })
+        }
     }
 
-    fn decode_payload(
-        input: &[u8],
-        _cx: &mut yield_vm::binding::DecodeCx<'_>,
-    ) -> Result<Self, CodecError> {
-        let bytes: [u8; 4] = input
-            .try_into()
-            .map_err(|_| CodecError::new("counter state must be four bytes"))?;
-        Ok(Self {
-            count: u32::from_le_bytes(bytes),
-        })
+    #[host_module(name = "counter")]
+    mod counter {
+        use super::*;
+
+        #[function(name = "bump")]
+        fn bump(cx: &mut CallCx<'_>) -> JsResult<()> {
+            cx.state::<CounterState>()?.count += 1;
+            Ok(())
+        }
+
+        #[function(name = "value")]
+        fn value(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            Ok(JsValue::number(f64::from(
+                cx.state::<CounterState>()?.count,
+            )))
+        }
+    }
+
+    #[host_module(name = "test")]
+    mod test {
+        use super::*;
+
+        #[function(name = "wait")]
+        fn wait(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+            let label = cx
+                .string(&arg)?
+                .to_utf8()
+                .map_err(|_| cx.type_error("wait requires a valid label"))?;
+            cx.start_operation(Wait { label })
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [counter, test],
+            classes: [],
+            states: [CounterState],
+            operations: [Wait],
+            services: [],
+        }
+        .expect("counter bindings")
     }
 }
 
@@ -356,31 +414,7 @@ export async function run() {
   return value();
 }
 "#;
-    let bindings = Bindings::builder()
-        .state::<CounterState>()
-        .operation::<yield_poc::Wait>()
-        .module(
-            ModuleDecl::new("counter")
-                .function("bump", 0, |cx| {
-                    cx.state::<CounterState>()?.count += 1;
-                    Ok(JsValue::undefined())
-                })
-                .function("value", 0, |cx| {
-                    Ok(JsValue::number(f64::from(
-                        cx.state::<CounterState>()?.count,
-                    )))
-                }),
-        )
-        .module(ModuleDecl::new("test").function("wait", 1, |cx| {
-            let arg = cx.arg(0)?;
-            let label = cx
-                .string(&arg)?
-                .to_utf8()
-                .map_err(|_| cx.type_error("wait requires a valid label"))?;
-            cx.start_operation(yield_poc::Wait { label })
-        }))
-        .build()
-        .expect("counter bindings");
+    let bindings = counter_fixture::bindings();
     let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
@@ -406,51 +440,62 @@ export async function run() {
     );
 }
 
-struct Point {
-    x: f64,
-}
+mod geom_fixture {
+    use super::*;
 
-impl HostClass for Point {
-    const TAG: &'static str = "Point";
-    const PAYLOAD_SCHEMA: Option<u32> = Some(1);
-    const METHODS: &'static [yield_vm::binding::MethodDecl] =
-        &[yield_vm::binding::MethodDecl::new("x", 0, |cx| {
-            let this = cx.this::<Point>()?;
-            Ok(JsValue::number(this.instance().payload(cx)?.x))
-        })];
-
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(&self.x.to_le_bytes());
-        Ok(())
+    #[host_class(tag = "Point", methods, schema = 1, encode = Point::encode_payload, decode = Point::decode_payload)]
+    struct Point {
+        x: f64,
     }
 
-    fn decode_payload(
-        input: &[u8],
-        _cx: &mut yield_vm::binding::DecodeCx<'_>,
-    ) -> Result<Self, CodecError> {
-        let bytes: [u8; 8] = input
-            .try_into()
-            .map_err(|_| CodecError::new("point payload must be eight bytes"))?;
-        Ok(Self {
-            x: f64::from_le_bytes(bytes),
-        })
+    #[methods(Point)]
+    impl Point {
+        #[method(name = "x")]
+        fn x(cx: &mut CallCx<'_>, this: This<Point>) -> JsResult<JsValue> {
+            Ok(JsValue::number(this.instance().payload(cx)?.x))
+        }
+
+        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+            out.extend_from_slice(&self.x.to_le_bytes());
+            Ok(())
+        }
+
+        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
+            let bytes: [u8; 8] = input
+                .try_into()
+                .map_err(|_| CodecError::new("point payload must be eight bytes"))?;
+            Ok(Self {
+                x: f64::from_le_bytes(bytes),
+            })
+        }
+    }
+
+    #[host_module(name = "geom")]
+    mod geom {
+        use super::*;
+
+        #[constructor(name = "Point", class = Point)]
+        fn point(cx: &mut CallCx<'_>, value: JsValue) -> JsResult<Instance<Point>> {
+            let x = cx.number(&value)?;
+            cx.alloc(Point { x })
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [geom],
+            classes: [Point],
+            states: [],
+            operations: [],
+            services: [],
+        }
+        .expect("geometry bindings")
     }
 }
 
 #[test]
 fn declared_constructor_exports_create_class_instances() {
-    let bindings = Bindings::builder()
-        .class::<Point>()
-        .module(
-            ModuleDecl::new("geom").constructor_for::<Point>("Point", 1, |cx| {
-                let value = cx.arg(0)?;
-                let x = cx.number(&value)?;
-                let point = cx.alloc(Point { x })?;
-                Ok(point.value(cx))
-            }),
-        )
-        .build()
-        .expect("geometry bindings");
+    let bindings = geom_fixture::bindings();
     let source = r#"
 import { Point } from "geom";
 export function run() {
@@ -469,24 +514,39 @@ export function run() {
     );
 }
 
-#[test]
-fn class_data_requires_a_declared_payload_schema() {
+mod loose_fixture {
+    use super::*;
+
+    #[host_class(tag = "Loose")]
     struct Loose {
         _n: u32,
     }
 
-    impl HostClass for Loose {
-        const TAG: &'static str = "Loose";
+    #[host_module(name = "loose")]
+    mod loose {
+        use super::*;
+
+        #[function(name = "make")]
+        fn make(cx: &mut CallCx<'_>) -> JsResult<Instance<Loose>> {
+            cx.alloc(Loose { _n: 1 })
+        }
     }
 
-    let bindings = Bindings::builder()
-        .class::<Loose>()
-        .module(ModuleDecl::new("loose").function("make", 0, |cx| {
-            let loose = cx.alloc(Loose { _n: 1 })?;
-            Ok(loose.value(cx))
-        }))
-        .build()
-        .expect("loose bindings");
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [loose],
+            classes: [Loose],
+            states: [],
+            operations: [],
+            services: [],
+        }
+        .expect("loose bindings")
+    }
+}
+
+#[test]
+fn class_data_requires_a_declared_payload_schema() {
+    let bindings = loose_fixture::bindings();
     let source = r#"
 import { make } from "loose";
 export function run() {
@@ -537,82 +597,97 @@ export async function run() {
     );
 }
 
-struct InheritWait;
+mod inherit_fixture {
+    use super::*;
 
-impl Operation for InheritWait {
-    const NAME: &'static str = "inherit-wait";
-    const SCHEMA: u32 = 1;
-    const RECOVERY: Recovery = Recovery::Resume;
+    #[operation(name = "inherit-wait", schema = 1, recovery = resume, encode = InheritWait::encode, decode = InheritWait::decode)]
+    struct InheritWait;
 
-    fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
-        Ok(())
+    impl InheritWait {
+        fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
+            Ok(())
+        }
+
+        fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+            Ok(Self)
+        }
     }
 
-    fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        Ok(Self)
+    #[host_class(tag = "Base", methods)]
+    struct Base {
+        #[js_slot]
+        base: JsValue,
     }
-}
 
-struct Base;
+    #[methods(Base)]
+    impl Base {
+        #[method(name = "read")]
+        fn read(cx: &mut CallCx<'_>, this: This<Base>) -> JsResult<JsValue> {
+            this.base(cx)
+        }
+    }
 
-impl HostClass for Base {
-    const TAG: &'static str = "Base";
-    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
-        name: "base",
-        kind: SlotKind::Js,
-    }];
-    const METHODS: &'static [yield_vm::binding::MethodDecl] =
-        &[yield_vm::binding::MethodDecl::new("read", 0, |cx| {
-            let this = cx.this::<Base>()?;
-            this.instance().slot(cx, 0)
-        })];
-}
+    #[host_class(tag = "Derived", parent = Base, methods)]
+    struct Derived {
+        #[js_slot]
+        value: JsValue,
+    }
 
-struct Derived;
+    #[methods(Derived)]
+    impl Derived {
+        #[method(name = "value")]
+        fn value(cx: &mut CallCx<'_>, this: This<Derived>) -> JsResult<JsValue> {
+            DerivedSlots::value(&this, cx)
+        }
+    }
 
-impl HostClass for Derived {
-    const TAG: &'static str = "Derived";
-    const PARENT: Option<&'static str> = Some("Base");
-    const SLOTS: &'static [SlotDecl] = &[SlotDecl {
-        name: "value",
-        kind: SlotKind::Js,
-    }];
-    const METHODS: &'static [yield_vm::binding::MethodDecl] =
-        &[yield_vm::binding::MethodDecl::new("value", 0, |cx| {
-            let this = cx.this::<Derived>()?;
-            this.instance().slot(cx, 0)
-        })];
+    #[host_module(name = "inherit")]
+    mod inherit {
+        use super::*;
+
+        #[function(name = "wait")]
+        fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            cx.start_operation(InheritWait)
+        }
+
+        #[function(name = "assert")]
+        fn assert(cx: &mut CallCx<'_>, value: JsValue, _message: Option<JsValue>) -> JsResult<()> {
+            if value.truthy() {
+                return Ok(());
+            }
+            Err(cx.throw_string("assert failed".to_owned()))
+        }
+
+        #[constructor(name = "Base", class = Base)]
+        fn base(cx: &mut CallCx<'_>) -> JsResult<Instance<Base>> {
+            let base = cx.alloc(Base)?;
+            base.set_base(cx, JsValue::number(1.0))?;
+            Ok(base)
+        }
+
+        #[constructor(name = "Derived", class = Derived)]
+        fn derived(cx: &mut CallCx<'_>) -> JsResult<Instance<Derived>> {
+            let derived = cx.alloc(Derived)?;
+            derived.set_value(cx, JsValue::number(2.0))?;
+            Ok(derived)
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            modules: [inherit],
+            classes: [Base, Derived],
+            states: [],
+            operations: [InheritWait],
+            services: [],
+        }
+        .expect("derived bindings")
+    }
 }
 
 #[test]
 fn derived_host_classes_inherit_prototypes_and_slot_layout() {
-    let bindings = Bindings::builder()
-        .class::<Base>()
-        .class::<Derived>()
-        .operation::<InheritWait>()
-        .module(
-            ModuleDecl::new("inherit")
-                .function("wait", 0, |cx| cx.start_operation(InheritWait))
-                .function("assert", 2, |cx| {
-                    let value = cx.arg(0)?;
-                    if value.truthy() {
-                        return Ok(JsValue::undefined());
-                    }
-                    Err(cx.throw_string("assert failed".to_owned()))
-                })
-                .constructor_for::<Base>("Base", 0, |cx| {
-                    let base = cx.alloc(Base)?;
-                    base.set_slot(cx, 0, JsValue::number(1.0))?;
-                    Ok(base.value(cx))
-                })
-                .constructor_for::<Derived>("Derived", 0, |cx| {
-                    let derived = cx.alloc(Derived)?;
-                    derived.set_slot(cx, 0, JsValue::number(2.0))?;
-                    Ok(derived.value(cx))
-                }),
-        )
-        .build()
-        .expect("derived bindings");
+    let bindings = inherit_fixture::bindings();
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";
 export async function run() {
@@ -659,4 +734,28 @@ export async function run() {
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::Bool(true))
     );
+}
+
+#[test]
+fn missing_wait_label_counts_call_without_starting_operation() {
+    let source = r#"
+import { wait } from "test";
+export function run() {
+  try {
+    wait();
+  } catch (error) {
+    return error instanceof TypeError;
+  }
+  return false;
+}
+"#;
+    let build = yield_poc::build(source);
+    let mut host = yield_poc::TestHost::default();
+    let mut vm = Vm::new(build, &mut host).expect("create VM");
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).expect("start"),
+        Value::Bool(true)
+    );
+    assert_eq!(host.count("wait"), 1);
+    assert!(host.pending_labels().is_empty());
 }

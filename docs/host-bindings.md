@@ -428,5 +428,7 @@ flowchart TB
 
 尚未实现：脚本 `class` / `extends` / `super`（编译器按首版契约拒绝，因此脚本派生类路径不存在，声明层父类已经可用）；TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。带 `class` 的 `#[constructor]` 导出将类原型用于 `new` 与 `instanceof`。
 
-Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。签名决定 `length` 和绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
+Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。参数位置数（含可选位置）决定声明的 arity，完整签名进入绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
+
+宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
 

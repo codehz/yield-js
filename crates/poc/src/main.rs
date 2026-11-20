@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::compile;
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, JsResult, JsValue, ModuleDecl, Operation, OperationStart,
-    OperationToken, Recovery,
+    Bindings, CallCx, CodecError, JsResult, JsValue, OperationStart, OperationToken,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
+use yield_vm::{host_bindings, host_module, operation};
 
 const SOURCE: &str = r#"
 import { inspect, seed, wait } from 'demo';
@@ -45,15 +45,12 @@ impl DemoCounters {
     }
 }
 
+#[operation(name = "wait", schema = 1, recovery = resume, encode = Wait::encode, decode = Wait::decode)]
 struct Wait {
     label: String,
 }
 
-impl Operation for Wait {
-    const NAME: &'static str = "wait";
-    const SCHEMA: u32 = 1;
-    const RECOVERY: Recovery = Recovery::Resume;
-
+impl Wait {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(self.label.as_bytes());
         Ok(())
@@ -132,41 +129,49 @@ impl Host for DemoHost {
 }
 
 fn demo_bindings(counters: Arc<DemoCounters>) -> Result<Bindings, String> {
-    Bindings::builder()
-        .service("demo-counters", 1, counters)
-        .operation::<Wait>()
-        .module(
-            ModuleDecl::new("demo")
-                .function("inspect", 1, |cx| {
-                    println!("  host call: inspect({:?})", cx.args());
-                    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
-                        counters.hit("inspect");
-                    }
-                    Ok(JsValue::undefined())
-                })
-                .function("seed", 0, |cx| {
-                    println!("  host call: seed()");
-                    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
-                        counters.hit("seed");
-                    }
-                    Ok(JsValue::number(10.0))
-                })
-                .function("wait", 1, wait_call),
-        )
-        .build()
+    host_bindings! {
+        modules: [demo],
+        classes: [],
+        states: [],
+        operations: [Wait],
+        services: [("demo-counters", 1, counters)],
+    }
 }
 
-fn wait_call(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-    let arg = cx.arg(0)?;
-    let label = cx
-        .string(&arg)?
-        .to_utf8()
-        .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
-    println!("  host call: wait({label:?})");
-    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
-        counters.hit("wait");
+#[host_module(name = "demo")]
+mod demo {
+    use super::*;
+
+    #[function(name = "inspect")]
+    fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        println!("  host call: inspect({:?})", cx.args());
+        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+            counters.hit("inspect");
+        }
+        Ok(())
     }
-    cx.start_operation(Wait { label })
+
+    #[function(name = "seed")]
+    fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        println!("  host call: seed()");
+        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+            counters.hit("seed");
+        }
+        Ok(JsValue::number(10.0))
+    }
+
+    #[function(name = "wait")]
+    fn wait(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
+        println!("  host call: wait({label:?})");
+        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+            counters.hit("wait");
+        }
+        cx.start_operation(Wait { label })
+    }
 }
 
 fn compile_options() -> yield_compiler::CompileOptions {
