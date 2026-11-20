@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`、`JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。15 节的未决项仍未全部定案，见文末「首版落地状态」。
+> 当前实现与本文的对应关系：`crates/vm/src/binding.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`、`JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
 
 ## 1. 目标与范围
 
@@ -405,25 +405,25 @@ flowchart TB
 8. **快照确定性。** 同一对象图重复快照产生相同内容；恢复后再次快照与首次一致（时间类状态除外）。
 9. **迁移后的 `test.expect` / `test.assert` / `test.wait`** 在无投影、无字符串分派的路径下通过现有语义用例。
 
-## 15. 未决问题
+## 15. 已决策事项
 
-以下问题在实现前必须有结论；本文不预设答案：
+以下策略作为后续实现基线。它们是设计决策，不代表对应能力已经实现；若与当前代码不一致，以「首版落地状态」中的实现说明为准。
 
-1. **弱引用槽。** 事件监听器、`WeakMap` 式缓存是否需要弱边？若需要，快照语义（弱引用不保活）与可达性遍历如何统一？
-2. **`JsMap` 槽。** 除 `Js` 与 `JsList` 外，是否需要键值集合？键是 `JsValue` 时的快照顺序与相等性如何定义？
-3. **访问器失败时机。** 原型访问器在快照恢复后第一次读取时才校验槽，还是恢复期就执行校验？前者允许惰性，后者失败更早。
-4. **构造器语义。** 是否允许绑定类被 `class extends` 继承？若允许，构造器与 `super` 的槽初始化规则需要明确。
-5. **符号与私有名。** 绑定是否可以用 `Symbol` 作为 JS 可见成员名？如何避免与脚本自建符号冲突？
-6. **C ABI 映射。** 声明如何生成稳定的 C 表；codec 上下文在跨语言边界如何提供服务注册；panic 与 `HostFault` 的映射。
-7. **宏与手写声明的等价性。** 是否要求一切声明都由宏生成，还是允许 builder 手写同一结构？两者必须有同一指纹算法。
-8. **TS 生成范围。** 泛型、重载、回调签名、`this` 类型如何表达；是否允许手工补丁文件。
-9. **payload 编码格式。** 选择哪种二进制格式（自定义、postcard、bincode、CBOR）以及规范性与向后兼容策略。
-10. **大对象与流式 payload。** 是否需要分块编码以限制单次快照内存峰值。
-11. **宿主并发。** 平台回调可能来自其他线程；交付令牌的线程模型、发送边界与顺序保证需要单独定义。
-12. **恢复期资源限制。** 是否需要 payload 大小、嵌套深度和对象数量的上限，以及超限的错误分类。
+1. **弱引用槽与 `JsMap` 槽：暂不增加。** 宿主实例槽维持 `Js` / `JsList`；弱键缓存使用 VM 已有的 `WeakMap`。出现具体绑定需求后再评估是否扩展槽种类。
+2. **访问器失败时机：延迟到脚本访问。** 恢复只做结构和声明校验，不执行 getter/setter 或其他脚本可观察逻辑。
+3. **绑定类继承：允许 `class extends` 并调用 `super`。** 派生类可复用基类构造路径和基类槽初始化；脚本定义的派生类不增加 `HostClass` 槽或 payload。`new.target`、派生实例初始化及非法构造路径须按此约束验证。
+4. **符号成员：支持显式列出的 well-known Symbol。** 声明使用稳定的符号枚举 ID，不接受任意运行期 Symbol；宿主私有状态仍走隐藏槽，不映射为 JS 私有名。
+5. **C ABI：暂缓。** Rust 应用链接 VM、实现 `Host` 并调用平台服务；本库不提供 C ABI 或移动端绑定。若未来需要外部语言直接声明绑定，再单独设计 ABI。
+6. **声明入口：宏是最终用户 API，builder 是过渡/内部实现工具。** 最终由宏生成或校验规范声明结构；不保留公开 builder 作为平行的声明逃生口。codec、operation 等行为可由 Rust trait 实现。
+7. **TypeScript 定义生成：暂缓。** 待声明和签名模型稳定后再确定生成范围，不引入手工补丁机制。
+8. **payload 编码：继续使用自定义 codec。** 不绑定 postcard、bincode 或 CBOR；规范编码、字段顺序、长度与版本规则由 codec 契约明确。
+9. **流式 payload：暂缓。** 维持整段写入/读取接口；只有实测证明峰值内存构成问题时再改为流式 API。
+10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；恢复返回后由 VM 所在线程启动。启动失败按对应 operation 的失败结果处理，不回滚已恢复的 VM。当前 `Vm::restore` 会在返回前调用 `Host::resume_operation`，后续须调整以符合此策略。
+11. **恢复资源限制：暂不由 VM 设通用上限。** 前提是快照仅来自可信本地存档；接入方须在读取/解析前限制文件大小。若快照转为导入、同步或其他不可信输入，必须重新评估解析前的大小、对象数、payload 大小和嵌套深度限制。
 
 ## 16. 首版落地状态
 
 已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌与恢复期重新登记；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
 
-尚未定案或未实现：弱引用槽、`JsMap` 槽、恢复期访问器校验时机、绑定类继承、Symbol 成员名、C ABI、宏生成、TypeScript 定义生成、payload 二进制格式与流式读取、跨线程交付、恢复资源上限。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用；绑定类被脚本 `class extends` 继承的规则仍留待 15 节第 4 项定案。
+尚未实现或需按决策调整：宿主成员使用 well-known Symbol；绑定类继承规则；宏声明入口（当前 builder 仍是实际 API）；恢复成功后再启动 `Resume` / `Reissue` 工作。TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用。
+
