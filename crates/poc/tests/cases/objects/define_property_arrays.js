@@ -3,6 +3,8 @@
 // @fulfill ["wait:array descriptor", 0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const define = Object.defineProperty;
   const describe = Object.getOwnPropertyDescriptor;

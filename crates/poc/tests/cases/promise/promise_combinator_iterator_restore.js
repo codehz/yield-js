@@ -5,6 +5,8 @@
 // @fulfill ["wait:a", 1]
 // @fulfilled "1,2,3:4"
 
+import { wait } from 'test';
+
 export async function run() {
   let reads = 0;
   const result = await Promise.all({

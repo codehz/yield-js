@@ -3,6 +3,8 @@
 // @fulfill ["wait:a",0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   function C() {}
   const b = 2;

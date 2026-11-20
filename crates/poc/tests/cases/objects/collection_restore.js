@@ -2,6 +2,8 @@
 // @restore
 // @fulfill ["wait:collections", null]
 // @fulfilled true
+import { wait } from 'test';
+
 export async function run() {
   const key = {};
   const symbol = Symbol('key');

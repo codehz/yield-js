@@ -3,6 +3,8 @@
 // @fulfill ["wait:a", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const before = globalThis;
   globalThis.marker = 7;

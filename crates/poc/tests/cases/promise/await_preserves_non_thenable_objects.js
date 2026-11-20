@@ -3,6 +3,8 @@
 // @fulfill ["wait:objects", 0]
 // @fulfilled true
 
+import { bind, wait } from 'test';
+
 export async function run() {
   const obj = {value: 7};
   const array = [3];

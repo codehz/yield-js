@@ -3,6 +3,8 @@
 // @fulfill ["wait:boot", 5]
 // @fulfilled true
 
+import { wait } from 'test';
+
 "use strict";
 const early = readLater();
 const hoisted = nestedVar;

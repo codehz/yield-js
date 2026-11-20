@@ -3,6 +3,8 @@
 // @fulfill ["wait:rhs",0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const symbol = Symbol("x");
   function Box() {}

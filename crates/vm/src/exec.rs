@@ -15,7 +15,7 @@ use crate::heap::{
     DescriptorUpdate, ITERATOR_SYMBOL, Object, OwnProperty, Property, TO_PRIMITIVE_SYMBOL,
     object_id,
 };
-use crate::host::{Host, HostReply};
+use crate::host::Host;
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
@@ -238,9 +238,36 @@ impl Vm {
                 frame.write(dst, value)?;
                 Ok(Step::Next)
             }
-            Instr::CallImport { dst, import, args } => {
-                let args = self.read_call_args(frame, &args)?;
-                frame.write(dst, self.call_import(host, import, &args)?)?;
+            Instr::GetImport { dst, import } => {
+                let module = self.imports.get(import.module as usize).ok_or_else(|| {
+                    VmError::InvalidState(format!("import module {} does not exist", import.module))
+                })?;
+                let declared_module = self
+                    .build
+                    .imports
+                    .keys()
+                    .nth(import.module as usize)
+                    .ok_or_else(|| {
+                        VmError::InvalidState(format!(
+                            "import module {} is not declared",
+                            import.module
+                        ))
+                    })?;
+                if declared_module != &module.module {
+                    return Err(VmError::InvalidState(format!(
+                        "import module index {} is inconsistent",
+                        import.module
+                    )));
+                }
+                let value = match import.export {
+                    None => Value::Object(module.namespace),
+                    Some(export) => {
+                        module.values.get(export as usize).cloned().ok_or_else(|| {
+                            VmError::InvalidState(format!("import export {export} does not exist"))
+                        })?
+                    }
+                };
+                frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::CallValue {
@@ -878,6 +905,23 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let mut current = Some(target);
         while let Some(id) = current {
+            if let Object::Native(native) = self.heap.get(id)? {
+                let native_key = native.key.clone();
+                let property = match key {
+                    PropertyKeyRef::String(name) => Some(name.to_owned()),
+                    PropertyKeyRef::JsString(name) => name.to_utf8().ok(),
+                    PropertyKeyRef::Symbol(_) => None,
+                };
+                let Some(property) = property else {
+                    return Ok(Invocation::Value(Value::Undefined));
+                };
+                return match host.get_property(&native_key, &property) {
+                    Ok(value) => Ok(Invocation::Value(self.host_to_value(&value)?)),
+                    Err(crate::host::HostException(value)) => {
+                        Ok(Invocation::Thrown(self.host_to_value(&value)?))
+                    }
+                };
+            }
             let object = self.heap.get(id)?;
             if let Object::Proxy {
                 target, handler, ..
@@ -1375,32 +1419,12 @@ impl Vm {
         Ok(Step::Next)
     }
 
-    fn call_import(
+    pub(crate) fn track_operation(
         &mut self,
-        host: &mut dyn Host,
-        import: u32,
-        args: &[Value],
+        module: String,
+        export: String,
+        operation_id: String,
     ) -> Result<Value, VmError> {
-        let import_name = self
-            .build
-            .imports
-            .get(import as usize)
-            .ok_or_else(|| VmError::InvalidState(format!("import {import} does not exist")))?
-            .name
-            .clone();
-        let host_args = args
-            .iter()
-            .map(|arg| self.to_host_value(arg))
-            .collect::<Result<Vec<_>, _>>()?;
-        match host.call(&import_name, &host_args).map_err(VmError::Host)? {
-            HostReply::Value(value) => self.host_to_value(&value),
-            HostReply::Operation { operation_id } => {
-                self.track_operation(import_name, operation_id)
-            }
-        }
-    }
-
-    fn track_operation(&mut self, import: String, operation_id: String) -> Result<Value, VmError> {
         if operation_id.is_empty() {
             return Err(VmError::Host(
                 "host operation id must not be empty".to_owned(),
@@ -1415,7 +1439,8 @@ impl Vm {
             crate::runtime::PendingOperation {
                 meta: crate::host::PendingOperationMeta {
                     id: operation_id,
-                    import,
+                    module,
+                    export,
                 },
                 promise,
             },

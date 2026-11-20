@@ -12,6 +12,7 @@ mod exec;
 mod frame;
 pub mod heap;
 pub mod host;
+pub mod host_data;
 mod json;
 mod math;
 mod number;
@@ -31,7 +32,7 @@ pub use bytecode::{
 };
 pub use error::VmError;
 pub use heap::{Object, PromiseState};
-pub use host::{Completion, Host, HostReply, PendingOperationMeta};
+pub use host::{Completion, Host, HostException, HostExport, HostReply, PendingOperationMeta};
 pub use regexp::{RegExpFlags, validate_regexp};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, HostValue, JsString, NativeKey, ObjectId, Value};

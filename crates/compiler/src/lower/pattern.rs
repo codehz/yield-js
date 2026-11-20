@@ -18,6 +18,7 @@ enum Pattern<'ast> {
 enum Destination<'ast> {
     Pattern(Pattern<'ast>),
     AssignmentBinding(BindingId),
+    AssignmentImport,
     Member { object: Reg, key: Reg },
 }
 
@@ -39,17 +40,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.write_pattern(destination, value)
     }
 
-    fn assignment_binding(&self, id: &IdentifierReference<'_>) -> Result<BindingId, CompileError> {
+    fn assignment_binding(
+        &self,
+        id: &IdentifierReference<'_>,
+    ) -> Result<Destination<'ast>, CompileError> {
         let name = id.name.as_str();
-        let binding = self.lookup(name).ok_or_else(|| {
-            CompileError::new(
+        if let Some(binding) = self.lookup(name) {
+            self.check_tdz(binding, name, id.span)?;
+            Ok(Destination::AssignmentBinding(binding))
+        } else if self.session.import(name).is_some() {
+            Ok(Destination::AssignmentImport)
+        } else {
+            Err(CompileError::new(
                 self.source_text(),
                 id.span,
                 format!("assignment to unknown binding {name:?}"),
-            )
-        })?;
-        self.check_tdz(binding, name, id.span)?;
-        Ok(binding)
+            ))
+        }
     }
 
     fn prepare_pattern(
@@ -58,7 +65,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Result<Destination<'ast>, CompileError> {
         if let Pattern::Assignment(target) = pattern {
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = target {
-                return Ok(Destination::AssignmentBinding(self.assignment_binding(id)?));
+                return self.assignment_binding(id);
             }
             if let Some(member) = target.as_member_expression() {
                 let (object, key) = self.compile_member_parts(member)?;
@@ -77,6 +84,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match destination {
             Destination::Pattern(pattern) => return self.compile_pattern(pattern, value),
             Destination::AssignmentBinding(binding) => self.put_binding(binding, value),
+            Destination::AssignmentImport => self.emit(Instr::ThrowAssignmentToConst),
             Destination::Member { object, key } => self.emit(Instr::SetMember {
                 object: self.slot(object),
                 key: self.slot(key),
@@ -129,9 +137,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                             self.emit_constant(Constant::String(
                                 property.binding.name.as_str().into(),
                             ))?,
-                            Destination::AssignmentBinding(
-                                self.assignment_binding(&property.binding)?,
-                            ),
+                            self.assignment_binding(&property.binding)?,
                             property.init.as_ref(),
                         ),
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {

@@ -6,6 +6,8 @@
 // @fulfill ["wait:proto", "P"]
 // @fulfilled "seen|Otail|firstProto|PlastProto|"
 
+import { wait } from 'test';
+
 export async function run() {
   const parent = { firstProto: true, seen: true, removed: true, lastProto: true };
   const object = Object.create(parent);

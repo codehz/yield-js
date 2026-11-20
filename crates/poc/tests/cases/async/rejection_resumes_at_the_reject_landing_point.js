@@ -4,6 +4,8 @@
 // @pending []
 // @rejected "boom"
 
+import { inspect, seed, wait } from 'test';
+
 export async function run(input) {
   inspect(input);
   const base = seed();

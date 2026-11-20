@@ -3,6 +3,8 @@
 // @fulfill ["wait:a",0]
 // @fulfilled true
 
+import { seed, wait } from 'test';
+
 export async function run() {
   const v = seed();
   const object = {get x() { throw 3; }};

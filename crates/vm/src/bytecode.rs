@@ -4,7 +4,7 @@
 //! around. All operands are explicit slots. No implicit operand stack is
 //! persisted across an `Await`.
 
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 28;
+pub const BYTECODE_VERSION: u32 = 29;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -108,9 +108,12 @@ pub enum Constant {
     String(JsString),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportDecl {
-    pub name: String,
+    /// Position in the build's sorted module manifest.
+    pub module: u32,
+    /// Position in the module's sorted export set, or `None` for its namespace.
+    pub export: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,10 +202,9 @@ pub enum Instr {
         /// For member read-modify-write, validate the base before converting.
         object: Option<Slot>,
     },
-    CallImport {
+    GetImport {
         dst: Slot,
-        import: u32,
-        args: CallArgs,
+        import: ImportDecl,
     },
     CallValue {
         dst: Slot,
@@ -469,7 +471,7 @@ pub struct Build {
     pub bytecode_version: u32,
     pub build_id: String,
     pub constants: Vec<Constant>,
-    pub imports: Vec<ImportDecl>,
+    pub imports: BTreeMap<String, BTreeSet<String>>,
     pub functions: Vec<Function>,
     /// Compiler script function. It runs once when the VM is created.
     pub script: u32,
@@ -518,7 +520,7 @@ struct DigestInput<'a> {
     bytecode_version: u32,
     execution_revision: u32,
     constants: &'a [Constant],
-    imports: &'a [ImportDecl],
+    imports: &'a BTreeMap<String, BTreeSet<String>>,
     functions: &'a [Function],
     script: u32,
     exports: &'a BTreeMap<String, BindingId>,
@@ -527,7 +529,7 @@ struct DigestInput<'a> {
 impl Build {
     pub fn new(
         constants: Vec<Constant>,
-        imports: Vec<ImportDecl>,
+        imports: BTreeMap<String, BTreeSet<String>>,
         functions: Vec<Function>,
         script: u32,
         exports: BTreeMap<String, BindingId>,
@@ -553,7 +555,7 @@ impl Build {
             bytecode_version: self.bytecode_version,
             // Reject artifacts from older builtin semantics even when their
             // instruction stream and snapshot record layout are unchanged.
-            execution_revision: 5,
+            execution_revision: 6,
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,
@@ -597,16 +599,6 @@ impl Build {
                 && !value.is_finite()
             {
                 return Err(format!("constant {index} is not a finite number"));
-            }
-        }
-
-        let mut import_names = std::collections::BTreeSet::new();
-        for import in &self.imports {
-            if import.name.is_empty() {
-                return Err("empty host import name".to_owned());
-            }
-            if !import_names.insert(import.name.as_str()) {
-                return Err(format!("duplicate host import {:?}", import.name));
             }
         }
 
@@ -813,15 +805,21 @@ impl Build {
                     check_slot(*dst, "ToPropertyKey.dst")?;
                     check_slot(*src, "ToPropertyKey.src")?;
                 }
-                Instr::CallImport { dst, import, args } => {
-                    check_slot(*dst, "CallImport.dst")?;
-                    if *import as usize >= self.imports.len() {
+                Instr::GetImport { dst, import } => {
+                    check_slot(*dst, "GetImport.dst")?;
+                    let Some(exports) = self.imports.values().nth(import.module as usize) else {
                         return Err(format!(
-                            "{location}: CallImport at pc {pc} references import {import}"
+                            "{location}: GetImport at pc {pc} references module {}",
+                            import.module
                         ));
-                    }
-                    for arg in args.slots() {
-                        check_slot(*arg, "CallImport.arg")?;
+                    };
+                    if let Some(export) = import.export
+                        && export as usize >= exports.len()
+                    {
+                        return Err(format!(
+                            "{location}: GetImport at pc {pc} references export {export} of module {}",
+                            import.module
+                        ));
                     }
                 }
                 Instr::CallValue {

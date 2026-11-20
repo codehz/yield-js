@@ -4,6 +4,7 @@ use yield_poc::{TestHost, build};
 use yield_vm::{Completion, HostValue, PromiseState, Snapshot, Value, Vm, VmError};
 
 pub(super) const RUN: &str = r#"
+import { inspect, seed, wait } from "test";
 export async function run(input) {
   inspect(input);
   const base = seed();
@@ -99,6 +100,7 @@ pub(super) fn values_beyond(subject: &[Value], baseline: &[Value]) -> Vec<Value>
 pub(super) fn baseline_at_first_await() -> Snapshot {
     Suspended::start(
         r#"
+import { wait } from "test";
 export async function run() {
   await wait("a");
 }
@@ -113,6 +115,7 @@ export async function run() {
 pub(super) fn baseline_at_second_await() -> Snapshot {
     let mut suspended = Suspended::start(
         r#"
+import { wait } from "test";
 export async function run() {
   await wait("a");
   await wait("b");

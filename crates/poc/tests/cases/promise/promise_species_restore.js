@@ -3,6 +3,8 @@
 // @fulfill ["wait:species", 5]
 // @fulfilled true
 
+import { wait } from 'test';
+
 let constructed;
 function Species(executor) {
   constructed = new Promise(executor);

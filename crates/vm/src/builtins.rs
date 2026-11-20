@@ -28,7 +28,7 @@ use crate::ops;
 use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::string::{StringMethod, StringStatic, utf16_len, utf16_unit};
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{NativeKey, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
@@ -298,6 +298,7 @@ enum Dispatch<'a> {
     Script { func_id: u32, env: ObjectId },
     Builtin(BuiltinCall),
     Bound(&'a BoundObject),
+    Native(NativeKey),
 }
 
 enum Constructor {
@@ -933,6 +934,7 @@ impl Vm {
                 let args = bound.args.iter().cloned().chain(args).collect();
                 self.invoke(host, &target, args, &bound_this)
             }
+            Some(Dispatch::Native(key)) => self.call_native(host, &key, args),
             None => self.throw_type_error("value is not a function"),
         }
     }
@@ -1145,6 +1147,7 @@ impl Vm {
                 Some(Dispatch::Builtin(BuiltinCall::PromiseCallback { id: *id }))
             }
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
+            Object::Native(native) if native.function => Some(Dispatch::Native(native.key.clone())),
             _ => None,
         })
     }
@@ -3141,6 +3144,7 @@ pub(crate) fn is_callable_object(object: &Object) -> bool {
         | Object::Resolution(_)
         | Object::Bound(_)
         | Object::PromiseCallback { .. } => true,
+        Object::Native(native) => native.function,
         Object::BuiltinStatic(function) => static_call(function).is_some(),
         _ => false,
     }

@@ -3,6 +3,8 @@
 // @fulfill ["wait:string-prototype", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const text = String.fromCodePoint(233, 128512, 122);
   const proto = String.prototype;

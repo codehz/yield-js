@@ -166,11 +166,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::ExportAllDeclaration(export) => {
                 Err(unsupported(self.source_text(), export.span, "re-export"))
             }
-            Statement::ImportDeclaration(import) => Err(unsupported(
-                self.source_text(),
-                import.span,
-                "import declaration",
-            )),
+            Statement::ImportDeclaration(_) => Ok(()),
             other => Err(unsupported(
                 self.source_text(),
                 other.span(),

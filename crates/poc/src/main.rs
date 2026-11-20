@@ -3,10 +3,12 @@ use std::error::Error;
 
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::{
-    Completion, Host, HostReply, HostValue, NativeKey, PendingOperationMeta, PromiseState, Vm,
+    Completion, Host, HostExport, HostReply, HostValue, NativeKey, PendingOperationMeta,
+    PromiseState, Vm,
 };
 
 const SOURCE: &str = r#"
+import { inspect, seed, wait } from 'demo';
 export async function run(input) {
   inspect(input);
   const base = seed();
@@ -36,11 +38,20 @@ impl DemoHost {
 }
 
 impl Host for DemoHost {
-    fn has_import(&self, name: &str) -> bool {
-        matches!(name, "inspect" | "seed" | "wait")
+    fn resolve_export(&self, module: &str, export: &str) -> Option<HostExport> {
+        (module == "demo" && matches!(export, "inspect" | "seed" | "wait"))
+            .then_some(HostExport::Function)
     }
 
-    fn call(&mut self, import: &str, args: &[HostValue]) -> Result<HostReply, String> {
+    fn call(
+        &mut self,
+        module: &str,
+        import: &str,
+        args: &[HostValue],
+    ) -> Result<HostReply, String> {
+        if module != "demo" {
+            return Err(format!("unknown host module {module:?}"));
+        }
         println!("  host call: {import}({args:?})");
         self.calls.push((import.to_owned(), args.to_vec()));
         match import {
@@ -58,7 +69,8 @@ impl Host for DemoHost {
                     id.clone(),
                     PendingOperationMeta {
                         id: id.clone(),
-                        import: import.to_owned(),
+                        module: module.to_owned(),
+                        export: import.to_owned(),
                     },
                 );
                 Ok(HostReply::Operation { operation_id: id })
@@ -96,7 +108,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let build = compile(
         SOURCE,
         &CompileOptions {
-            imports: vec!["inspect".into(), "seed".into(), "wait".into()],
+            imports: [(
+                "demo".into(),
+                ["inspect".into(), "seed".into(), "wait".into()].into(),
+            )]
+            .into(),
         },
     )?;
     let function = build.function_named("run").expect("demo entry function");
@@ -180,5 +196,7 @@ fn render_value(value: &HostValue) -> String {
         HostValue::Number(value) => value.to_string(),
         HostValue::String(value) => format!("{value:?}"),
         HostValue::Native(key) => key.to_string(),
+        HostValue::NativeFunction(key) => key.to_string(),
+        HostValue::Data(_) => "<host data>".to_owned(),
     }
 }

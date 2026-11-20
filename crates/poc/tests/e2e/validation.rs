@@ -1,29 +1,37 @@
 //! The loader and snapshot APIs reject invalid inputs and state.
 
-use super::support::{RUN, Suspended, count_delta};
+use super::support::{RUN, Suspended, count_delta, json_round_trip};
 use yield_poc::{TestHost, build};
 use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
-use yield_vm::{Host, HostReply, HostValue, JsString, Object, Value, Vm, VmError};
+use yield_vm::{Completion, Host, HostReply, HostValue, JsString, Object, Value, Vm, VmError};
+use yield_vm::{HostExport, PendingOperationMeta, PromiseState};
 
 #[test]
 fn host_identifiers_require_well_formed_utf16() {
     let mut host = yield_poc::TestHost::default();
     let lone = HostValue::String(JsString::from_units(vec![0xD800]));
-    assert!(host.call("inspect", std::slice::from_ref(&lone)).is_ok());
-    for import in ["wait", "bind"] {
-        assert!(host.call(import, std::slice::from_ref(&lone)).is_err());
+    assert!(
+        host.call("test", "inspect", std::slice::from_ref(&lone))
+            .is_ok()
+    );
+    for export in ["wait", "bind"] {
+        assert!(
+            host.call("test", export, std::slice::from_ref(&lone))
+                .is_err()
+        );
     }
     let pair = HostValue::String("😀".into());
     assert!(
-        matches!(host.call("wait", &[pair]), Ok(HostReply::Operation { operation_id }) if operation_id == "wait:😀")
+        matches!(host.call("test", "wait", &[pair]), Ok(HostReply::Operation { operation_id }) if operation_id == "wait:😀")
     );
 }
 
 #[test]
 fn missing_bindings_and_mismatched_builds_are_rejected_before_execution() {
     let source = r#"
+import { bind, setLabel, wait } from "test";
 export async function run() {
   const node = bind("root");
   setLabel(node, "before");
@@ -134,6 +142,44 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
 }
 
 #[test]
+fn loader_rejects_out_of_range_import_indices() {
+    let mut host = TestHost::default();
+    let mut corrupt = build("import { inspect } from 'test'; inspect(1);");
+    let get_import = corrupt
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.code)
+        .find(|instruction| matches!(instruction, Instr::GetImport { .. }))
+        .expect("GetImport instruction");
+    let Instr::GetImport { import, .. } = get_import else {
+        unreachable!()
+    };
+    import.module = u32::MAX;
+    corrupt.finalize();
+    assert!(matches!(
+        Vm::new(corrupt, &mut host),
+        Err(VmError::InvalidBuild(message)) if message.contains("GetImport") && message.contains("module")
+    ));
+
+    let mut corrupt = build("import { inspect } from 'test'; inspect(1);");
+    let get_import = corrupt
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.code)
+        .find(|instruction| matches!(instruction, Instr::GetImport { .. }))
+        .expect("GetImport instruction");
+    let Instr::GetImport { import, .. } = get_import else {
+        unreachable!()
+    };
+    import.export = Some(u32::MAX);
+    corrupt.finalize();
+    assert!(matches!(
+        Vm::new(corrupt, &mut host),
+        Err(VmError::InvalidBuild(message)) if message.contains("GetImport") && message.contains("export")
+    ));
+}
+
+#[test]
 fn corrupted_snapshot_associations_are_rejected() {
     let mut s = Suspended::start(RUN, vec![]);
     let snapshot = s.snapshot();
@@ -181,6 +227,7 @@ fn loader_rejects_handler_target_inside_its_protected_range() {
 #[test]
 fn restore_rejects_an_environment_the_function_does_not_use() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const live = {n: 7};
   await wait("a");
@@ -218,6 +265,7 @@ export async function run() {
 #[test]
 fn restore_rejects_a_missing_environment_required_by_layout() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const live = {n: 1};
   const alias = () => live;
@@ -239,6 +287,7 @@ export async function run() {
 
 fn suspended_symbol_snapshot() -> (super::support::Suspended, yield_vm::Snapshot) {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const key = Symbol("key");
   const obj = {};
@@ -513,6 +562,7 @@ fn for_in_snapshot_rejects_invalid_cursor_state() {
 #[test]
 fn symbols_never_reach_the_host_call() {
     let source = r#"
+import { inspect } from "test";
 export async function run() {
   return inspect(Symbol("hidden"));
 }
@@ -532,7 +582,7 @@ export async function run() {
 #[test]
 fn script_startup_validates_before_calling_the_host() {
     let mut host = TestHost::default();
-    let mut invalid = build("inspect(1); export function run() {}");
+    let mut invalid = build("import { inspect } from 'test'; inspect(1); export function run() {}");
     *invalid.exports.get_mut("run").unwrap() = u32::MAX;
     invalid.finalize();
     assert!(matches!(
@@ -541,25 +591,86 @@ fn script_startup_validates_before_calling_the_host() {
     ));
 
     let options = yield_compiler::CompileOptions {
-        imports: vec!["inspect".into(), "missing".into()],
+        imports: std::collections::BTreeMap::from([(
+            "test".to_owned(),
+            std::collections::BTreeSet::from(["inspect".to_owned(), "missing".to_owned()]),
+        )]),
     };
-    let missing = yield_compiler::compile("inspect(1);", &options).unwrap();
+    let missing = yield_compiler::compile("import { missing } from 'test';", &options).unwrap();
+    let error = Vm::new(missing, &mut host).expect_err("missing module export is rejected eagerly");
     assert!(
-        matches!(Vm::new(missing, &mut host), Err(VmError::MissingImport(name)) if name == "missing")
+        matches!(error, VmError::MissingImport(detail) if detail.contains("test") && detail.contains("missing"))
     );
     assert_eq!(host.count("inspect"), 0);
 
-    let throws = build("throw 7; inspect(1);");
+    let throws = build("import { inspect } from 'test'; throw 7; inspect(1);");
     assert!(matches!(
         Vm::new(throws, &mut host),
         Err(VmError::Thrown(Value::Number(7.0)))
     ));
     assert_eq!(host.count("inspect"), 0);
 
-    let standalone = build("inspect(2);");
+    let standalone = build("import { inspect } from 'test'; inspect(2);");
     let vm = Vm::new(standalone.clone(), &mut host).unwrap();
     Vm::restore(vm.snapshot(&[]).unwrap(), standalone, &mut host).unwrap();
     assert_eq!(host.count("inspect"), 1);
+}
+
+#[test]
+fn namespace_and_function_import_identity_survive_snapshot_restore() {
+    let source = r#"
+import * as test from "test";
+export async function run() {
+  const wait = test.wait;
+  await wait("identity");
+  return test.wait === wait && test.wait === test.wait && wait === wait;
+}
+"#;
+    let build = build(source);
+    let mut host = ImportTestHost(TestHost::default());
+    let mut vm = Vm::new(build.clone(), &mut host).expect("resolve host imports");
+    let result = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host).expect("suspend");
+    let snapshot = json_round_trip(
+        &vm.snapshot(std::slice::from_ref(&result))
+            .expect("snapshot"),
+    );
+    vm = Vm::restore(snapshot, build, &mut host).expect("restore imports");
+    vm.complete_operation("wait:identity", Completion::Fulfilled(HostValue::Undefined))
+        .expect("complete operation");
+    vm.run_until_idle(&mut host).expect("resume");
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Bool(true))
+    );
+}
+
+#[test]
+fn import_bindings_and_namespace_properties_are_readonly() {
+    let mut host = TestHost::default();
+    let local_write = build("import { wait } from 'test'; wait = 1;");
+    assert!(matches!(
+        Vm::new(local_write, &mut host),
+        Err(VmError::Thrown(_))
+    ));
+    let namespace_write = build("import * as test from 'test'; test.wait = 1;");
+    assert!(matches!(
+        Vm::new(namespace_write, &mut host),
+        Err(VmError::Thrown(_))
+    ));
+}
+
+#[test]
+fn restore_rejects_a_pending_operation_with_a_different_import_binding() {
+    let mut s = Suspended::start(RUN, vec![]);
+    let mut snapshot = s.snapshot();
+    assert_eq!(snapshot.operations[0].module, "test");
+    assert_eq!(snapshot.operations[0].export, "wait");
+    snapshot.operations[0].export = "inspect".to_owned();
+    assert!(matches!(
+        s.restore(snapshot),
+        Err(VmError::MissingOperation(id)) if id == "wait:a"
+    ));
 }
 
 #[test]
@@ -586,6 +697,7 @@ fn build_deserialization_rejects_duplicate_export_names() {
 fn restore_preserves_live_entries_without_replaying_startup() {
     let build = build(
         r#"
+import { inspect, seed } from "test";
 inspect(1);
 let count = seed();
 export { entry as run, count as total };
@@ -658,4 +770,109 @@ export function dropEntry() { entry = 0; }
     ));
     assert_eq!(host.count("inspect"), 1);
     assert_eq!(host.count("seed"), 1);
+}
+
+struct ImportTestHost(TestHost);
+
+impl Host for ImportTestHost {
+    fn resolve_export(&self, module: &str, export: &str) -> Option<HostExport> {
+        if module == "extra" && export == "default" {
+            Some(HostExport::Function)
+        } else if module == "extra" && export == "answer" {
+            Some(HostExport::Value(HostValue::Number(7.0)))
+        } else {
+            self.0.resolve_export(module, export)
+        }
+    }
+
+    fn call(
+        &mut self,
+        module: &str,
+        export: &str,
+        args: &[HostValue],
+    ) -> Result<HostReply, String> {
+        if module == "extra" && export == "default" {
+            assert!(args.is_empty());
+            Ok(HostReply::Value(HostValue::Number(42.0)))
+        } else {
+            self.0.call(module, export, args)
+        }
+    }
+
+    fn report_error(&mut self, error: &Value) {
+        self.0.report_error(error);
+    }
+
+    fn has_native(&self, key: &yield_vm::NativeKey) -> bool {
+        self.0.has_native(key)
+    }
+
+    fn rebuild_operation(&mut self, operation: &PendingOperationMeta) -> bool {
+        self.0.rebuild_operation(operation)
+    }
+}
+
+#[test]
+fn default_imported_function_identity_survives_snapshot_restore() {
+    let options = yield_compiler::CompileOptions {
+        imports: std::collections::BTreeMap::from([
+            (
+                "extra".to_owned(),
+                std::collections::BTreeSet::from(["answer".to_owned(), "default".to_owned()]),
+            ),
+            (
+                "test".to_owned(),
+                std::collections::BTreeSet::from(["wait".to_owned()]),
+            ),
+        ]),
+    };
+    let source = r#"
+import runDefault, { answer } from "extra";
+import * as test from "test";
+export async function run() {
+  const call = runDefault;
+  const wait = test.wait;
+  await wait("default-identity");
+  return call === runDefault && answer === 7 && test.wait === wait && call() === 42;
+}
+"#;
+    let build = yield_compiler::compile(source, &options).expect("compile host imports");
+    let mut host = ImportTestHost(TestHost::default());
+    let mut vm = Vm::new(build, &mut host).expect("resolve host imports");
+    let result = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host).expect("suspend");
+    let snapshot = json_round_trip(
+        &vm.snapshot(std::slice::from_ref(&result))
+            .expect("snapshot"),
+    );
+    let build = vm.build().clone();
+    vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    vm.complete_operation(
+        "wait:default-identity",
+        Completion::Fulfilled(HostValue::Undefined),
+    )
+    .expect("complete operation");
+    vm.run_until_idle(&mut host).expect("resume");
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Bool(true))
+    );
+}
+
+#[test]
+fn imported_functions_cross_the_host_boundary_with_module_identity() {
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(
+        build("import { wait } from 'test'; export function run() { return wait; }"),
+        &mut host,
+    )
+    .expect("resolve host imports");
+    let value = vm.start(&mut host, "run", vec![]).expect("start");
+    assert_eq!(
+        vm.to_host_value(&value).unwrap(),
+        HostValue::NativeFunction(yield_vm::NativeKey {
+            type_name: "test".to_owned(),
+            id: "wait".to_owned(),
+        })
+    );
 }

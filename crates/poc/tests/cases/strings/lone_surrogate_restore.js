@@ -4,6 +4,8 @@
 // @fulfill ["wait:a", {"utf16":[56320]}]
 // @fulfilled {"utf16":[55296,65533,56320]}
 
+import { wait } from 'test';
+
 export async function run(input) {
   const key = "\uD800";
   if (key !== String.fromCharCode(55296) || key !== input) throw "literal or host argument";

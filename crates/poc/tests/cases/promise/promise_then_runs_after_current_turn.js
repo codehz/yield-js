@@ -2,6 +2,8 @@
 // @fulfill ["wait:a", 1]
 // @fulfilled 2
 
+import { wait } from 'test';
+
 export async function run() {
   let v = 1;
   const pending = new Promise(function (resolve) {

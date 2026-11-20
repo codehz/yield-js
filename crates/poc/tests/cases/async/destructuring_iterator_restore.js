@@ -6,6 +6,8 @@
 // @reject ["wait:reject", "boom"]
 // @fulfilled "INNVR7:8|INRboom"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const iterable = {

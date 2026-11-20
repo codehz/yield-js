@@ -12,3 +12,22 @@ fn private_run_is_not_a_case_entrypoint() {
         matches!(vm.get_export("run"), Err(yield_vm::VmError::InvalidState(message)) if message == "unknown export \"run\"")
     );
 }
+
+#[test]
+fn case_matcher_failure_reports_arguments_after_restore() {
+    let source = include_str!("failing_cases/matcher_failure.js");
+    let error = yield_poc::run_case("matcher_failure.js", source).unwrap_err();
+    for detail in ["toBe", "3", "4"] {
+        assert!(error.contains(detail), "{error}");
+    }
+}
+
+#[test]
+fn case_assertion_failure_reports_checkpoint() {
+    let source = r#"// @returns undefined
+import { assert } from 'test';
+export function run() { assert(false, 'checkpoint'); }
+"#;
+    let error = yield_poc::run_case("assertion_failure.js", source).unwrap_err();
+    assert!(error.contains("checkpoint"), "{error}");
+}

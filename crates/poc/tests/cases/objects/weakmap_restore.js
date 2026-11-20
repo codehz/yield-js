@@ -2,6 +2,8 @@
 // @restore
 // @fulfill ["wait:weakmap", null]
 // @fulfilled true
+import { wait } from 'test';
+
 export async function run() {
   const root = {};
   const next = {};

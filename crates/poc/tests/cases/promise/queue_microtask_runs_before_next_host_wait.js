@@ -2,6 +2,8 @@
 // @fulfill ["wait:a", 0]
 // @fulfilled 1
 
+import { wait } from 'test';
+
 export async function run() {
   let v = 0;
   queueMicrotask(function () {

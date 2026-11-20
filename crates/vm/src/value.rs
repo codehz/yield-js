@@ -444,7 +444,7 @@ impl Value {
 
 /// A property key after value-to-key conversion. Strings keep the original
 /// conversion; symbols are their own identity and never coerce to a string.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PropertyKey {
     String(JsString),
     Symbol(SymbolId),
@@ -534,8 +534,8 @@ impl std::fmt::Display for NativeKey {
     }
 }
 
-/// Values that may cross the host boundary. Non-native VM objects are not
-/// exposed: doing so would leak VM heap identities into host state.
+/// Host boundary values. Data projections are input-only and cannot be used
+/// to access the VM heap or to construct a script value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostValue {
@@ -544,5 +544,7 @@ pub enum HostValue {
     Bool(bool),
     Number(f64),
     String(JsString),
+    NativeFunction(NativeKey),
     Native(NativeKey),
+    Data(crate::host_data::HostData),
 }

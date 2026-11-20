@@ -1,5 +1,7 @@
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   let x = 0;
   let skipped = (x &&= await wait("skip"));

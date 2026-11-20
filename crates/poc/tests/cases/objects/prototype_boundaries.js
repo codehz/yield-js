@@ -1,5 +1,7 @@
 // @fulfilled true
 
+import { bind } from 'test';
+
 function throwsTypeError(action) {
   try { action(); return false; } catch (e) { return e.name === "TypeError"; }
 }

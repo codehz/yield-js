@@ -3,6 +3,8 @@
 // @fulfill ["wait:a", 2]
 // @fulfilled 20
 
+import { wait } from 'test';
+
 async function f(a, ...rest) {
   const read = () => rest[0];
   const alias = rest;

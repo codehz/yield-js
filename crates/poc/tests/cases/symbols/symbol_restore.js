@@ -3,6 +3,8 @@
 // @fulfill ["wait:s", 0]
 // @fulfilled 7
 
+import { wait } from 'test';
+
 export async function run() {
   const fresh = Symbol("fresh");
   const registered = Symbol.for("k");

@@ -34,7 +34,7 @@ use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 // JavaScript strings retain arbitrary UTF-16 code units; string maps use pairs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 34;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 35;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -127,7 +127,8 @@ pub struct ContinuationRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingOperationRecord {
     pub id: String,
-    pub import: String,
+    pub module: String,
+    pub export: String,
     pub promise: ObjectId,
 }
 
@@ -144,6 +145,8 @@ pub struct Snapshot {
     #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
+    /// VM-managed module namespaces corresponding to the sorted build manifest.
+    pub imports: Vec<ObjectId>,
     pub script_env: Option<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
     pub random_state: u64,
@@ -165,6 +168,7 @@ impl Snapshot {
             objects: Vec::new(),
             continuations: Vec::new(),
             operations: Vec::new(),
+            imports: Vec::new(),
             globals: BTreeMap::new(),
             roots: BTreeMap::new(),
             script_env: None,
@@ -199,6 +203,9 @@ impl Vm {
         }
         for value in self.globals.values() {
             tracer.mark_value(value)?;
+        }
+        for import in &self.imports {
+            tracer.mark_object(import.namespace)?;
         }
         for operation in self.operations.values() {
             tracer.mark_object(operation.promise)?;
@@ -240,6 +247,7 @@ impl Vm {
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
+        snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
         snapshot.script_env = self.script_env;
         for id in &tracer.objects {
             let object = match self.heap.get(*id)? {
@@ -277,7 +285,8 @@ impl Vm {
         for operation in self.operations.values() {
             snapshot.operations.push(PendingOperationRecord {
                 id: operation.meta.id.clone(),
-                import: operation.meta.import.clone(),
+                module: operation.meta.module.clone(),
+                export: operation.meta.export.clone(),
                 promise: operation.promise,
             });
         }
@@ -320,7 +329,7 @@ impl Vm {
                 snapshot.build_id, build.build_id
             )));
         }
-        Self::check_imports(&build, host)?;
+        let resolved_imports = Self::resolve_imports(&build, host)?;
 
         let mut heap = Heap::new();
         for ObjectRecord { id, mut object } in std::mem::take(&mut snapshot.objects) {
@@ -345,26 +354,35 @@ impl Vm {
             snapshot.symbol_registry.clone(),
             snapshot.next_symbol_id,
         );
-        check_heap_edges(&build, &heap, host)?;
-        require_value_objects(&heap, snapshot.globals.values())?;
+        if snapshot.imports.len() != build.imports.len() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "import namespace count mismatch: snapshot {}, build {}",
+                snapshot.imports.len(),
+                build.imports.len()
+            )));
+        }
+        validate_import_native_records(&build, &snapshot, host)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         for continuation in continuations.values() {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
-        let operations = load_operations(&build, &heap, &snapshot.operations, host)?;
         let builtins = load_roots(&heap, &snapshot.roots)?;
-        validate_jobs(&heap)?;
-        validate_combines(&heap)?;
         let mut vm = Self::restored(
             build,
             heap,
             continuations,
-            operations,
+            BTreeMap::new(),
             snapshot.globals,
             builtins,
             script_env,
         );
+        vm.restore_imports(snapshot.imports, resolved_imports)?;
+        validate_native_import_objects(&vm.heap, &vm.imports)?;
+        check_heap_edges(&vm.build, &vm.heap, host)?;
+        vm.operations = load_operations(&vm.build, &vm.heap, &snapshot.operations, host)?;
+        validate_jobs(&vm.heap)?;
+        validate_combines(&vm.heap)?;
         vm.random_state = snapshot.random_state;
         Ok(vm)
     }
@@ -991,6 +1009,7 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
         if let Object::Native(native) = heap.get(id)?
+            && !(native.function && is_module_function_key(build, &native.key))
             && !host.has_native(&native.key)
         {
             return Err(VmError::MissingNative(native.key.clone()));
@@ -1206,6 +1225,71 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             current = next;
         }
         completed.extend(std::mem::take(&mut path));
+    }
+    Ok(())
+}
+fn is_module_function_key(build: &Build, key: &crate::value::NativeKey) -> bool {
+    build
+        .imports
+        .get(&key.type_name)
+        .is_some_and(|exports| exports.contains(&key.id))
+}
+
+fn validate_import_native_records(
+    build: &Build,
+    snapshot: &Snapshot,
+    host: &dyn Host,
+) -> Result<(), VmError> {
+    let mut identities = BTreeMap::new();
+    for record in &snapshot.objects {
+        if let Object::Native(native) = &record.object {
+            if let Some(previous) =
+                identities.insert((native.key.clone(), native.function), record.id)
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "duplicate native object identity {:?} at {previous} and {}",
+                    native.key, record.id
+                )));
+            }
+            if native.function && is_module_function_key(build, &native.key) {
+                let matches_host = match host.resolve_export(&native.key.type_name, &native.key.id)
+                {
+                    Some(crate::host::HostExport::Function) => true,
+                    Some(crate::host::HostExport::Value(
+                        crate::value::HostValue::NativeFunction(key),
+                    )) => key == native.key,
+                    _ => false,
+                };
+                if !matches_host {
+                    return Err(VmError::MissingNative(native.key.clone()));
+                }
+            } else if !host.has_native(&native.key) {
+                return Err(VmError::MissingNative(native.key.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_native_import_objects(
+    heap: &Heap,
+    imports: &[crate::vm::ImportModule],
+) -> Result<(), VmError> {
+    let mut identities = BTreeMap::new();
+    for import in imports {
+        for value in &import.values {
+            if let Value::Object(id) = value
+                && let Object::Native(native) = heap.get(*id)?
+                && let Some(previous) =
+                    identities.insert((native.key.clone(), native.function), *id)
+                && previous != *id
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "duplicate native import identity {:?}",
+                    native.key
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1540,14 +1624,23 @@ fn load_operations(
                 record.id
             )));
         }
-        if !build
-            .imports
-            .iter()
-            .any(|import| import.name == record.import)
-        {
+        let Some(exports) = build.imports.get(&record.module) else {
             return Err(VmError::InvalidSnapshot(format!(
-                "operation {:?} references missing import {:?}",
-                record.id, record.import
+                "operation {:?} references undeclared import module {:?}",
+                record.id, record.module
+            )));
+        };
+        let Some(_export) = exports.get(&record.export) else {
+            return Err(VmError::InvalidSnapshot(format!(
+                "operation {:?} references undeclared import {}:{}",
+                record.id, record.module, record.export
+            )));
+        };
+        let resolved = host.resolve_export(&record.module, &record.export);
+        if !matches!(resolved, Some(crate::host::HostExport::Function)) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "operation {:?} references non-callable import {}:{}",
+                record.id, record.module, record.export
             )));
         }
         match heap.get(record.promise) {
@@ -1567,7 +1660,8 @@ fn load_operations(
         }
         let meta = PendingOperationMeta {
             id: record.id.clone(),
-            import: record.import.clone(),
+            module: record.module.clone(),
+            export: record.export.clone(),
         };
         if !host.rebuild_operation(&meta) {
             return Err(VmError::MissingOperation(record.id.clone()));

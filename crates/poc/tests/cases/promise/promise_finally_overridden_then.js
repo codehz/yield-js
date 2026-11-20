@@ -3,6 +3,8 @@
 // @fulfill ["wait:cleanup", 8]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const p = Promise.resolve(1);
   const marker = {};

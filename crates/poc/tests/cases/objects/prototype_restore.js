@@ -3,6 +3,8 @@
 // @fulfill ["wait:prototype", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const child = Object.create(Object.create(Object.create(null, {
     value: { value: 21, writable: true },

@@ -3,6 +3,8 @@
 // @fulfill ["wait:properties", 0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 function Descriptors() {}
 
 export async function run() {

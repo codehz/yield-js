@@ -31,7 +31,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
         Vm::new(build.clone(), &mut host).map_err(|error| format!("{name}: vm: {error}"))?;
     let result = vm
         .start(&mut host, "run", args)
-        .map_err(|error| format!("{name}: start: {error}"))?;
+        .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
     vm.run_until_idle(&mut host)
         .map_err(|error| format!("{name}: drain: {error}"))?;
 
@@ -580,9 +580,19 @@ fn format_value(value: &Value) -> String {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => format_number(*value),
-        Value::String(value) => format!("{value:?}"),
+        Value::String(value) => value
+            .to_utf8()
+            .map(|text| format!("{text:?}"))
+            .unwrap_or_else(|_| format!("{value:?}")),
         Value::Symbol(_) => "symbol".to_owned(),
         Value::Object(_) => "object".to_owned(),
+    }
+}
+
+fn format_vm_error(error: &yield_vm::VmError) -> String {
+    match error {
+        yield_vm::VmError::Thrown(value) => format_value(value),
+        other => other.to_string(),
     }
 }
 

@@ -3,6 +3,8 @@
 // @fulfill ["wait:override", 10]
 // @fulfilled "get;get;get;get;then;then;then;then;11,11,11,11"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const gate = wait("override");

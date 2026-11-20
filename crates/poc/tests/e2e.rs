@@ -9,6 +9,7 @@ fn restore_rejects_a_missing_boxed_symbol_payload() {
 
     let build = build(
         r#"
+import { wait } from "test";
 export async function run() {
   const boxed = Object(Symbol("boxed-only"));
   await wait("a");

@@ -6,6 +6,8 @@
 // @fulfill ["wait:again", 0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 function make() {
   let count = 0;
   const target = { value: 7 };

@@ -6,7 +6,9 @@ use oxc::span::GetSpan;
 use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
+use yield_vm::bytecode::{
+    BinaryOp, CallArgs, Constant, ImportDecl, Instr, PropertyDefinition, UnaryOp,
+};
 use yield_vm::{BindingId, JsString};
 
 use super::{FunctionSource, Lowerer, THIS_BINDING};
@@ -300,6 +302,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
+            ValueName::Import(import) => {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetImport {
+                    dst: self.slot(dst),
+                    import,
+                });
+                Ok(dst)
+            }
             ValueName::Undefined => self.emit_undefined(),
             ValueName::Builtin(index) => {
                 let dst = self.alloc_reg()?;
@@ -309,11 +319,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
-            ValueName::NotFirstClass => Err(CompileError::new(
-                self.source_text(),
-                identifier.span,
-                format!("import value {name:?} is not first-class in this PoC"),
-            )),
             ValueName::Unknown => Err(CompileError::new(
                 self.source_text(),
                 identifier.span,
@@ -566,7 +571,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         } else {
             None
         };
-        // Direct calls to known functions or imports may not emit a guard.
         if !exits.is_empty() {
             let end = self.jump();
             let short_circuit = self.pc();
@@ -698,14 +702,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     value
                 }
                 Callee::Import(import) => {
-                    let args = self.compile_arguments(&expression.arguments)?;
-                    let dst = self.alloc_reg()?;
-                    self.emit(Instr::CallImport {
-                        dst: self.slot(dst),
+                    let value = self.alloc_reg()?;
+                    self.emit(Instr::GetImport {
+                        dst: self.slot(value),
                         import,
-                        args,
                     });
-                    return Ok(dst);
+                    value
                 }
                 Callee::Builtin(index) => {
                     let value = self.alloc_reg()?;
@@ -854,13 +856,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Result<Reg, CompileError> {
         if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left {
             let name = identifier.name.as_str();
-            let binding = self.lookup(name).ok_or_else(|| {
-                CompileError::new(
+            let Some(binding) = self.lookup(name) else {
+                if let Some(import) = self.session.import(name) {
+                    return self.compile_import_assignment(expression, import);
+                }
+                return Err(CompileError::new(
                     self.source_text(),
                     identifier.span,
                     format!("assignment to unknown binding {name:?}"),
-                )
-            })?;
+                ));
+            };
             self.check_tdz(binding, name, identifier.span)?;
             if let Some(op) = logical_assignment_operator(expression.operator) {
                 let result = self.alloc_reg()?;
@@ -986,12 +991,55 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         ))
     }
 
+    fn compile_import_assignment(
+        &mut self,
+        expression: &'ast AssignmentExpression<'ast>,
+        import: ImportDecl,
+    ) -> Result<Reg, CompileError> {
+        let old = if matches!(expression.operator, AssignmentOperator::Assign) {
+            None
+        } else {
+            let old = self.alloc_reg()?;
+            self.emit(Instr::GetImport {
+                dst: self.slot(old),
+                import,
+            });
+            Some(old)
+        };
+
+        if let Some(op) = logical_assignment_operator(expression.operator) {
+            let result = old.expect("logical assignment reads the current import value");
+            let end = self.begin_logical_rhs(op, result)?;
+            let _right = self.compile_expression(&expression.right)?;
+            self.emit(Instr::ThrowAssignmentToConst);
+            self.patch_jump(end, self.pc())?;
+            return Ok(result);
+        }
+
+        let right = self.compile_expression(&expression.right)?;
+        let result = if let Some(old) = old {
+            let result = self.alloc_reg()?;
+            self.emit(Instr::Binary {
+                dst: self.slot(result),
+                op: binary_assignment_operator(expression.operator),
+                lhs: self.slot(old),
+                rhs: self.slot(right),
+            });
+            result
+        } else {
+            right
+        };
+        self.emit(Instr::ThrowAssignmentToConst);
+        Ok(result)
+    }
+
     fn compile_update(
         &mut self,
         expression: &'ast UpdateExpression<'ast>,
     ) -> Result<Reg, CompileError> {
         enum Target {
             Binding(BindingId),
+            Import(ImportDecl),
             Member(Reg, Reg),
         }
 
@@ -1002,15 +1050,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             &expression.argument
         {
             let name = identifier.name.as_str();
-            let binding = self.lookup(name).ok_or_else(|| {
-                CompileError::new(
+            if let Some(binding) = self.lookup(name) {
+                self.check_tdz(binding, name, identifier.span)?;
+                Target::Binding(binding)
+            } else if let Some(import) = self.session.import(name) {
+                Target::Import(import)
+            } else {
+                return Err(CompileError::new(
                     self.source_text(),
                     identifier.span,
                     format!("assignment to unknown binding {name:?}"),
-                )
-            })?;
-            self.check_tdz(binding, name, identifier.span)?;
-            Target::Binding(binding)
+                ));
+            }
         } else if let Some(member) = expression.argument.as_member_expression() {
             let (object, key) = self.compile_member_parts(member)?;
             let key = if member.is_computed() {
@@ -1032,6 +1083,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Target::Binding(binding) => self.emit(Instr::GetBinding {
                 dst: self.slot(old),
                 binding: *binding,
+            }),
+            Target::Import(import) => self.emit(Instr::GetImport {
+                dst: self.slot(old),
+                import: *import,
             }),
             Target::Member(object, key) => self.emit(Instr::GetMember {
                 dst: self.slot(old),
@@ -1059,6 +1114,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         });
         match &target {
             Target::Binding(binding) => self.put_binding(*binding, updated),
+            Target::Import(_) => self.emit(Instr::ThrowAssignmentToConst),
             Target::Member(object, key) => self.emit(Instr::SetMember {
                 object: self.slot(*object),
                 key: self.slot(*key),

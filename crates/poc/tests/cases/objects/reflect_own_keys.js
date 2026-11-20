@@ -3,6 +3,8 @@
 // @fulfill ["wait:keys", 0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 function Box() {}
 
 export async function run() {

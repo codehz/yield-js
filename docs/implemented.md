@@ -4,6 +4,8 @@
 
 - 字节码版本、构建 ID 摘要、函数/导入/导出/常量/恢复表/异常表结构校验；导出表拒绝重复公开名，目标必须是初始化函数声明的绑定。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
+- 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主原生函数可作值传递；命名空间由 VM 创建，其导出属性不可写、不可配置。构建记录排序后的模块和导出清单，初始化前解析宿主绑定；快照保留命名空间和原生对象身份，并验证操作的模块及导出名。
+- `test` 宿主模块提供 `expect(actual).toBe(expected)`、`toEqual(expected)`、`toBeTruthy()` 与 `assert(condition, message?)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较只投影普通对象/数组的自有可枚举数据属性，不运行 getter，也不跨 VM 边界暴露堆对象。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。

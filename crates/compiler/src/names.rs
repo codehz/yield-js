@@ -1,36 +1,33 @@
 //! PoC name-resolution policy.
 //!
-//! Locals shadow everything at value and call positions. Host imports are
-//! callable, but not first-class values. Direct script functions are ordinary
-//! mutable bindings. `typeof` still folds an undeclared name to `"undefined"`,
-//! an import to `"function"` even when a local shadows it, and a local that
-//! shadows a direct script function to `"function"`. The live script binding
-//! itself is evaluated so a later assignment is visible. Callers check TDZ
-//! before folding.
+//! Static imports are indexed operands; locals shadow imports and builtins
+//! at value and call positions. `typeof` folds an undeclared name to
+//! `"undefined"`, and preserves the legacy `"function"` fold for a local
+//! shadowing an import. Unshadowed imports evaluate their actual value.
 use std::collections::BTreeMap;
 
 use crate::env::Env;
 use yield_vm::BindingId;
 use yield_vm::bytecode::BUILTINS;
+use yield_vm::bytecode::ImportDecl;
 
 pub(crate) struct Tables<'a> {
-    pub(crate) imports: &'a BTreeMap<String, u32>,
+    pub(crate) imports: &'a BTreeMap<String, ImportDecl>,
     pub(crate) top_level_functions: &'a BTreeMap<String, BindingId>,
 }
 
 pub(crate) enum ValueName {
     Binding(BindingId),
+    Import(ImportDecl),
     Undefined,
-    /// Host import. The PoC rejects reading it as a value.
-    NotFirstClass,
-    /// Index into [`BUILTINS`]. Locals shadow this; the builtin shadows imports.
+    /// Index into [`BUILTINS`]. Locals shadow this.
     Builtin(usize),
     Unknown,
 }
 
 pub(crate) enum Callee {
     Binding(BindingId),
-    Import(u32),
+    Import(ImportDecl),
     Builtin(usize),
     Unknown,
 }
@@ -39,12 +36,12 @@ impl Tables<'_> {
     pub(crate) fn value(&self, env: &Env, name: &str) -> ValueName {
         if let Some(binding) = env.lookup(name) {
             ValueName::Binding(binding)
+        } else if let Some(import) = self.imports.get(name).copied() {
+            ValueName::Import(import)
         } else if name == "undefined" {
             ValueName::Undefined
         } else if let Some(index) = builtin_index(name) {
             ValueName::Builtin(index)
-        } else if self.imports.contains_key(name) {
-            ValueName::NotFirstClass
         } else {
             ValueName::Unknown
         }
@@ -53,10 +50,10 @@ impl Tables<'_> {
     pub(crate) fn callee(&self, env: &Env, name: &str) -> Callee {
         if let Some(binding) = env.lookup(name) {
             Callee::Binding(binding)
-        } else if let Some(index) = builtin_index(name) {
-            Callee::Builtin(index)
         } else if let Some(import) = self.imports.get(name).copied() {
             Callee::Import(import)
+        } else if let Some(index) = builtin_index(name) {
+            Callee::Builtin(index)
         } else {
             Callee::Unknown
         }
@@ -74,7 +71,7 @@ impl Tables<'_> {
         if !known {
             return Some("undefined");
         }
-        if self.imports.contains_key(name) {
+        if self.imports.contains_key(name) && binding.is_some() {
             return Some("function");
         }
         if let Some(function) = self.top_level_functions.get(name).copied()

@@ -3,6 +3,8 @@
 // @fulfill ["wait:key", "first"]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const sym = Symbol("first");
   const other = Symbol("second");

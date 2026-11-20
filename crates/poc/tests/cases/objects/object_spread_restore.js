@@ -3,6 +3,8 @@
 // @fulfill ["wait:source", 7]
 // @fulfilled "before,after|6,7,8"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const result = {

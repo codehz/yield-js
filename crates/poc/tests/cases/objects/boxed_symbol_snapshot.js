@@ -3,6 +3,8 @@
 // @fulfill ["wait:boxed", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const box = Object(Symbol("only reachable through the wrapper"));
   const alias = { box };

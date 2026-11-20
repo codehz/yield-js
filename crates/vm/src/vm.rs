@@ -3,11 +3,36 @@ use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{Heap, PromiseState, ReactionJob};
-use crate::host::{Completion, Host};
+use crate::heap::{Heap, Object, PromiseState, ReactionJob};
+use crate::host::{Completion, Host, HostReply};
 use crate::runtime::{ExecOutcome, Invocation, Microtask, PendingOperation, Settlement};
 use crate::value::{ContinuationId, HostValue, ObjectId, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+#[derive(Debug, Clone)]
+pub(crate) struct ImportModule {
+    pub(crate) module: String,
+    pub(crate) namespace: ObjectId,
+    pub(crate) values: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedImports {
+    pub(crate) modules: Vec<ResolvedModule>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedModule {
+    pub(crate) module: String,
+    pub(crate) exports: Vec<(String, crate::host::HostExport)>,
+}
+
+/// Module namespace exports are visible to enumeration but immutable.
+const IMPORT_EXPORT_ATTRIBUTES: crate::heap::Attributes = crate::heap::Attributes {
+    writable: false,
+    enumerable: true,
+    configurable: false,
+};
 
 #[derive(Debug)]
 pub struct Vm {
@@ -17,6 +42,7 @@ pub struct Vm {
     pub(crate) operations: BTreeMap<String, PendingOperation>,
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<JsString, Value>,
+    pub(crate) imports: Vec<ImportModule>,
     next_continuation_id: ContinuationId,
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
@@ -29,9 +55,10 @@ pub struct Vm {
 impl Vm {
     pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         build.validate().map_err(VmError::InvalidBuild)?;
-        Self::check_imports(&build, host)?;
+        let resolved = Self::resolve_imports(&build, host)?;
         let mut vm = Self::empty(build);
         vm.init_builtins();
+        vm.install_imports(resolved)?;
         vm.run_script(host)?;
         vm.run_until_idle(host)?;
         Ok(vm)
@@ -42,6 +69,7 @@ impl Vm {
             build,
             heap: Heap::new(),
             continuations: BTreeMap::new(),
+            imports: Vec::new(),
             operations: BTreeMap::new(),
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
@@ -53,11 +81,209 @@ impl Vm {
         }
     }
 
-    pub(crate) fn check_imports(build: &Build, host: &dyn Host) -> Result<(), VmError> {
-        for import in &build.imports {
-            if !host.has_import(&import.name) {
-                return Err(VmError::MissingImport(import.name.clone()));
+    pub(crate) fn resolve_imports(
+        build: &Build,
+        host: &dyn Host,
+    ) -> Result<ResolvedImports, VmError> {
+        let mut modules = Vec::with_capacity(build.imports.len());
+        for (module, exports) in &build.imports {
+            let mut resolved = Vec::with_capacity(exports.len());
+            for export in exports {
+                let value = host
+                    .resolve_export(module, export)
+                    .ok_or_else(|| VmError::MissingImport(format!("{module}:{export}")))?;
+                resolved.push((export.clone(), value));
             }
+            modules.push(ResolvedModule {
+                module: module.clone(),
+                exports: resolved,
+            });
+        }
+        Ok(ResolvedImports { modules })
+    }
+
+    fn is_module_export(&self, key: &crate::value::NativeKey) -> bool {
+        self.build
+            .imports
+            .get(&key.type_name)
+            .is_some_and(|exports| exports.contains(&key.id))
+    }
+
+    pub(crate) fn call_native(
+        &mut self,
+        host: &mut dyn Host,
+        key: &crate::value::NativeKey,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
+        let is_export = self.is_module_export(key);
+        let project = is_export && host.project_arguments(&key.type_name, &key.id)
+            || host.project_native_arguments(key);
+        let host_args = args
+            .iter()
+            .map(|arg| {
+                if project {
+                    self.project_argument(arg)
+                } else {
+                    self.to_host_value(arg)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reply = if is_export {
+            host.call(&key.type_name, &key.id, &host_args)
+                .map_err(VmError::Host)?
+        } else {
+            match host.call_native(key, &host_args) {
+                Ok(reply) => reply,
+                Err(crate::host::HostException(value)) => {
+                    return Ok(Invocation::Thrown(self.host_to_value(&value)?));
+                }
+            }
+        };
+        match reply {
+            HostReply::Value(value) => Ok(Invocation::Value(self.host_to_value(&value)?)),
+            HostReply::Throw(message) => Ok(Invocation::Thrown(Value::String(message.into()))),
+            HostReply::Operation { operation_id } => {
+                if !is_export {
+                    return Err(VmError::Host(
+                        "host operation requires a module export".to_owned(),
+                    ));
+                }
+                Ok(Invocation::Value(self.track_operation(
+                    key.type_name.clone(),
+                    key.id.clone(),
+                    operation_id,
+                )?))
+            }
+        }
+    }
+
+    fn import_export_value(
+        &mut self,
+        module: &str,
+        name: &str,
+        export: crate::host::HostExport,
+    ) -> Result<Value, VmError> {
+        match export {
+            crate::host::HostExport::Value(value) => self.host_to_value(&value),
+            crate::host::HostExport::Function => Ok(Value::Object(self.heap.intern_native(
+                crate::value::NativeKey {
+                    type_name: module.to_owned(),
+                    id: name.to_owned(),
+                },
+                true,
+            ))),
+        }
+    }
+
+    fn install_imports(&mut self, resolved: ResolvedImports) -> Result<(), VmError> {
+        for module in resolved.modules {
+            let namespace = self.heap.alloc_plain_with(None);
+            let mut values = Vec::with_capacity(module.exports.len());
+            for (name, export) in module.exports {
+                let value = self.import_export_value(&module.module, &name, export)?;
+                self.heap.define_data(
+                    namespace,
+                    name.as_str(),
+                    value.clone(),
+                    IMPORT_EXPORT_ATTRIBUTES,
+                )?;
+                values.push(value);
+            }
+            self.heap.get_mut(namespace)?.prevent_extensions();
+            self.imports.push(ImportModule {
+                module: module.module,
+                namespace,
+                values,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_imports(
+        &mut self,
+        namespaces: Vec<ObjectId>,
+        resolved: ResolvedImports,
+    ) -> Result<(), VmError> {
+        if namespaces.len() != resolved.modules.len() {
+            return Err(VmError::InvalidSnapshot(
+                "import namespace count mismatch".to_owned(),
+            ));
+        }
+        for (namespace, module) in namespaces.into_iter().zip(resolved.modules) {
+            let object = self.heap.get(namespace)?;
+            if !matches!(object, Object::Plain(_))
+                || object.prototype().is_some()
+                || object.is_extensible()
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "import namespace {} is not frozen with a null prototype",
+                    module.module
+                )));
+            }
+            let mut actual = BTreeMap::new();
+            for key in object.own_keys(false) {
+                let crate::value::PropertyKey::String(name) = key else {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} has a symbol key",
+                        module.module
+                    )));
+                };
+                let Some(property) =
+                    object.own_property(crate::value::PropertyKeyRef::JsString(&name))
+                else {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} lost key {:?}",
+                        module.module, name
+                    )));
+                };
+                if property.attributes() != IMPORT_EXPORT_ATTRIBUTES {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} export {name:?} is not frozen",
+                        module.module
+                    )));
+                }
+                let Some(value) = property.data_value().cloned() else {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} export {name:?} is not a data property",
+                        module.module
+                    )));
+                };
+                if actual.insert(name, value).is_some() {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} has a duplicate key",
+                        module.module
+                    )));
+                }
+            }
+            if actual.len() != module.exports.len() {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "import namespace {} does not have exactly the resolved exports",
+                    module.module
+                )));
+            }
+            let mut values = Vec::with_capacity(module.exports.len());
+            for (name, export) in module.exports {
+                let expected = self.import_export_value(&module.module, &name, export)?;
+                let key = JsString::from(name.as_str());
+                let Some(value) = actual.get(&key) else {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} is missing export {name:?}",
+                        module.module
+                    )));
+                };
+                if value != &expected {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "import namespace {} export {name:?} does not match the host",
+                        module.module
+                    )));
+                }
+                values.push(value.clone());
+            }
+            self.imports.push(ImportModule {
+                module: module.module,
+                namespace,
+                values,
+            });
         }
         Ok(())
     }
@@ -193,7 +419,11 @@ impl Vm {
                 "Symbol values cannot cross the host boundary".to_owned(),
             )),
             Value::Object(id) => match self.heap.get(*id)? {
-                crate::heap::Object::Native(native) => Ok(HostValue::Native(native.key.clone())),
+                crate::heap::Object::Native(native) => Ok(if native.function {
+                    HostValue::NativeFunction(native.key.clone())
+                } else {
+                    HostValue::Native(native.key.clone())
+                }),
                 _ => Err(VmError::InvalidState(format!(
                     "object {id} cannot cross the host boundary"
                 ))),
@@ -215,7 +445,15 @@ impl Vm {
                 Ok(Value::Number(*value))
             }
             HostValue::String(value) => Ok(Value::String(value.clone())),
-            HostValue::Native(key) => Ok(Value::Object(self.heap.intern_native(key.clone()))),
+            HostValue::Native(key) => {
+                Ok(Value::Object(self.heap.intern_native(key.clone(), false)))
+            }
+            HostValue::NativeFunction(key) => {
+                Ok(Value::Object(self.heap.intern_native(key.clone(), true)))
+            }
+            HostValue::Data(_) => Err(VmError::Host(
+                "host data projections cannot be converted into script values".to_owned(),
+            )),
         }
     }
 
@@ -448,6 +686,7 @@ impl Vm {
             operations,
             microtasks: VecDeque::new(),
             globals,
+            imports: Vec::new(),
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             builtins,

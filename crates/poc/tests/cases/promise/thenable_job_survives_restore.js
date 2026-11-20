@@ -3,6 +3,8 @@
 // @fulfill ["wait:thenable", 4]
 // @fulfilled "get;return;then;tick;inner;9"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const obj = {

@@ -117,6 +117,7 @@ pub struct PromiseObject {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeObject {
     pub key: NativeKey,
+    pub function: bool,
 }
 
 /// Lookup stays keyed; the ordinal records creation order, not write order.
@@ -454,6 +455,14 @@ impl OwnProperty<'_> {
             Self::ArrayLength(length, _) => Property::Data(Value::Number(length as f64)),
             Self::StringLength(length) => Property::Data(Value::Number(length as f64)),
             Self::StringIndex(unit) => Property::Data(Value::String(utf16_unit_string(unit))),
+        }
+    }
+
+    pub(crate) fn data_value(&self) -> Option<&Value> {
+        match self {
+            Self::Stored(Property::Data(value), _) => Some(value),
+            Self::Stored(_, _) => None,
+            _ => None,
         }
     }
 
@@ -1853,14 +1862,14 @@ impl Heap {
         self.objects.keys().copied().collect()
     }
 
-    pub(crate) fn intern_native(&mut self, key: NativeKey) -> ObjectId {
+    pub(crate) fn intern_native(&mut self, key: NativeKey, function: bool) -> ObjectId {
         if let Some(id) = self.objects.iter().find_map(|(id, object)| match object {
-            Object::Native(native) if native.key == key => Some(*id),
+            Object::Native(native) if native.key == key && native.function == function => Some(*id),
             _ => None,
         }) {
             return id;
         }
-        self.alloc(Object::Native(NativeObject { key }))
+        self.alloc(Object::Native(NativeObject { key, function }))
     }
 
     pub(crate) fn set_prototype(

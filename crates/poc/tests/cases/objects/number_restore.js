@@ -3,6 +3,8 @@
 // @fulfill ["wait:number", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const constructor = Number;
   const prototype = Number.prototype;

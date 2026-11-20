@@ -1,5 +1,7 @@
 // @fulfilled 31
 
+import { seed } from 'test';
+
 function top() { return 2; }
 
 export async function run() {

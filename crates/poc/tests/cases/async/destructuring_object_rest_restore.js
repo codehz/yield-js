@@ -6,6 +6,8 @@
 // @reject ["wait:reject", "boom"]
 // @fulfilled "CGR7:false:8|CGboom"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const omit = Symbol("omit");

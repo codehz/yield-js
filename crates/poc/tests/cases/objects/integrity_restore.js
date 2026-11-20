@@ -3,6 +3,8 @@
 // @fulfill ["wait:integrity", null]
 // @fulfilled true
 
+import { bind, wait } from 'test';
+
 export async function run() {
   const sym = Symbol("state");
   let state = 0;

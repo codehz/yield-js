@@ -50,7 +50,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Const { .. }
         | Instr::Undefined { .. }
         | Instr::Move { .. }
-        | Instr::CallImport { .. }
+        | Instr::GetImport { .. }
         | Instr::Closure { .. }
         | Instr::NewObject { .. }
         | Instr::NewRegExp { .. }
@@ -110,8 +110,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.extend(object.map(|slot| slot.index));
             defs.insert(dst.index);
         }
-        Instr::CallImport { dst, args, .. } => {
-            uses.extend(args.slots().iter().map(|arg| arg.index));
+        Instr::GetImport { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::CallValue {
@@ -278,10 +277,9 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             src: remap(src),
             object: object.map(remap),
         },
-        Instr::CallImport { dst, import, args } => Instr::CallImport {
+        Instr::GetImport { dst, import } => Instr::GetImport {
             dst: remap(dst),
             import,
-            args: remap_args(args, remap),
         },
         Instr::CallValue {
             dst,

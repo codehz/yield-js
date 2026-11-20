@@ -3,6 +3,8 @@
 // @fulfill ["wait:reflect", 0]
 // @fulfilled true
 
+import { wait } from 'test';
+
 function Base() {}
 Base.prototype = { inherited: 1, get seen() { return this.receiver; } };
 Object.defineProperty(Base.prototype, "locked", { value: 1 });

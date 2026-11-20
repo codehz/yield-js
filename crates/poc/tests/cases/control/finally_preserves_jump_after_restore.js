@@ -3,6 +3,8 @@
 // @fulfill ["wait:a", 0]
 // @fulfilled "f"
 
+import { wait } from 'test';
+
 export async function run() {
   let s = "";
   done: {

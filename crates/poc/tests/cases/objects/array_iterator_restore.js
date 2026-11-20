@@ -3,6 +3,8 @@
 // @fulfill ["wait:a",0]
 // @fulfilled 23
 
+import { wait } from 'test';
+
 export async function run() {
   const it = [1, 2].values();
   if (it.next().value !== 1) {

@@ -92,9 +92,9 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingNative` / `MissingOperation`, `Host`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host failures are `String`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
-- Name policy (`compiler/src/names.rs`): script and local bindings shadow globals and imports at value and call positions. Imports are callable, not first-class values. Preserve the intentional `typeof` fold for imports and locally shadowed top-level function names; an unshadowed top-level function binding is live.
-- Adding a host import used by fixtures means updating `IMPORTS` in `crates/poc/src/lib.rs` and `TestHost::call`. Demo host in `main.rs` is separate (`inspect`, `seed`, `wait` only).
-- `TestHost` semantics: `seed()` → `10`; `wait(label)` → operation id `wait:{label}`; `bind(id)` → `NativeKey { type_name: "Node", id }`; `inspect` / `setLabel` → `undefined`. Failure injection: `fail_import`, `reject_native`, `reject_restore_operation`.
+- Name policy (`compiler/src/names.rs`): script and local bindings shadow globals and static host imports. Host imports are indexed first-class values; calls lower through `GetImport` + `CallValue`. Preserve `typeof` behavior for a local shadowing an import or top-level function; an unshadowed imported value is evaluated.
+- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest. Fixture host exports are in `compile_options()` / `TestHost`; DemoHost in `main.rs` remains separate (`inspect`, `seed`, `wait`).
+- `TestHost` semantics: `seed()` → `10`; `wait(label)` → operation id `wait:{label}`; `bind(id)` → `NativeKey { type_name: "Node", id }`; `inspect` / `setLabel` → `undefined`. `test.expect` / `test.assert` throw catchable script values on failure. Failure injection: `reject_native`, `reject_restore_operation`.
 
 Where to edit:
 
@@ -152,7 +152,7 @@ Case contract (`yield_poc::run_case`):
 - `@args` JSON array, only as the first directive.
 - `@pending ["wait:a"]`, `@restore` (JSON round-trip, then `Vm::restore`), `@fulfill ["wait:a", 2]`, `@reject ["wait:a", "boom"]`.
 - Last directive must be `@returns`, `@fulfilled`, `@rejected`, or `@uncaught`. Scalars only: number, bool, string, `null`, `undefined`. `@uncaught` takes an array and checks the exact ordered list of errors reported to the host.
-- Fixed compile imports: `inspect`, `seed`, `wait`, `bind`, `setLabel`.
+- Fixtures import used host exports explicitly from the static `test` module; the current exports include `inspect`, `seed`, `wait`, `bind`, `setLabel`, `expect`, and `assert`.
 
 Example:
 

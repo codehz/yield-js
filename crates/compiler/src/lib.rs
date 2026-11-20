@@ -31,6 +31,8 @@ mod names;
 mod promote;
 mod session;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use oxc::allocator::Allocator;
 use yield_vm::bytecode::Build;
 
@@ -38,9 +40,9 @@ pub use error::CompileError;
 
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
-    /// Host bindings declared by the build. Missing bindings are rejected by
-    /// the VM before any script code runs.
-    pub imports: Vec<String>,
+    /// Static host module specifiers and available exports. The build retains
+    /// this manifest; the VM resolves it before executing the script.
+    pub imports: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Compiles a strict-mode JavaScript program into a versioned bytecode build.
@@ -50,7 +52,7 @@ pub struct CompileOptions {
 pub fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
     let allocator = Allocator::default();
     let program = frontend::parse(&allocator, source)?;
-    let mut session = session::Session::new(source, options)?;
+    let mut session = session::Session::new(source, options);
     lower::lower_program(&mut session, &program)?;
     session.finish()
 }

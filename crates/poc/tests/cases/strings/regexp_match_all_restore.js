@@ -3,6 +3,8 @@
 // @fulfill ["wait:next", true]
 // @fulfilled "1:1|2:2|done"
 
+import { wait } from 'test';
+
 export async function run() {
   const iterator = "a1b2".matchAll(/(\d)/g);
   let trace = "";

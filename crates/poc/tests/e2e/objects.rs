@@ -8,6 +8,7 @@ use yield_vm::{Completion, HostValue, JsString, Object, PromiseState, Value, VmE
 #[test]
 fn accessor_only_closures_survive_restore_and_bad_descriptors_are_rejected() {
     let source = r#"
+import { seed, wait } from "test";
 function make() {
   let hidden = 2;
   return {
@@ -77,6 +78,7 @@ export async function run() {
 #[test]
 fn unreachable_native_wrappers_do_not_require_rebinding() {
     let source = r#"
+import { bind, wait } from "test";
 export async function run() {
   bind("temporary");
   await wait("a");
@@ -85,12 +87,10 @@ export async function run() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
-    assert!(
-        snapshot
-            .objects
-            .iter()
-            .all(|record| !matches!(record.object, Object::Native(_)))
-    );
+    assert!(snapshot.objects.iter().all(|record| !matches!(
+        &record.object,
+        Object::Native(native) if native.key.type_name == "Node"
+    )));
     s.host.reject_native = true;
     s.restore(snapshot).expect("transient native is not a root");
 }
@@ -98,6 +98,7 @@ export async function run() {
 #[test]
 fn closures_and_their_environment_survive_snapshot() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   let n = 1;
   function step() {
@@ -134,6 +135,7 @@ export async function run() {
 #[test]
 fn object_identity_survives_snapshot() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const obj = { n: 1, list: [2] };
   const alias = obj;
@@ -165,6 +167,7 @@ export async function run() {
 #[test]
 fn restore_validates_internal_prototypes_but_allows_property_cycles() {
     let source = r#"
+import { wait } from "test";
 function Box() {}
 
 export async function run() {
@@ -253,6 +256,7 @@ export async function run() {
 #[test]
 fn restore_allows_reparented_builtin_prototypes_but_rejects_non_null_object_prototype() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const arrayPrototype = Object.getPrototypeOf([]);
   Object.setPrototypeOf(arrayPrototype, null);
@@ -293,6 +297,7 @@ export async function run() {
 #[test]
 fn builtin_roots_and_function_identity_survive_restore() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const then = Promise.prototype.then;
   const fn = demo;
@@ -330,6 +335,7 @@ function demo() {
 #[test]
 fn bound_function_survives_restore() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const captured = 4;
   const fn = function (arg, v) { return captured + this.n + arg.n + v; };
@@ -373,6 +379,7 @@ export async function run() {
 #[test]
 fn restore_rejects_invalid_property_ordinals() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const obj = { z: 1, a: 2 };
   await wait("a");
@@ -406,6 +413,7 @@ export async function run() {
 #[test]
 fn snapshot_deserialization_rejects_duplicate_property_records_and_invalid_units() {
     let source = r#"
+import { wait } from "test";
 export async function run() {
   const obj = { "\uD800": 42 };
   await wait("a");
@@ -446,7 +454,10 @@ export async function run() {
 
 #[test]
 fn restore_rejects_writable_object_prototype() {
-    let mut s = Suspended::start("export async function run() { await wait('a'); }", vec![]);
+    let mut s = Suspended::start(
+        "import { wait } from 'test'; export async function run() { await wait('a'); }",
+        vec![],
+    );
     let snapshot = s.snapshot();
     let index = snapshot
         .objects
@@ -473,7 +484,7 @@ fn restore_rejects_writable_object_prototype() {
 #[test]
 fn restore_rejects_array_index_past_length() {
     let mut s = Suspended::start(
-        "export async function run() { const a = []; Object.defineProperty(a, '9', { value: 4 }); await wait('a'); return a[9]; }",
+        "import { wait } from 'test'; export async function run() { const a = []; Object.defineProperty(a, '9', { value: 4 }); await wait('a'); return a[9]; }",
         vec![],
     );
     let mut snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");
@@ -496,7 +507,7 @@ fn restore_rejects_array_index_past_length() {
 #[test]
 fn snapshot_decode_rejects_invalid_regexp_source_and_flags() {
     let s = Suspended::start(
-        "export async function run() { const re = /foo/g; await wait('a'); return re.test('foo'); }",
+        "import { wait } from 'test'; export async function run() { const re = /foo/g; await wait('a'); return re.test('foo'); }",
         vec![],
     );
     let snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");
@@ -520,7 +531,7 @@ fn snapshot_decode_rejects_invalid_regexp_source_and_flags() {
 #[test]
 fn restore_rejects_corrupt_collection_records() {
     let mut s = Suspended::start(
-        "export async function run() { const m = new Map([[{}, Symbol()]]); const i = m.keys(); const s = new Set([{}]); await wait('a'); return i.next().done || s.size; }",
+        "import { wait } from 'test'; export async function run() { const m = new Map([[{}, Symbol()]]); const i = m.keys(); const s = new Set([{}]); await wait('a'); return i.next().done || s.size; }",
         vec![],
     );
     let snapshot = s.snapshot();
@@ -564,7 +575,7 @@ fn restore_rejects_corrupt_collection_records() {
 #[test]
 fn restore_rejects_malformed_proxy_records() {
     let mut s = Suspended::start(
-        "export async function run() { const p = new Proxy({}, {}); await wait('a'); return p.x; }",
+        "import { wait } from 'test'; export async function run() { const p = new Proxy({}, {}); await wait('a'); return p.x; }",
         vec![],
     );
     let snapshot = s.snapshot();
@@ -611,6 +622,7 @@ fn restore_rejects_malformed_proxy_records() {
 fn weakmap_snapshot_drops_unreachable_entries_and_values() {
     let mut s = Suspended::start(
         r#"
+import { bind, wait } from "test";
 const live = {};
 function makeMap() {
   const a = {};
@@ -636,12 +648,10 @@ export async function run() {
         .expect("reachable WeakMap");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries.values().next(), Some(&Value::Number(7.0)));
-    assert!(
-        snapshot
-            .objects
-            .iter()
-            .all(|record| !matches!(record.object, Object::Native(_)))
-    );
+    assert!(snapshot.objects.iter().all(|record| !matches!(
+        &record.object,
+        Object::Native(native) if native.key.type_name == "Node"
+    )));
     s.host.reject_native = true;
     s.restore(snapshot)
         .expect("weak-only native is not rebound");
@@ -652,7 +662,7 @@ export async function run() {
 #[test]
 fn restore_rejects_dangling_weakmap_entries() {
     let mut s = Suspended::start(
-        "export async function run() { const key = {}; const map = new WeakMap([[key, 1]]); await wait('a'); return map.get(key); }",
+        "import { wait } from 'test'; export async function run() { const key = {}; const map = new WeakMap([[key, 1]]); await wait('a'); return map.get(key); }",
         vec![],
     );
     let snapshot = s.snapshot();

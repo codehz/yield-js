@@ -3,6 +3,8 @@
 // @fulfill ["wait:keys", 0]
 // @fulfilled "Ka;|first|Dgone;Dhidden;PDbefore;|before|Dgone;|gone|Dadded;|added|"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const parent = { before: 1, hidden: 2, gone: 3 };

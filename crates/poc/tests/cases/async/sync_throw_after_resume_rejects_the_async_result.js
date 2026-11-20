@@ -1,6 +1,8 @@
 // @fulfill ["wait:a",1]
 // @rejected "sync boom"
 
+import { wait } from 'test';
+
 function fail() {
   throw "sync boom";
 }

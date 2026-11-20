@@ -50,9 +50,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 
 `for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
 
-名称策略里有一处有意偏差，先不要当疏漏改掉：`typeof` 对被局部遮蔽的 import 或顶层函数仍报 `"function"`（`names.rs`）。这和 design 里「未声明全局的 `typeof` 保持标准语义」不是同一条；未声明且不是 import/顶层函数的名字已经折叠为 `"undefined"`。
-
-宿主 import 目前只能调用，不能当值读取（`import value … is not first-class`）。若验收包要把宿主函数存进变量或传给其它函数，这是阻断项；当前是明确的名称策略，不是漏实现的语法。
+名称策略仍保留一个偏差：`typeof` 对被局部遮蔽的顶层函数折叠为 `"function"`（`names.rs`）。未声明的裸名字折叠为 `"undefined"`。
 
 ## 4. 首版内建还缺的表面
 
@@ -94,7 +92,7 @@ flowchart LR
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造、`with`
 - `class` 与标签模板：首版由离线构建降级。编译器拒绝它们是符合契约的，不是 VM 还欠的语法
-- 离线打包后的单个严格 ESM 模块支持本地命名导出，但不支持模块查找、加载或链接；残留的静态 `import`、`import.meta`、默认导出和再导出均在编译期拒绝。
+- 严格 ESM 支持本地命名导出和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和再导出在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`

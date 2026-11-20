@@ -3,6 +3,8 @@
 // @reject ["wait:a", "boom"]
 // @fulfilled "boom"
 
+import { wait } from 'test';
+
 export async function run() {
   let i = 0;
   try {

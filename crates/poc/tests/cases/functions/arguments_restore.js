@@ -3,6 +3,8 @@
 // @fulfill ["wait:args", 2]
 // @fulfilled true
 
+import { wait } from 'test';
+
 async function f() {
   const alias = arguments;
   const iter = arguments[Symbol.iterator]();

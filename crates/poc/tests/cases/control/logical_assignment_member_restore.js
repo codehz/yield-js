@@ -3,6 +3,8 @@
 // @fulfill ["wait:rhs", 7]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   let original = { v: null };
   let current = original;

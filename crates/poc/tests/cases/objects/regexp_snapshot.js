@@ -3,6 +3,8 @@
 // @fulfill ["wait:regexp", null]
 // @fulfilled true
 
+import { wait } from 'test';
+
 export async function run() {
   const re = /foo/g;
   const sticky = /foo/y;

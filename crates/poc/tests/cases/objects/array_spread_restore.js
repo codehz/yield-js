@@ -3,6 +3,8 @@
 // @fulfill ["wait:a", 7]
 // @fulfilled "1,2,7,8,9"
 
+import { wait } from 'test';
+
 export async function run() {
   const pending = [8, 9].values();
   const partial = [1, ...[2]];

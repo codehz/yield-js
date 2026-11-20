@@ -1,5 +1,18 @@
+use std::collections::{BTreeMap, BTreeSet};
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::Instr;
+
+fn manifest(modules: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+    modules
+        .iter()
+        .map(|(module, exports)| {
+            (
+                (*module).to_owned(),
+                exports.iter().map(|export| (*export).to_owned()).collect(),
+            )
+        })
+        .collect()
+}
 
 const RUN: &str = r#"
 async function run(input) {
@@ -13,10 +26,11 @@ async function run(input) {
 "#;
 
 fn compile_run(source: &str) -> yield_vm::bytecode::Function {
+    let source = format!("import {{ inspect, seed, wait }} from \"test\";\n{source}");
     let build = compile(
-        source,
+        &source,
         &CompileOptions {
-            imports: vec!["inspect".into(), "seed".into(), "wait".into()],
+            imports: manifest(&[("test", &["inspect", "seed", "wait"])]),
         },
     )
     .expect("source compiles");
@@ -391,7 +405,7 @@ struct TdzCase {
     /// Unique substring. The access identifier starts `skip` bytes into it.
     marker: &'static str,
     skip: usize,
-    imports: &'static [&'static str],
+    imports: &'static [(&'static str, &'static [&'static str])],
 }
 
 fn access_at(source: &str, marker: &str, skip: usize) -> (u32, usize, usize) {
@@ -421,7 +435,7 @@ fn rejects_static_use_before_lexical_initialization() {
             name: "seed",
             marker: "seed?.",
             skip: 0,
-            imports: &["seed"],
+            imports: &[("test", &["seed"])],
         },
         TdzCase {
             source: "function run() {\n  x = 1;\n  let x;\n}\n",
@@ -463,7 +477,7 @@ fn rejects_static_use_before_lexical_initialization() {
             name: "inspect",
             marker: "typeof inspect",
             skip: 7,
-            imports: &["inspect"],
+            imports: &[("test", &["inspect"])],
         },
         TdzCase {
             source: "function run() {\n  let x = x;\n}\n",
@@ -513,7 +527,7 @@ fn rejects_static_use_before_lexical_initialization() {
         let error = compile(
             case.source,
             &CompileOptions {
-                imports: case.imports.iter().map(|name| (*name).to_owned()).collect(),
+                imports: manifest(case.imports),
             },
         )
         .expect_err(case.source);
@@ -547,9 +561,9 @@ fn allows_lexical_use_after_initialization_and_cross_closure_read() {
     ];
     for source in sources {
         let imports = if source.contains("inspect") {
-            vec!["inspect".to_owned()]
+            manifest(&[("test", &["inspect"])])
         } else {
-            Vec::new()
+            BTreeMap::new()
         };
         compile(source, &CompileOptions { imports }).expect(source);
     }
@@ -606,12 +620,8 @@ fn rejects_exports_of_unknown_local_bindings() {
             "{ let privateName = 1; }\nexport { privateName };",
             "privateName",
         ),
-        ("\nexport { inspect };", "inspect"),
     ] {
-        let options = CompileOptions {
-            imports: vec!["inspect".into()],
-        };
-        let error = compile(source, &options).unwrap_err();
+        let error = compile(source, &CompileOptions::default()).unwrap_err();
         assert!(
             error.message().contains("unknown export binding"),
             "{error}"
@@ -623,6 +633,19 @@ fn rejects_exports_of_unknown_local_bindings() {
             "{error}"
         );
     }
+}
+
+#[test]
+fn rejects_re_exporting_an_imported_binding() {
+    let error = compile(
+        "import { inspect } from 'test';\nexport { inspect };",
+        &CompileOptions {
+            imports: manifest(&[("test", &["inspect"])]),
+        },
+    )
+    .unwrap_err();
+    assert!(error.message().contains("re-export"), "{error}");
+    assert_eq!(error.line(), 2, "{error}");
 }
 
 #[test]
@@ -650,7 +673,7 @@ fn rejects_unsupported_module_syntax() {
     for (statement, feature) in [
         ("await 1;", "top-level await"),
         ("for await (const value of []) {}", "top-level await"),
-        ("import 'dep';", "import declaration"),
+        ("import 'dep';", "unknown host module"),
         ("import('dep');", "dynamic import"),
         ("import.meta;", "import.meta"),
         ("export default 1;", "default export"),
@@ -668,6 +691,130 @@ fn rejects_unsupported_module_syntax() {
         );
         assert!(error.message().contains(feature), "{error}");
     }
+}
+
+#[test]
+fn lowers_named_default_namespace_and_side_effect_imports() {
+    let imports = manifest(&[("host", &["", "default", "fn", "value"])]);
+    let build = compile(
+        r#"
+import fallback, { fn as call, value as item, "" as empty } from "host";
+import * as host from "host";
+import "host";
+function run() { return call(item, fallback, empty, host.value); }
+"#,
+        &CompileOptions { imports },
+    )
+    .expect("static host imports compile");
+    let run = build.functions.iter().find(|f| f.name == "run").unwrap();
+    assert!(
+        run.code
+            .iter()
+            .any(|ins| matches!(ins, Instr::CallValue { .. }))
+    );
+}
+
+#[test]
+fn rejects_unknown_host_module_and_export_at_import_location() {
+    let imports = manifest(&[("host", &["known"])]);
+    for (source, text) in [
+        ("import { known } from 'missing';", "unknown host module"),
+        ("import { absent } from 'host';", "has no export"),
+    ] {
+        let error = compile(
+            source,
+            &CompileOptions {
+                imports: imports.clone(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.message().contains(text), "{error}");
+        assert!(error.span().start > 0, "{error}");
+    }
+}
+
+#[test]
+fn imported_bindings_are_readonly_and_shadow_normally() {
+    let imports = manifest(&[("host", &["value"])]);
+    let build = compile(
+        "import { value } from 'host'; value = 1;",
+        &CompileOptions {
+            imports: imports.clone(),
+        },
+    )
+    .expect("imports are const; the assignment throws at runtime");
+    assert!(
+        build.functions.iter().any(|function| function
+            .code
+            .iter()
+            .any(|ins| matches!(ins, Instr::ThrowAssignmentToConst))),
+        "assigning an import must lower to a const violation"
+    );
+    compile(
+        "import { value } from 'host'; function run() { let value = 1; return value; }",
+        &CompileOptions { imports },
+    )
+    .expect("local shadowing allowed");
+}
+
+#[test]
+fn imported_values_in_closures_are_direct_operands_not_environment_cells() {
+    let build = compile(
+        "import { value } from 'host'; function run() { return value; }",
+        &CompileOptions {
+            imports: manifest(&[("host", &["value"])]),
+        },
+    )
+    .expect("imported closure reference compiles");
+    let run = build
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    assert!(
+        run.code
+            .iter()
+            .any(|ins| matches!(ins, Instr::GetImport { .. }))
+    );
+    assert!(
+        !run.code
+            .iter()
+            .any(|ins| matches!(ins, Instr::GetBinding { .. }))
+    );
+}
+
+#[test]
+fn imported_assignments_use_const_throws_without_binding_cells() {
+    let build = compile(
+        "import { value } from 'host'; value += 1;",
+        &CompileOptions {
+            imports: manifest(&[("host", &["value"])]),
+        },
+    )
+    .expect("readonly import assignment lowers");
+    let script = build
+        .functions
+        .iter()
+        .find(|function| function.func_id == build.script)
+        .unwrap();
+    assert!(
+        script
+            .code
+            .iter()
+            .any(|ins| matches!(ins, Instr::GetImport { .. }))
+    );
+    assert!(
+        script
+            .code
+            .iter()
+            .any(|ins| matches!(ins, Instr::ThrowAssignmentToConst))
+    );
+    assert!(
+        !script
+            .code
+            .iter()
+            .any(|ins| matches!(ins, Instr::DeclareBinding { .. } | Instr::SetBinding { .. }))
+    );
 }
 
 #[test]

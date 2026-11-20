@@ -6,6 +6,8 @@
 // @fulfill ["wait:finally", 0]
 // @fulfilled "123C"
 
+import { wait } from 'test';
+
 export async function run() {
   let trace = "";
   const array = [1, 2];

@@ -168,6 +168,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let length = self.compile_parameters(source)?;
         match source {
             FunctionSource::Script(statements) => {
+                self.init_imports(statements)?;
                 self.hoist_script(statements)?;
                 self.collect_exports(statements)?;
                 for statement in statements {
@@ -561,6 +562,56 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
+    /// Validate and register static host imports before any body lowering,
+    /// so nested functions can emit direct indexed operands.
+    fn init_imports(&mut self, statements: &[Statement<'_>]) -> Result<(), CompileError> {
+        use ImportDeclarationSpecifier::*;
+
+        for statement in statements {
+            let Statement::ImportDeclaration(import) = statement else {
+                continue;
+            };
+            if import.phase.is_some() || import.with_clause.is_some() {
+                return Err(unsupported(
+                    self.source_text(),
+                    import.span,
+                    "import phases or attributes",
+                ));
+            }
+            let Some(module) = import.source.value.as_str() else {
+                return Err(unsupported(
+                    self.source_text(),
+                    import.source.span,
+                    "non-string module specifier",
+                ));
+            };
+            let module_span = import.source.span;
+            let specifiers = import
+                .specifiers
+                .as_ref()
+                .map(|items| items.as_slice())
+                .unwrap_or(&[]);
+            if specifiers.is_empty() {
+                // Resolution is the only effect: host modules have no script body.
+                self.session.resolve_import(module, module_span, None)?;
+            }
+            for specifier in specifiers {
+                let local = specifier.local();
+                let export = match specifier {
+                    ImportSpecifier(specifier) => Some((
+                        specifier.imported.name().as_str(),
+                        specifier.imported.span(),
+                    )),
+                    ImportDefaultSpecifier(specifier) => Some(("default", specifier.span)),
+                    ImportNamespaceSpecifier(_) => None,
+                };
+                let import = self.session.resolve_import(module, module_span, export)?;
+                self.session.bind_import(local.name.as_str(), import);
+            }
+        }
+        Ok(())
+    }
+
     fn collect_exports(&mut self, statements: &[Statement<'_>]) -> Result<(), CompileError> {
         for statement in statements {
             match statement {
@@ -617,6 +668,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.source_text(),
                 public_span,
                 "default export",
+            ));
+        }
+        if self.session.is_import(local) {
+            return Err(unsupported(
+                self.source_text(),
+                local_span,
+                "re-export of an imported binding",
             ));
         }
         let binding = self.env.lookup(local).ok_or_else(|| {
@@ -1007,6 +1065,12 @@ fn collect_stmt<'ast>(
         _ => {}
     }
     match statement {
+        Statement::ImportDeclaration(import) => {
+            for specifier in import.specifiers.iter().flatten() {
+                let local = specifier.local();
+                add_lexical(source, lexical, local.name.as_str(), local.span)?;
+            }
+        }
         Statement::BlockStatement(block) => {
             merge_vars(vars, collect_list(source, &block.body, false, functions)?);
         }
