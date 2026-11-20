@@ -1,7 +1,7 @@
 //! Synchronous execution checks do not require a suspension harness.
 
 use yield_poc::{TestHost, build};
-use yield_vm::{HostValue, Value, Vm, VmError};
+use yield_vm::{JsValue, Value, Vm, VmError};
 
 #[test]
 fn finally_completion_overrides_return_and_throw() {
@@ -91,7 +91,7 @@ export function run(n) {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).expect("bindings");
     let result = vm
-        .start(&mut host, "run", vec![HostValue::Number(5.0)])
+        .start(&mut host, "run", vec![JsValue::number(5.0)])
         .expect("start");
     assert!(matches!(
         vm.promise_state(&result),

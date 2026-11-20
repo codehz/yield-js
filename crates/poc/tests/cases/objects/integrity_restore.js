@@ -33,6 +33,7 @@ export async function run() {
   const promise = Object.freeze(Promise.resolve(9));
   const fn = Object.freeze(function () { return 10; });
   const native = bind("integrity");
+  Object.freeze(native);
   await wait("integrity");
 
   if (Object.isExtensible(fixed) || Object.isSealed(fixed) || Object.isFrozen(fixed)) return false;

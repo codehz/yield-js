@@ -14,7 +14,7 @@ export async function run() {
   expect({ result: [2] }).toEqual({ result: [2] });
   const compare = matcher.toEqual;
   const result = await wait('a');
-  compare({ result: [result] });
+  matcher.toEqual({ result: [result] });
   expect(result).toBe(2);
   return result;
 }

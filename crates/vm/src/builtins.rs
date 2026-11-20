@@ -28,7 +28,7 @@ use crate::ops;
 use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::string::{StringMethod, StringStatic, utf16_len, utf16_unit};
-use crate::value::{NativeKey, ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
@@ -295,14 +295,21 @@ pub(crate) enum BuiltinCall {
 }
 
 enum Dispatch<'a> {
-    Script { func_id: u32, env: ObjectId },
+    Script {
+        func_id: u32,
+        env: ObjectId,
+    },
     Builtin(BuiltinCall),
     Bound(&'a BoundObject),
-    Native(NativeKey),
+    Native {
+        target: crate::binding::NativeTarget,
+        constructable: bool,
+    },
 }
 
 enum Constructor {
     Script { func_id: u32, env: ObjectId },
+    Native(crate::binding::NativeTarget),
     Promise,
     Object,
     String,
@@ -934,7 +941,9 @@ impl Vm {
                 let args = bound.args.iter().cloned().chain(args).collect();
                 self.invoke(host, &target, args, &bound_this)
             }
-            Some(Dispatch::Native(key)) => self.call_native(host, &key, args),
+            Some(Dispatch::Native { target, .. }) => {
+                self.call_host(host, target, args, receiver, false)
+            }
             None => self.throw_type_error("value is not a function"),
         }
     }
@@ -947,6 +956,10 @@ impl Vm {
             {
                 Some(Constructor::Script { func_id, env })
             }
+            Some(Dispatch::Native {
+                target,
+                constructable: true,
+            }) => Some(Constructor::Native(target)),
             Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
             Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
             Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => Some(Constructor::String),
@@ -1023,6 +1036,9 @@ impl Vm {
                     }
                     result => Ok(result),
                 };
+            }
+            Constructor::Native(target) => {
+                return self.call_host(host, target, args, &Value::Undefined, true);
             }
             Constructor::Promise => {
                 return self.construct_promise(host, args, prototype);
@@ -1147,7 +1163,10 @@ impl Vm {
                 Some(Dispatch::Builtin(BuiltinCall::PromiseCallback { id: *id }))
             }
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
-            Object::Native(native) if native.function => Some(Dispatch::Native(native.key.clone())),
+            Object::Native(native) => Some(Dispatch::Native {
+                target: native.target,
+                constructable: native.constructable,
+            }),
             _ => None,
         })
     }
@@ -1721,7 +1740,7 @@ impl Vm {
             return self.invoke(host, receiver, args.collect(), &this_arg);
         }
         let target = match *receiver {
-            Value::Object(id) if self.heap.function(id).is_some() => id,
+            Value::Object(id) if self.heap.get(id).is_ok_and(is_callable_object) => id,
             _ => {
                 return self.throw_type_error("incompatible Function receiver");
             }
@@ -3033,7 +3052,8 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<(), VmError> {
         if let Invocation::Thrown(error) = self.invoke(host, &function, args, &Value::Undefined)? {
-            host.report_error(&error);
+            let error = self.host_value(error);
+            host.report_error(error);
         }
         Ok(())
     }
@@ -3144,7 +3164,7 @@ pub(crate) fn is_callable_object(object: &Object) -> bool {
         | Object::Resolution(_)
         | Object::Bound(_)
         | Object::PromiseCallback { .. } => true,
-        Object::Native(native) => native.function,
+        Object::Native(_) => true,
         Object::BuiltinStatic(function) => static_call(function).is_some(),
         _ => false,
     }

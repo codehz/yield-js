@@ -1,13 +1,29 @@
 use crate::JsString;
+use crate::binding::{Bindings, ExportDecl, ExportId, JsError, JsValue, NativeTarget};
 use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{Heap, Object, PromiseState, ReactionJob};
-use crate::host::{Completion, Host, HostReply};
-use crate::runtime::{ExecOutcome, Invocation, Microtask, PendingOperation, Settlement};
-use crate::value::{ContinuationId, HostValue, ObjectId, Value};
+use crate::host::{Completion, Host};
+use crate::runtime::{
+    ExecOutcome, HostInstance, Invocation, Microtask, PendingOperation, Settlement,
+};
+use crate::value::{ContinuationId, ObjectId, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static NEXT_EPOCH: AtomicU32 = AtomicU32::new(1);
+
+fn next_epoch() -> u32 {
+    loop {
+        let epoch = NEXT_EPOCH.fetch_add(1, Ordering::Relaxed);
+        if epoch != 0 {
+            return epoch;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ImportModule {
@@ -21,10 +37,16 @@ pub(crate) struct ResolvedImports {
     pub(crate) modules: Vec<ResolvedModule>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedExport {
+    Function(ExportId),
+    Constant,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedModule {
     pub(crate) module: String,
-    pub(crate) exports: Vec<(String, crate::host::HostExport)>,
+    pub(crate) exports: Vec<(String, ResolvedExport)>,
 }
 
 /// Module namespace exports are visible to enumeration but immutable.
@@ -34,15 +56,48 @@ const IMPORT_EXPORT_ATTRIBUTES: crate::heap::Attributes = crate::heap::Attribute
     configurable: false,
 };
 
+/// A pending operation as exposed to the host after a call or restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOperationInfo {
+    pub token: crate::binding::OperationToken,
+    pub name: String,
+    pub schema: u32,
+    pub recovery: crate::binding::Recovery,
+    pub state: Vec<u8>,
+}
+
+/// State assembled by restore before publication.
+pub(crate) struct RestoredState {
+    pub(crate) heap: Heap,
+    pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
+    pub(crate) operations: BTreeMap<u64, PendingOperation>,
+    pub(crate) class_prototypes: Vec<ObjectId>,
+    pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
+    pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
+    pub(crate) globals: BTreeMap<JsString, Value>,
+    pub(crate) builtins: BuiltinRoots,
+    pub(crate) script_env: Option<ObjectId>,
+}
+
 #[derive(Debug)]
 pub struct Vm {
     pub(crate) build: Build,
+    pub(crate) bindings: Arc<Bindings>,
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
-    pub(crate) operations: BTreeMap<String, PendingOperation>,
+    pub(crate) operations: BTreeMap<u64, PendingOperation>,
     pub(crate) microtasks: VecDeque<Microtask>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) imports: Vec<ImportModule>,
+    /// Class tag id to the VM-owned prototype object.
+    pub(crate) class_prototypes: Vec<ObjectId>,
+    /// Hidden slots and payloads keyed by the ordinary object that owns them.
+    pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
+    /// Per-module state aligned with the sorted module declaration table.
+    pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
+    pub(crate) epoch: u32,
+    next_operation_id: u64,
+    next_host_call: u64,
     next_continuation_id: ContinuationId,
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
@@ -55,24 +110,35 @@ pub struct Vm {
 impl Vm {
     pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         build.validate().map_err(VmError::InvalidBuild)?;
-        let resolved = Self::resolve_imports(&build, host)?;
-        let mut vm = Self::empty(build);
+        let bindings = host.bindings();
+        let resolved = Self::resolve_imports(&build, &bindings)?;
+        let mut vm = Self::empty(build, bindings.clone());
         vm.init_builtins();
-        vm.install_imports(resolved)?;
+        vm.install_classes(&bindings)?;
+        vm.install_module_states(&bindings);
+        vm.install_imports(&bindings, resolved)?;
         vm.run_script(host)?;
         vm.run_until_idle(host)?;
         Ok(vm)
     }
 
-    fn empty(build: Build) -> Self {
+    fn empty(build: Build, bindings: Arc<Bindings>) -> Self {
+        let module_states = (0..bindings.module_count()).map(|_| None).collect();
         Self {
             build,
+            bindings,
             heap: Heap::new(),
             continuations: BTreeMap::new(),
             imports: Vec::new(),
             operations: BTreeMap::new(),
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
+            class_prototypes: Vec::new(),
+            host_instances: BTreeMap::new(),
+            module_states,
+            epoch: next_epoch(),
+            next_operation_id: 1,
+            next_host_call: 1,
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
@@ -83,16 +149,20 @@ impl Vm {
 
     pub(crate) fn resolve_imports(
         build: &Build,
-        host: &dyn Host,
+        bindings: &Bindings,
     ) -> Result<ResolvedImports, VmError> {
         let mut modules = Vec::with_capacity(build.imports.len());
         for (module, exports) in &build.imports {
             let mut resolved = Vec::with_capacity(exports.len());
             for export in exports {
-                let value = host
-                    .resolve_export(module, export)
+                let (id, declaration) = bindings
+                    .export(module, export)
                     .ok_or_else(|| VmError::MissingImport(format!("{module}:{export}")))?;
-                resolved.push((export.clone(), value));
+                let kind = match declaration {
+                    ExportDecl::Function(_) => ResolvedExport::Function(id),
+                    ExportDecl::Constant(_) => ResolvedExport::Constant,
+                };
+                resolved.push((export.clone(), kind));
             }
             modules.push(ResolvedModule {
                 module: module.clone(),
@@ -102,85 +172,229 @@ impl Vm {
         Ok(ResolvedImports { modules })
     }
 
-    fn is_module_export(&self, key: &crate::value::NativeKey) -> bool {
-        self.build
-            .imports
-            .get(&key.type_name)
-            .is_some_and(|exports| exports.contains(&key.id))
+    fn install_classes(&mut self, bindings: &Bindings) -> Result<(), VmError> {
+        for (class, _) in bindings.classes() {
+            let prototype = self.heap.alloc_plain_with(None);
+            self.class_prototypes.push(prototype);
+            for method in 0..bindings.method_count(class) {
+                let target = NativeTarget::Method(crate::binding::MethodId {
+                    class: class as u32,
+                    method: method as u32,
+                });
+                let function = self.heap.intern_native(target, false);
+                let name = bindings
+                    .method(crate::binding::MethodId {
+                        class: class as u32,
+                        method: method as u32,
+                    })
+                    .expect("method exists")
+                    .name;
+                self.heap.define_data(
+                    prototype,
+                    name,
+                    Value::Object(function),
+                    crate::binding::PROTOTYPE_METHOD_ATTRIBUTES,
+                )?;
+            }
+            for accessor in 0..bindings.accessor_count(class) {
+                let declaration = bindings.accessor(class, accessor).expect("accessor exists");
+                let get = declaration.get.map(|_| {
+                    self.heap.intern_native(
+                        NativeTarget::Accessor {
+                            class: class as u32,
+                            accessor: accessor as u32,
+                            set: false,
+                        },
+                        false,
+                    )
+                });
+                let set = declaration.set.map(|_| {
+                    self.heap.intern_native(
+                        NativeTarget::Accessor {
+                            class: class as u32,
+                            accessor: accessor as u32,
+                            set: true,
+                        },
+                        false,
+                    )
+                });
+                self.heap.define_property(
+                    prototype,
+                    crate::value::PropertyKey::from(declaration.name),
+                    crate::heap::Property::Accessor { get, set },
+                )?;
+            }
+        }
+        Ok(())
     }
 
-    pub(crate) fn call_native(
+    fn install_module_states(&mut self, bindings: &Bindings) {
+        for module in bindings.state_modules() {
+            let Some(payload) = bindings.state_new(module) else {
+                continue;
+            };
+            let slots = bindings
+                .state_slots(module)
+                .unwrap_or_default()
+                .iter()
+                .map(|slot| match slot.kind {
+                    crate::binding::SlotKind::Js => crate::runtime::HostSlot::Js(Value::Undefined),
+                    crate::binding::SlotKind::JsList => {
+                        crate::runtime::HostSlot::JsList(Vec::new())
+                    }
+                })
+                .collect();
+            self.module_states[module] = Some(crate::runtime::ModuleState { slots, payload });
+        }
+    }
+
+    pub(crate) fn call_host(
         &mut self,
         host: &mut dyn Host,
-        key: &crate::value::NativeKey,
+        target: NativeTarget,
         args: Vec<Value>,
+        receiver: &Value,
+        construct: bool,
     ) -> Result<Invocation, VmError> {
-        let is_export = self.is_module_export(key);
-        let project = is_export && host.project_arguments(&key.type_name, &key.id)
-            || host.project_native_arguments(key);
-        let host_args = args
-            .iter()
-            .map(|arg| {
-                if project {
-                    self.project_argument(arg)
-                } else {
-                    self.to_host_value(arg)
+        let bindings = host.bindings();
+        let declaration = match target {
+            NativeTarget::Export(id) => match bindings.export_decl(id) {
+                Some(ExportDecl::Function(function)) => {
+                    (function.call, function.constructable, function.name.clone())
                 }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let reply = if is_export {
-            host.call(&key.type_name, &key.id, &host_args)
-                .map_err(VmError::Host)?
-        } else {
-            match host.call_native(key, &host_args) {
-                Ok(reply) => reply,
-                Err(crate::host::HostException(value)) => {
-                    return Ok(Invocation::Thrown(self.host_to_value(&value)?));
+                _ => {
+                    return Err(VmError::Host(format!(
+                        "host function at {id:?} is not declared"
+                    )));
                 }
-            }
+            },
+            NativeTarget::Method(id) => match bindings.method(id) {
+                Some(method) => (method.call, false, method.name.to_owned()),
+                None => {
+                    return Err(VmError::Host(format!(
+                        "host method at {id:?} is not declared"
+                    )));
+                }
+            },
+            NativeTarget::Accessor {
+                class,
+                accessor,
+                set,
+            } => match bindings.accessor(class as usize, accessor as usize) {
+                Some(declaration) => {
+                    let call = if set {
+                        declaration.set
+                    } else {
+                        declaration.get
+                    };
+                    let Some(call) = call else {
+                        return Err(VmError::Host(format!(
+                            "host accessor {class}.{accessor} has no {}",
+                            if set { "setter" } else { "getter" }
+                        )));
+                    };
+                    (call, false, declaration.name.to_owned())
+                }
+                None => {
+                    return Err(VmError::Host(format!(
+                        "host accessor {class}.{accessor} is not declared"
+                    )));
+                }
+            },
         };
-        match reply {
-            HostReply::Value(value) => Ok(Invocation::Value(self.host_to_value(&value)?)),
-            HostReply::Throw(message) => Ok(Invocation::Thrown(Value::String(message.into()))),
-            HostReply::Operation { operation_id } => {
-                if !is_export {
-                    return Err(VmError::Host(
-                        "host operation requires a module export".to_owned(),
-                    ));
-                }
-                Ok(Invocation::Value(self.track_operation(
-                    key.type_name.clone(),
-                    key.id.clone(),
-                    operation_id,
-                )?))
+        let call = declaration.0;
+        if construct && !declaration.1 {
+            return Err(VmError::Host(format!(
+                "host function {} is not a constructor",
+                declaration.2
+            )));
+        }
+        let call_id = self.next_host_call;
+        self.next_host_call = self.next_host_call.checked_add(1).unwrap_or(1);
+        let epoch = self.epoch;
+        let args = args
+            .iter()
+            .map(|value| JsValue::handle(value.clone(), epoch, call_id))
+            .collect();
+        let this = JsValue::handle(receiver.clone(), epoch, call_id);
+        let mut cx = crate::binding::CallCx {
+            vm: self,
+            host,
+            bindings,
+            epoch,
+            call: call_id,
+            args,
+            this,
+            construct,
+        };
+        match call(&mut cx) {
+            Ok(value) => {
+                let value = cx
+                    .into_value(value)
+                    .map_err(|error| VmError::Host(error.0))?;
+                Ok(Invocation::Value(value))
             }
+            Err(JsError::Throw(value)) => {
+                let value = cx
+                    .into_value(value)
+                    .map_err(|error| VmError::Host(error.0))?;
+                Ok(Invocation::Thrown(value))
+            }
+            Err(JsError::Fault(fault)) => Err(VmError::HostFault(fault.0)),
         }
     }
 
     fn import_export_value(
         &mut self,
-        module: &str,
-        name: &str,
-        export: crate::host::HostExport,
+        bindings: &Bindings,
+        resolved: ResolvedExport,
     ) -> Result<Value, VmError> {
-        match export {
-            crate::host::HostExport::Value(value) => self.host_to_value(&value),
-            crate::host::HostExport::Function => Ok(Value::Object(self.heap.intern_native(
-                crate::value::NativeKey {
-                    type_name: module.to_owned(),
-                    id: name.to_owned(),
-                },
-                true,
-            ))),
+        match resolved {
+            ResolvedExport::Constant => {
+                // Constants are looked up through the bindings below.
+                let _ = bindings;
+                Err(VmError::InvalidState(
+                    "constant import needs a declaration".to_owned(),
+                ))
+            }
+            ResolvedExport::Function(id) => {
+                let constructable = matches!(
+                    bindings.export_decl(id),
+                    Some(ExportDecl::Function(function)) if function.constructable
+                );
+                Ok(Value::Object(
+                    self.heap
+                        .intern_native(NativeTarget::Export(id), constructable),
+                ))
+            }
         }
     }
 
-    fn install_imports(&mut self, resolved: ResolvedImports) -> Result<(), VmError> {
+    fn install_imports(
+        &mut self,
+        bindings: &Bindings,
+        resolved: ResolvedImports,
+    ) -> Result<(), VmError> {
         for module in resolved.modules {
             let namespace = self.heap.alloc_plain_with(None);
             let mut values = Vec::with_capacity(module.exports.len());
             for (name, export) in module.exports {
-                let value = self.import_export_value(&module.module, &name, export)?;
+                let value = match export {
+                    ResolvedExport::Constant => {
+                        let (_, declaration) =
+                            bindings.export(&module.module, &name).ok_or_else(|| {
+                                VmError::MissingImport(format!("{}:{name}", module.module))
+                            })?;
+                        let ExportDecl::Constant(constant) = declaration else {
+                            return Err(VmError::MissingImport(format!(
+                                "{}:{name}",
+                                module.module
+                            )));
+                        };
+                        constant.value.value()
+                    }
+                    ResolvedExport::Function(_) => self.import_export_value(bindings, export)?,
+                };
                 self.heap.define_data(
                     namespace,
                     name.as_str(),
@@ -201,6 +415,7 @@ impl Vm {
 
     pub(crate) fn restore_imports(
         &mut self,
+        bindings: &Bindings,
         namespaces: Vec<ObjectId>,
         resolved: ResolvedImports,
     ) -> Result<(), VmError> {
@@ -263,7 +478,22 @@ impl Vm {
             }
             let mut values = Vec::with_capacity(module.exports.len());
             for (name, export) in module.exports {
-                let expected = self.import_export_value(&module.module, &name, export)?;
+                let expected = match export {
+                    ResolvedExport::Function(_) => self.import_export_value(bindings, export)?,
+                    ResolvedExport::Constant => {
+                        let (_, declaration) =
+                            bindings.export(&module.module, &name).ok_or_else(|| {
+                                VmError::MissingImport(format!("{}:{name}", module.module))
+                            })?;
+                        let ExportDecl::Constant(constant) = declaration else {
+                            return Err(VmError::MissingImport(format!(
+                                "{}:{name}",
+                                module.module
+                            )));
+                        };
+                        constant.value.value()
+                    }
+                };
                 let key = JsString::from(name.as_str());
                 let Some(value) = actual.get(&key) else {
                     return Err(VmError::InvalidSnapshot(format!(
@@ -273,7 +503,7 @@ impl Vm {
                 };
                 if value != &expected {
                     return Err(VmError::InvalidSnapshot(format!(
-                        "import namespace {} export {name:?} does not match the host",
+                        "import namespace {} export {name:?} does not match the bindings",
                         module.module
                     )));
                 }
@@ -313,12 +543,16 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         entry: &str,
-        args: Vec<HostValue>,
+        args: Vec<JsValue>,
     ) -> Result<Value, VmError> {
         let callee = self.get_export(entry)?;
         let args = args
-            .iter()
-            .map(|value| self.host_to_value(value))
+            .into_iter()
+            .map(|value| {
+                value
+                    .into_constant()
+                    .map_err(|error| VmError::Host(error.0))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         self.invoke(host, &callee, args, &Value::Undefined)?
             .into_result()
@@ -375,30 +609,84 @@ impl Vm {
 
     pub fn complete_operation(
         &mut self,
-        operation_id: &str,
+        token: crate::binding::OperationToken,
         completion: Completion,
     ) -> Result<(), VmError> {
-        if !self.operations.contains_key(operation_id) {
-            return Err(VmError::UnknownOperation(operation_id.to_owned()));
+        if token.epoch != self.epoch {
+            return Err(VmError::UnknownOperation(format!(
+                "stale operation token {}",
+                token.id()
+            )));
         }
-        let value = match &completion {
-            Completion::Fulfilled(value) | Completion::Rejected(value) => {
-                self.host_to_value(value)?
-            }
+        let (value, rejected) = match completion {
+            Completion::Fulfilled(value) => (value, false),
+            Completion::Rejected(value) => (value, true),
         };
+        let value = value
+            .into_constant()
+            .map_err(|error| VmError::Host(error.0))?;
         let operation = self
             .operations
-            .remove(operation_id)
-            .ok_or_else(|| VmError::UnknownOperation(operation_id.to_owned()))?;
-        let settlement = match completion {
-            Completion::Fulfilled(_) => Settlement::Fulfilled(value),
-            Completion::Rejected(_) => Settlement::Rejected(value),
+            .get(&token.id)
+            .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
+        if matches!(value, Value::Number(number) if !number.is_finite()) {
+            return Err(VmError::Host(
+                "non-finite numbers are not supported by this PoC".to_owned(),
+            ));
+        }
+        let promise = operation.promise;
+        self.operations
+            .remove(&token.id)
+            .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
+        let settlement = if rejected {
+            Settlement::Rejected(value)
+        } else {
+            Settlement::Fulfilled(value)
         };
-        self.settle(operation.promise, settlement)
+        self.settle(promise, settlement)
     }
 
-    pub fn pending_operation_ids(&self) -> Vec<String> {
-        self.operations.keys().cloned().collect()
+    pub fn pending_operations(&self) -> Vec<PendingOperationInfo> {
+        self.operations
+            .iter()
+            .map(|(id, operation)| PendingOperationInfo {
+                token: crate::binding::OperationToken {
+                    epoch: self.epoch,
+                    id: *id,
+                },
+                name: operation.name.clone(),
+                schema: operation.schema,
+                recovery: operation.recovery,
+                state: operation.state.clone(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn alloc_operation<O: crate::binding::Operation>(
+        &mut self,
+        state: Vec<u8>,
+        promise: ObjectId,
+    ) -> crate::binding::OperationToken {
+        let id = self.next_operation_id;
+        self.next_operation_id = self
+            .next_operation_id
+            .checked_add(1)
+            .expect("operation id space exhausted");
+        self.operations.insert(
+            id,
+            PendingOperation {
+                name: O::NAME.to_owned(),
+                schema: O::SCHEMA,
+                recovery: O::RECOVERY,
+                rejection: O::REJECTION,
+                state,
+                promise,
+            },
+        );
+        crate::binding::OperationToken {
+            epoch: self.epoch,
+            id,
+        }
     }
 
     pub fn promise_state(&self, value: &Value) -> Result<PromiseState, VmError> {
@@ -408,53 +696,8 @@ impl Vm {
         Ok(self.heap.promise(*id)?.state.clone())
     }
 
-    pub fn to_host_value(&self, value: &Value) -> Result<HostValue, VmError> {
-        match value {
-            Value::Undefined => Ok(HostValue::Undefined),
-            Value::Null => Ok(HostValue::Null),
-            Value::Bool(value) => Ok(HostValue::Bool(*value)),
-            Value::Number(value) => Ok(HostValue::Number(*value)),
-            Value::String(value) => Ok(HostValue::String(value.clone())),
-            Value::Symbol(_) => Err(VmError::InvalidState(
-                "Symbol values cannot cross the host boundary".to_owned(),
-            )),
-            Value::Object(id) => match self.heap.get(*id)? {
-                crate::heap::Object::Native(native) => Ok(if native.function {
-                    HostValue::NativeFunction(native.key.clone())
-                } else {
-                    HostValue::Native(native.key.clone())
-                }),
-                _ => Err(VmError::InvalidState(format!(
-                    "object {id} cannot cross the host boundary"
-                ))),
-            },
-        }
-    }
-
-    pub(crate) fn host_to_value(&mut self, value: &HostValue) -> Result<Value, VmError> {
-        match value {
-            HostValue::Undefined => Ok(Value::Undefined),
-            HostValue::Null => Ok(Value::Null),
-            HostValue::Bool(value) => Ok(Value::Bool(*value)),
-            HostValue::Number(value) => {
-                if !value.is_finite() {
-                    return Err(VmError::Host(
-                        "non-finite numbers are not supported by this PoC".to_owned(),
-                    ));
-                }
-                Ok(Value::Number(*value))
-            }
-            HostValue::String(value) => Ok(Value::String(value.clone())),
-            HostValue::Native(key) => {
-                Ok(Value::Object(self.heap.intern_native(key.clone(), false)))
-            }
-            HostValue::NativeFunction(key) => {
-                Ok(Value::Object(self.heap.intern_native(key.clone(), true)))
-            }
-            HostValue::Data(_) => Err(VmError::Host(
-                "host data projections cannot be converted into script values".to_owned(),
-            )),
-        }
+    pub(crate) fn host_value(&self, value: Value) -> JsValue {
+        JsValue::handle(value, self.epoch, 0)
     }
 
     pub(crate) fn function_index(&self, func_id: u32) -> Result<usize, VmError> {
@@ -664,29 +907,40 @@ impl Vm {
         }
     }
 
-    pub(crate) fn restored(
-        build: Build,
-        mut heap: Heap,
-        continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
-        operations: BTreeMap<String, PendingOperation>,
-        globals: BTreeMap<JsString, Value>,
-        builtins: BuiltinRoots,
-        script_env: Option<ObjectId>,
-    ) -> Self {
+    pub(crate) fn restored(build: Build, bindings: Arc<Bindings>, state: RestoredState) -> Self {
+        let RestoredState {
+            mut heap,
+            continuations,
+            operations,
+            class_prototypes,
+            host_instances,
+            module_states,
+            globals,
+            builtins,
+            script_env,
+        } = state;
         heap.promise_prototype = Some(builtins.promise_prototype);
         heap.object_prototype = Some(builtins.object_prototype);
         heap.array_prototype = Some(builtins.array_prototype);
         heap.function_prototype = Some(builtins.function_prototype);
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
+        let next_operation_id = operations.keys().next_back().map_or(1, |id| id + 1);
         Self {
             build,
+            bindings,
             heap,
             continuations,
             operations,
             microtasks: VecDeque::new(),
             globals,
             imports: Vec::new(),
+            class_prototypes,
+            host_instances,
+            module_states,
+            epoch: next_epoch(),
+            next_operation_id,
+            next_host_call: 1,
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             builtins,

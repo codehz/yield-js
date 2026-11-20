@@ -3,7 +3,7 @@
 use super::support::{Suspended, baseline_at_first_await, json_round_trip, values_beyond};
 use yield_poc::number;
 use yield_vm::heap::Property;
-use yield_vm::{Completion, HostValue, JsString, Object, PromiseState, Value};
+use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value};
 
 fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<JsString> {
     snapshot
@@ -118,10 +118,7 @@ export async function run() {
     let snapshot = s.snapshot();
     assert!(plain_tags(&snapshot).contains(&JsString::from("kept")));
     s.restore(snapshot).expect("restore");
-    s.complete(
-        "wait:a",
-        Completion::Rejected(HostValue::String("boom".into())),
-    );
+    s.complete("wait:a", Completion::Rejected(JsValue::string("boom")));
     assert_eq!(
         s.state(),
         PromiseState::Fulfilled(Value::String("kept".into()))

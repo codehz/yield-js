@@ -3,7 +3,7 @@
 use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
 use yield_poc::number;
 use yield_vm::heap::Property;
-use yield_vm::{Completion, HostValue, JsString, Object, PromiseState, Value, VmError};
+use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
 
 #[test]
 fn accessor_only_closures_survive_restore_and_bad_descriptors_are_rejected() {
@@ -87,11 +87,12 @@ export async function run() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
-    assert!(snapshot.objects.iter().all(|record| !matches!(
-        &record.object,
-        Object::Native(native) if native.key.type_name == "Node"
-    )));
-    s.host.reject_native = true;
+    assert!(
+        snapshot
+            .host_instances
+            .iter()
+            .all(|record| record.class != "Node")
+    );
     s.restore(snapshot).expect("transient native is not a root");
 }
 
@@ -328,7 +329,7 @@ function demo() {
     assert!(matches!(error, VmError::InvalidSnapshot(_)));
 
     s.restore(snapshot).expect("restore");
-    s.complete("wait:a", Completion::Fulfilled(HostValue::Number(0.0)));
+    s.complete("wait:a", Completion::Fulfilled(JsValue::number(0.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(4.0)));
 }
 
@@ -372,7 +373,7 @@ export async function run() {
         recaptured.objects.iter().find(|r| r.id == bound_record.id),
         Some(&bound_record)
     );
-    s.complete("wait:a", Completion::Fulfilled(HostValue::Number(2.0)));
+    s.complete("wait:a", Completion::Fulfilled(JsValue::number(2.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(14.0)));
 }
 
@@ -648,14 +649,15 @@ export async function run() {
         .expect("reachable WeakMap");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries.values().next(), Some(&Value::Number(7.0)));
-    assert!(snapshot.objects.iter().all(|record| !matches!(
-        &record.object,
-        Object::Native(native) if native.key.type_name == "Node"
-    )));
-    s.host.reject_native = true;
+    assert!(
+        snapshot
+            .host_instances
+            .iter()
+            .all(|record| record.class != "Node")
+    );
     s.restore(snapshot)
         .expect("weak-only native is not rebound");
-    s.complete("wait:a", Completion::Fulfilled(HostValue::Undefined));
+    s.complete("wait:a", Completion::Fulfilled(JsValue::undefined()));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
 }
 

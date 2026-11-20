@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::JsString;
+use crate::binding::{Bindings, Recovery};
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
@@ -27,14 +28,16 @@ use crate::heap::{
     SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
-use crate::host::{Host, PendingOperationMeta};
+use crate::host::Host;
 use crate::regexp::compile_pattern;
-use crate::runtime::{Continuation, PendingOperation};
+use crate::runtime::{
+    Continuation, HostInstance, HostSlot, ModuleState, PendingOperation, Settlement,
+};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 // JavaScript strings retain arbitrary UTF-16 code units; string maps use pairs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 35;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 36;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -126,10 +129,40 @@ pub struct ContinuationRecord {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingOperationRecord {
-    pub id: String,
-    pub module: String,
-    pub export: String,
+    pub id: u64,
+    pub name: String,
+    pub schema: u32,
+    pub recovery: Recovery,
+    pub state: Vec<u8>,
     pub promise: ObjectId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostSlotRecord {
+    Js(Value),
+    JsList(Vec<Value>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadRecord {
+    pub schema: u32,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInstanceRecord {
+    pub object: ObjectId,
+    pub class: String,
+    pub slots: Vec<HostSlotRecord>,
+    pub payload: Option<PayloadRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModuleStateRecord {
+    pub module: String,
+    pub slots: Vec<HostSlotRecord>,
+    pub payload: PayloadRecord,
 }
 
 /// Host-held script roots live outside the VM. The snapshot deliberately does
@@ -139,6 +172,7 @@ pub struct Snapshot {
     pub format_version: u32,
     pub bytecode_version: u32,
     pub build_id: String,
+    pub binding_fingerprint: String,
     pub objects: Vec<ObjectRecord>,
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
@@ -147,6 +181,10 @@ pub struct Snapshot {
     pub roots: BTreeMap<String, ObjectId>,
     /// VM-managed module namespaces corresponding to the sorted build manifest.
     pub imports: Vec<ObjectId>,
+    /// Class tag to the VM-owned prototype saved with the object graph.
+    pub class_prototypes: BTreeMap<String, ObjectId>,
+    pub host_instances: Vec<HostInstanceRecord>,
+    pub module_states: Vec<ModuleStateRecord>,
     pub script_env: Option<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
     pub random_state: u64,
@@ -165,10 +203,14 @@ impl Snapshot {
             format_version: SNAPSHOT_FORMAT_VERSION,
             bytecode_version: BYTECODE_VERSION,
             build_id,
+            binding_fingerprint: String::new(),
             objects: Vec::new(),
             continuations: Vec::new(),
             operations: Vec::new(),
             imports: Vec::new(),
+            class_prototypes: BTreeMap::new(),
+            host_instances: Vec::new(),
+            module_states: Vec::new(),
             globals: BTreeMap::new(),
             roots: BTreeMap::new(),
             script_env: None,
@@ -197,7 +239,7 @@ impl Vm {
             ));
         }
 
-        let mut tracer = Tracer::new(&self.heap, &self.continuations);
+        let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
         for root in roots {
             tracer.mark_value(root)?;
         }
@@ -209,6 +251,21 @@ impl Vm {
         }
         for operation in self.operations.values() {
             tracer.mark_object(operation.promise)?;
+        }
+        for prototype in &self.class_prototypes {
+            tracer.mark_object(*prototype)?;
+        }
+        for state in self.module_states.iter().flatten() {
+            for slot in &state.slots {
+                match slot {
+                    HostSlot::Js(value) => tracer.mark_value(value)?,
+                    HostSlot::JsList(values) => {
+                        for value in values {
+                            tracer.mark_value(value)?;
+                        }
+                    }
+                }
+            }
         }
         for id in self.builtins.to_map().values() {
             tracer.mark_object(*id)?;
@@ -245,9 +302,15 @@ impl Vm {
         }
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
+        snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
+        for (class, tag) in self.bindings.classes() {
+            snapshot
+                .class_prototypes
+                .insert(tag.to_owned(), self.class_prototypes[class]);
+        }
         snapshot.script_env = self.script_env;
         for id in &tracer.objects {
             let object = match self.heap.get(*id)? {
@@ -262,6 +325,76 @@ impl Vm {
                 object => object.clone(),
             };
             snapshot.objects.push(ObjectRecord { id: *id, object });
+        }
+        for (object, instance) in &self.host_instances {
+            if !tracer.objects.contains(object) {
+                continue;
+            }
+            let class = instance.class;
+            let slots = instance
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    HostSlot::Js(value) => HostSlotRecord::Js(value.clone()),
+                    HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
+                })
+                .collect();
+            let payload = match self.bindings.class_payload_schema(class) {
+                Some(schema) => {
+                    let payload = instance.payload.as_ref().ok_or_else(|| {
+                        VmError::InvalidState(format!(
+                            "host instance {object} is missing its payload"
+                        ))
+                    })?;
+                    let mut bytes = Vec::new();
+                    self.bindings
+                        .class_encode(class, payload.as_ref(), &mut bytes)
+                        .map_err(|error| VmError::InvalidState(error.0))?;
+                    Some(PayloadRecord { schema, bytes })
+                }
+                None => None,
+            };
+            snapshot.host_instances.push(HostInstanceRecord {
+                object: *object,
+                class: self
+                    .bindings
+                    .class_tag(class)
+                    .unwrap_or_default()
+                    .to_owned(),
+                slots,
+                payload,
+            });
+        }
+        for (module, state) in self.module_states.iter().enumerate() {
+            let Some(state) = state else {
+                continue;
+            };
+            let slots = state
+                .slots
+                .iter()
+                .map(|slot| match slot {
+                    HostSlot::Js(value) => HostSlotRecord::Js(value.clone()),
+                    HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
+                })
+                .collect();
+            let schema = self
+                .bindings
+                .state_schema(module)
+                .ok_or_else(|| VmError::InvalidState("module state is undeclared".to_owned()))?;
+            let mut bytes = Vec::new();
+            self.bindings
+                .state_encode(module, state.payload.as_ref(), &mut bytes)
+                .ok_or_else(|| VmError::InvalidState("module state is undeclared".to_owned()))?
+                .map_err(|error| VmError::InvalidState(error.0))?;
+            snapshot.module_states.push(ModuleStateRecord {
+                module: self
+                    .bindings
+                    .state_name(module)
+                    .unwrap_or_default()
+                    .to_owned(),
+                slots,
+                payload: PayloadRecord { schema, bytes },
+            });
         }
         for id in tracer.continuations_seen {
             let continuation = self.continuations.get(&id).ok_or_else(|| {
@@ -282,11 +415,13 @@ impl Vm {
                 values: continuation.values.clone(),
             });
         }
-        for operation in self.operations.values() {
+        for (id, operation) in &self.operations {
             snapshot.operations.push(PendingOperationRecord {
-                id: operation.meta.id.clone(),
-                module: operation.meta.module.clone(),
-                export: operation.meta.export.clone(),
+                id: *id,
+                name: operation.name.clone(),
+                schema: operation.schema,
+                recovery: operation.recovery,
+                state: operation.state.clone(),
                 promise: operation.promise,
             });
         }
@@ -329,7 +464,15 @@ impl Vm {
                 snapshot.build_id, build.build_id
             )));
         }
-        let resolved_imports = Self::resolve_imports(&build, host)?;
+        let bindings = host.bindings();
+        if snapshot.binding_fingerprint != bindings.fingerprint() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "binding fingerprint mismatch: snapshot {}, bindings {}",
+                snapshot.binding_fingerprint,
+                bindings.fingerprint()
+            )));
+        }
+        let resolved_imports = Self::resolve_imports(&build, &bindings)?;
 
         let mut heap = Heap::new();
         for ObjectRecord { id, mut object } in std::mem::take(&mut snapshot.objects) {
@@ -361,36 +504,86 @@ impl Vm {
                 build.imports.len()
             )));
         }
-        validate_import_native_records(&build, &snapshot, host)?;
+        validate_native_targets(&bindings, &heap)?;
+        let class_prototypes = load_class_prototypes(&bindings, &heap, &snapshot.class_prototypes)?;
+        let host_instances = load_host_instances(
+            &bindings,
+            &heap,
+            &class_prototypes,
+            &snapshot.host_instances,
+        )?;
+        let module_states = load_module_states(&bindings, &heap, &snapshot.module_states)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         for continuation in continuations.values() {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
         let builtins = load_roots(&heap, &snapshot.roots)?;
+        let operations = load_operations(&bindings, &heap, &snapshot.operations)?;
         let mut vm = Self::restored(
             build,
-            heap,
-            continuations,
-            BTreeMap::new(),
-            snapshot.globals,
-            builtins,
-            script_env,
+            bindings.clone(),
+            crate::vm::RestoredState {
+                heap,
+                continuations,
+                operations,
+                class_prototypes,
+                host_instances,
+                module_states,
+                globals: snapshot.globals,
+                builtins,
+                script_env,
+            },
         );
-        vm.restore_imports(snapshot.imports, resolved_imports)?;
+        vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         validate_native_import_objects(&vm.heap, &vm.imports)?;
-        check_heap_edges(&vm.build, &vm.heap, host)?;
-        vm.operations = load_operations(&vm.build, &vm.heap, &snapshot.operations, host)?;
+        check_heap_edges(&vm.build, &vm.heap, &bindings)?;
         validate_jobs(&vm.heap)?;
         validate_combines(&vm.heap)?;
+        vm.resume_operations(host)?;
         vm.random_state = snapshot.random_state;
         Ok(vm)
+    }
+
+    fn resume_operations(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        let pending = std::mem::take(&mut self.operations);
+        for (id, operation) in pending {
+            let token = crate::binding::OperationToken {
+                epoch: self.epoch,
+                id,
+            };
+            match operation.recovery {
+                Recovery::Pause => {
+                    self.settle(operation.promise, Settlement::Fulfilled(Value::Undefined))?;
+                }
+                Recovery::Reject => {
+                    self.settle(
+                        operation.promise,
+                        Settlement::Rejected(Value::String(operation.rejection.into())),
+                    )?;
+                }
+                Recovery::Resume | Recovery::Reissue => {
+                    let start = crate::binding::OperationStart {
+                        token,
+                        name: &operation.name,
+                        schema: operation.schema,
+                        recovery: operation.recovery,
+                        state: &operation.state,
+                    };
+                    host.resume_operation(start)
+                        .map_err(|error| VmError::MissingOperation(error.0))?;
+                    self.operations.insert(id, operation);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 struct Tracer<'a> {
     heap: &'a Heap,
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
+    host_instances: &'a BTreeMap<ObjectId, HostInstance>,
     objects: BTreeSet<ObjectId>,
     symbols: BTreeSet<SymbolId>,
     continuations_seen: BTreeSet<ContinuationId>,
@@ -401,10 +594,15 @@ struct Tracer<'a> {
 }
 
 impl<'a> Tracer<'a> {
-    fn new(heap: &'a Heap, continuations: &'a BTreeMap<ContinuationId, Continuation>) -> Self {
+    fn new(
+        heap: &'a Heap,
+        continuations: &'a BTreeMap<ContinuationId, Continuation>,
+        host_instances: &'a BTreeMap<ObjectId, HostInstance>,
+    ) -> Self {
         Self {
             heap,
             continuations,
+            host_instances,
             objects: BTreeSet::new(),
             symbols: BTreeSet::new(),
             continuations_seen: BTreeSet::new(),
@@ -514,6 +712,18 @@ impl<'a> Tracer<'a> {
         }
         edges.clear();
         self.edges = edges;
+        if let Some(instance) = self.host_instances.get(&id) {
+            let mut values = Vec::new();
+            for slot in &instance.slots {
+                match slot {
+                    HostSlot::Js(value) => values.push(value.clone()),
+                    HostSlot::JsList(items) => values.extend(items.iter().cloned()),
+                }
+            }
+            for value in values {
+                self.mark_value(&value)?;
+            }
+        }
         Ok(())
     }
 
@@ -1004,15 +1214,16 @@ fn load_script_env(
     }
 }
 
-fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), VmError> {
+fn check_heap_edges(build: &Build, heap: &Heap, bindings: &Bindings) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
         if let Object::Native(native) = heap.get(id)?
-            && !(native.function && is_module_function_key(build, &native.key))
-            && !host.has_native(&native.key)
+            && !valid_native_target(bindings, native.target)
         {
-            return Err(VmError::MissingNative(native.key.clone()));
+            return Err(VmError::InvalidSnapshot(format!(
+                "native object {id} references an undeclared binding"
+            )));
         }
         if let Object::Function(function) = heap.get(id)?
             && function.func_id == build.script
@@ -1022,13 +1233,21 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             )));
         }
         // The shared edge walk below checks the bound receiver and arguments.
-        if let Object::Bound(bound) = heap.get(id)?
-            && !matches!(heap.function(bound.target), Some(f) if build.function(f.func_id).is_some())
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "bound target {} is missing or not a function",
-                bound.target
-            )));
+        if let Object::Bound(bound) = heap.get(id)? {
+            let callable = heap
+                .get(bound.target)
+                .is_ok_and(crate::builtins::is_callable_object);
+            let valid = callable
+                && match heap.function(bound.target) {
+                    Some(function) => build.function(function.func_id).is_some(),
+                    None => true,
+                };
+            if !valid {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "bound target {} is missing or not a function",
+                    bound.target
+                )));
+            }
         }
         if let Object::CollectionIterator {
             kind,
@@ -1228,43 +1447,42 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
     }
     Ok(())
 }
-fn is_module_function_key(build: &Build, key: &crate::value::NativeKey) -> bool {
-    build
-        .imports
-        .get(&key.type_name)
-        .is_some_and(|exports| exports.contains(&key.id))
+fn valid_native_target(bindings: &Bindings, target: crate::binding::NativeTarget) -> bool {
+    match target {
+        crate::binding::NativeTarget::Export(id) => matches!(
+            bindings.export_decl(id),
+            Some(crate::binding::ExportDecl::Function(_))
+        ),
+        crate::binding::NativeTarget::Method(id) => bindings.method(id).is_some(),
+        crate::binding::NativeTarget::Accessor {
+            class,
+            accessor,
+            set,
+        } => bindings
+            .accessor(class as usize, accessor as usize)
+            .is_some_and(|declaration| {
+                if set {
+                    declaration.set.is_some()
+                } else {
+                    declaration.get.is_some()
+                }
+            }),
+    }
 }
 
-fn validate_import_native_records(
-    build: &Build,
-    snapshot: &Snapshot,
-    host: &dyn Host,
-) -> Result<(), VmError> {
-    let mut identities = BTreeMap::new();
-    for record in &snapshot.objects {
-        if let Object::Native(native) = &record.object {
-            if let Some(previous) =
-                identities.insert((native.key.clone(), native.function), record.id)
-            {
+fn validate_native_targets(bindings: &Bindings, heap: &Heap) -> Result<(), VmError> {
+    let mut identities = BTreeSet::new();
+    for id in heap.ids() {
+        if let Object::Native(native) = heap.get(id)? {
+            if !valid_native_target(bindings, native.target) {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "duplicate native object identity {:?} at {previous} and {}",
-                    native.key, record.id
+                    "native object {id} references an undeclared binding"
                 )));
             }
-            if native.function && is_module_function_key(build, &native.key) {
-                let matches_host = match host.resolve_export(&native.key.type_name, &native.key.id)
-                {
-                    Some(crate::host::HostExport::Function) => true,
-                    Some(crate::host::HostExport::Value(
-                        crate::value::HostValue::NativeFunction(key),
-                    )) => key == native.key,
-                    _ => false,
-                };
-                if !matches_host {
-                    return Err(VmError::MissingNative(native.key.clone()));
-                }
-            } else if !host.has_native(&native.key) {
-                return Err(VmError::MissingNative(native.key.clone()));
+            if !identities.insert((native.target, native.constructable)) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "duplicate native object identity at {id}"
+                )));
             }
         }
     }
@@ -1275,23 +1493,255 @@ fn validate_native_import_objects(
     heap: &Heap,
     imports: &[crate::vm::ImportModule],
 ) -> Result<(), VmError> {
-    let mut identities = BTreeMap::new();
+    let mut identities = BTreeSet::new();
     for import in imports {
         for value in &import.values {
             if let Value::Object(id) = value
                 && let Object::Native(native) = heap.get(*id)?
-                && let Some(previous) =
-                    identities.insert((native.key.clone(), native.function), *id)
-                && previous != *id
+                && !identities.insert((native.target, native.constructable))
             {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "duplicate native import identity {:?}",
-                    native.key
+                    "duplicate native import identity at {id}"
                 )));
             }
         }
     }
     Ok(())
+}
+
+fn load_class_prototypes(
+    bindings: &Bindings,
+    heap: &Heap,
+    records: &BTreeMap<String, ObjectId>,
+) -> Result<Vec<ObjectId>, VmError> {
+    if records.len() != bindings.classes_len() {
+        return Err(VmError::InvalidSnapshot(format!(
+            "class prototype count mismatch: snapshot {}, bindings {}",
+            records.len(),
+            bindings.classes_len()
+        )));
+    }
+    let mut prototypes = vec![0; bindings.classes_len()];
+    for (class, tag) in bindings.classes() {
+        let id = *records
+            .get(tag)
+            .ok_or_else(|| VmError::InvalidSnapshot(format!("snapshot is missing class {tag}")))?;
+        match heap.get(id) {
+            Ok(Object::Plain(_)) => {}
+            Ok(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "class {tag} prototype {id} is not a plain object"
+                )));
+            }
+            Err(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "class {tag} prototype {id} does not exist"
+                )));
+            }
+        }
+        prototypes[class] = id;
+    }
+    Ok(prototypes)
+}
+
+fn load_host_instances(
+    bindings: &Bindings,
+    heap: &Heap,
+    class_prototypes: &[ObjectId],
+    records: &[HostInstanceRecord],
+) -> Result<BTreeMap<ObjectId, HostInstance>, VmError> {
+    let mut instances = BTreeMap::new();
+    for record in records {
+        if instances.contains_key(&record.object) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate host instance object {}",
+                record.object
+            )));
+        }
+        match heap.get(record.object) {
+            Ok(Object::Plain(_)) => {}
+            Ok(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "host instance {} is not a plain object",
+                    record.object
+                )));
+            }
+            Err(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "host instance {} does not exist",
+                    record.object
+                )));
+            }
+        }
+        let class = bindings.class_by_tag(&record.class).ok_or_else(|| {
+            VmError::InvalidSnapshot(format!("unknown host class {:?}", record.class))
+        })?;
+        let expected_slots = bindings.class_slots(class);
+        if record.slots.len() != expected_slots.len() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "class {} slot count mismatch: snapshot {}, bindings {}",
+                record.class,
+                record.slots.len(),
+                expected_slots.len()
+            )));
+        }
+        let mut slots = Vec::with_capacity(record.slots.len());
+        for (slot, declaration) in record.slots.iter().zip(expected_slots) {
+            let slot = match (slot, declaration.kind) {
+                (HostSlotRecord::Js(value), crate::binding::SlotKind::Js) => {
+                    HostSlot::Js(value.clone())
+                }
+                (HostSlotRecord::JsList(values), crate::binding::SlotKind::JsList) => {
+                    HostSlot::JsList(values.clone())
+                }
+                _ => {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "class {} slot {:?} kind mismatch",
+                        record.class, declaration.name
+                    )));
+                }
+            };
+            for value in match &slot {
+                HostSlot::Js(value) => std::slice::from_ref(value),
+                HostSlot::JsList(values) => values.as_slice(),
+            } {
+                require_value_objects(heap, std::iter::once(value))?;
+            }
+            slots.push(slot);
+        }
+        if heap.prototype_of(record.object)? != Some(class_prototypes[class]) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "host instance {} does not use the {} prototype",
+                record.object, record.class
+            )));
+        }
+        let payload = match bindings.class_payload_schema(class) {
+            Some(schema) => {
+                let payload = record.payload.as_ref().ok_or_else(|| {
+                    VmError::InvalidSnapshot(format!(
+                        "class {} is missing its payload",
+                        record.class
+                    ))
+                })?;
+                if payload.schema != schema {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "class {} payload schema mismatch: snapshot {}, bindings {}",
+                        record.class, payload.schema, schema
+                    )));
+                }
+                Some(
+                    bindings
+                        .class_decode(class, &payload.bytes)
+                        .map_err(|error| {
+                            VmError::InvalidSnapshot(format!(
+                                "class {} payload: {error}",
+                                record.class
+                            ))
+                        })?,
+                )
+            }
+            None => {
+                if record.payload.is_some() {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "class {} has no payload declaration",
+                        record.class
+                    )));
+                }
+                None
+            }
+        };
+        instances.insert(
+            record.object,
+            HostInstance {
+                class,
+                slots,
+                payload,
+            },
+        );
+    }
+    Ok(instances)
+}
+
+fn load_module_states(
+    bindings: &Bindings,
+    heap: &Heap,
+    records: &[ModuleStateRecord],
+) -> Result<Vec<Option<ModuleState>>, VmError> {
+    let declared = bindings.state_modules();
+    let mut by_name: BTreeMap<&str, &ModuleStateRecord> = BTreeMap::new();
+    for record in records {
+        if by_name.insert(record.module.as_str(), record).is_some() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate module state {:?}",
+                record.module
+            )));
+        }
+    }
+    if by_name.len() != declared.len() {
+        return Err(VmError::InvalidSnapshot(format!(
+            "module state count mismatch: snapshot {}, bindings {}",
+            by_name.len(),
+            declared.len()
+        )));
+    }
+    let mut states = (0..bindings.module_count())
+        .map(|_| None)
+        .collect::<Vec<_>>();
+    for module in declared {
+        let name = bindings
+            .state_name(module)
+            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?;
+        let record = by_name.get(name).ok_or_else(|| {
+            VmError::InvalidSnapshot(format!("snapshot is missing module state {name:?}"))
+        })?;
+        let expected_slots = bindings.state_slots(module).unwrap_or_default();
+        if record.slots.len() != expected_slots.len() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "module {name} state slot count mismatch"
+            )));
+        }
+        let mut slots = Vec::with_capacity(record.slots.len());
+        for (slot, declaration) in record.slots.iter().zip(expected_slots) {
+            let slot = match (slot, declaration.kind) {
+                (HostSlotRecord::Js(value), crate::binding::SlotKind::Js) => {
+                    HostSlot::Js(value.clone())
+                }
+                (HostSlotRecord::JsList(values), crate::binding::SlotKind::JsList) => {
+                    HostSlot::JsList(values.clone())
+                }
+                _ => {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "module {name} state slot {:?} kind mismatch",
+                        declaration.name
+                    )));
+                }
+            };
+            for value in match &slot {
+                HostSlot::Js(value) => std::slice::from_ref(value),
+                HostSlot::JsList(values) => values.as_slice(),
+            } {
+                require_value_objects(heap, std::iter::once(value))?;
+            }
+            slots.push(slot);
+        }
+        let schema = bindings
+            .state_schema(module)
+            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?;
+        if record.payload.schema != schema {
+            return Err(VmError::InvalidSnapshot(format!(
+                "module {name} state payload schema mismatch: snapshot {}, bindings {}",
+                record.payload.schema, schema
+            )));
+        }
+        let payload = bindings
+            .state_decode(module, &record.payload.bytes)
+            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?
+            .map_err(|error| {
+                VmError::InvalidSnapshot(format!("module {name} state payload: {error}"))
+            })?;
+        states[module] = Some(ModuleState { slots, payload });
+    }
+    Ok(states)
 }
 
 fn require_environment(
@@ -1610,45 +2060,48 @@ fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(), VmError>
 }
 
 fn load_operations(
-    build: &Build,
+    bindings: &Bindings,
     heap: &Heap,
     records: &[PendingOperationRecord],
-    host: &mut dyn Host,
-) -> Result<BTreeMap<String, PendingOperation>, VmError> {
+) -> Result<BTreeMap<u64, PendingOperation>, VmError> {
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
     for record in records {
-        if operations.contains_key(&record.id) {
+        if record.id == 0 || operations.contains_key(&record.id) {
             return Err(VmError::InvalidSnapshot(format!(
-                "duplicate host operation {:?}",
+                "duplicate or invalid host operation id {}",
                 record.id
             )));
         }
-        let Some(exports) = build.imports.get(&record.module) else {
+        let (_, recovery, rejection) =
+            bindings
+                .operation(&record.name, record.schema)
+                .ok_or_else(|| {
+                    VmError::InvalidSnapshot(format!(
+                        "operation {} schema {} is not declared",
+                        record.name, record.schema
+                    ))
+                })?;
+        if recovery != record.recovery {
             return Err(VmError::InvalidSnapshot(format!(
-                "operation {:?} references undeclared import module {:?}",
-                record.id, record.module
-            )));
-        };
-        let Some(_export) = exports.get(&record.export) else {
-            return Err(VmError::InvalidSnapshot(format!(
-                "operation {:?} references undeclared import {}:{}",
-                record.id, record.module, record.export
-            )));
-        };
-        let resolved = host.resolve_export(&record.module, &record.export);
-        if !matches!(resolved, Some(crate::host::HostExport::Function)) {
-            return Err(VmError::InvalidSnapshot(format!(
-                "operation {:?} references non-callable import {}:{}",
-                record.id, record.module, record.export
+                "operation {} schema {} recovery mismatch",
+                record.name, record.schema
             )));
         }
+        bindings
+            .decode_operation(&record.name, record.schema, &record.state)
+            .map_err(|error| {
+                VmError::InvalidSnapshot(format!(
+                    "operation {} schema {} state: {error}",
+                    record.name, record.schema
+                ))
+            })?;
         match heap.get(record.promise) {
             Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending) => {}
             _ => {
                 return Err(VmError::InvalidSnapshot(format!(
                     "operation {:?} references non-pending Promise {}",
-                    record.id, record.promise
+                    record.name, record.promise
                 )));
             }
         }
@@ -1658,18 +2111,14 @@ fn load_operations(
                 record.promise
             )));
         }
-        let meta = PendingOperationMeta {
-            id: record.id.clone(),
-            module: record.module.clone(),
-            export: record.export.clone(),
-        };
-        if !host.rebuild_operation(&meta) {
-            return Err(VmError::MissingOperation(record.id.clone()));
-        }
         operations.insert(
-            record.id.clone(),
+            record.id,
             PendingOperation {
-                meta,
+                name: record.name.clone(),
+                schema: record.schema,
+                recovery,
+                rejection,
+                state: record.state.clone(),
                 promise: record.promise,
             },
         );

@@ -905,23 +905,6 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let mut current = Some(target);
         while let Some(id) = current {
-            if let Object::Native(native) = self.heap.get(id)? {
-                let native_key = native.key.clone();
-                let property = match key {
-                    PropertyKeyRef::String(name) => Some(name.to_owned()),
-                    PropertyKeyRef::JsString(name) => name.to_utf8().ok(),
-                    PropertyKeyRef::Symbol(_) => None,
-                };
-                let Some(property) = property else {
-                    return Ok(Invocation::Value(Value::Undefined));
-                };
-                return match host.get_property(&native_key, &property) {
-                    Ok(value) => Ok(Invocation::Value(self.host_to_value(&value)?)),
-                    Err(crate::host::HostException(value)) => {
-                        Ok(Invocation::Thrown(self.host_to_value(&value)?))
-                    }
-                };
-            }
             let object = self.heap.get(id)?;
             if let Object::Proxy {
                 target, handler, ..
@@ -1162,12 +1145,10 @@ impl Vm {
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Option<&'static str> {
-        if self.heap.function(id).is_some() {
+        if self.heap.get(id).is_ok_and(is_callable_object) {
             ["call", "apply", "bind"]
                 .into_iter()
                 .find(|name| key.is_str(name))
-        } else if key.is_str("call") && matches!(self.heap.get(id), Ok(Object::BuiltinStatic(_))) {
-            Some("call")
         } else {
             None
         }
@@ -1417,35 +1398,6 @@ impl Vm {
         let id = self.materialize_function(func_id, env)?;
         frame.write(dst, Value::Object(id))?;
         Ok(Step::Next)
-    }
-
-    pub(crate) fn track_operation(
-        &mut self,
-        module: String,
-        export: String,
-        operation_id: String,
-    ) -> Result<Value, VmError> {
-        if operation_id.is_empty() {
-            return Err(VmError::Host(
-                "host operation id must not be empty".to_owned(),
-            ));
-        }
-        if self.operations.contains_key(&operation_id) {
-            return Err(VmError::DuplicateOperation(operation_id));
-        }
-        let promise = self.heap.alloc_promise();
-        self.operations.insert(
-            operation_id.clone(),
-            crate::runtime::PendingOperation {
-                meta: crate::host::PendingOperationMeta {
-                    id: operation_id,
-                    module,
-                    export,
-                },
-                promise,
-            },
-        );
-        Ok(Value::Object(promise))
     }
 
     fn suspend(

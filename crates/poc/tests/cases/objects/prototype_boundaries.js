@@ -28,10 +28,9 @@ export async function run() {
   if (Object.getPrototypeOf(target) !== Object.prototype) return false;
 
   const native = bind("prototype-boundary");
-  if (Object.getPrototypeOf(native) !== null || Reflect.getPrototypeOf(native) !== null) return false;
-  if (!Reflect.setPrototypeOf(native, null) || Object.setPrototypeOf(native, null) !== native) return false;
-  if (Reflect.setPrototypeOf(native, target) !== false) return false;
-  if (!throwsTypeError(() => Object.setPrototypeOf(native, target))) return false;
+  if (Object.getPrototypeOf(native) === null) return false;
+  if (!Reflect.setPrototypeOf(native, null)) return false;
+  if (Object.setPrototypeOf(native, target) !== native) return false;
   const child = Object.create(native);
-  return Object.getPrototypeOf(native) === null && Reflect.getPrototypeOf(child) === native && !("toString" in child);
+  return Object.getPrototypeOf(child) === native && "toString" in child;
 }

@@ -5,14 +5,14 @@ use super::support::{
     json_round_trip, values_beyond,
 };
 use yield_poc::number;
-use yield_vm::{Completion, HostValue, PromiseState, Value};
+use yield_vm::{Completion, JsValue, PromiseState, Value};
 
 #[test]
 fn snapshot_and_restore_across_two_awaits() {
-    let mut s = Suspended::start(RUN, vec![HostValue::String("input".into())]);
+    let mut s = Suspended::start(RUN, vec![JsValue::string("input")]);
     assert_eq!(s.host.count("inspect"), 1);
     assert_eq!(s.host.count("seed"), 1);
-    assert_eq!(s.vm.pending_operation_ids(), vec!["wait:a".to_owned()]);
+    assert_eq!(s.host.pending_labels(), vec!["wait:a".to_owned()]);
 
     let baseline = baseline_at_first_await();
     let snapshot = s.snapshot();
@@ -38,7 +38,7 @@ fn snapshot_and_restore_across_two_awaits() {
     );
     s.restore(json_round_trip(&snapshot))
         .expect("restore validates bindings");
-    assert_eq!(s.vm.pending_operation_ids(), vec!["wait:a".to_owned()]);
+    assert_eq!(s.host.pending_labels(), vec!["wait:a".to_owned()]);
 
     let inspect = s.host.count("inspect");
     let seed = s.host.count("seed");
@@ -51,7 +51,7 @@ fn snapshot_and_restore_across_two_awaits() {
     );
     assert_eq!(count_delta(s.host.count("seed"), seed), 0);
     assert_eq!(count_delta(s.host.count("wait"), wait), 1);
-    assert_eq!(s.vm.pending_operation_ids(), vec!["wait:b".to_owned()]);
+    assert_eq!(s.host.pending_labels(), vec!["wait:b".to_owned()]);
 
     let snapshot = s.snapshot();
     assert_eq!(
@@ -89,7 +89,7 @@ export async function run() {
 }
 "#;
     let mut s = Suspended::start(source, vec![]);
-    assert_eq!(s.vm.pending_operation_ids(), vec!["wait:fin".to_owned()]);
+    assert_eq!(s.host.pending_labels(), vec!["wait:fin".to_owned()]);
     assert_eq!(s.host.count("setLabel"), 0);
     let snapshot = s.snapshot();
     assert!(

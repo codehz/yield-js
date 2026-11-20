@@ -45,7 +45,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 | --- | --- |
 | `queueMicrotask` / Promise 拒绝 | `queueMicrotask` 回调抛出的异常通过 `Host::report_error` 交给宿主；未处理的 Promise 拒绝仍不跟踪 |
 | 函数对象 | 函数的 `name` / `length` 是只读虚拟属性：可读取并用 `in` / `Reflect.has` 检查，但不出现在自有键或自有描述符中。匿名函数与箭头函数不推断名称；计算方法名只使用静态可知的键或编译期提示，不按运行时键命名。内建函数的 `length` 统一为 `0`。共享的 `Function.prototype` 不可调用，默认 `toString` 返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法。绑定函数不自动创建 `.prototype`，其可构造性取决于目标。 |
-| 原型与描述符 | `Object.getPrototypeOf` 对四种非空原始值返回对应共享原型，但这不意味着所有 `Object` / `Reflect` API 都会隐式装箱；例如 `Reflect.getPrototypeOf` 仍要求对象。宿主原生句柄固定不可扩展，不开放属性定义。 |
+| 原型与描述符 | `Object.getPrototypeOf` 对四种非空原始值返回对应共享原型，但这不意味着所有 `Object` / `Reflect` API 都会隐式装箱；例如 `Reflect.getPrototypeOf` 仍要求对象。宿主类实例是普通对象，原型为 VM 创建的类原型；`Object.create(prototype)` 只能得到普通对象，不能伪造隐藏槽。 |
 | 未声明名字 | `globalThis` 提供内建全局属性，可用 `typeof globalThis.MessageChannel` 等方式探测功能。未声明的裸名字仍不能读取或赋值（编译错误，不是运行时 `ReferenceError`）；`typeof` 对这类名字折叠为 `"undefined"` |
 
 `for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
@@ -77,7 +77,8 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 
 1. **隐式装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **代理仅覆盖六种 trap。** 支持的属性操作及边界见上表和已实现清单，不等同于完整 ECMAScript Proxy。
-3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；`WeakMap` 条目由快照的 ephemeron 追踪单独处理。`RegExp` 的编译结果不进入快照，而由保存的模式与标志重建；`matchAll` 的 `RegExpStringIterator` 只保存匹配器对象、输入和游标状态。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由快照追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+4. **宿主绑定首版仍有未决项。** 已实现静态模块/类/原型/方法/访问器、`Js` / `JsList` 槽、payload codec、服务指纹、模块状态和四种 operation 恢复策略。尚未实现弱引用槽、`JsMap` 槽、以 `Symbol` 作为绑定成员名、绑定类继承、C ABI、宏生成、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。构造器导出可通过 `new` 调用，但 `instanceof` 所需的 `prototype` 属性与继承规则尚未接入。
 
 ## 6. 依赖关系（现状组织，非承诺）
 

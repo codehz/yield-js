@@ -31,10 +31,10 @@ Public entry points:
 - `yield_compiler::compile(source, &CompileOptions { imports }) -> Result<Build, CompileError>`
 - `Vm::new(build, &mut host)` validates the build and imports, runs the script once, and drains initialization microtasks
 - `Vm::get_export("name")` reads the current value of an explicitly exported module binding
-- `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver, then the host calls `Vm::run_until_idle(host)`
+- `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver; `args` are `JsValue` constants, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
-- `Vm::restore(snapshot, same_build, host)` rebinds natives and operations before execution
-- Host async work is `HostReply::Operation { operation_id }`, later `Vm::complete_operation`
+- `Vm::restore(snapshot, same_build, host)` rebinds declarations and operations before execution
+- Host async work is `CallCx::start_operation::<O>(state)`, later `Vm::complete_operation(token, completion)` with the current VM generation token
 
 Suspend/resume invariants (do not weaken these):
 
@@ -45,10 +45,10 @@ Suspend/resume invariants (do not weaken these):
 - Bindings read or written from another function, plus exported bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
 - After successful preparation, `Await` always resumes through the microtask queue, even for settled promises. A throwing `constructor` getter transfers control to the script exception handler without suspending.
-- Snapshot roots include the script environment, builtins, pending operations, and caller-supplied script roots. Traverse reachable closure environments and async continuations. Native pointers, host callbacks, and queued microtasks are not in the snapshot. Native objects are `(type, id)` keys.
-- Restore is exact-version: `SNAPSHOT_FORMAT_VERSION`, `BYTECODE_VERSION`, and `build_id` must match. Missing native binding or missing operation rejects the whole restore; the VM must not start. No snapshot migration.
+- Snapshot roots include the script environment, builtins, class prototypes, module state slots, pending operations, and caller-supplied script roots. Traverse reachable closure environments, host instance slots, and async continuations. Native pointers, host callbacks, and queued microtasks are not in the snapshot.
+- Restore is exact-version: `SNAPSHOT_FORMAT_VERSION`, `BYTECODE_VERSION`, `build_id`, and the binding fingerprint must match. Missing declarations, slot/payload mismatch, or missing operation rejects the whole restore; the VM must not start. No snapshot migration.
 
-`Host::call` is synchronous and must not re-enter the VM. The host is authoritative for operation state; the VM stores only the operation id and its Promise link.
+Host binding functions are synchronous and must not re-enter the VM. Declarations are immutable and shared; the VM owns prototypes, instances, slots, payloads, module state, and operation records. `JsValue` handles are valid only for the VM generation and call that produced them; retaining a value requires a declared slot or module state slot.
 
 ## Key Directories
 
@@ -89,12 +89,12 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - Edition 2024. Module docs (`//!`) state invariants; match that voice when adding a module. Code comments are English. README and `docs/design.md` are Chinese.
 - Small public surface. Crate internals are `pub(crate)`. New opcodes go in `yield_vm::bytecode::Instr`, then `compiler/src/instr.rs` (uses/defs/throws/rewrite) and the lowerer. CFG and slot allocation must not match on instruction shape.
 - Incompatible bytecode changes bump `BYTECODE_VERSION` (`crates/vm/src/bytecode.rs`). Snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION` (`crates/vm/src/snapshot.rs`). Do not bump them together unless both contracts changed. `Build::finalize` sets `build_id` from `compute_id`; content changes already reject old snapshots.
-- Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingNative` / `MissingOperation`, `Host`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host failures are `String`.
+- Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingOperation`, `Host`, `HostFault`, `UnknownOperation`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host binding functions return `JsResult` (`JsError::Throw` / `JsError::Fault`); host scheduling failures use `HostFault`. `Host::report_error` receives a `JsValue`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
 - Name policy (`compiler/src/names.rs`): script and local bindings shadow globals and static host imports. Host imports are indexed first-class values; calls lower through `GetImport` + `CallValue`. Preserve `typeof` behavior for a local shadowing an import or top-level function; an unshadowed imported value is evaluated.
-- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest. Fixture host exports are in `compile_options()` / `TestHost`; DemoHost in `main.rs` remains separate (`inspect`, `seed`, `wait`).
-- `TestHost` semantics: `seed()` → `10`; `wait(label)` → operation id `wait:{label}`; `bind(id)` → `NativeKey { type_name: "Node", id }`; `inspect` / `setLabel` → `undefined`. `test.expect` / `test.assert` throw catchable script values on failure. Failure injection: `reject_native`, `reject_restore_operation`.
+- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `poc/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
+- `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Failure injection: `reject_restore_operation`; corrupt snapshot payloads by editing the record.
 
 Where to edit:
 
@@ -105,7 +105,7 @@ Where to edit:
 | New opcode | `vm/src/bytecode.rs`, `vm/src/exec.rs` (and `ops.rs` if it is a value op), `compiler/src/instr.rs`, lowerer |
 | New heap kind | `vm/src/heap.rs` `write_edges`; snapshot reachability uses that list only |
 | Snapshot or restore checks | `vm/src/snapshot.rs`; add a rejection test in `poc/tests/e2e.rs` |
-| Host protocol | `vm/src/host.rs`, `value.rs` (`HostValue`); implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
+| Host protocol | `vm/src/host.rs`, `vm/src/binding.rs`; implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
 
 Easy to break:

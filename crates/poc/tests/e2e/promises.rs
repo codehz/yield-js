@@ -2,7 +2,7 @@
 
 use super::support::{RUN, Suspended, baseline_at_first_await, count_delta};
 use yield_poc::{TestHost, build};
-use yield_vm::{Completion, HostValue, Object, PromiseState, Value, Vm, VmError};
+use yield_vm::{Completion, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]
 fn script_reaction_survives_restore_and_runs_on_fulfill() {
@@ -15,7 +15,7 @@ export async function run() {
 }
 "#;
     let mut s = Suspended::start(source, vec![]);
-    assert_eq!(s.vm.pending_operation_ids(), vec!["wait:a".to_owned()]);
+    assert_eq!(s.host.pending_labels(), vec!["wait:a".to_owned()]);
     let snapshot = s.snapshot();
     assert!(
         snapshot.objects.iter().any(|record| matches!(
@@ -25,7 +25,7 @@ export async function run() {
         "then() handler is a persisted reaction"
     );
     s.restore(snapshot).expect("restore");
-    s.complete("wait:a", Completion::Fulfilled(HostValue::Number(4.0)));
+    s.complete("wait:a", Completion::Fulfilled(JsValue::number(4.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
 }
 
@@ -108,7 +108,7 @@ export async function run() {
 }
 "#;
     let mut s = Suspended::start(source, vec![]);
-    s.complete("wait:a", Completion::Fulfilled(HostValue::Number(2.0)));
+    s.complete("wait:a", Completion::Fulfilled(JsValue::number(2.0)));
     let snapshot = s.snapshot();
     assert_eq!(
         count_delta(
@@ -118,6 +118,6 @@ export async function run() {
         1
     );
     s.restore(snapshot).expect("restore");
-    s.complete("wait:b", Completion::Fulfilled(HostValue::Number(3.0)));
+    s.complete("wait:b", Completion::Fulfilled(JsValue::number(3.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
 }

@@ -1,8 +1,8 @@
 # 宿主绑定详细设计（草案）
 
-> **状态：非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节，供实现前评审；命名、宏形态、记录编码均可能变化。
+> **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 本文描述目标契约，不描述当前实现。当前 PoC 仍使用 `Host::call` / `Host::call_native` 加 `NativeKey` 字符串分派，见 [迁移映射](#13-从现有-poc-迁移映射)。
+> 当前实现与本文的对应关系：`crates/vm/src/binding.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`、`JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。15 节的未决项仍未全部定案，见文末「首版落地状态」。
 
 ## 1. 目标与范围
 
@@ -421,3 +421,9 @@ flowchart TB
 10. **大对象与流式 payload。** 是否需要分块编码以限制单次快照内存峰值。
 11. **宿主并发。** 平台回调可能来自其他线程；交付令牌的线程模型、发送边界与顺序保证需要单独定义。
 12. **恢复期资源限制。** 是否需要 payload 大小、嵌套深度和对象数量的上限，以及超限的错误分类。
+
+## 16. 首版落地状态
+
+已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌与恢复期重新登记；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
+
+尚未定案或未实现：弱引用槽、`JsMap` 槽、恢复期访问器校验时机、绑定类继承、Symbol 成员名、C ABI、宏生成、TypeScript 定义生成、payload 二进制格式与流式读取、跨线程交付、恢复资源上限。构造器导出已能按普通函数声明并通过 `new` 调用，但 `instanceof` 依赖的 `prototype` 属性安装与继承规则仍留待 15 节第 4 项定案。

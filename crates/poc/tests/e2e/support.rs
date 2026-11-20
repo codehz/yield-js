@@ -1,7 +1,7 @@
 //! Shared fixtures and lifecycle helpers for snapshot tests.
 
 use yield_poc::{TestHost, build};
-use yield_vm::{Completion, HostValue, PromiseState, Snapshot, Value, Vm, VmError};
+use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
 
 pub(super) const RUN: &str = r#"
 import { inspect, seed, wait } from "test";
@@ -23,7 +23,7 @@ pub(super) struct Suspended {
 
 impl Suspended {
     #[track_caller]
-    pub(super) fn start(source: &str, args: Vec<HostValue>) -> Self {
+    pub(super) fn start(source: &str, args: Vec<JsValue>) -> Self {
         let mut host = TestHost::default();
         let mut vm = Vm::new(build(source), &mut host).expect("create VM");
         let result = vm.start(&mut host, "run", args).expect("start run");
@@ -46,8 +46,8 @@ impl Suspended {
 
     #[track_caller]
     pub(super) fn complete(&mut self, id: &str, completion: Completion) {
-        self.vm
-            .complete_operation(id, completion)
+        self.host
+            .complete(&mut self.vm, id, completion)
             .map_err(|error| (id, error))
             .expect("complete operation");
         self.vm
@@ -123,6 +123,6 @@ export async function run() {
 "#,
         vec![],
     );
-    suspended.complete("wait:a", Completion::Fulfilled(HostValue::Number(0.0)));
+    suspended.complete("wait:a", Completion::Fulfilled(JsValue::number(0.0)));
     suspended.snapshot()
 }

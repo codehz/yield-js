@@ -1,13 +1,13 @@
 # yield-js PoC
 
-可恢复迷你 JavaScript VM 的第一个垂直切片。当前处于早期开发状态：已打通「严格模式 JS 子集 → 字节码 → async VM → 宿主 operation → 快照/恢复」的核心闭环，但仅覆盖设计文档的一个子集，语法与内建仍不完整。
+可恢复迷你 JavaScript VM 的第一个垂直切片。当前处于早期开发状态：已打通「严格模式 JS 子集 → 字节码 → async VM → 静态宿主绑定 → 快照/恢复」的核心闭环，但仅覆盖设计文档的一个子集，语法与内建仍不完整。
 
 ```text
 严格模式 JS 子集
   -> Oxc AST
   -> 显式槽位字节码
   -> async VM（Promise / 微任务 / async 续体）
-  -> 宿主 operation
+  -> 静态宿主模块 / 类 / operation
   -> 快照 / 恢复
 ```
 
@@ -18,7 +18,7 @@ cargo test --workspace
 cargo run -p yield-poc
 ```
 
-`yield-poc` 编译并执行设计文档中的双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。宿主只能按公开名读取或调用显式导出的绑定（`export async function run`）；输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
+`yield-poc` 编译并执行设计文档中的双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。宿主只通过显式导出的绑定（`export async function run`）进入脚本；宿主模块、类、原型、实例槽、payload、模块状态和 operation 都由 VM 持有，恢复只需要同一 Build、同一绑定声明和同一快照。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
 
 ## 目录
 

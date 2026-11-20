@@ -1,5 +1,5 @@
 use yield_compiler::compile;
-use yield_vm::{Completion, HostValue, JsString, PromiseState, Snapshot, Value, Vm};
+use yield_vm::{Completion, JsString, JsValue, PromiseState, Snapshot, Value, Vm};
 
 use crate::{TestHost, compile_options};
 
@@ -67,7 +67,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                 )?;
             }
             Directive::Pending(expected) => {
-                assert_pending(name, step.line, &vm, &expected)?;
+                assert_pending(name, step.line, &host, &expected)?;
             }
             Directive::Returns(expected) => {
                 assert_value(name, step.line, "@returns", &expected, &result)?;
@@ -92,10 +92,10 @@ struct Step {
 }
 
 enum Directive {
-    Args(Vec<HostValue>),
+    Args(Vec<JsValue>),
     Restore,
-    Fulfill(String, HostValue),
-    Reject(String, HostValue),
+    Fulfill(String, JsValue),
+    Reject(String, JsValue),
     Pending(Vec<String>),
     Returns(Expected),
     Fulfilled(Expected),
@@ -235,7 +235,7 @@ fn require_args<'a>(line: usize, directive: &str, args: &'a str) -> Result<&'a s
     }
 }
 
-fn parse_args(line: usize, args: &str) -> Result<Vec<HostValue>, String> {
+fn parse_args(line: usize, args: &str) -> Result<Vec<JsValue>, String> {
     let items = parse_array(line, "@args", args)?;
     items
         .into_iter()
@@ -257,11 +257,7 @@ fn parse_pending(line: usize, args: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn parse_completion(
-    line: usize,
-    directive: &str,
-    args: &str,
-) -> Result<(String, HostValue), String> {
+fn parse_completion(line: usize, directive: &str, args: &str) -> Result<(String, JsValue), String> {
     let items = parse_array(line, directive, args)?;
     if items.len() != 2 {
         return Err(format!(
@@ -369,17 +365,13 @@ fn parse_expected(line: usize, directive: &str, args: &str) -> Result<Expected, 
     json_scalar(line, directive, value)
 }
 
-fn host_scalar(
-    line: usize,
-    directive: &str,
-    value: serde_json::Value,
-) -> Result<HostValue, String> {
+fn host_scalar(line: usize, directive: &str, value: serde_json::Value) -> Result<JsValue, String> {
     Ok(match json_scalar(line, directive, value)? {
-        Expected::Undefined => HostValue::Undefined,
-        Expected::Null => HostValue::Null,
-        Expected::Bool(value) => HostValue::Bool(value),
-        Expected::Number(value) => HostValue::Number(value),
-        Expected::String(value) => HostValue::String(value),
+        Expected::Undefined => JsValue::undefined(),
+        Expected::Null => JsValue::null(),
+        Expected::Bool(value) => JsValue::boolean(value),
+        Expected::Number(value) => JsValue::number(value),
+        Expected::String(value) => JsValue::string(value),
     })
 }
 
@@ -453,16 +445,21 @@ fn complete(
     id: &str,
     completion: Completion,
 ) -> Result<(), String> {
-    vm.complete_operation(id, completion)
+    host.complete(vm, id, completion)
         .map_err(|error| located(name, line, directive, error))?;
     vm.run_until_idle(host)
         .map_err(|error| located(name, line, directive, error))?;
     Ok(())
 }
 
-fn assert_pending(name: &str, line: usize, vm: &Vm, expected: &[String]) -> Result<(), String> {
+fn assert_pending(
+    name: &str,
+    line: usize,
+    host: &TestHost,
+    expected: &[String],
+) -> Result<(), String> {
     let mut expected = expected.to_vec();
-    let mut actual = vm.pending_operation_ids();
+    let mut actual = host.pending_labels();
     expected.sort();
     actual.sort();
     if expected != actual {
@@ -520,13 +517,13 @@ fn assert_uncaught(
     name: &str,
     line: usize,
     expected: &[Expected],
-    actual: &[Value],
+    actual: &[JsValue],
 ) -> Result<(), String> {
     if expected.len() == actual.len()
         && expected
             .iter()
             .zip(actual)
-            .all(|(expected, actual)| values_equal(expected, actual))
+            .all(|(expected, actual)| values_equal_js(expected, actual))
     {
         return Ok(());
     }
@@ -539,10 +536,20 @@ fn assert_uncaught(
             .join(", "),
         actual
             .iter()
-            .map(format_value)
+            .map(JsValue::to_string)
             .collect::<Vec<_>>()
             .join(", "),
     ))
+}
+
+fn values_equal_js(expected: &Expected, actual: &JsValue) -> bool {
+    match expected {
+        Expected::Undefined => actual.is_undefined(),
+        Expected::Null => actual.is_null(),
+        Expected::Bool(expected) => actual.as_bool() == Some(*expected),
+        Expected::Number(expected) => actual.as_number() == Some(*expected),
+        Expected::String(expected) => actual.as_string() == Some(expected),
+    }
 }
 
 fn values_equal(expected: &Expected, actual: &Value) -> bool {

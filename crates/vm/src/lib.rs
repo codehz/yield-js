@@ -4,6 +4,7 @@
 //! imports the compiler, or stores host-native pointers in snapshots.
 
 mod array;
+pub mod binding;
 mod builtins;
 pub mod bytecode;
 mod collections;
@@ -12,7 +13,6 @@ mod exec;
 mod frame;
 pub mod heap;
 pub mod host;
-pub mod host_data;
 mod json;
 mod math;
 mod number;
@@ -27,13 +27,18 @@ mod string;
 pub mod value;
 mod vm;
 
+pub use binding::{
+    Bindings, BindingsBuilder, ClassId, ConstKind, ConstValue, ExportDecl, ExportId, HostClass,
+    HostFault, HostModuleState, Instance, JsError, JsResult, JsValue, MethodDecl, MethodId,
+    ModuleDecl, NativeTarget, Operation, OperationStart, OperationToken, Recovery, SlotDecl, This,
+};
 pub use bytecode::{
     Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 pub use error::VmError;
 pub use heap::{Object, PromiseState};
-pub use host::{Completion, Host, HostException, HostExport, HostReply, PendingOperationMeta};
+pub use host::{Completion, Host};
 pub use regexp::{RegExpFlags, validate_regexp};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
-pub use value::{BindingId, ContinuationId, HostValue, JsString, NativeKey, ObjectId, Value};
-pub use vm::Vm;
+pub use value::{BindingId, ContinuationId, JsString, ObjectId, Value};
+pub use vm::{PendingOperationInfo, Vm};

@@ -4,8 +4,11 @@
 
 - 字节码版本、构建 ID 摘要、函数/导入/导出/常量/恢复表/异常表结构校验；导出表拒绝重复公开名，目标必须是初始化函数声明的绑定。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
-- 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主原生函数可作值传递；命名空间由 VM 创建，其导出属性不可写、不可配置。构建记录排序后的模块和导出清单，初始化前解析宿主绑定；快照保留命名空间和原生对象身份，并验证操作的模块及导出名。
-- `test` 宿主模块提供 `expect(actual).toBe(expected)`、`toEqual(expected)`、`toBeTruthy()` 与 `assert(condition, message?)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较只投影普通对象/数组的自有可枚举数据属性，不运行 getter，也不跨 VM 边界暴露堆对象。
+- 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。声明由 `yield_vm::binding::Bindings` builder 提供，编译器清单由同一份声明派生。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
+- 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。
+- `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec 使用 `DecodeCx` 访问平台服务；服务 ID 进入声明指纹，缺失或版本不符整体拒绝恢复。
+- 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
+- `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
@@ -61,15 +64,15 @@
 - Promise 组合子接受同步可迭代值。每次调用先读取接收者的 `resolve` 一次，按输入顺序以同一接收者调用它，并调用每个返回值的 `then`。属性读取、调用与迭代错误拒绝结果 Promise。等待中的组合子可跨快照恢复；`Promise.any` 全拒绝时以真实 `AggregateError` 拒绝，`.errors` 按输入顺序保留拒绝原因。
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
-- 宿主同步导入、可恢复 operation、operation 完成/拒绝、重复完成拒绝。
+- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 创建 Promise 与持久 operation 记录，宿主只收到声明名、schema、策略、状态字节和代际令牌。结算必须使用当前代际令牌；旧 VM 的令牌、重复结算和未知 operation 被拒绝。恢复按声明策略处理：`Pause` 以 `undefined` 兑现，`Reject` 拒绝，`Resume` / `Reissue` 在全部快照校验通过后重新登记并保留原 Promise。
+- 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
-- 原生对象稳定键 `(type, id)` 包装；恢复前验证绑定，缺失即整体拒绝。
-- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
-- 恢复校验：格式/字节码版本、构建 ID、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、缺失 operation、缺失 native 绑定、Symbol 引用与注册表。内部原型（含修改过的内建共享原型）按身份保存；恢复时拒绝悬空链接、环境对象、原型环和 `Object.prototype` 的非空原型。普通属性可以互相引用。
+- 快照仅遍历根可达对象；从 pending operation、async 续体、闭包环境、内建单例、类原型、模块状态槽、顶层脚本环境和宿主提供的脚本根出发。`Symbol.iterator`、`Symbol.toPrimitive`、`Symbol.species` 与注册表项恒为 Symbol 根，普通 Symbol 只从已标记对象的键值中保留。
+- 恢复校验：格式/字节码版本、构建 ID、绑定指纹、声明引用、类原型、实例槽种类与数量、payload schema 与解码、模块状态、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、operation 类型/schema/策略、Symbol 引用与注册表。平台资源在全部 payload 解码成功后才发布；任一失败整体拒绝，不启动脚本。
 - `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。
 - `WeakMap` 构造器及其共享原型也是快照根。快照按 ephemeron 规则追踪：仅在 WeakMap 和键均已可达时追踪对应值，反复处理直至没有新增可达对象；不会仅因条目存在而保留键。不可达键的条目从快照省略，恢复拒绝条目中的悬空引用。这不表示运行期间会回收堆对象。
 - `Proxy` 构造器是快照根；代理到目标、handler 的边是强引用，handler 捕获的闭包环境沿普通堆边保存。保存和恢复直接处理记录，不通过 trap 查询代理。恢复拒绝缺失或类型不合法的代理引用。
-- 快照格式 **30** 保存包装对象的原始值、自有属性、原型和对象身份，并保存 `Boolean` 构造器及共享原型根。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
-- 字节码格式 **28** 和快照格式 **33** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
+- 快照格式 **36** 保存包装对象的原始值、自有属性、原型和对象身份，并保存 `Boolean` 构造器及共享原型根；同时保存绑定指纹、类原型映射、可达宿主实例的槽/payload 和模块状态。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
+- 字节码格式 **29** 和快照格式 **36** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
 - 快照要求微任务队列已排空。

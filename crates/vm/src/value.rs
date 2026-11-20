@@ -519,32 +519,3 @@ impl From<&str> for PropertyKey {
         Self::String(key.into())
     }
 }
-
-/// Stable key for a host-owned object wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct NativeKey {
-    #[serde(rename = "type")]
-    pub type_name: String,
-    pub id: String,
-}
-
-impl std::fmt::Display for NativeKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "({}, {})", self.type_name, self.id)
-    }
-}
-
-/// Host boundary values. Data projections are input-only and cannot be used
-/// to access the VM heap or to construct a script value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HostValue {
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(JsString),
-    NativeFunction(NativeKey),
-    Native(NativeKey),
-    Data(crate::host_data::HostData),
-}

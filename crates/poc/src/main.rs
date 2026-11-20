@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 
-use yield_compiler::{CompileOptions, compile};
-use yield_vm::{
-    Completion, Host, HostExport, HostReply, HostValue, NativeKey, PendingOperationMeta,
-    PromiseState, Vm,
+use yield_compiler::compile;
+use yield_vm::binding::{
+    Bindings, CallCx, CodecError, JsResult, JsValue, ModuleDecl, Operation, OperationStart,
+    OperationToken, Recovery,
 };
+use yield_vm::bytecode::Build;
+use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
 
 const SOURCE: &str = r#"
 import { inspect, seed, wait } from 'demo';
@@ -19,75 +22,166 @@ export async function run(input) {
 }
 "#;
 
+#[derive(Default)]
+struct DemoCounters(Mutex<BTreeMap<String, usize>>);
+
+impl DemoCounters {
+    fn hit(&self, name: &str) {
+        *self
+            .0
+            .lock()
+            .expect("counter lock")
+            .entry(name.to_owned())
+            .or_default() += 1;
+    }
+
+    fn count(&self, name: &str) -> usize {
+        self.0
+            .lock()
+            .expect("counter lock")
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+struct Wait {
+    label: String,
+}
+
+impl Operation for Wait {
+    const NAME: &'static str = "wait";
+    const SCHEMA: u32 = 1;
+    const RECOVERY: Recovery = Recovery::Resume;
+
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+        out.extend_from_slice(self.label.as_bytes());
+        Ok(())
+    }
+
+    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
+        Ok(Self {
+            label: std::str::from_utf8(input)
+                .map_err(|_| CodecError::new("wait label is not UTF-8"))?
+                .to_owned(),
+        })
+    }
+}
+
 struct DemoHost {
-    calls: Vec<(String, Vec<HostValue>)>,
-    operations: BTreeMap<String, PendingOperationMeta>,
+    bindings: Arc<Bindings>,
+    counters: Arc<DemoCounters>,
+    operations: BTreeMap<String, OperationToken>,
 }
 
 impl DemoHost {
-    fn new() -> Self {
-        Self {
-            calls: Vec::new(),
+    fn new() -> Result<Self, String> {
+        let counters = Arc::new(DemoCounters::default());
+        let bindings = demo_bindings(counters.clone())?;
+        Ok(Self {
+            bindings: Arc::new(bindings),
+            counters,
             operations: BTreeMap::new(),
-        }
+        })
     }
 
     fn calls(&self, name: &str) -> usize {
-        self.calls.iter().filter(|(call, _)| call == name).count()
+        self.counters.count(name)
+    }
+
+    fn token(&self, label: &str) -> Option<OperationToken> {
+        self.operations.get(label).copied()
+    }
+
+    fn complete(&self, vm: &mut Vm, label: &str, value: JsValue) -> Result<(), String> {
+        let token = self
+            .token(label)
+            .ok_or_else(|| format!("unknown operation {label:?}"))?;
+        vm.complete_operation(token, Completion::Fulfilled(value))
+            .map_err(|error| error.to_string())
+    }
+
+    fn complete_mut(&mut self, vm: &mut Vm, label: &str, value: JsValue) -> Result<(), String> {
+        self.complete(vm, label, value)?;
+        self.operations.remove(label);
+        Ok(())
     }
 }
 
 impl Host for DemoHost {
-    fn resolve_export(&self, module: &str, export: &str) -> Option<HostExport> {
-        (module == "demo" && matches!(export, "inspect" | "seed" | "wait"))
-            .then_some(HostExport::Function)
+    fn bindings(&self) -> Arc<Bindings> {
+        self.bindings.clone()
     }
 
-    fn call(
-        &mut self,
-        module: &str,
-        import: &str,
-        args: &[HostValue],
-    ) -> Result<HostReply, String> {
-        if module != "demo" {
-            return Err(format!("unknown host module {module:?}"));
+    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
+        if start.name != "wait" {
+            return Err(HostFault::new(format!("unknown operation {}", start.name)));
         }
-        println!("  host call: {import}({args:?})");
-        self.calls.push((import.to_owned(), args.to_vec()));
-        match import {
-            "inspect" => Ok(HostReply::Value(HostValue::Undefined)),
-            "seed" => Ok(HostReply::Value(HostValue::Number(10.0))),
-            "wait" => {
-                let label = match args {
-                    [HostValue::String(label)] => label
-                        .to_utf8()
-                        .map_err(|_| "wait label must be valid UTF-16".to_owned())?,
-                    _ => return Err("wait expects one string".to_owned()),
-                };
-                let id = format!("wait:{label}");
-                self.operations.insert(
-                    id.clone(),
-                    PendingOperationMeta {
-                        id: id.clone(),
-                        module: module.to_owned(),
-                        export: import.to_owned(),
-                    },
-                );
-                Ok(HostReply::Operation { operation_id: id })
-            }
-            _ => Err(format!("unknown import {import}")),
-        }
+        let label = std::str::from_utf8(start.state)
+            .map_err(|_| HostFault::new("wait label is not UTF-8"))?
+            .to_owned();
+        self.operations.insert(label, start.token);
+        Ok(())
     }
 
-    fn has_native(&self, _key: &NativeKey) -> bool {
-        true
+    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
+        self.start_operation(start)
     }
 
-    fn rebuild_operation(&mut self, operation: &PendingOperationMeta) -> bool {
-        self.operations
-            .get(&operation.id)
-            .is_some_and(|known| known == operation)
+    fn report_error(&mut self, _error: JsValue) {}
+}
+
+fn demo_bindings(counters: Arc<DemoCounters>) -> Result<Bindings, String> {
+    Bindings::builder()
+        .service("demo-counters", 1, counters)
+        .operation::<Wait>()
+        .module(
+            ModuleDecl::new("demo")
+                .function("inspect", 1, |cx| {
+                    println!("  host call: inspect({:?})", cx.args());
+                    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+                        counters.hit("inspect");
+                    }
+                    Ok(JsValue::undefined())
+                })
+                .function("seed", 0, |cx| {
+                    println!("  host call: seed()");
+                    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+                        counters.hit("seed");
+                    }
+                    Ok(JsValue::number(10.0))
+                })
+                .function("wait", 1, wait_call),
+        )
+        .build()
+}
+
+fn wait_call(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+    let arg = cx.arg(0)?;
+    let label = cx
+        .string(&arg)?
+        .to_utf8()
+        .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
+    println!("  host call: wait({label:?})");
+    if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+        counters.hit("wait");
     }
+    cx.start_operation(Wait { label })
+}
+
+fn compile_options() -> yield_compiler::CompileOptions {
+    let bindings = demo_bindings(Arc::new(DemoCounters::default())).expect("demo bindings");
+    let mut imports = BTreeMap::new();
+    for module in bindings.module_names() {
+        imports.insert(
+            module.to_owned(),
+            bindings
+                .export_names(module)
+                .map(str::to_owned)
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+    yield_compiler::CompileOptions { imports }
 }
 
 fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
@@ -105,16 +199,7 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let build = compile(
-        SOURCE,
-        &CompileOptions {
-            imports: [(
-                "demo".into(),
-                ["inspect".into(), "seed".into(), "wait".into()].into(),
-            )]
-            .into(),
-        },
-    )?;
+    let build: Build = compile(SOURCE, &compile_options())?;
     let function = build.function_named("run").expect("demo entry function");
     println!("build {} ({})", build.build_id, function.name);
     println!(
@@ -128,14 +213,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut host = DemoHost::new();
+    let mut host = DemoHost::new()?;
     let mut vm = Vm::new(build.clone(), &mut host)?;
-    let result = vm.start(&mut host, "run", vec![HostValue::String("input".into())])?;
+    let result = vm.start(&mut host, "run", vec![JsValue::string("input")])?;
     vm.run_until_idle(&mut host)?;
-    println!(
-        "\nafter first await: pending {:?}",
-        vm.pending_operation_ids()
-    );
+    println!("\nafter first await: pending {:?}", host.operations.keys());
     let first = vm.snapshot(std::slice::from_ref(&result))?;
     println!(
         "snapshot 1: {}, {} continuation(s)",
@@ -150,12 +232,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         host.calls("inspect"),
         host.calls("seed")
     );
-    vm.complete_operation("wait:a", Completion::Fulfilled(HostValue::Number(2.0)))?;
+    host.complete_mut(&mut vm, "a", JsValue::number(2.0))?;
     vm.run_until_idle(&mut host)?;
-    println!(
-        "after second await: pending {:?}",
-        vm.pending_operation_ids()
-    );
+    println!("after second await: pending {:?}", host.operations.keys());
     let second = vm.snapshot(std::slice::from_ref(&result))?;
     println!(
         "snapshot 2: {}, {} continuation(s)",
@@ -165,19 +244,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(vm);
 
     let mut vm = Vm::restore(second, build, &mut host)?;
-    vm.complete_operation("wait:b", Completion::Fulfilled(HostValue::Number(3.0)))?;
+    host.complete_mut(&mut vm, "b", JsValue::number(3.0))?;
     vm.run_until_idle(&mut host)?;
     match vm.promise_state(&result)? {
         PromiseState::Pending => println!("result: pending (unexpected)"),
-        PromiseState::Fulfilled(value) => {
-            println!("result: {}", render_value(&vm.to_host_value(&value)?))
-        }
-        PromiseState::Rejected(value) => {
-            println!(
-                "result: rejected {}",
-                render_value(&vm.to_host_value(&value)?)
-            )
-        }
+        PromiseState::Fulfilled(value) => println!("result: {}", render_value(&value)),
+        PromiseState::Rejected(value) => println!("result: rejected {}", render_value(&value)),
     }
     println!(
         "audit: inspect={} seed={} wait={} (restore did not re-run effects)",
@@ -188,15 +260,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn render_value(value: &HostValue) -> String {
+fn render_value(value: &yield_vm::Value) -> String {
     match value {
-        HostValue::Undefined => "undefined".to_owned(),
-        HostValue::Null => "null".to_owned(),
-        HostValue::Bool(value) => value.to_string(),
-        HostValue::Number(value) => value.to_string(),
-        HostValue::String(value) => format!("{value:?}"),
-        HostValue::Native(key) => key.to_string(),
-        HostValue::NativeFunction(key) => key.to_string(),
-        HostValue::Data(_) => "<host data>".to_owned(),
+        yield_vm::Value::Undefined => "undefined".to_owned(),
+        yield_vm::Value::Null => "null".to_owned(),
+        yield_vm::Value::Bool(value) => value.to_string(),
+        yield_vm::Value::Number(value) => value.to_string(),
+        yield_vm::Value::String(value) => format!("{value:?}"),
+        yield_vm::Value::Symbol(_) => "symbol".to_owned(),
+        yield_vm::Value::Object(_) => "object".to_owned(),
     }
 }

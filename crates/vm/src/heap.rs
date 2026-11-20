@@ -18,7 +18,7 @@ use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
 use crate::string::utf16_unit_string;
 use crate::value::{
-    BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
+    BindingId, ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
 
 /// Reserved well-known symbols. Ordinary symbols allocate from 2 and are never
@@ -116,8 +116,8 @@ pub struct PromiseObject {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeObject {
-    pub key: NativeKey,
-    pub function: bool,
+    pub target: crate::binding::NativeTarget,
+    pub constructable: bool,
 }
 
 /// Lookup stays keyed; the ordinal records creation order, not write order.
@@ -1154,7 +1154,7 @@ impl Object {
         })
     }
 
-    fn tables(&self) -> Option<PropertyTables<'_>> {
+    pub(crate) fn tables(&self) -> Option<PropertyTables<'_>> {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
@@ -1862,14 +1862,25 @@ impl Heap {
         self.objects.keys().copied().collect()
     }
 
-    pub(crate) fn intern_native(&mut self, key: NativeKey, function: bool) -> ObjectId {
+    pub(crate) fn intern_native(
+        &mut self,
+        target: crate::binding::NativeTarget,
+        constructable: bool,
+    ) -> ObjectId {
         if let Some(id) = self.objects.iter().find_map(|(id, object)| match object {
-            Object::Native(native) if native.key == key && native.function == function => Some(*id),
+            Object::Native(native)
+                if native.target == target && native.constructable == constructable =>
+            {
+                Some(*id)
+            }
             _ => None,
         }) {
             return id;
         }
-        self.alloc(Object::Native(NativeObject { key, function }))
+        self.alloc(Object::Native(NativeObject {
+            target,
+            constructable,
+        }))
     }
 
     pub(crate) fn set_prototype(

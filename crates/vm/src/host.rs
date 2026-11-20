@@ -1,80 +1,39 @@
-use crate::value::{HostValue, NativeKey, Value};
+use std::sync::Arc;
 
-/// Metadata the VM persists for a recoverable host operation. Private host
-/// state stays with the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingOperationMeta {
-    pub id: String,
-    pub module: String,
-    pub export: String,
-}
+use crate::binding::{Bindings, HostFault, JsValue, OperationStart};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostExport {
-    Value(HostValue),
-    Function,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum HostReply {
-    /// Synchronous completion.
-    Value(HostValue),
-    /// The export threw a script-visible error.
-    Throw(String),
-    /// The host accepted recoverable work. The VM creates the corresponding
-    /// Promise and records only the stable operation ID.
-    Operation { operation_id: String },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct HostException(pub HostValue);
-
-#[derive(Debug, Clone, PartialEq)]
+/// How a host operation completed. Values are produced outside a call, so
+/// they must be constants; host code cannot mint object handles after the
+/// call that created them.
+#[derive(Debug, Clone)]
 pub enum Completion {
-    Fulfilled(HostValue),
-    Rejected(HostValue),
+    Fulfilled(JsValue),
+    Rejected(JsValue),
 }
 
-/// Host adapter contract. The host is authoritative for operations, native
-/// objects and timer/event delivery.
+/// Host-side resources and delivery endpoint.
+///
+/// Declarations, classes, codecs and services come from [`Bindings`]. The VM
+/// owns every instance, prototype, slot and operation record; the host only
+/// schedules work and delivers completions through
+/// [`crate::Vm::complete_operation`].
 pub trait Host {
-    fn resolve_export(&self, module: &str, export: &str) -> Option<HostExport>;
+    fn bindings(&self) -> Arc<Bindings>;
 
-    /// Invoked synchronously by script code. Must not re-enter the VM.
-    fn call(&mut self, module: &str, export: &str, args: &[HostValue])
-    -> Result<HostReply, String>;
+    /// Called synchronously after the VM records a new operation. The host may
+    /// hand `start.state` to a platform service. It must not re-enter the VM.
+    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault>;
 
-    /// Reads a property from a host-owned native object. Called synchronously.
-    fn get_property(&self, _key: &NativeKey, _property: &str) -> Result<HostValue, HostException> {
-        Ok(HostValue::Undefined)
+    /// Called during restore for `Resume` and `Reissue` operations, after the
+    /// snapshot has been fully validated. Returning an error rejects the whole
+    /// restore; the VM is not created.
+    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
+        let _ = start;
+        Err(HostFault::new(
+            "host does not support operation recovery".to_owned(),
+        ))
     }
 
-    /// Invokes a host-owned native function. Called synchronously.
-    fn call_native(
-        &mut self,
-        key: &NativeKey,
-        _args: &[HostValue],
-    ) -> Result<HostReply, HostException> {
-        Err(HostException(HostValue::String(
-            format!("native {key} is not callable").into(),
-        )))
-    }
-
-    /// Enables read-only own-data projection for matcher-style inspection.
-    fn project_arguments(&self, _module: &str, _export: &str) -> bool {
-        false
-    }
-    fn project_native_arguments(&self, _key: &NativeKey) -> bool {
-        false
-    }
-    /// Called when a microtask callback throws with no promise result.
-    /// The host decides whether and how to log the error.
-    fn report_error(&mut self, _error: &Value) {}
-
-    /// Called during snapshot restore before execution starts.
-    fn has_native(&self, key: &NativeKey) -> bool;
-
-    /// Called during snapshot restore. Returning `false` rejects the whole
-    /// restore before the VM is created.
-    fn rebuild_operation(&mut self, operation: &PendingOperationMeta) -> bool;
+    /// Reports an uncaught microtask error. The host decides whether to log it.
+    fn report_error(&mut self, error: JsValue);
 }

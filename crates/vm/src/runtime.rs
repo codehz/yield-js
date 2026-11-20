@@ -1,14 +1,56 @@
 //! Suspended work. A script exception inside an async activation is a
 //! [`Settlement`], not a VM failure. [`Invocation`] is the same split for a call.
 
+use std::any::Any;
+
+use crate::binding::{ClassId, Recovery};
 use crate::error::VmError;
 use crate::heap::{CombineKind, PromiseState};
-use crate::host::PendingOperationMeta;
 use crate::value::{ContinuationId, ObjectId, Value};
 
 #[derive(Debug, Clone)]
+pub(crate) enum HostSlot {
+    Js(Value),
+    JsList(Vec<Value>),
+}
+
+pub(crate) struct HostInstance {
+    pub(crate) class: ClassId,
+    pub(crate) slots: Vec<HostSlot>,
+    pub(crate) payload: Option<Box<dyn Any>>,
+}
+
+impl std::fmt::Debug for HostInstance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostInstance")
+            .field("class", &self.class)
+            .field("slots", &self.slots)
+            .finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct ModuleState {
+    pub(crate) slots: Vec<HostSlot>,
+    pub(crate) payload: Box<dyn Any>,
+}
+
+impl std::fmt::Debug for ModuleState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModuleState")
+            .field("slots", &self.slots)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct PendingOperation {
-    pub(crate) meta: PendingOperationMeta,
+    pub(crate) name: String,
+    pub(crate) schema: u32,
+    pub(crate) recovery: Recovery,
+    pub(crate) rejection: &'static str,
+    pub(crate) state: Vec<u8>,
     pub(crate) promise: ObjectId,
 }
 
