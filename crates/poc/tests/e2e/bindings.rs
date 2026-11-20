@@ -399,6 +399,7 @@ struct Point {
 
 impl HostClass for Point {
     const TAG: &'static str = "Point";
+    const PAYLOAD_SCHEMA: Option<u32> = Some(1);
     const METHODS: &'static [yield_vm::binding::MethodDecl] = &[yield_vm::binding::MethodDecl {
         name: "x",
         arity: 0,
@@ -407,6 +408,23 @@ impl HostClass for Point {
             Ok(JsValue::number(this.instance().payload(cx)?.x))
         },
     }];
+
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+        out.extend_from_slice(&self.x.to_le_bytes());
+        Ok(())
+    }
+
+    fn decode_payload(
+        input: &[u8],
+        _cx: &mut yield_vm::binding::DecodeCx<'_>,
+    ) -> Result<Self, CodecError> {
+        let bytes: [u8; 8] = input
+            .try_into()
+            .map_err(|_| CodecError::new("point payload must be eight bytes"))?;
+        Ok(Self {
+            x: f64::from_le_bytes(bytes),
+        })
+    }
 }
 
 #[test]
@@ -438,6 +456,42 @@ export function run() {
     assert_eq!(
         vm.start(&mut host, "run", vec![]).expect("start"),
         Value::Number(3.0)
+    );
+}
+
+#[test]
+fn class_data_requires_a_declared_payload_schema() {
+    struct Loose {
+        _n: u32,
+    }
+
+    impl HostClass for Loose {
+        const TAG: &'static str = "Loose";
+    }
+
+    let bindings = Bindings::builder()
+        .class::<Loose>()
+        .module(ModuleDecl::new("loose").function("make", 0, |cx| {
+            let loose = cx.alloc(Loose { _n: 1 })?;
+            Ok(loose.value(cx))
+        }))
+        .build()
+        .expect("loose bindings");
+    let source = r#"
+import { make } from "loose";
+export function run() {
+  return make();
+}
+"#;
+    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let mut host = StrategyHost::new(bindings);
+    let mut vm = Vm::new(build, &mut host).expect("create VM");
+    let error = vm
+        .start(&mut host, "run", vec![])
+        .expect_err("payload without a schema is a host fault");
+    assert!(
+        matches!(&error, VmError::HostFault(message) if message.contains("no payload schema")),
+        "{error:?}"
     );
 }
 

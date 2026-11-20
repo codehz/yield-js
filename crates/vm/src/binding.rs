@@ -329,6 +329,7 @@ impl Services {
 
 type DecodeFn = fn(&[u8], &mut DecodeCx<'_>) -> Result<Box<dyn Any>, CodecError>;
 type EncodeFn = fn(&dyn Any, &mut Vec<u8>) -> Result<(), CodecError>;
+type EmptyFn = fn(&dyn Any) -> bool;
 
 struct ClassDecl {
     tag: String,
@@ -338,6 +339,7 @@ struct ClassDecl {
     payload_schema: Option<u32>,
     decode: DecodeFn,
     encode: EncodeFn,
+    empty: EmptyFn,
 }
 
 struct StateDecl {
@@ -494,6 +496,10 @@ impl Bindings {
 
     pub fn class_payload_schema(&self, class: ClassId) -> Option<u32> {
         self.inner.classes[class].payload_schema
+    }
+
+    pub(crate) fn class_payload_is_empty(&self, class: ClassId, payload: &dyn Any) -> bool {
+        (self.inner.classes[class].empty)(payload)
     }
 
     pub fn method_count(&self, class: ClassId) -> usize {
@@ -665,6 +671,11 @@ impl BindingsBuilder {
                     .downcast_ref::<T>()
                     .ok_or_else(|| CodecError::new("payload type mismatch"))?;
                 T::encode_payload(payload, out)
+            },
+            empty: |payload| {
+                payload
+                    .downcast_ref::<T>()
+                    .is_some_and(|payload| std::mem::size_of_val(payload) == 0)
             },
         });
         self
@@ -1315,6 +1326,17 @@ impl<'a> CallCx<'a> {
         let prototype = *self.vm.class_prototypes.get(class).ok_or_else(|| {
             JsError::Fault(self.fault(format!("class {} has no prototype", T::TAG)))
         })?;
+        let payload = Box::new(payload);
+        if self.bindings.class_payload_schema(class).is_none()
+            && !self
+                .bindings
+                .class_payload_is_empty(class, payload.as_ref())
+        {
+            return Err(JsError::Fault(HostFault::new(format!(
+                "class {} has data but no payload schema",
+                T::TAG
+            ))));
+        }
         let object = self.vm.heap.alloc_plain_with(Some(prototype));
         let slots = self
             .bindings
@@ -1330,7 +1352,7 @@ impl<'a> CallCx<'a> {
             crate::runtime::HostInstance {
                 class,
                 slots,
-                payload: Some(Box::new(payload)),
+                payload: Some(payload),
             },
         );
         Ok(Instance::new(object))
