@@ -202,7 +202,7 @@ impl Vm {
             }
             for accessor in 0..bindings.accessor_count(class) {
                 let declaration = bindings.accessor(class, accessor).expect("accessor exists");
-                let get = declaration.get.map(|_| {
+                let get = declaration.get.as_ref().map(|_| {
                     self.heap.intern_native(
                         NativeTarget::Accessor {
                             class: class as u32,
@@ -212,7 +212,7 @@ impl Vm {
                         false,
                     )
                 });
-                let set = declaration.set.map(|_| {
+                let set = declaration.set.as_ref().map(|_| {
                     self.heap.intern_native(
                         NativeTarget::Accessor {
                             class: class as u32,
@@ -294,18 +294,18 @@ impl Vm {
                 set,
             } => match bindings.accessor(class as usize, accessor as usize) {
                 Some(declaration) => {
-                    let call = if set {
-                        declaration.set
+                    let entry = if set {
+                        &declaration.set
                     } else {
-                        declaration.get
+                        &declaration.get
                     };
-                    let Some(call) = call else {
+                    let Some(entry) = entry else {
                         return Err(VmError::Host(format!(
                             "host accessor {class}.{accessor} has no {}",
                             if set { "setter" } else { "getter" }
                         )));
                     };
-                    (call, false, declaration.name.to_string())
+                    (entry.call, false, declaration.name.to_string())
                 }
                 None => {
                     return Err(VmError::Host(format!(

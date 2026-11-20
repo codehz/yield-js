@@ -188,7 +188,7 @@ pub struct FunctionDecl {
     pub constructable: bool,
     pub class: Option<&'static str>,
     pub call: HostCall,
-    pub signature: Option<CallSignature>,
+    signature: CallSignature,
 }
 
 #[derive(Clone)]
@@ -315,62 +315,20 @@ pub struct MethodDecl {
     pub name: MemberName,
     pub arity: usize,
     pub call: HostCall,
-    pub signature: Option<CallSignature>,
-}
-
-impl MethodDecl {
-    pub const fn new(name: &'static str, arity: usize, call: HostCall) -> Self {
-        Self {
-            name: MemberName::Name(name),
-            arity,
-            call,
-            signature: None,
-        }
-    }
-
-    pub const fn symbol(symbol: WellKnownSymbol, arity: usize, call: HostCall) -> Self {
-        Self {
-            name: MemberName::Symbol(symbol),
-            arity,
-            call,
-            signature: None,
-        }
-    }
+    signature: CallSignature,
 }
 
 #[derive(Clone)]
 pub struct AccessorDecl {
     pub name: MemberName,
-    pub get: Option<HostCall>,
-    pub set: Option<HostCall>,
-    pub get_signature: Option<CallSignature>,
-    pub set_signature: Option<CallSignature>,
+    pub get: Option<AccessorCall>,
+    pub set: Option<AccessorCall>,
 }
 
-impl AccessorDecl {
-    pub const fn new(name: &'static str, get: Option<HostCall>, set: Option<HostCall>) -> Self {
-        Self {
-            name: MemberName::Name(name),
-            get,
-            set,
-            get_signature: None,
-            set_signature: None,
-        }
-    }
-
-    pub const fn symbol(
-        symbol: WellKnownSymbol,
-        get: Option<HostCall>,
-        set: Option<HostCall>,
-    ) -> Self {
-        Self {
-            name: MemberName::Symbol(symbol),
-            get,
-            set,
-            get_signature: None,
-            set_signature: None,
-        }
-    }
+#[derive(Clone, Copy)]
+pub struct AccessorCall {
+    pub call: HostCall,
+    signature: CallSignature,
 }
 
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
@@ -522,6 +480,7 @@ struct OperationDecl {
     decode: fn(&[u8], &Bindings) -> Result<(), CodecError>,
 }
 
+#[doc(hidden)]
 pub struct ModuleDecl {
     name: String,
     exports: Vec<ExportDecl>,
@@ -529,6 +488,7 @@ pub struct ModuleDecl {
 
 #[doc(hidden)]
 pub mod __macro_support {
+    use super::{AccessorCall, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, ExportDecl, MemberName, MethodDecl, ModuleDecl,
         ReturnKind,
@@ -569,14 +529,17 @@ pub mod __macro_support {
         operations: impl IntoIterator<Item = OperationType>,
         services: impl IntoIterator<Item = Service>,
     ) -> Result<Bindings, String> {
-        let mut table = Bindings::builder();
-        table.modules = modules.into_iter().collect();
-        table.classes = classes.into_iter().map(|class| class.0).collect();
-        table.states = states.into_iter().map(|state| state.0).collect();
-        table.operations = operations
-            .into_iter()
-            .map(|operation| operation.0)
-            .collect();
+        let mut table = UnlinkedBindings {
+            modules: modules.into_iter().collect(),
+            classes: classes.into_iter().map(|class| class.0).collect(),
+            states: states.into_iter().map(|state| state.0).collect(),
+            operations: operations
+                .into_iter()
+                .map(|operation| operation.0)
+                .collect(),
+            services: Default::default(),
+            service_ids: Default::default(),
+        };
         for Service(id, version, value) in services {
             match table.services.values.entry(id.to_owned()) {
                 Entry::Vacant(entry) => {
@@ -609,7 +572,7 @@ pub mod __macro_support {
             constructable,
             class,
             call,
-            signature: Some(signature),
+            signature,
         })
     }
 
@@ -625,7 +588,7 @@ pub mod __macro_support {
             name,
             arity: signature.args.len(),
             call,
-            signature: Some(signature),
+            signature,
         }
     }
 
@@ -634,20 +597,16 @@ pub mod __macro_support {
         get: Option<(HostCall, CallSignature)>,
         set: Option<(HostCall, CallSignature)>,
     ) -> AccessorDecl {
-        let (get, get_signature) = match get {
-            Some((call, signature)) => (Some(call), Some(signature)),
-            None => (None, None),
-        };
-        let (set, set_signature) = match set {
-            Some((call, signature)) => (Some(call), Some(signature)),
-            None => (None, None),
-        };
+        const fn entry(value: Option<(HostCall, CallSignature)>) -> Option<AccessorCall> {
+            match value {
+                Some((call, signature)) => Some(AccessorCall { call, signature }),
+                None => None,
+            }
+        }
         AccessorDecl {
             name,
-            get,
-            set,
-            get_signature,
-            set_signature,
+            get: entry(get),
+            set: entry(set),
         }
     }
 }
@@ -680,17 +639,6 @@ impl std::fmt::Debug for Bindings {
 }
 
 impl Bindings {
-    pub fn builder() -> BindingsBuilder {
-        BindingsBuilder {
-            modules: Vec::new(),
-            classes: Vec::new(),
-            operations: Vec::new(),
-            states: Vec::new(),
-            services: Services::default(),
-            service_ids: BTreeSet::new(),
-        }
-    }
-
     pub fn fingerprint(&self) -> &str {
         &self.inner.fingerprint
     }
@@ -947,36 +895,13 @@ impl Bindings {
     }
 }
 
-pub struct BindingsBuilder {
+struct UnlinkedBindings {
     modules: Vec<ModuleDecl>,
     classes: Vec<ClassDecl>,
     operations: Vec<OperationDecl>,
     states: Vec<StateDecl>,
     services: Services,
     service_ids: BTreeSet<String>,
-}
-
-impl BindingsBuilder {
-    pub fn service<T: Any + Send + Sync>(mut self, id: &str, version: u32, value: T) -> Self {
-        self.service_ids.insert(format!("{id}:{version}"));
-        self.services.values.insert(id.to_owned(), Arc::new(value));
-        self
-    }
-
-    pub fn class<T: HostClass>(mut self) -> Self {
-        self.classes.push(ClassDecl::of::<T>());
-        self
-    }
-
-    pub fn state<S: HostModuleState>(mut self) -> Self {
-        self.states.push(StateDecl::of::<S>());
-        self
-    }
-
-    pub fn operation<O: Operation>(mut self) -> Self {
-        self.operations.push(OperationDecl::of::<O>());
-        self
-    }
 }
 
 impl ClassDecl {
@@ -1044,13 +969,8 @@ impl OperationDecl {
     }
 }
 
-impl BindingsBuilder {
-    pub fn module(mut self, module: ModuleDecl) -> Self {
-        self.modules.push(module);
-        self
-    }
-
-    pub fn build(mut self) -> Result<Bindings, String> {
+impl UnlinkedBindings {
+    fn build(mut self) -> Result<Bindings, String> {
         self.modules.sort_by(|a, b| a.name.cmp(&b.name));
         for module in &mut self.modules {
             module.exports.sort_by(|a, b| a.name().cmp(b.name()));
@@ -1128,64 +1048,6 @@ impl BindingsBuilder {
                 fingerprint,
             }),
         })
-    }
-}
-
-impl ModuleDecl {
-    pub fn new(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            exports: Vec::new(),
-        }
-    }
-
-    pub fn function(mut self, name: &str, arity: usize, call: HostCall) -> Self {
-        self.exports.push(ExportDecl::Function(FunctionDecl {
-            name: name.to_owned(),
-            arity,
-            constructable: false,
-            class: None,
-            call,
-            signature: None,
-        }));
-        self
-    }
-
-    pub fn constructor(mut self, name: &str, arity: usize, call: HostCall) -> Self {
-        self.exports.push(ExportDecl::Function(FunctionDecl {
-            name: name.to_owned(),
-            arity,
-            constructable: true,
-            class: None,
-            call,
-            signature: None,
-        }));
-        self
-    }
-
-    pub fn constructor_for<T: HostClass>(
-        mut self,
-        name: &str,
-        arity: usize,
-        call: HostCall,
-    ) -> Self {
-        self.exports.push(ExportDecl::Function(FunctionDecl {
-            name: name.to_owned(),
-            arity,
-            constructable: true,
-            class: Some(T::TAG),
-            call,
-            signature: None,
-        }));
-        self
-    }
-
-    pub fn constant(mut self, name: &str, value: impl Into<ConstValue>) -> Self {
-        self.exports.push(ExportDecl::Constant(ConstantDecl {
-            name: name.to_owned(),
-            value: value.into(),
-        }));
-        self
     }
 }
 
@@ -1268,8 +1130,7 @@ fn hash_line(hasher: &mut Sha256, text: String) {
     hasher.update(b"\n");
 }
 
-fn hash_signature(hasher: &mut Sha256, direction: u8, signature: Option<CallSignature>) {
-    let Some(signature) = signature else { return };
+fn hash_signature(hasher: &mut Sha256, direction: u8, signature: CallSignature) {
     hasher.update([direction]);
     hasher.update((signature.args.len() as u64).to_le_bytes());
     for arg in signature.args {
@@ -1350,8 +1211,12 @@ fn fingerprint(
                     accessor.set.is_some()
                 ),
             );
-            hash_signature(&mut hasher, 2, accessor.get_signature);
-            hash_signature(&mut hasher, 3, accessor.set_signature);
+            if let Some(get) = accessor.get {
+                hash_signature(&mut hasher, 2, get.signature);
+            }
+            if let Some(set) = accessor.set {
+                hash_signature(&mut hasher, 3, set.signature);
+            }
         }
     }
     for operation in operations {

@@ -47,6 +47,12 @@
 //! fn write(_: &Wait, _: &mut Vec<u8>) -> Result<(), CodecError> { Ok(()) }
 //! fn read(_: &[u8], _: &Bindings) -> Result<Wait, CodecError> { Ok(Wait) }
 //! ```
+//!
+//! Register bindings with [`host_bindings!`]; there is no public builder:
+//!
+//! ```compile_fail,E0599
+//! let _ = yield_vm::Bindings::builder();
+//! ```
 
 extern crate self as yield_vm;
 
@@ -78,10 +84,9 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    Bindings, BindingsBuilder, ClassId, ConstKind, ConstValue, ExportDecl, ExportId, HostClass,
-    HostFault, HostModuleState, Instance, JsError, JsResult, JsValue, MemberName, MethodDecl,
-    MethodId, ModuleDecl, NativeTarget, Operation, OperationStart, OperationToken, Recovery,
-    SlotDecl, This, WellKnownSymbol,
+    Bindings, ClassId, ConstKind, ConstValue, ExportId, HostClass, HostFault, HostModuleState,
+    Instance, JsError, JsResult, JsValue, MemberName, MethodId, NativeTarget, Operation,
+    OperationStart, OperationToken, Recovery, SlotDecl, This, WellKnownSymbol,
 };
 pub use bytecode::{
     Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,

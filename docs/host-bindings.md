@@ -432,3 +432,5 @@ Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；
 
 宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
 
+`host_bindings!` 是受支持的注册入口，不再提供公开 builder。`__macro_support` 只用于跨 crate 的宏展开，不是手写注册 API。
+
