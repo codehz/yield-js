@@ -44,11 +44,10 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 | `queueMicrotask` / Promise 拒绝 | `queueMicrotask` 回调抛出的异常通过 `Host::report_error` 交给宿主；未处理的 Promise 拒绝仍不跟踪 |
 | 函数对象 | 函数的 `name` / `length` 是只读虚拟属性：可读取并用 `in` / `Reflect.has` 检查，但不出现在自有键或自有描述符中。匿名函数与箭头函数不推断名称；计算方法名只使用静态可知的键或编译期提示，不按运行时键命名。内建函数的 `length` 统一为 `0`。共享的 `Function.prototype` 不可调用，默认 `toString` 返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法。绑定函数不自动创建 `.prototype`，其可构造性取决于目标。 |
 | 原型与描述符 | `Object.getPrototypeOf` 对四种非空原始值返回对应共享原型，但这不意味着所有 `Object` / `Reflect` API 都会隐式装箱；例如 `Reflect.getPrototypeOf` 仍要求对象。宿主类实例是普通对象，原型为 VM 创建的类原型；`Object.create(prototype)` 只能得到普通对象，不能伪造隐藏槽。 |
-| 未声明名字 | `globalThis` 提供内建属性及 preload 导出。动态添加的属性不会自动成为编译期可见的裸名称；未知裸名称的读取和赋值是编译错误，`typeof` 折叠为 `"undefined"`。 |
 
 `for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
 
-名称策略仍保留一个偏差：`typeof` 对被局部遮蔽的顶层函数折叠为 `"function"`（`names.rs`）。未声明的裸名字折叠为 `"undefined"`。
+名称策略仍保留一个偏差：`typeof` 对被局部遮蔽的顶层函数折叠为 `"function"`（`names.rs`）。
 
 ## 4. 首版内建还缺的表面
 
