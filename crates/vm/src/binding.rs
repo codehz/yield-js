@@ -97,6 +97,25 @@ impl JsError {
 
 pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<JsValue>;
 
+#[derive(Debug, Clone, Copy)]
+pub enum ArgKind {
+    Value,
+    OptionalValue,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ReturnKind {
+    Value,
+    Void,
+    Instance(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CallSignature {
+    pub args: &'static [ArgKind],
+    pub result: ReturnKind,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstKind {
@@ -169,6 +188,7 @@ pub struct FunctionDecl {
     pub constructable: bool,
     pub class: Option<&'static str>,
     pub call: HostCall,
+    pub signature: Option<CallSignature>,
 }
 
 #[derive(Clone)]
@@ -295,6 +315,7 @@ pub struct MethodDecl {
     pub name: MemberName,
     pub arity: usize,
     pub call: HostCall,
+    pub signature: Option<CallSignature>,
 }
 
 impl MethodDecl {
@@ -303,6 +324,7 @@ impl MethodDecl {
             name: MemberName::Name(name),
             arity,
             call,
+            signature: None,
         }
     }
 
@@ -311,6 +333,7 @@ impl MethodDecl {
             name: MemberName::Symbol(symbol),
             arity,
             call,
+            signature: None,
         }
     }
 }
@@ -320,6 +343,8 @@ pub struct AccessorDecl {
     pub name: MemberName,
     pub get: Option<HostCall>,
     pub set: Option<HostCall>,
+    pub get_signature: Option<CallSignature>,
+    pub set_signature: Option<CallSignature>,
 }
 
 impl AccessorDecl {
@@ -328,6 +353,8 @@ impl AccessorDecl {
             name: MemberName::Name(name),
             get,
             set,
+            get_signature: None,
+            set_signature: None,
         }
     }
 
@@ -340,6 +367,8 @@ impl AccessorDecl {
             name: MemberName::Symbol(symbol),
             get,
             set,
+            get_signature: None,
+            set_signature: None,
         }
     }
 }
@@ -972,6 +1001,7 @@ impl ModuleDecl {
             constructable: false,
             class: None,
             call,
+            signature: None,
         }));
         self
     }
@@ -983,6 +1013,7 @@ impl ModuleDecl {
             constructable: true,
             class: None,
             call,
+            signature: None,
         }));
         self
     }
@@ -999,6 +1030,7 @@ impl ModuleDecl {
             constructable: true,
             class: Some(T::TAG),
             call,
+            signature: None,
         }));
         self
     }
@@ -1086,6 +1118,32 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
     Ok(())
 }
 
+fn hash_line(hasher: &mut Sha256, text: String) {
+    hasher.update(text.as_bytes());
+    hasher.update(b"\n");
+}
+
+fn hash_signature(hasher: &mut Sha256, direction: u8, signature: Option<CallSignature>) {
+    let Some(signature) = signature else { return };
+    hasher.update([direction]);
+    hasher.update((signature.args.len() as u64).to_le_bytes());
+    for arg in signature.args {
+        hasher.update([match arg {
+            ArgKind::Value => 0,
+            ArgKind::OptionalValue => 1,
+        }]);
+    }
+    match signature.result {
+        ReturnKind::Value => hasher.update([0]),
+        ReturnKind::Void => hasher.update([1]),
+        ReturnKind::Instance(tag) => {
+            hasher.update([2]);
+            hasher.update((tag.len() as u64).to_le_bytes());
+            hasher.update(tag.as_bytes());
+        }
+    }
+}
+
 fn fingerprint(
     modules: &[ModuleDecl],
     classes: &[ClassDecl],
@@ -1094,63 +1152,89 @@ fn fingerprint(
     services: &BTreeSet<String>,
 ) -> String {
     let mut hasher = Sha256::new();
-    let mut line = |text: String| {
-        hasher.update(text.as_bytes());
-        hasher.update(b"\n");
-    };
     for module in modules {
-        line(format!("module {}", module.name));
+        hash_line(&mut hasher, format!("module {}", module.name));
         for export in &module.exports {
             match export {
-                ExportDecl::Function(function) => line(format!(
-                    "export {} function arity={} constructable={} class={:?}",
-                    function.name, function.arity, function.constructable, function.class
-                )),
-                ExportDecl::Constant(constant) => line(format!(
-                    "export {} constant {:?}",
-                    constant.name,
-                    constant.value.kind()
-                )),
+                ExportDecl::Function(function) => {
+                    hash_line(
+                        &mut hasher,
+                        format!(
+                            "export {} function arity={} constructable={} class={:?}",
+                            function.name, function.arity, function.constructable, function.class
+                        ),
+                    );
+                    hash_signature(&mut hasher, 0, function.signature);
+                }
+                ExportDecl::Constant(constant) => hash_line(
+                    &mut hasher,
+                    format!(
+                        "export {} constant {:?}",
+                        constant.name,
+                        constant.value.kind()
+                    ),
+                ),
             }
         }
     }
     for class in classes {
-        line(format!("class {} parent={:?}", class.tag, class.parent_tag));
+        hash_line(
+            &mut hasher,
+            format!("class {} parent={:?}", class.tag, class.parent_tag),
+        );
         for slot in &class.slots {
-            line(format!("slot {} {:?}", slot.name, slot.kind));
+            hash_line(&mut hasher, format!("slot {} {:?}", slot.name, slot.kind));
         }
         if let Some(schema) = class.payload_schema {
-            line(format!("payload {schema}"));
+            hash_line(&mut hasher, format!("payload {schema}"));
         }
         for method in &class.methods {
-            line(format!("method {} arity={}", method.name, method.arity));
+            hash_line(
+                &mut hasher,
+                format!("method {} arity={}", method.name, method.arity),
+            );
+            hash_signature(&mut hasher, 1, method.signature);
         }
         for accessor in &class.accessors {
-            line(format!(
-                "accessor {} get={} set={}",
-                accessor.name,
-                accessor.get.is_some(),
-                accessor.set.is_some()
-            ));
+            hash_line(
+                &mut hasher,
+                format!(
+                    "accessor {} get={} set={}",
+                    accessor.name,
+                    accessor.get.is_some(),
+                    accessor.set.is_some()
+                ),
+            );
+            hash_signature(&mut hasher, 2, accessor.get_signature);
+            hash_signature(&mut hasher, 3, accessor.set_signature);
         }
     }
     for operation in operations {
-        line(format!(
-            "operation {} schema={} recovery={:?}",
-            operation.name, operation.schema, operation.recovery
-        ));
+        hash_line(
+            &mut hasher,
+            format!(
+                "operation {} schema={} recovery={:?}",
+                operation.name, operation.schema, operation.recovery
+            ),
+        );
     }
     for (module, state) in states {
-        line(format!(
-            "module-state {} schema={}",
-            modules[*module].name, state.payload_schema
-        ));
+        hash_line(
+            &mut hasher,
+            format!(
+                "module-state {} schema={}",
+                modules[*module].name, state.payload_schema
+            ),
+        );
         for slot in &state.slots {
-            line(format!("state-slot {} {:?}", slot.name, slot.kind));
+            hash_line(
+                &mut hasher,
+                format!("state-slot {} {:?}", slot.name, slot.kind),
+            );
         }
     }
     for service in services {
-        line(format!("service {service}"));
+        hash_line(&mut hasher, format!("service {service}"));
     }
     format!("{:x}", hasher.finalize())
 }
