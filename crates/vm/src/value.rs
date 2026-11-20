@@ -129,7 +129,11 @@ impl JsString {
         if range.is_empty() {
             return Self::new();
         }
-        Self::from_units(self.units().skip(range.start).take(range.len()).collect())
+        match &self.0 {
+            StringStorage::Empty => Self::new(),
+            StringStorage::Latin1(bytes) => Self::from_latin1(bytes[range].to_vec()),
+            StringStorage::Wide(units) => Self::from_units(units[range].to_vec()),
+        }
     }
 
     pub fn to_utf16(&self) -> Cow<'_, [u16]> {
@@ -227,12 +231,23 @@ impl From<&str> for JsString {
         if text.is_ascii() {
             return Self(StringStorage::Latin1(Arc::new(text.as_bytes().to_vec())));
         }
-        if !text.as_bytes().iter().any(|&byte| byte >= 0xc4) {
-            return Self(StringStorage::Latin1(Arc::new(
-                text.chars().map(|ch| ch as u8).collect(),
-            )));
+        let bytes = text.as_bytes();
+        let mut latin1 = Vec::with_capacity(bytes.len().div_ceil(2));
+        let mut index = 0;
+        while index < bytes.len() {
+            let first = bytes[index];
+            if first < 0x80 {
+                latin1.push(first);
+                index += 1;
+            } else if first < 0xc4 {
+                let second = bytes[index + 1];
+                latin1.push(((first & 0x1f) << 6) | (second & 0x3f));
+                index += 2;
+            } else {
+                return Self(StringStorage::Wide(Arc::new(text.encode_utf16().collect())));
+            }
         }
-        Self(StringStorage::Wide(Arc::new(text.encode_utf16().collect())))
+        Self(StringStorage::Latin1(Arc::new(latin1)))
     }
 }
 impl From<String> for JsString {
