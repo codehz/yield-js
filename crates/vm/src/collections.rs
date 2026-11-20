@@ -1,17 +1,20 @@
 //! Strong and weak collections. Strong collection tombstones keep live cursor positions stable.
 
+use crate::builtin_globals::Owner;
+use crate::builtins::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CollectionIteration, CollectionKind, DescriptorUpdate, ITERATOR_SYMBOL, Object,
     PlainObject,
 };
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 #[derive(Clone, Copy)]
-pub(crate) enum CollectionMethod {
+enum CollectionMethod {
     Get,
     Insert,
     Has,
@@ -22,52 +25,148 @@ pub(crate) enum CollectionMethod {
     Iterate(CollectionIteration),
 }
 
-impl CollectionMethod {
-    fn methods(kind: CollectionKind) -> impl Iterator<Item = (&'static str, Self)> {
-        use CollectionIteration::{Entries, Keys, Values};
-        use CollectionMethod::*;
-        let specific: &[(_, _)] = match kind {
-            CollectionKind::Map => &[("get", Get), ("set", Insert), ("keys", Iterate(Keys))],
-            CollectionKind::Set => &[("add", Insert)],
-        };
-        specific.iter().copied().chain([
-            ("has", Has),
-            ("delete", Delete),
-            ("clear", Clear),
-            ("size", Size),
-            ("forEach", ForEach),
-            ("values", Iterate(Values)),
-            ("entries", Iterate(Entries)),
-        ])
-    }
-
-    pub(crate) fn lookup(kind: CollectionKind, name: &str) -> Option<Self> {
-        Self::methods(kind).find_map(|(key, method)| (key == name).then_some(method))
-    }
-}
-
 #[derive(Clone, Copy)]
-pub(crate) enum WeakMapMethod {
+enum WeakMapMethod {
     Get,
     Set,
     Has,
     Delete,
 }
 
-impl WeakMapMethod {
-    const METHODS: [(&'static str, Self); 4] = [
-        ("get", Self::Get),
-        ("set", Self::Set),
-        ("has", Self::Has),
-        ("delete", Self::Delete),
-    ];
+const MAP: IntrinsicKey = IntrinsicKey::new("Map", Slot::Global, "");
+const SET: IntrinsicKey = IntrinsicKey::new("Set", Slot::Global, "");
+const WEAK_MAP: IntrinsicKey = IntrinsicKey::new("WeakMap", Slot::Global, "");
 
-    pub(crate) fn lookup(name: &str) -> Option<Self> {
-        Self::METHODS
-            .into_iter()
-            .find_map(|(key, method)| (key == name).then_some(method))
-    }
+pub(crate) const MAP_OWNER: Owner = Owner::new(
+    "map",
+    MAP_ROOTS,
+    &[MAP_INTRINSICS],
+    Some(|vm, identity| {
+        vm.install_collection(
+            CollectionKind::Map,
+            vm.builtins.get("map"),
+            vm.builtins.get("map.prototype"),
+            vm.builtins.get("mapIterator.prototype"),
+            identity,
+        );
+    }),
+);
+pub(crate) const SET_OWNER: Owner = Owner::new(
+    "set",
+    SET_ROOTS,
+    &[SET_INTRINSICS],
+    Some(|vm, identity| {
+        vm.install_collection(
+            CollectionKind::Set,
+            vm.builtins.get("set"),
+            vm.builtins.get("set.prototype"),
+            vm.builtins.get("setIterator.prototype"),
+            identity,
+        );
+    }),
+);
+pub(crate) const WEAK_MAP_OWNER: Owner = Owner::new(
+    "weakmap",
+    WEAK_MAP_ROOTS,
+    &[WEAK_MAP_INTRINSICS],
+    Some(|vm, _| {
+        vm.install_weakmap(
+            vm.builtins.get("weakmap"),
+            vm.builtins.get("weakmap.prototype"),
+        );
+    }),
+);
+
+pub(crate) const MAP_ROOTS: &[RootSpec] = &[
+    RootSpec::new("map", RootKind::Native(MAP), Some("function.prototype")).fixed("map.prototype"),
+    RootSpec::new("map.prototype", RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(
+        "mapIterator.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+pub(crate) const SET_ROOTS: &[RootSpec] = &[
+    RootSpec::new("set", RootKind::Native(SET), Some("function.prototype")).fixed("set.prototype"),
+    RootSpec::new("set.prototype", RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(
+        "setIterator.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+pub(crate) const WEAK_MAP_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "weakmap",
+        RootKind::Native(WEAK_MAP),
+        Some("function.prototype"),
+    )
+    .fixed("weakmap.prototype"),
+    RootSpec::new(
+        "weakmap.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+
+use CollectionIteration::{Entries, Keys, Values};
+use CollectionMethod::*;
+
+macro_rules! collection {
+    ($key:expr, $owner:literal, $iterator:literal, $kind:ident; $($name:literal => $method:expr),*) => {
+        &[
+            IntrinsicDef::constructor(
+                $key,
+                |vm, _, _, _| vm.throw_type_error("Map and Set require new"),
+                |vm, host, args, prototype| vm.construct_collection(host, CollectionKind::$kind, &args, prototype),
+            ),
+            $(collection!(@method $owner, $kind, Prototype, $name, $method),)*
+            collection!(@method $owner, $kind, Prototype, "has", Has),
+            collection!(@method $owner, $kind, Prototype, "delete", Delete),
+            collection!(@method $owner, $kind, Prototype, "clear", Clear),
+            collection!(@method $owner, $kind, PrototypeGetter, "size", Size),
+            collection!(@method $owner, $kind, Prototype, "forEach", ForEach),
+            collection!(@method $owner, $kind, Prototype, "values", Iterate(Values)),
+            collection!(@method $owner, $kind, Prototype, "entries", Iterate(Entries)),
+            IntrinsicDef::call(IntrinsicKey::new($iterator, Slot::Prototype, "next"), |vm, _, _, receiver| {
+                vm.collection_next(CollectionKind::$kind, receiver)
+            }),
+        ]
+    };
+    (@method $owner:literal, $kind:ident, $slot:ident, $name:literal, $method:expr) => {
+        IntrinsicDef::call(IntrinsicKey::new($owner, Slot::$slot, $name), |vm, host, args, receiver| {
+            vm.collection_method(host, CollectionKind::$kind, $method, receiver, &args)
+        })
+    };
 }
+
+pub(crate) const MAP_INTRINSICS: &[IntrinsicDef] = collection!(
+    MAP, "Map", "MapIterator", Map; "get" => Get, "set" => Insert, "keys" => Iterate(Keys)
+);
+pub(crate) const SET_INTRINSICS: &[IntrinsicDef] = collection!(
+    SET, "Set", "SetIterator", Set; "add" => Insert
+);
+
+macro_rules! weak_map_method {
+    ($name:literal, $method:ident) => {
+        IntrinsicDef::call(
+            IntrinsicKey::new("WeakMap", Slot::Prototype, $name),
+            |vm, _, args, receiver| vm.weakmap_method(WeakMapMethod::$method, receiver, &args),
+        )
+    };
+}
+
+pub(crate) const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        WEAK_MAP,
+        |vm, _, _, _| vm.throw_type_error("WeakMap requires new"),
+        |vm, host, args, prototype| vm.construct_weakmap(host, &args, prototype),
+    ),
+    weak_map_method!("get", Get),
+    weak_map_method!("set", Set),
+    weak_map_method!("has", Has),
+    weak_map_method!("delete", Delete),
+];
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
     a == b || matches!((a, b), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
@@ -82,20 +181,26 @@ fn canonical_key(value: &Value) -> Value {
 }
 
 impl Vm {
-    pub(crate) fn init_collection(
+    pub(crate) fn install_collection(
         &mut self,
         kind: CollectionKind,
+        constructor: ObjectId,
+        prototype: ObjectId,
+        iterator: ObjectId,
         identity: &Value,
-    ) -> (ObjectId, ObjectId, ObjectId) {
-        let (name, iterator_name) = match kind {
-            CollectionKind::Map => ("Map", "MapIterator"),
-            CollectionKind::Set => ("Set", "SetIterator"),
+    ) {
+        self.link_collection_prototype(constructor, prototype);
+        let defs = match kind {
+            CollectionKind::Map => MAP_INTRINSICS,
+            CollectionKind::Set => SET_INTRINSICS,
         };
-        let (constructor, prototype) = self.init_collection_prototype(name);
-        let iterator = self.heap.alloc_plain();
-        for (name_key, method) in CollectionMethod::methods(kind) {
-            let function = self.heap.alloc_builtin(name, Some(name_key));
-            if matches!(method, CollectionMethod::Size) {
+        for def in defs {
+            if def.key.slot == Slot::Global {
+                continue;
+            }
+            let function = self.alloc_intrinsic(def.key);
+            let name_key = def.key.member;
+            if def.key.slot == Slot::PrototypeGetter {
                 assert!(
                     self.heap
                         .apply_descriptor(
@@ -111,13 +216,28 @@ impl Vm {
                 );
                 continue;
             }
-            let value = Value::Object(function);
+            let target = if matches!(def.key.owner, "MapIterator" | "SetIterator") {
+                iterator
+            } else {
+                prototype
+            };
             self.heap
-                .define_data(prototype, name_key, value.clone(), Attributes::METHOD)
+                .define_data(
+                    target,
+                    name_key,
+                    Value::Object(function),
+                    Attributes::METHOD,
+                )
                 .expect("collection method");
+            // The aliases reuse this declaration's function object.
             if kind == CollectionKind::Set && name_key == "values" {
                 self.heap
-                    .define_data(prototype, "keys", value.clone(), Attributes::METHOD)
+                    .define_data(
+                        prototype,
+                        "keys",
+                        Value::Object(function),
+                        Attributes::METHOD,
+                    )
                     .expect("Set keys alias");
             }
             if matches!(
@@ -128,16 +248,12 @@ impl Vm {
                     .define_data(
                         prototype,
                         PropertyKey::Symbol(ITERATOR_SYMBOL),
-                        value,
+                        Value::Object(function),
                         Attributes::METHOD,
                     )
                     .expect("collection iterator alias");
             }
         }
-        let next = self.heap.alloc_builtin(iterator_name, Some("next"));
-        self.heap
-            .define_data(iterator, "next", Value::Object(next), Attributes::METHOD)
-            .expect("collection iterator next");
         self.heap
             .define_data(
                 iterator,
@@ -146,12 +262,9 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("collection iterator identity");
-        (constructor, prototype, iterator)
     }
 
-    fn init_collection_prototype(&mut self, name: &str) -> (ObjectId, ObjectId) {
-        let constructor = self.heap.alloc_builtin(name, None);
-        let prototype = self.heap.alloc_plain();
+    fn link_collection_prototype(&mut self, constructor: ObjectId, prototype: ObjectId) {
         self.heap
             .define_data(
                 constructor,
@@ -168,27 +281,34 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("collection prototype constructor");
-        (constructor, prototype)
     }
 
-    pub(crate) fn init_weakmap(&mut self) -> (ObjectId, ObjectId) {
-        let (constructor, prototype) = self.init_collection_prototype("WeakMap");
-        for (name, _) in WeakMapMethod::METHODS {
-            let function = self.heap.alloc_builtin("WeakMap", Some(name));
+    pub(crate) fn install_weakmap(&mut self, constructor: ObjectId, prototype: ObjectId) {
+        self.link_collection_prototype(constructor, prototype);
+        for def in WEAK_MAP_INTRINSICS {
+            if def.key.slot == Slot::Global {
+                continue;
+            }
+            let function = self.alloc_intrinsic(def.key);
             self.heap
-                .define_data(prototype, name, Value::Object(function), Attributes::METHOD)
+                .define_data(
+                    prototype,
+                    def.key.member,
+                    Value::Object(function),
+                    Attributes::METHOD,
+                )
                 .expect("WeakMap method");
         }
-        (constructor, prototype)
     }
 
-    pub(crate) fn construct_weakmap(
+    fn construct_weakmap(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
-        let object = PlainObject::new(prototype.or(Some(self.builtins.weakmap_prototype)));
+        let prototype = prototype.unwrap_or_else(|| self.builtins.get("weakmap.prototype"));
+        let object = PlainObject::new(Some(prototype));
         let collection = Value::Object(self.heap.alloc(Object::WeakMap {
             object,
             entries: Default::default(),
@@ -196,7 +316,7 @@ impl Vm {
         self.populate_collection(host, collection, args, "set")
     }
 
-    pub(crate) fn weakmap_method(
+    fn weakmap_method(
         &mut self,
         method: WeakMapMethod,
         receiver: &Value,
@@ -222,7 +342,7 @@ impl Vm {
         }))
     }
 
-    pub(crate) fn construct_collection(
+    fn construct_collection(
         &mut self,
         host: &mut dyn Host,
         kind: CollectionKind,
@@ -230,8 +350,8 @@ impl Vm {
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
         let (default_proto, adder_name) = match kind {
-            CollectionKind::Map => (self.builtins.map_prototype, "set"),
-            CollectionKind::Set => (self.builtins.set_prototype, "add"),
+            CollectionKind::Map => (self.builtins.get("map.prototype"), "set"),
+            CollectionKind::Set => (self.builtins.get("set.prototype"), "add"),
         };
         let object = PlainObject::new(prototype.or(Some(default_proto)));
         let collection = Value::Object(self.heap.alloc(match kind {
@@ -314,7 +434,7 @@ impl Vm {
         self.invoke(host, adder, args, collection)
     }
 
-    pub(crate) fn collection_method(
+    fn collection_method(
         &mut self,
         host: &mut dyn Host,
         kind: CollectionKind,
@@ -339,8 +459,8 @@ impl Vm {
         let value = match method {
             Iterate(iteration) => {
                 let prototype = match kind {
-                    CollectionKind::Map => self.builtins.map_iterator_prototype,
-                    CollectionKind::Set => self.builtins.set_iterator_prototype,
+                    CollectionKind::Map => self.builtins.get("mapIterator.prototype"),
+                    CollectionKind::Set => self.builtins.get("setIterator.prototype"),
                 };
                 Value::Object(self.heap.alloc(Object::CollectionIterator {
                     object: PlainObject::new(Some(prototype)),
@@ -402,7 +522,7 @@ impl Vm {
         })
     }
 
-    pub(crate) fn collection_next(
+    fn collection_next(
         &mut self,
         kind: CollectionKind,
         receiver: &Value,

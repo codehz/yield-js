@@ -1,15 +1,22 @@
 //! UTF-16 string operations.
 
 use crate::JsString;
+use crate::builtin_globals::Owner;
+use crate::builtins::{
+    ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_RANGEERROR_PROTOTYPE,
+    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind,
+    RootSpec,
+};
 use crate::error::VmError;
 use crate::heap::{
-    BoxedPrimitive, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, REPLACE_SYMBOL, SEARCH_SYMBOL,
-    SPLIT_SYMBOL,
+    Attributes, BoxedPrimitive, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
+    PlainObject, REPLACE_SYMBOL, SEARCH_SYMBOL, SPLIT_SYMBOL,
 };
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp_runtime::RegExpMethod;
 use crate::runtime::Invocation;
-use crate::value::{PropertyKeyRef, SymbolId, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = 16 * 1024 * 1024;
@@ -112,12 +119,180 @@ pub(crate) mod members {
     }
 }
 
+const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("String", Slot::Global, "");
+const ITERATOR: IntrinsicKey = IntrinsicKey::new("String", Slot::PrototypeSymbol, "iterator");
+const ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("StringIterator", Slot::Prototype, "next");
+
+pub(crate) const STRING_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        CONSTRUCTOR,
+        |vm, host, args, _| vm.call_string(host, &args),
+        |vm, host, args, prototype| {
+            let result = match vm.call_string(host, &args)? {
+                Invocation::Value(value) => vm.construct_object(&[value])?,
+                thrown => thrown,
+            };
+            vm.with_result_prototype(result, prototype)
+        },
+    ),
+    IntrinsicDef::call(ITERATOR, |vm, host, _, receiver| {
+        vm.string_iterator(host, receiver)
+    }),
+    IntrinsicDef::call(ITERATOR_NEXT, |vm, _, _, receiver| {
+        vm.string_iterator_next(receiver)
+    }),
+];
+
+pub(crate) const OWNER: Owner = Owner::new(
+    members::ROOT,
+    STRING_ROOTS,
+    &[STRING_INTRINSICS, members::INTRINSICS],
+    Some(|vm, identity| {
+        let Value::Object(identity) = *identity else {
+            unreachable!("iterator identity is a function")
+        };
+        install(vm);
+        install_iterator_prototype(vm, identity);
+    }),
+);
+
+pub(crate) const STRING_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        members::ROOT,
+        RootKind::Native(CONSTRUCTOR),
+        Some(ROOT_FUNCTION_PROTOTYPE),
+    )
+    .fixed(ROOT_STRING_PROTOTYPE),
+    RootSpec::new(
+        ROOT_STRING_PROTOTYPE,
+        RootKind::Plain,
+        Some(ROOT_OBJECT_PROTOTYPE),
+    ),
+    RootSpec::new(
+        ROOT_STRING_ITERATOR,
+        RootKind::Native(ITERATOR),
+        Some(ROOT_FUNCTION_PROTOTYPE),
+    ),
+    RootSpec::new(
+        ROOT_STRING_ITERATOR_PROTOTYPE,
+        RootKind::Plain,
+        Some(ROOT_OBJECT_PROTOTYPE),
+    ),
+];
+
+fn install(vm: &mut Vm) {
+    vm.init_string_constructor(
+        vm.builtins.get(members::ROOT),
+        vm.builtins.get(ROOT_STRING_PROTOTYPE),
+        vm.builtins.get(ROOT_STRING_ITERATOR),
+    );
+}
+
+pub(crate) fn install_iterator_prototype(vm: &mut Vm, identity: ObjectId) {
+    vm.init_string_iterator_prototype(vm.builtins.get(ROOT_STRING_ITERATOR_PROTOTYPE), identity);
+}
+
 impl Vm {
-    pub(crate) fn call_string(
+    fn init_string_constructor(
+        &mut self,
+        constructor: ObjectId,
+        prototype: ObjectId,
+        iterator: ObjectId,
+    ) {
+        self.heap
+            .define_data(
+                constructor,
+                "prototype",
+                Value::Object(prototype),
+                Attributes::FIXED,
+            )
+            .expect("String stores its prototype");
+        self.heap
+            .define_data(
+                prototype,
+                "constructor",
+                Value::Object(constructor),
+                Attributes::METHOD,
+            )
+            .expect("String.prototype stores its constructor");
+        self.heap
+            .define_data(
+                prototype,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                Value::Object(iterator),
+                Attributes::METHOD,
+            )
+            .expect("String.prototype stores Symbol.iterator");
+        members::install_members(self, constructor, prototype);
+    }
+
+    fn init_string_iterator_prototype(&mut self, prototype: ObjectId, identity: ObjectId) {
+        let next = Value::Object(self.alloc_intrinsic(ITERATOR_NEXT));
+        self.heap
+            .define_data(prototype, "next", next, Attributes::METHOD)
+            .expect("iterator prototype stores next");
+        self.heap
+            .define_data(
+                prototype,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                Value::Object(identity),
+                Attributes::METHOD,
+            )
+            .expect("iterator prototype stores Symbol.iterator");
+    }
+
+    fn string_iterator(
         &mut self,
         host: &mut dyn Host,
-        args: &[Value],
+        receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        if matches!(receiver, Value::Null | Value::Undefined) {
+            return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
+        }
+        let string = match self.coerce_string(host, receiver)? {
+            Ok(string) => string,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let iterator = self.heap.alloc(Object::StringIterator {
+            object: PlainObject::new(Some(self.builtins.get(ROOT_STRING_ITERATOR_PROTOTYPE))),
+            string,
+            position: 0,
+        });
+        Ok(Invocation::Value(Value::Object(iterator)))
+    }
+
+    fn string_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let invalid_receiver = "StringIterator.next requires a string iterator";
+        let Value::Object(id) = *receiver else {
+            return self.throw_type_error(invalid_receiver);
+        };
+        let Object::StringIterator {
+            string, position, ..
+        } = self.heap.get_mut(id)?
+        else {
+            return self.throw_type_error(invalid_receiver);
+        };
+        let Some(first) = utf16_unit(string, *position) else {
+            return self.iterator_result(Value::Undefined, true);
+        };
+        let width = if (0xd800..=0xdbff).contains(&first)
+            && matches!(utf16_unit(string, *position + 1), Some(0xdc00..=0xdfff))
+        {
+            2
+        } else {
+            1
+        };
+        let end = *position + width;
+        let value = string.slice_units(*position..end);
+        *position = end;
+        if end == utf16_len(string) {
+            *string = JsString::default();
+            *position = 0;
+        }
+        self.iterator_result(Value::String(value), false)
+    }
+
+    fn call_string(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
         let Some(value) = args.first() else {
             return Ok(Invocation::Value(Value::String(JsString::default())));
         };
@@ -1018,7 +1193,7 @@ impl Vm {
 
     fn alloc_range_error(&mut self, message: &str) -> Result<Value, VmError> {
         self.alloc_error(
-            self.builtins.rangeerror_prototype,
+            self.builtins.get(ROOT_RANGEERROR_PROTOTYPE),
             "RangeError",
             Some(message.into()),
         )

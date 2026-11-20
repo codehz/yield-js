@@ -32,10 +32,18 @@ pub(crate) mod namespace {
     #[constant(name = "SQRT2")]
     const SQRT2: f64 = consts::SQRT_2;
 
+    #[function(name = "abs")]
+    fn abs(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        match vm.coerce_number(host, args.first().unwrap_or(&Value::Undefined))? {
+            Ok(number) => Ok(Invocation::Value(Value::Number(number.abs()))),
+            Err(error) => Ok(Invocation::Thrown(error)),
+        }
+    }
+
     #[functions(
-        abs, acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, ceil, clz32, cos, cosh, exp,
-        expm1, floor, fround, hypot, imul, log, log1p, log10, log2, max, min, pow, random, round,
-        sign, sin, sinh, sqrt, tan, tanh, trunc
+        acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, ceil, clz32, cos, cosh, exp, expm1,
+        floor, fround, hypot, imul, log, log1p, log10, log2, max, min, pow, random, round, sign,
+        sin, sinh, sqrt, tan, tanh, trunc
     )]
     fn dispatch(
         vm: &mut Vm,
@@ -106,7 +114,6 @@ impl Vm {
                             _ => x.powf(y),
                         }
                     }
-                    "abs" => x.abs(),
                     "acos" => x.acos(),
                     "acosh" => x.acosh(),
                     "asin" => x.asin(),

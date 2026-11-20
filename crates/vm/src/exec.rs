@@ -4,6 +4,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use crate::builtin_roots::{RootKind, RootSpec};
 use crate::builtins::is_callable_object;
 use crate::bytecode::{
     BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
@@ -12,16 +13,136 @@ use crate::bytecode::{
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{
-    DescriptorUpdate, ITERATOR_SYMBOL, Object, OwnProperty, Property, TO_PRIMITIVE_SYMBOL,
-    object_id,
+    BoundObject, DescriptorUpdate, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty, PlainObject,
+    Property, TO_PRIMITIVE_SYMBOL, object_id,
 };
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
 use crate::string::utf16_unit_string;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
+
+const FUNCTION_CALL: IntrinsicDef = IntrinsicDef::call(
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call"),
+    Vm::function_call,
+);
+const FUNCTION_APPLY: IntrinsicDef = IntrinsicDef::call(
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "apply"),
+    Vm::function_apply,
+);
+const FUNCTION_BIND: IntrinsicDef = IntrinsicDef::call(
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind"),
+    Vm::function_bind,
+);
+
+pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
+    FUNCTION_CALL,
+    FUNCTION_APPLY,
+    FUNCTION_BIND,
+    IntrinsicDef::call(
+        IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
+        Vm::function_to_string,
+    ),
+];
+
+// Virtual methods have no property slot of their own, so root their shared
+// identities directly instead of allocating a function on every read.
+const VIRTUAL_FUNCTION_METHODS: [(&str, IntrinsicKey); 3] = [
+    ("function.call", FUNCTION_CALL.key),
+    ("function.apply", FUNCTION_APPLY.key),
+    ("function.bind", FUNCTION_BIND.key),
+];
+
+const fn virtual_function_root(index: usize) -> RootSpec {
+    let (name, key) = VIRTUAL_FUNCTION_METHODS[index];
+    RootSpec::new(name, RootKind::Native(key), Some("function.prototype"))
+}
+
+pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "function.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+    virtual_function_root(0),
+    virtual_function_root(1),
+    virtual_function_root(2),
+];
+
+impl Vm {
+    fn function_call(
+        &mut self,
+        host: &mut dyn Host,
+        args: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        if !self.is_callable(receiver) {
+            return self.throw_type_error("incompatible Function receiver");
+        }
+        let mut args = args.into_iter();
+        let this_arg = args.next().unwrap_or(Value::Undefined);
+        self.invoke(host, receiver, args.collect(), &this_arg)
+    }
+
+    fn function_apply(
+        &mut self,
+        host: &mut dyn Host,
+        args: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        if !self.is_callable(receiver) {
+            return self.throw_type_error("incompatible Function receiver");
+        }
+        let mut args = args.into_iter();
+        let this_arg = args.next().unwrap_or(Value::Undefined);
+        let args = match args.next() {
+            None | Some(Value::Undefined | Value::Null) => Vec::new(),
+            Some(list) => match self.arguments_from_array_like(host, &list)? {
+                Ok(values) => values,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
+        };
+        self.invoke(host, receiver, args, &this_arg)
+    }
+
+    fn function_bind(
+        &mut self,
+        _: &mut dyn Host,
+        args: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let target = match *receiver {
+            Value::Object(id) if self.heap.get(id).is_ok_and(is_callable_object) => id,
+            _ => return self.throw_type_error("incompatible Function receiver"),
+        };
+        let mut args = args.into_iter();
+        let id = self.heap.alloc(Object::Bound(BoundObject {
+            target,
+            bound_this: args.next().unwrap_or(Value::Undefined),
+            args: args.collect(),
+            object: PlainObject::new(self.heap.function_prototype),
+        }));
+        Ok(Invocation::Value(Value::Object(id)))
+    }
+
+    fn function_to_string(
+        &mut self,
+        _: &mut dyn Host,
+        _: Vec<Value>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        if self.is_callable(receiver) {
+            Ok(Invocation::Value(Value::String(
+                "function () { [native code] }".into(),
+            )))
+        } else {
+            self.throw_type_error("incompatible Function.prototype.toString receiver")
+        }
+    }
+}
 
 /// What one instruction did. `Throw` has not been caught yet.
 enum Step {
@@ -852,7 +973,7 @@ impl Vm {
             },
             _ => {}
         }
-        self.read_property_with_receiver(host, self.builtins.object_prototype, object, key)
+        self.read_property_with_receiver(host, self.builtins.get("object.prototype"), object, key)
     }
 
     pub(crate) fn read_property(
@@ -866,7 +987,7 @@ impl Vm {
             if matches!(key, PropertyKeyRef::Symbol(_)) {
                 return self.read_property_with_receiver(
                     host,
-                    self.builtins.string_prototype,
+                    self.builtins.get("string.prototype"),
                     object,
                     key,
                 );
@@ -882,7 +1003,7 @@ impl Vm {
             }
             return self.read_property_with_receiver(
                 host,
-                self.builtins.string_prototype,
+                self.builtins.get("string.prototype"),
                 object,
                 key,
             );
@@ -906,9 +1027,11 @@ impl Vm {
         let mut current = Some(target);
         while let Some(id) = current {
             let object = self.heap.get(id)?;
-            if let Object::Native(native) = object
+            if let Object::Native(NativeObject::Host {
+                target: crate::binding::NativeTarget::Export(export),
+                ..
+            }) = *object
                 && key.is_str("prototype")
-                && let crate::binding::NativeTarget::Export(export) = native.target
                 && let Some(class) = self.bindings.export_class(export)
             {
                 return Ok(Invocation::Value(Value::Object(
@@ -930,8 +1053,7 @@ impl Vm {
             }
             current = object.prototype();
         }
-        if let Some(name) = self.virtual_function_method(target, key) {
-            let method = self.heap.alloc_builtin("Function", Some(name));
+        if let Some(method) = self.virtual_function_method(target, key) {
             return Ok(Invocation::Value(Value::Object(method)));
         }
         Ok(Invocation::Value(Value::Undefined))
@@ -1110,7 +1232,8 @@ impl Vm {
         key: PropertyKeyRef<'_>,
     ) -> Result<bool, VmError> {
         Ok((key.is_str("name") || key.is_str("length"))
-            && (id == self.builtins.function_prototype || is_callable_object(self.heap.get(id)?)))
+            && (id == self.builtins.get("function.prototype")
+                || is_callable_object(self.heap.get(id)?)))
     }
 
     pub(crate) fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
@@ -1130,14 +1253,19 @@ impl Vm {
                 };
                 (name, function.length)
             }
-            Object::BuiltinStatic(function) => {
-                let member = function.member.as_deref();
-                let length = match (function.name.as_str(), member) {
-                    ("RegExp", None) => 2,
-                    ("RegExp", Some("exec" | "test" | "escape")) => 1,
+            Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
+                let key = intrinsic.definition().key;
+                let length = match (key.owner, key.member) {
+                    ("RegExp", "") => 2,
+                    ("RegExp", "exec" | "test" | "escape") => 1,
                     _ => 0,
                 };
-                (member.unwrap_or(&function.name), length)
+                let name = if key.member.is_empty() {
+                    key.owner
+                } else {
+                    key.member
+                };
+                (name, length)
             }
             _ => ("", 0), // The shared prototype and Promise resolving functions.
         };
@@ -1149,18 +1277,14 @@ impl Vm {
         })
     }
 
-    fn virtual_function_method(
-        &self,
-        id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Option<&'static str> {
-        if self.heap.get(id).is_ok_and(is_callable_object) {
-            ["call", "apply", "bind"]
-                .into_iter()
-                .find(|name| key.is_str(name))
-        } else {
-            None
+    fn virtual_function_method(&self, id: ObjectId, key: PropertyKeyRef<'_>) -> Option<ObjectId> {
+        if !self.heap.get(id).is_ok_and(is_callable_object) {
+            return None;
         }
+        VIRTUAL_FUNCTION_METHODS
+            .iter()
+            .find(|(_, intrinsic)| key.is_str(intrinsic.member))
+            .map(|(root, _)| self.builtins.get(root))
     }
 
     fn write_member(

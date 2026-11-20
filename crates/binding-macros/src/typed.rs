@@ -528,16 +528,16 @@ fn parse_builtin_marker(
             (Item::Fn(item), "function") => {
                 let ident = &item.sig.ident;
                 BuiltinMemberAction::Handler(
-                    quote!(|vm, host, _, args| self::#ident(vm, host, args)),
+                    quote!(|vm, host, args, _| self::#ident(vm, host, &args)),
                 )
             }
             (Item::Fn(item), "functions" | "methods") => {
                 let ident = &item.sig.ident;
                 let key = mapped.map_or_else(|| quote!(#member), |path| quote!(#path));
                 BuiltinMemberAction::Handler(if prototype {
-                    quote!(|vm, host, receiver, args| self::#ident(vm, host, #key, receiver, args))
+                    quote!(|vm, host, args, receiver| self::#ident(vm, host, #key, receiver, &args))
                 } else {
-                    quote!(|vm, host, _, args| self::#ident(vm, host, #key, args))
+                    quote!(|vm, host, args, _| self::#ident(vm, host, #key, &args))
                 })
             }
             (_, "constant") => {
@@ -589,7 +589,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
 
     let members = collect_builtin_members(items, constructor)?;
     let mut install = Vec::new();
-    let mut resolve = Vec::new();
+    let mut descriptors = Vec::new();
     for BuiltinMember {
         name: member,
         prototype,
@@ -602,6 +602,12 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         } else {
             object.clone()
         };
+        let slot = if prototype {
+            quote!(Prototype)
+        } else {
+            quote!(Static)
+        };
+        let key = quote!(crate::intrinsic::IntrinsicKey::new(NAME, crate::intrinsic::Slot::#slot, #member));
         let call = match action {
             BuiltinMemberAction::Constant(ident) => {
                 install.push(quote! {
@@ -615,18 +621,25 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 });
                 continue;
             }
-            BuiltinMemberAction::Handler(handler) => {
-                quote!(crate::builtins::BuiltinCall::Registered(#handler))
+            BuiltinMemberAction::Handler(handler) => handler,
+            BuiltinMemberAction::Direct { binding, mut call } => {
+                if let Some(key) = binding {
+                    let Expr::Closure(closure) = &mut call else {
+                        return Err(Error::new_spanned(
+                            call,
+                            "a bound builtin call requires a closure",
+                        ));
+                    };
+                    let body = &closure.body;
+                    closure.body = syn::parse_quote!({ let #key: &'static str = #member; #body });
+                }
+                quote!(#call)
             }
-            BuiltinMemberAction::Direct { binding, call } => match binding {
-                Some(key) => quote!({ let #key: &'static str = #member; #call }),
-                None => quote!(#call),
-            },
         };
         install.push(quote! {
             #(#cfg)*
             {
-                let method = vm.heap.alloc_builtin(NAME, Some(#member));
+                let method = vm.alloc_intrinsic(#key);
                 vm.heap.define_data(
                     #target,
                     #member,
@@ -635,9 +648,9 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 ).expect("builtin stores methods");
             }
         });
-        resolve.push(quote! {
+        descriptors.push(quote! {
             #(#cfg)*
-            #member => Some(#call),
+            crate::intrinsic::IntrinsicDef::call(#key, #call),
         });
     }
 
@@ -655,20 +668,19 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         });
     } else {
         items.push(syn::parse_quote! {
-            pub(crate) fn install(vm: &mut crate::vm::Vm) -> crate::value::ObjectId {
-                let object = vm.heap.alloc_plain();
+            pub(crate) const ROOTS: &[crate::builtins::RootSpec] = &[
+                crate::builtins::RootSpec::new(ROOT, crate::builtins::RootKind::Plain, Some("object.prototype")),
+            ];
+        });
+        items.push(syn::parse_quote! {
+            pub(crate) fn install(vm: &mut crate::vm::Vm, _: &crate::value::Value) {
+                let object = vm.builtins.get(ROOT);
                 #(#install)*
-                object
             }
         });
     }
     items.push(syn::parse_quote! {
-        pub(crate) fn resolve(member: &str) -> Option<crate::builtins::BuiltinCall> {
-            match member {
-                #(#resolve)*
-                _ => None,
-            }
-        }
+        pub(crate) const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
     });
     Ok(quote!(#module))
 }
@@ -1522,7 +1534,7 @@ mod tests {
                     mod members {
                         #[function(name = "shared")]
                         fn shared() {}
-                        prototype_calls! { shared => BuiltinCall::Example; }
+                        prototype_calls! { shared => example; }
                     }
                 },
             ),
@@ -1531,7 +1543,7 @@ mod tests {
         diagnostic(
             builtin_global(
                 quote!(name = "Example", root = "example"),
-                quote! { mod members { prototype_calls! { f => BuiltinCall::Example; } } },
+                quote! { mod members { prototype_calls! { f => example; } } },
             ),
             "methods marker requires a constructor builtin",
         );
@@ -1547,11 +1559,11 @@ mod tests {
             quote!(name = "Example", root = "example", kind = "constructor"),
             quote! {
                 mod members {
-                    static_calls! { create => BuiltinCall::Create; }
+                    static_calls! { create => create_handler; }
                     #[cfg(feature = "example")]
                     prototype_calls! {
-                        then | r#match as key => BuiltinCall::Method { name: key };
-                        other => BuiltinCall::Other;
+                        then | r#match as key => |vm, host, args, receiver| method(vm, host, args, receiver, key);
+                        other => other_handler;
                     }
                 }
             },

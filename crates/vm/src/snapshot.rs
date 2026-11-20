@@ -4,42 +4,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::JsString;
 use crate::binding::{Bindings, Recovery};
-use crate::builtins::{
-    BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
-    ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
-    ROOT_BOOLEAN_PROTOTYPE, ROOT_ERROR, ROOT_ERROR_PROTOTYPE, ROOT_EVALERROR,
-    ROOT_EVALERROR_PROTOTYPE, ROOT_FUNCTION_PROTOTYPE, ROOT_GLOBAL_THIS, ROOT_NUMBER_PROTOTYPE,
-    ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK,
-    ROOT_RANGEERROR, ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE,
-    ROOT_REGEXP, ROOT_REGEXP_ITERATOR_PROTOTYPE, ROOT_REGEXP_PROTOTYPE, ROOT_STRING_ITERATOR,
-    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE,
-    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
-    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE,
-    is_callable_object, object_members, promise_members, reflect_namespace,
-};
+use crate::builtin_roots::BuiltinRoots;
+use crate::builtins::is_callable_object;
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
+use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::heap::{
-    Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL,
-    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, Object, OwnProperty,
+    CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
+    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OwnProperty,
     OwnedEdge, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
     SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
     SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
-use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::Host;
-use crate::math::namespace as math_namespace;
-use crate::number::members as number_members;
 use crate::regexp::compile_pattern;
 use crate::runtime::{
     Continuation, HostInstance, HostSlot, ModuleState, PendingOperation, Settlement,
 };
-use crate::string::members as string_members;
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Plain objects preserve the internal Error brand.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 37;
+// Native callables persist stable intrinsic keys, not linked IDs.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 38;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -520,7 +506,7 @@ impl Vm {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
-        let builtins = load_roots(&heap, &snapshot.roots)?;
+        let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
         let operations = load_operations(&bindings, &heap, &snapshot.operations)?;
         let mut vm = Self::restored(
             build,
@@ -539,7 +525,7 @@ impl Vm {
         );
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         validate_native_import_objects(&vm.heap, &vm.imports)?;
-        check_heap_edges(&vm.build, &vm.heap, &bindings)?;
+        check_heap_edges(&vm.build, &vm.heap)?;
         validate_jobs(&vm.heap)?;
         validate_combines(&vm.heap)?;
         vm.settle_restored_operations()?;
@@ -845,320 +831,6 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
     Ok(())
 }
 
-fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<BuiltinRoots, VmError> {
-    let expected = BuiltinRoots::default().to_map().len();
-    if roots.len() != expected {
-        return Err(VmError::InvalidSnapshot(format!(
-            "snapshot has {} builtin roots, expected {expected}",
-            roots.len()
-        )));
-    }
-    let promise = required_root(roots, promise_members::ROOT)?;
-    let prototype = required_root(roots, ROOT_PROMISE_PROTOTYPE)?;
-    let queue = required_root(roots, ROOT_QUEUE_MICROTASK)?;
-    match heap.get(promise)? {
-        Object::BuiltinStatic(function)
-            if function.name == promise_members::NAME && function.member.is_none() => {}
-        _ => {
-            return Err(VmError::InvalidSnapshot(
-                "promise root is not the Promise constructor".to_owned(),
-            ));
-        }
-    }
-    if !matches!(heap.get(prototype)?, Object::Plain(_)) {
-        return Err(VmError::InvalidSnapshot(
-            "promise.prototype root is not a plain object".to_owned(),
-        ));
-    }
-    match heap.get(queue)? {
-        Object::BuiltinStatic(function)
-            if function.name == "queueMicrotask" && function.member.is_none() => {}
-        _ => {
-            return Err(VmError::InvalidSnapshot(
-                "queueMicrotask root is not the builtin".to_owned(),
-            ));
-        }
-    }
-    require_fixed_prototype(heap, promise, prototype, promise_members::NAME)?;
-    let plain_root = |name| {
-        let id = required_root(roots, name)?;
-        if !matches!(heap.get(id), Ok(Object::Plain(_))) {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{name} root is not a plain object"
-            )));
-        }
-        Ok(id)
-    };
-    let builtin_root = |key, name| {
-        let id = required_root(roots, key)?;
-        if !matches!(heap.get(id), Ok(Object::BuiltinStatic(f)) if f.name == name && f.member.is_none())
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{key} root is not the {name} constructor"
-            )));
-        }
-        Ok(id)
-    };
-    let object_prototype = plain_root(ROOT_OBJECT_PROTOTYPE)?;
-    if matches!(heap.get(object_prototype)?, Object::Plain(plain) if plain.prototype.is_some()) {
-        return Err(VmError::InvalidSnapshot(
-            "Object.prototype must have a null prototype".to_owned(),
-        ));
-    }
-    let json = plain_root(crate::json::namespace::ROOT)?;
-    let object = builtin_root(object_members::ROOT, object_members::NAME)?;
-    require_fixed_prototype(heap, object, object_prototype, object_members::NAME)?;
-    let map = builtin_root("map", "Map")?;
-    let map_prototype = plain_root("map.prototype")?;
-    let map_iterator_prototype = plain_root("mapIterator.prototype")?;
-    require_fixed_prototype(heap, map, map_prototype, "Map")?;
-    let set = builtin_root("set", "Set")?;
-    let set_prototype = plain_root("set.prototype")?;
-    let set_iterator_prototype = plain_root("setIterator.prototype")?;
-    require_fixed_prototype(heap, set, set_prototype, "Set")?;
-    let weakmap = builtin_root(ROOT_WEAK_MAP, "WeakMap")?;
-    let weakmap_prototype = plain_root(ROOT_WEAK_MAP_PROTOTYPE)?;
-    require_fixed_prototype(heap, weakmap, weakmap_prototype, "WeakMap")?;
-    let array_prototype = required_root(roots, ROOT_ARRAY_PROTOTYPE)?;
-    if !matches!(heap.get(array_prototype)?, Object::Array(_)) {
-        return Err(VmError::InvalidSnapshot(
-            "Array.prototype root is not an array".to_owned(),
-        ));
-    }
-    let array = builtin_root(ROOT_ARRAY, "Array")?;
-    require_fixed_prototype(heap, array, array_prototype, "Array")?;
-    let array_values = required_root(roots, ROOT_ARRAY_VALUES)?;
-    if !matches!(heap.get(array_values), Ok(Object::BuiltinStatic(f)) if f.name == "Array" && f.member.as_deref() == Some("values"))
-    {
-        return Err(VmError::InvalidSnapshot(
-            "array.values root is not the builtin".to_owned(),
-        ));
-    }
-    let string_prototype = plain_root(ROOT_STRING_PROTOTYPE)?;
-    let string = builtin_root(string_members::ROOT, string_members::NAME)?;
-    require_fixed_prototype(heap, string, string_prototype, "String")?;
-    let regexp = builtin_root(ROOT_REGEXP, "RegExp")?;
-    let regexp_prototype = plain_root(ROOT_REGEXP_PROTOTYPE)?;
-    require_fixed_prototype(heap, regexp, regexp_prototype, "RegExp")?;
-    if roots
-        .iter()
-        .any(|(name, id)| name != ROOT_REGEXP_PROTOTYPE && *id == regexp_prototype)
-    {
-        return Err(VmError::InvalidSnapshot(
-            "RegExp.prototype aliases another builtin root".to_owned(),
-        ));
-    }
-    let number_prototype = plain_root(ROOT_NUMBER_PROTOTYPE)?;
-    let number = builtin_root(number_members::ROOT, number_members::NAME)?;
-    require_fixed_prototype(heap, number, number_prototype, "Number")?;
-    if !heap
-        .get(number_prototype)?
-        .own_property(PropertyKeyRef::String("constructor"))
-        .is_some_and(|property| property.into_owned() == Property::Data(Value::Object(number)))
-    {
-        return Err(VmError::InvalidSnapshot(
-            "Number prototype constructor is invalid".to_owned(),
-        ));
-    }
-    let boolean_prototype = plain_root(ROOT_BOOLEAN_PROTOTYPE)?;
-    let boolean_constructor = builtin_root(ROOT_BOOLEAN, "Boolean")?;
-    require_fixed_prototype(heap, boolean_constructor, boolean_prototype, "Boolean")?;
-    let symbol_prototype = plain_root(ROOT_SYMBOL_PROTOTYPE)?;
-    let symbol = builtin_root(ROOT_SYMBOL, "Symbol")?;
-    require_fixed_prototype(heap, symbol, symbol_prototype, "Symbol")?;
-    let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
-    let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
-    let regexp_iterator_prototype = plain_root(ROOT_REGEXP_ITERATOR_PROTOTYPE)?;
-    let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
-    if !matches!(heap.get(string_iterator), Ok(Object::BuiltinStatic(f)) if f.name == "String" && f.member.as_deref() == Some("iterator"))
-    {
-        return Err(VmError::InvalidSnapshot(
-            "string.iterator root is not the builtin".to_owned(),
-        ));
-    }
-    let function_prototype = plain_root(ROOT_FUNCTION_PROTOTYPE)?;
-    let error_prototype = plain_root(ROOT_ERROR_PROTOTYPE)?;
-    let typeerror_prototype = plain_root(ROOT_TYPEERROR_PROTOTYPE)?;
-    let rangeerror_prototype = plain_root(ROOT_RANGEERROR_PROTOTYPE)?;
-    let referenceerror_prototype = plain_root(ROOT_REFERENCEERROR_PROTOTYPE)?;
-    let syntaxerror_prototype = plain_root(ROOT_SYNTAXERROR_PROTOTYPE)?;
-    let evalerror_prototype = plain_root(ROOT_EVALERROR_PROTOTYPE)?;
-    let urierror_prototype = plain_root(ROOT_URIERROR_PROTOTYPE)?;
-    let aggregateerror_prototype = plain_root(ROOT_AGGREGATEERROR_PROTOTYPE)?;
-    let error_types = [
-        (ROOT_TYPEERROR, "TypeError", typeerror_prototype),
-        (ROOT_RANGEERROR, "RangeError", rangeerror_prototype),
-        (
-            ROOT_REFERENCEERROR,
-            "ReferenceError",
-            referenceerror_prototype,
-        ),
-        (ROOT_SYNTAXERROR, "SyntaxError", syntaxerror_prototype),
-        (ROOT_EVALERROR, "EvalError", evalerror_prototype),
-        (ROOT_URIERROR, "URIError", urierror_prototype),
-        (
-            ROOT_AGGREGATEERROR,
-            "AggregateError",
-            aggregateerror_prototype,
-        ),
-    ];
-    let mut error_prototypes = BTreeSet::from([error_prototype]);
-    for (root, name, prototype) in error_types {
-        if !error_prototypes.insert(prototype)
-            || !matches!(heap.get(prototype)?, Object::Plain(plain) if plain.prototype == Some(error_prototype))
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{root} prototype has invalid identity or inheritance"
-            )));
-        }
-        let constructor = builtin_root(root, name)?;
-        require_fixed_prototype(heap, constructor, prototype, name)?;
-        if !heap
-            .get(prototype)?
-            .own_property(PropertyKeyRef::String("constructor"))
-            .is_some_and(|property| {
-                property.attributes() == Attributes::METHOD
-                    && property.into_owned() == Property::Data(Value::Object(constructor))
-            })
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{root} prototype constructor is invalid"
-            )));
-        }
-    }
-    let error = builtin_root(ROOT_ERROR, "Error")?;
-    if !heap
-        .get(error_prototype)?
-        .own_property(PropertyKeyRef::String("constructor"))
-        .is_some_and(|property| {
-            property.attributes() == Attributes::METHOD
-                && property.into_owned() == Property::Data(Value::Object(error))
-        })
-    {
-        return Err(VmError::InvalidSnapshot(
-            "Error prototype constructor is invalid".to_owned(),
-        ));
-    }
-    require_fixed_prototype(heap, error, error_prototype, "Error")?;
-    let rangeerror = builtin_root(ROOT_RANGEERROR, "RangeError")?;
-    let referenceerror = builtin_root(ROOT_REFERENCEERROR, "ReferenceError")?;
-    let syntaxerror = builtin_root(ROOT_SYNTAXERROR, "SyntaxError")?;
-    let evalerror = builtin_root(ROOT_EVALERROR, "EvalError")?;
-    let urierror = builtin_root(ROOT_URIERROR, "URIError")?;
-    let aggregateerror = builtin_root(ROOT_AGGREGATEERROR, "AggregateError")?;
-    let mut prototypes = BTreeSet::from([object_prototype]);
-    for (name, id) in [
-        (ROOT_STRING_PROTOTYPE, string_prototype),
-        (ROOT_NUMBER_PROTOTYPE, number_prototype),
-        (ROOT_BOOLEAN_PROTOTYPE, boolean_prototype),
-        (ROOT_SYMBOL_PROTOTYPE, symbol_prototype),
-        (ROOT_ARRAY_PROTOTYPE, array_prototype),
-        (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
-        (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
-        (ROOT_REGEXP_ITERATOR_PROTOTYPE, regexp_iterator_prototype),
-        (ROOT_FUNCTION_PROTOTYPE, function_prototype),
-    ] {
-        if !prototypes.insert(id) {
-            return Err(VmError::InvalidSnapshot(format!(
-                "{name} aliases another prototype root"
-            )));
-        }
-    }
-    let global_this = plain_root(ROOT_GLOBAL_THIS)?;
-    // Its properties and prototype are mutable, but the root must be distinct.
-    if roots
-        .iter()
-        .any(|(name, id)| name != ROOT_GLOBAL_THIS && *id == global_this)
-    {
-        return Err(VmError::InvalidSnapshot(
-            "globalThis aliases another builtin root".to_owned(),
-        ));
-    }
-    Ok(BuiltinRoots {
-        global_this,
-        map,
-        map_prototype,
-        map_iterator_prototype,
-        set,
-        set_prototype,
-        set_iterator_prototype,
-        weakmap,
-        weakmap_prototype,
-        promise,
-        proxy: builtin_root(ROOT_PROXY, "Proxy")?,
-        promise_prototype: prototype,
-        queue_microtask: queue,
-        object_prototype,
-        array,
-        array_prototype,
-        array_values,
-        string,
-        string_prototype,
-        regexp,
-        regexp_prototype,
-        number,
-        number_prototype,
-        boolean_constructor,
-        boolean_prototype,
-        array_iterator_prototype,
-        string_iterator,
-        string_iterator_prototype,
-        regexp_iterator_prototype,
-        function_prototype,
-        error_prototype,
-        typeerror_prototype,
-        rangeerror_prototype,
-        referenceerror_prototype,
-        syntaxerror_prototype,
-        evalerror_prototype,
-        urierror_prototype,
-        aggregateerror_prototype,
-        error,
-        typeerror: builtin_root(ROOT_TYPEERROR, "TypeError")?,
-        rangeerror,
-        referenceerror,
-        syntaxerror,
-        evalerror,
-        urierror,
-        aggregateerror,
-        symbol,
-        symbol_prototype,
-        reflect: plain_root(reflect_namespace::ROOT)?,
-        object,
-        math: plain_root(math_namespace::ROOT)?,
-        json,
-    })
-}
-
-fn require_fixed_prototype(
-    heap: &Heap,
-    constructor: ObjectId,
-    prototype: ObjectId,
-    name: &str,
-) -> Result<(), VmError> {
-    if heap
-        .get(constructor)?
-        .own_property(PropertyKeyRef::String("prototype"))
-        .is_some_and(|property| {
-            property.attributes() == Attributes::FIXED
-                && property.into_owned() == Property::Data(Value::Object(prototype))
-        })
-    {
-        Ok(())
-    } else {
-        Err(VmError::InvalidSnapshot(format!(
-            "{name}.prototype does not match the fixed prototype root"
-        )))
-    }
-}
-
-fn required_root(roots: &BTreeMap<String, ObjectId>, name: &str) -> Result<ObjectId, VmError> {
-    roots
-        .get(name)
-        .copied()
-        .ok_or_else(|| VmError::InvalidSnapshot(format!("snapshot is missing builtin root {name}")))
-}
-
 fn load_script_env(
     build: &Build,
     heap: &Heap,
@@ -1206,17 +878,10 @@ fn load_script_env(
     }
 }
 
-fn check_heap_edges(build: &Build, heap: &Heap, bindings: &Bindings) -> Result<(), VmError> {
+fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
-        if let Object::Native(native) = heap.get(id)?
-            && !valid_native_target(bindings, native.target)
-        {
-            return Err(VmError::InvalidSnapshot(format!(
-                "native object {id} references an undeclared binding"
-            )));
-        }
         if let Object::Function(function) = heap.get(id)?
             && function.func_id == build.script
         {
@@ -1463,19 +1128,31 @@ fn valid_native_target(bindings: &Bindings, target: crate::binding::NativeTarget
 }
 
 fn validate_native_targets(bindings: &Bindings, heap: &Heap) -> Result<(), VmError> {
-    let mut identities = BTreeSet::new();
+    let mut host_identities = BTreeSet::new();
+    let mut intrinsic_identities = BTreeSet::new();
     for id in heap.ids() {
-        if let Object::Native(native) = heap.get(id)? {
-            if !valid_native_target(bindings, native.target) {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "native object {id} references an undeclared binding"
-                )));
+        let unique = match heap.get(id)? {
+            Object::Native(NativeObject::Host {
+                target,
+                constructable,
+            }) => {
+                if !valid_native_target(bindings, *target) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "native object {id} references an undeclared binding"
+                    )));
+                }
+                host_identities.insert((*target, *constructable))
             }
-            if !identities.insert((native.target, native.constructable)) {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "duplicate native object identity at {id}"
-                )));
+            Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
+                // IntrinsicId deserialization has already linked a declared key.
+                intrinsic_identities.insert(*intrinsic)
             }
+            _ => continue,
+        };
+        if !unique {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate native object identity at {id}"
+            )));
         }
     }
     Ok(())
@@ -1489,8 +1166,11 @@ fn validate_native_import_objects(
     for import in imports {
         for value in &import.values {
             if let Value::Object(id) = value
-                && let Object::Native(native) = heap.get(*id)?
-                && !identities.insert((native.target, native.constructable))
+                && let Object::Native(NativeObject::Host {
+                    target,
+                    constructable,
+                }) = heap.get(*id)?
+                && !identities.insert((*target, *constructable))
             {
                 return Err(VmError::InvalidSnapshot(format!(
                     "duplicate native import identity at {id}"

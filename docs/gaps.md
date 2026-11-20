@@ -99,6 +99,6 @@ flowchart LR
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
-- 快照迁移：版本不匹配即拒绝
+- 快照迁移：只接受当前格式（38），拒绝旧记录；字节码格式仍为 29。
 - 重复 `default`、匿名函数声明：按语法错误拒绝，不是未实现的特性
 - 严格模式下删除裸标识符（包括加括号的标识符）：按语法错误拒绝。

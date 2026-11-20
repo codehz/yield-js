@@ -115,9 +115,34 @@ pub struct PromiseObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NativeObject {
-    pub target: crate::binding::NativeTarget,
-    pub constructable: bool,
+#[serde(deny_unknown_fields)]
+pub enum NativeObject {
+    Host {
+        target: crate::binding::NativeTarget,
+        constructable: bool,
+    },
+    Intrinsic {
+        intrinsic: crate::intrinsic::IntrinsicId,
+        object: PlainObject,
+    },
+}
+
+impl NativeObject {
+    pub(crate) fn target(&self) -> crate::intrinsic::CallableTarget {
+        match self {
+            Self::Host { target, .. } => crate::intrinsic::CallableTarget::Host(*target),
+            Self::Intrinsic { intrinsic, .. } => {
+                crate::intrinsic::CallableTarget::Intrinsic(*intrinsic)
+            }
+        }
+    }
+
+    pub(crate) fn constructable(&self) -> bool {
+        match self {
+            Self::Host { constructable, .. } => *constructable,
+            Self::Intrinsic { intrinsic, .. } => intrinsic.definition().construct.is_some(),
+        }
+    }
 }
 
 /// Lookup stays keyed; the ordinal records creation order, not write order.
@@ -614,20 +639,6 @@ pub struct EnvironmentObject {
     pub bindings: BTreeMap<BindingId, Value>,
 }
 
-/// `Promise`, `queueMicrotask`, a static such as `Promise.resolve`, or one
-/// shared instance method such as `then`. The receiver is supplied by the call,
-/// not stored on the object.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BuiltinStatic {
-    pub name: String,
-    pub member: Option<String>,
-    #[serde(with = "property_pairs")]
-    pub props: PropertyTable<JsString, Property>,
-    pub symbol_props: PropertyTable<SymbolId, Property>,
-    pub prototype: Option<ObjectId>,
-    extensible: bool,
-}
-
 /// One-shot `resolve` or `reject` passed to an executor or a thenable `then`.
 ///
 /// The pair shares the once-flag: calling either marks both `called`. An
@@ -758,7 +769,6 @@ pub enum Object {
     Function(FunctionObject),
     Bound(BoundObject),
     Environment(EnvironmentObject),
-    BuiltinStatic(BuiltinStatic),
     Resolution(Resolution),
     PromiseCallback {
         object: PlainObject,
@@ -957,7 +967,6 @@ impl PartialEq for Object {
             (Function(a), Function(b)) => a == b,
             (Bound(a), Bound(b)) => a == b,
             (Environment(a), Environment(b)) => a == b,
-            (BuiltinStatic(a), BuiltinStatic(b)) => a == b,
             (Resolution(a), Resolution(b)) => a == b,
             (
                 PromiseCallback {
@@ -1084,7 +1093,7 @@ impl Object {
             Self::Array(o) => &mut o.extensible,
             Self::Function(o) => &mut o.extensible,
             Self::Promise(o) => &mut o.extensible,
-            Self::BuiltinStatic(o) => &mut o.extensible,
+            Self::Native(NativeObject::Intrinsic { object, .. }) => &mut object.extensible,
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
@@ -1108,7 +1117,7 @@ impl Object {
             Self::Array(o) => o.extensible,
             Self::Function(o) => o.extensible,
             Self::Promise(o) => o.extensible,
-            Self::BuiltinStatic(o) => o.extensible,
+            Self::Native(NativeObject::Intrinsic { object, .. }) => object.extensible,
             // Opaque native handles have no script property storage.
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => false,
         }
@@ -1175,7 +1184,9 @@ impl Object {
             Self::Array(o) => (&o.props, &o.symbol_props),
             Self::Function(o) => (&o.props, &o.symbol_props),
             Self::Promise(o) => (&o.props, &o.symbol_props),
-            Self::BuiltinStatic(o) => (&o.props, &o.symbol_props),
+            Self::Native(NativeObject::Intrinsic { object, .. }) => {
+                (&object.props, &object.symbol_props)
+            }
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
@@ -1199,7 +1210,9 @@ impl Object {
             Self::Array(o) => (&mut o.props, &mut o.symbol_props),
             Self::Function(o) => (&mut o.props, &mut o.symbol_props),
             Self::Promise(o) => (&mut o.props, &mut o.symbol_props),
-            Self::BuiltinStatic(o) => (&mut o.props, &mut o.symbol_props),
+            Self::Native(NativeObject::Intrinsic { object, .. }) => {
+                (&mut object.props, &mut object.symbol_props)
+            }
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
@@ -1331,7 +1344,7 @@ impl Object {
             Self::Array(array) => array.prototype,
             Self::Function(function) => function.prototype,
             Self::Promise(promise) => promise.prototype,
-            Self::BuiltinStatic(builtin) => builtin.prototype,
+            Self::Native(NativeObject::Intrinsic { object, .. }) => object.prototype,
             Self::Bound(bound) => bound.object.prototype,
             Self::Resolution(resolution) => resolution.object.prototype,
             Self::PromiseCallback { object, .. } => object.prototype,
@@ -1358,7 +1371,7 @@ impl Object {
             Self::Array(o) => &mut o.prototype,
             Self::Function(o) => &mut o.prototype,
             Self::Promise(o) => &mut o.prototype,
-            Self::BuiltinStatic(o) => &mut o.prototype,
+            Self::Native(NativeObject::Intrinsic { object, .. }) => &mut object.prototype,
             Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
@@ -1426,7 +1439,6 @@ impl Object {
             Self::Native(_)
             | Self::Plain(_)
             | Self::RegExp { .. }
-            | Self::BuiltinStatic(_)
             | Self::WeakMap { .. }
             | Self::StringIterator { .. } => {}
             Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
@@ -1735,14 +1747,10 @@ impl Heap {
         }))
     }
 
-    pub(crate) fn alloc_builtin(&mut self, name: &str, member: Option<&str>) -> ObjectId {
-        self.alloc(Object::BuiltinStatic(BuiltinStatic {
-            name: name.to_owned(),
-            member: member.map(str::to_owned),
-            props: PropertyTable::new(),
-            symbol_props: PropertyTable::new(),
-            prototype: self.function_prototype,
-            extensible: true,
+    pub(crate) fn alloc_intrinsic(&mut self, intrinsic: crate::intrinsic::IntrinsicId) -> ObjectId {
+        self.alloc(Object::Native(NativeObject::Intrinsic {
+            intrinsic,
+            object: PlainObject::new(self.function_prototype),
         }))
     }
 
@@ -1870,16 +1878,15 @@ impl Heap {
         constructable: bool,
     ) -> ObjectId {
         if let Some(id) = self.objects.iter().find_map(|(id, object)| match object {
-            Object::Native(native)
-                if native.target == target && native.constructable == constructable =>
-            {
-                Some(*id)
-            }
+            Object::Native(NativeObject::Host {
+                target: current,
+                constructable: flag,
+            }) if *current == target && *flag == constructable => Some(*id),
             _ => None,
         }) {
             return id;
         }
-        self.alloc(Object::Native(NativeObject {
+        self.alloc(Object::Native(NativeObject::Host {
             target,
             constructable,
         }))

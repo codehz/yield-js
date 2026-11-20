@@ -988,10 +988,10 @@ impl Vm {
             builtins,
             script_env,
         } = state;
-        heap.promise_prototype = Some(builtins.promise_prototype);
-        heap.object_prototype = Some(builtins.object_prototype);
-        heap.array_prototype = Some(builtins.array_prototype);
-        heap.function_prototype = Some(builtins.function_prototype);
+        heap.promise_prototype = Some(builtins.get("promise.prototype"));
+        heap.object_prototype = Some(builtins.get("object.prototype"));
+        heap.array_prototype = Some(builtins.get("array.prototype"));
+        heap.function_prototype = Some(builtins.get("function.prototype"));
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
         let next_operation_id = operations.keys().next_back().map_or(1, |id| id + 1);

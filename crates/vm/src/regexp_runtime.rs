@@ -1,9 +1,12 @@
 //! RegExp objects and matching over JavaScript UTF-16 code units.
 use std::borrow::Cow;
 
+use crate::builtin_globals::Owner;
+use crate::builtins::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
@@ -32,44 +35,91 @@ pub(crate) enum RegExpMethod {
     Escape,
 }
 
-pub(crate) const REGEXP_METHODS: &[(&str, RegExpMethod)] = &[
-    ("exec", RegExpMethod::Exec),
-    ("test", RegExpMethod::Test),
-    ("toString", RegExpMethod::ToString),
-    ("get source", RegExpMethod::Source),
-    ("get flags", RegExpMethod::Flags),
-    ("get global", RegExpMethod::Global),
-    ("get ignoreCase", RegExpMethod::IgnoreCase),
-    ("get multiline", RegExpMethod::Multiline),
-    ("get dotAll", RegExpMethod::DotAll),
-    ("get unicode", RegExpMethod::Unicode),
-    ("get hasIndices", RegExpMethod::HasIndices),
-    ("get unicodeSets", RegExpMethod::UnicodeSets),
-    ("get sticky", RegExpMethod::Sticky),
+const REGEXP: IntrinsicKey = IntrinsicKey::new("RegExp", Slot::Global, "");
+
+pub(crate) const OWNER: Owner = Owner::new(
+    "regexp",
+    REGEXP_ROOTS,
+    &[REGEXP_INTRINSICS],
+    Some(|vm, identity| {
+        vm.install_regexp(
+            vm.builtins.get("regexp"),
+            vm.builtins.get("regexp.prototype"),
+            vm.builtins.get("regexpIterator.prototype"),
+            identity,
+        );
+    }),
+);
+
+pub(crate) const REGEXP_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "regexp",
+        RootKind::Native(REGEXP),
+        Some("function.prototype"),
+    )
+    .fixed("regexp.prototype"),
+    RootSpec::new(
+        "regexp.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+    RootSpec::new(
+        "regexpIterator.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
 ];
 
-pub(crate) const REGEXP_STATICS: &[(&str, RegExpMethod)] = &[("escape", RegExpMethod::Escape)];
+macro_rules! regexp_method {
+    ($slot:ident, $name:literal, $method:ident) => {
+        IntrinsicDef::call(
+            IntrinsicKey::new("RegExp", Slot::$slot, $name),
+            |vm, host, args, receiver| {
+                vm.call_regexp_method(host, RegExpMethod::$method, receiver, &args)
+            },
+        )
+    };
+}
 
-pub(crate) const REGEXP_SYMBOL_METHODS: &[(crate::value::SymbolId, &str, RegExpMethod)] = &[
-    (crate::heap::MATCH_SYMBOL, "@@match", RegExpMethod::Match),
-    (
-        crate::heap::MATCH_ALL_SYMBOL,
-        "@@matchAll",
-        RegExpMethod::MatchAll,
+pub(crate) const REGEXP_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        REGEXP,
+        |vm, host, args, _| vm.construct_regexp(host, &args, None, true),
+        |vm, host, args, prototype| vm.construct_regexp(host, &args, prototype, false),
     ),
-    (
-        crate::heap::REPLACE_SYMBOL,
-        "@@replace",
-        RegExpMethod::Replace,
+    regexp_method!(Prototype, "exec", Exec),
+    regexp_method!(Prototype, "test", Test),
+    regexp_method!(Prototype, "toString", ToString),
+    regexp_method!(PrototypeGetter, "source", Source),
+    regexp_method!(PrototypeGetter, "flags", Flags),
+    regexp_method!(PrototypeGetter, "global", Global),
+    regexp_method!(PrototypeGetter, "ignoreCase", IgnoreCase),
+    regexp_method!(PrototypeGetter, "multiline", Multiline),
+    regexp_method!(PrototypeGetter, "dotAll", DotAll),
+    regexp_method!(PrototypeGetter, "unicode", Unicode),
+    regexp_method!(PrototypeGetter, "hasIndices", HasIndices),
+    regexp_method!(PrototypeGetter, "unicodeSets", UnicodeSets),
+    regexp_method!(PrototypeGetter, "sticky", Sticky),
+    regexp_method!(Static, "escape", Escape),
+    regexp_method!(PrototypeSymbol, "match", Match),
+    regexp_method!(PrototypeSymbol, "matchAll", MatchAll),
+    regexp_method!(PrototypeSymbol, "replace", Replace),
+    regexp_method!(PrototypeSymbol, "search", Search),
+    regexp_method!(PrototypeSymbol, "split", Split),
+    IntrinsicDef::call(
+        IntrinsicKey::new("RegExpStringIterator", Slot::Prototype, "next"),
+        |vm, host, _, receiver| vm.regexp_string_iterator_next(host, receiver),
     ),
-    (crate::heap::SEARCH_SYMBOL, "@@search", RegExpMethod::Search),
-    (crate::heap::SPLIT_SYMBOL, "@@split", RegExpMethod::Split),
 ];
 
 impl Vm {
-    pub(crate) fn init_regexp(&mut self) -> (ObjectId, ObjectId) {
-        let constructor = self.heap.alloc_builtin("RegExp", None);
-        let prototype = self.heap.alloc_plain();
+    pub(crate) fn install_regexp(
+        &mut self,
+        constructor: ObjectId,
+        prototype: ObjectId,
+        iterator: ObjectId,
+        identity: &Value,
+    ) {
         self.heap
             .define_data(
                 constructor,
@@ -86,14 +136,18 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("RegExp.prototype stores its constructor");
-        for &(name, _) in REGEXP_METHODS {
-            let method = self.heap.alloc_builtin("RegExp", Some(name));
-            if let Some(property) = name.strip_prefix("get ") {
+        for def in REGEXP_INTRINSICS {
+            let name = def.key.member;
+            if def.key.slot == Slot::Global {
+                continue;
+            }
+            let method = self.alloc_intrinsic(def.key);
+            if def.key.slot == Slot::PrototypeGetter {
                 assert!(
                     self.heap
                         .apply_descriptor(
                             prototype,
-                            property.into(),
+                            name.into(),
                             DescriptorUpdate {
                                 get: Some(Some(method)),
                                 configurable: Some(true),
@@ -102,30 +156,37 @@ impl Vm {
                         )
                         .expect("RegExp.prototype stores getters")
                 );
-            } else {
-                self.heap
-                    .define_data(prototype, name, Value::Object(method), Attributes::METHOD)
-                    .expect("RegExp.prototype stores methods");
+                continue;
             }
-        }
-        for &(name, _) in REGEXP_STATICS {
-            let method = self.heap.alloc_builtin("RegExp", Some(name));
+            let (target, key) = match (def.key.owner, def.key.slot) {
+                ("RegExp", Slot::Static) => (constructor, name.into()),
+                ("RegExp", Slot::Prototype) => (prototype, name.into()),
+                ("RegExpStringIterator", Slot::Prototype) => (iterator, name.into()),
+                ("RegExp", Slot::PrototypeSymbol) => {
+                    let symbol = match name {
+                        "match" => crate::heap::MATCH_SYMBOL,
+                        "matchAll" => crate::heap::MATCH_ALL_SYMBOL,
+                        "replace" => crate::heap::REPLACE_SYMBOL,
+                        "search" => crate::heap::SEARCH_SYMBOL,
+                        "split" => crate::heap::SPLIT_SYMBOL,
+                        _ => unreachable!("unexpected RegExp symbol: {name}"),
+                    };
+                    (prototype, PropertyKey::Symbol(symbol))
+                }
+                _ => unreachable!("unexpected RegExp declaration: {:?}", def.key),
+            };
             self.heap
-                .define_data(constructor, name, Value::Object(method), Attributes::METHOD)
-                .expect("RegExp constructor stores static methods");
+                .define_data(target, key, Value::Object(method), Attributes::METHOD)
+                .expect("RegExp builtin method");
         }
-        for &(symbol, name, _) in REGEXP_SYMBOL_METHODS {
-            let method = self.heap.alloc_builtin("RegExp", Some(name));
-            self.heap
-                .define_data(
-                    prototype,
-                    PropertyKey::Symbol(symbol),
-                    Value::Object(method),
-                    Attributes::METHOD,
-                )
-                .expect("RegExp prototype stores symbol methods");
-        }
-        (constructor, prototype)
+        self.heap
+            .define_data(
+                iterator,
+                PropertyKey::Symbol(crate::heap::ITERATOR_SYMBOL),
+                identity.clone(),
+                Attributes::METHOD,
+            )
+            .expect("RegExp iterator identity");
     }
 
     /// A literal was validated by the compiler, but bytecode may come from elsewhere.
@@ -139,7 +200,7 @@ impl Vm {
             source.to_owned(),
             flags,
             compiled,
-            self.builtins.regexp_prototype,
+            self.builtins.get("regexp.prototype"),
         )
     }
 
@@ -183,7 +244,7 @@ impl Vm {
         };
         if called && regexp.is_some() && matches!(flags_arg, Value::Undefined) {
             match self.read_property(host, pattern, PropertyKeyRef::String("constructor"))? {
-                Invocation::Value(Value::Object(id)) if id == self.builtins.regexp => {
+                Invocation::Value(Value::Object(id)) if id == self.builtins.get("regexp") => {
                     return Ok(Invocation::Value(pattern.clone()));
                 }
                 Invocation::Value(_) => {}
@@ -224,14 +285,14 @@ impl Vm {
             Err(message) => {
                 return self
                     .alloc_error(
-                        self.builtins.syntaxerror_prototype,
+                        self.builtins.get("syntaxerror.prototype"),
                         "SyntaxError",
                         Some(message.into()),
                     )
                     .map(Invocation::Thrown);
             }
         };
-        let prototype = prototype.unwrap_or(self.builtins.regexp_prototype);
+        let prototype = prototype.unwrap_or_else(|| self.builtins.get("regexp.prototype"));
         self.alloc_compiled_regexp(source, flags, compiled, prototype)
             .map(|id| Invocation::Value(Value::Object(id)))
     }
@@ -307,7 +368,7 @@ impl Vm {
             _ => {}
         }
         let Object::RegExp { source, flags, .. } = self.heap.get(id)? else {
-            if id == self.builtins.regexp_prototype {
+            if id == self.builtins.get("regexp.prototype") {
                 match method {
                     RegExpMethod::Source => {
                         return Ok(Invocation::Value(Value::String("(?:)".into())));
@@ -457,7 +518,7 @@ impl Vm {
         }
         let full_unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
         let iterator = self.heap.alloc(Object::RegExpStringIterator {
-            object: PlainObject::new(Some(self.builtins.regexp_iterator_prototype)),
+            object: PlainObject::new(Some(self.builtins.get("regexpIterator.prototype"))),
             regexp: matcher,
             string,
             global: true,
@@ -467,7 +528,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(iterator)))
     }
 
-    pub(crate) fn regexp_string_iterator_next(
+    fn regexp_string_iterator_next(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,

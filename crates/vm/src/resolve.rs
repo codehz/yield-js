@@ -57,7 +57,7 @@ impl Vm {
         }
         match self.read_property(host, value, PropertyKeyRef::String("constructor"))? {
             Invocation::Value(Value::Object(constructor))
-                if constructor == self.builtins.promise =>
+                if constructor == self.builtins.get("promise") =>
             {
                 Ok(Ok(Some(id)))
             }

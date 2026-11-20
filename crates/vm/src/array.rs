@@ -1,43 +1,112 @@
 //! Array builtins use ordinary property operations for observable reads and writes.
 //! New results define own data properties, bypassing inherited setters.
 
+use crate::builtin_globals::Owner;
+use crate::builtins::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object};
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops::strict_equal;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = u32::MAX as usize;
-const STATICS: &[&str] = &["isArray", "from", "of"];
-const METHODS: &[&str] = &[
-    "push",
-    "pop",
-    "shift",
-    "unshift",
-    "splice",
-    "slice",
-    "fill",
-    "map",
-    "filter",
-    "reduce",
-    "forEach",
-    "some",
-    "every",
-    "flat",
-    "indexOf",
-    "lastIndexOf",
-    "includes",
-    "concat",
-    "find",
-    "findIndex",
-    "flatMap",
+macro_rules! array_operation {
+    ($slot:ident, $name:literal) => {
+        IntrinsicDef::call(
+            IntrinsicKey::new("Array", Slot::$slot, $name),
+            |vm, host, args, receiver| vm.array_operation(host, $name, receiver, args),
+        )
+    };
+}
+
+const ARRAY_CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Array", Slot::Global, "");
+const ARRAY_VALUES: IntrinsicKey = IntrinsicKey::new("Array", Slot::Prototype, "values");
+
+pub(crate) const OWNER: Owner = Owner::new(
+    "array",
+    ARRAY_ROOTS,
+    &[ARRAY_INTRINSICS],
+    Some(|vm, identity| {
+        vm.install_array(
+            vm.builtins.get("array"),
+            vm.builtins.get("array.prototype"),
+            vm.builtins.get("array.values"),
+            vm.builtins.get("arrayIterator.prototype"),
+            identity,
+        );
+    }),
+);
+
+pub(crate) const ARRAY_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "array",
+        RootKind::Native(ARRAY_CONSTRUCTOR),
+        Some("function.prototype"),
+    )
+    .fixed("array.prototype"),
+    RootSpec::new("array.prototype", RootKind::Array, Some("object.prototype")),
+    RootSpec::new(
+        "array.values",
+        RootKind::Native(ARRAY_VALUES),
+        Some("function.prototype"),
+    ),
+    RootSpec::new(
+        "arrayIterator.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
 ];
 
-pub(crate) fn is_array_operation(name: &str) -> bool {
-    STATICS.contains(&name) || METHODS.contains(&name)
-}
+pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        ARRAY_CONSTRUCTOR,
+        |vm, _, args, _| vm.construct_array(args),
+        |vm, _, args, prototype| {
+            let result = vm.construct_array(args)?;
+            vm.with_result_prototype(result, prototype)
+        },
+    ),
+    array_operation!(Static, "isArray"),
+    array_operation!(Static, "from"),
+    array_operation!(Static, "of"),
+    array_operation!(Prototype, "push"),
+    array_operation!(Prototype, "pop"),
+    array_operation!(Prototype, "shift"),
+    array_operation!(Prototype, "unshift"),
+    array_operation!(Prototype, "splice"),
+    array_operation!(Prototype, "slice"),
+    array_operation!(Prototype, "fill"),
+    array_operation!(Prototype, "map"),
+    array_operation!(Prototype, "filter"),
+    array_operation!(Prototype, "reduce"),
+    array_operation!(Prototype, "forEach"),
+    array_operation!(Prototype, "some"),
+    array_operation!(Prototype, "every"),
+    array_operation!(Prototype, "flat"),
+    array_operation!(Prototype, "indexOf"),
+    array_operation!(Prototype, "lastIndexOf"),
+    array_operation!(Prototype, "includes"),
+    array_operation!(Prototype, "concat"),
+    array_operation!(Prototype, "find"),
+    array_operation!(Prototype, "findIndex"),
+    array_operation!(Prototype, "flatMap"),
+    IntrinsicDef::call(
+        IntrinsicKey::new("Array", Slot::Prototype, "join"),
+        |vm, host, args, receiver| vm.array_join(host, receiver, &args),
+    ),
+    IntrinsicDef::call(
+        IntrinsicKey::new("Array", Slot::Prototype, "toString"),
+        |vm, host, _, receiver| vm.array_to_string(host, receiver),
+    ),
+    IntrinsicDef::call(ARRAY_VALUES, |vm, _, _, receiver| vm.array_values(receiver)),
+    IntrinsicDef::call(
+        IntrinsicKey::new("ArrayIterator", Slot::Prototype, "next"),
+        |vm, host, _, receiver| vm.array_iterator_next(host, receiver),
+    ),
+];
 
 type Completion<T> = Result<Result<T, Value>, VmError>;
 
@@ -79,8 +148,14 @@ fn relative(index: f64, len: usize) -> usize {
 }
 
 impl Vm {
-    pub(crate) fn init_array_constructor(&mut self, prototype: ObjectId) -> ObjectId {
-        let constructor = self.heap.alloc_builtin("Array", None);
+    pub(crate) fn install_array(
+        &mut self,
+        constructor: ObjectId,
+        prototype: ObjectId,
+        values: ObjectId,
+        iterator: ObjectId,
+        identity: &Value,
+    ) {
         self.heap
             .define_data(
                 constructor,
@@ -97,18 +172,50 @@ impl Vm {
                 Attributes::METHOD,
             )
             .expect("Array.prototype stores its constructor");
-        for (target, names) in [(constructor, STATICS), (prototype, METHODS)] {
-            for &name in names {
-                let id = self.heap.alloc_builtin("Array", Some(name));
+        self.heap.array_prototype = Some(prototype);
+        for def in ARRAY_INTRINSICS {
+            let target = match (def.key.owner, def.key.slot) {
+                ("Array", Slot::Global) => continue,
+                ("Array", Slot::Static) => constructor,
+                ("Array", Slot::Prototype) => prototype,
+                ("ArrayIterator", Slot::Prototype) => iterator,
+                _ => unreachable!("unexpected Array declaration: {:?}", def.key),
+            };
+            let id = if def.key == ARRAY_VALUES {
+                values
+            } else {
+                self.alloc_intrinsic(def.key)
+            };
+            self.heap
+                .define_data(
+                    target,
+                    def.key.member,
+                    Value::Object(id),
+                    Attributes::METHOD,
+                )
+                .expect("Array builtin method");
+            if def.key == ARRAY_VALUES {
                 self.heap
-                    .define_data(target, name, Value::Object(id), Attributes::METHOD)
-                    .expect("Array stores its builtin methods");
+                    .define_data(
+                        prototype,
+                        PropertyKey::Symbol(ITERATOR_SYMBOL),
+                        Value::Object(id),
+                        Attributes::METHOD,
+                    )
+                    .expect("Array iterator alias");
             }
         }
-        constructor
+        self.heap
+            .define_data(
+                iterator,
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                identity.clone(),
+                Attributes::METHOD,
+            )
+            .expect("Array iterator identity");
     }
 
-    pub(crate) fn construct_array(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    fn construct_array(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let id = if let [Value::Number(length)] = args.as_slice() {
             if !(0.0..=MAX_LENGTH as f64).contains(length) || length.fract() != 0.0 {
                 return self.throw_range_error("invalid array length");
@@ -139,7 +246,7 @@ impl Vm {
         })
     }
 
-    pub(crate) fn array_operation(
+    fn array_operation(
         &mut self,
         host: &mut dyn Host,
         name: &str,

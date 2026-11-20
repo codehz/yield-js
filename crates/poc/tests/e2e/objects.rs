@@ -466,7 +466,7 @@ fn restore_rejects_writable_object_prototype() {
         .position(|record| record.id == snapshot.roots["object"])
         .expect("Object constructor in snapshot");
     let mut corrupt = serde_json::to_value(snapshot).expect("serialize snapshot");
-    let props = corrupt["objects"][index]["object"]["builtin_static"]["props"]
+    let props = corrupt["objects"][index]["object"]["native"]["Intrinsic"]["object"]["props"]
         .as_array_mut()
         .expect("property records");
     let entry = props

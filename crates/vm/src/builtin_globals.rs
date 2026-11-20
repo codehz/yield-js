@@ -1,0 +1,181 @@
+use crate::array;
+use crate::builtin_roots::{RootKind, RootSpec};
+use crate::builtins::{
+    boolean_family, error_family, object_members, promise_members, queue_family, reflect_namespace,
+    symbol_family,
+};
+use crate::collections;
+use crate::error::VmError;
+use crate::exec;
+use crate::heap::Attributes;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::json::namespace as json;
+use crate::math::namespace as math;
+use crate::number;
+use crate::proxy;
+use crate::regexp_runtime as regexp;
+use crate::string;
+use crate::value::Value;
+use crate::vm::Vm;
+
+pub(crate) struct Owner {
+    root: &'static str,
+    roots: &'static [RootSpec],
+    groups: &'static [&'static [IntrinsicDef]],
+    install: Option<fn(&mut Vm, &Value)>,
+}
+
+impl Owner {
+    pub(crate) const fn new(
+        root: &'static str,
+        roots: &'static [RootSpec],
+        groups: &'static [&'static [IntrinsicDef]],
+        install: Option<fn(&mut Vm, &Value)>,
+    ) -> Self {
+        Self {
+            root,
+            roots,
+            groups,
+            install,
+        }
+    }
+}
+
+enum Global {
+    Owner(Owner),
+    Number(f64),
+}
+
+macro_rules! builtin_globals {
+    ($($name:expr => $global:expr),+ $(,)?) => {
+        const GLOBALS: &[Global] = &[$($global),+];
+
+        /// VM-provided globals in bytecode operand order. Append; never reorder.
+        pub const BUILTINS: [&str; GLOBALS.len()] = [$($name),+];
+    };
+}
+
+macro_rules! module {
+    ($module:ident $(, $extra:ident)?) => {
+        Global::Owner(Owner::new($module::ROOT, $module::ROOTS, &[$($module::$extra,)? $module::INTRINSICS], Some($module::install)))
+    };
+}
+
+// Foundational roots and non-global functions are not bytecode globals.
+const ITERATOR_IDENTITY: IntrinsicKey =
+    IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "identity");
+const ITERATOR_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
+    ITERATOR_IDENTITY,
+    |_, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
+)];
+const GLOBAL_THIS: &str = "globalThis";
+const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(
+    GLOBAL_THIS,
+    RootKind::Plain,
+    Some("object.prototype"),
+)];
+
+builtin_globals! {
+    promise_members::NAME => module!(promise_members, GLOBAL),
+    "queueMicrotask" => Global::Owner(queue_family::OWNER),
+    "Error" => Global::Owner(error_family::ERROR),
+    "TypeError" => Global::Owner(error_family::TYPE_ERROR),
+    "Symbol" => Global::Owner(symbol_family::OWNER),
+    reflect_namespace::NAME => module!(reflect_namespace),
+    object_members::NAME => module!(object_members, GLOBAL),
+    "NaN" => Global::Number(f64::NAN),
+    "Infinity" => Global::Number(f64::INFINITY),
+    "Array" => Global::Owner(array::OWNER),
+    string::members::NAME => Global::Owner(string::OWNER),
+    "RangeError" => Global::Owner(error_family::RANGE_ERROR),
+    "ReferenceError" => Global::Owner(error_family::REFERENCE_ERROR),
+    "SyntaxError" => Global::Owner(error_family::SYNTAX_ERROR),
+    "EvalError" => Global::Owner(error_family::EVAL_ERROR),
+    "URIError" => Global::Owner(error_family::URI_ERROR),
+    "AggregateError" => Global::Owner(error_family::AGGREGATE_ERROR),
+    number::members::NAME => Global::Owner(number::OWNER),
+    math::NAME => module!(math),
+    json::NAME => module!(json),
+    "Map" => Global::Owner(collections::MAP_OWNER),
+    "Set" => Global::Owner(collections::SET_OWNER),
+    "WeakMap" => Global::Owner(collections::WEAK_MAP_OWNER),
+    "Proxy" => Global::Owner(proxy::OWNER),
+    "Boolean" => Global::Owner(boolean_family::OWNER),
+    GLOBAL_THIS => Global::Owner(Owner::new(GLOBAL_THIS, GLOBAL_THIS_ROOTS, &[], None)),
+    "RegExp" => Global::Owner(regexp::OWNER),
+}
+
+fn owners() -> impl Iterator<Item = &'static Owner> {
+    GLOBALS.iter().filter_map(|global| match global {
+        Global::Owner(owner) => Some(owner),
+        Global::Number(_) => None,
+    })
+}
+
+pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]> {
+    owners()
+        .flat_map(|owner| owner.groups.iter().copied())
+        .chain([exec::FUNCTION_INTRINSICS, ITERATOR_INTRINSICS])
+}
+
+pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
+    let (object, object_rest) = object_members::ROOTS.split_at(1);
+    let (function, function_rest) = exec::FUNCTION_ROOTS.split_at(1);
+    [object, function, function_rest]
+        .into_iter()
+        .chain(owners().map(move |owner| {
+            if owner.root == object_members::ROOT {
+                object_rest
+            } else {
+                owner.roots
+            }
+        }))
+}
+
+impl Vm {
+    pub(crate) fn builtin_value(&self, index: u32) -> Result<Value, VmError> {
+        match GLOBALS.get(index as usize) {
+            Some(Global::Owner(owner)) => Ok(Value::Object(self.builtins.get(owner.root))),
+            Some(Global::Number(number)) => Ok(Value::Number(*number)),
+            None => Err(VmError::InvalidState(format!(
+                "builtin {index} does not exist"
+            ))),
+        }
+    }
+
+    pub(crate) fn init_builtins(&mut self) {
+        self.allocate_builtin_roots();
+        let function_prototype = self.builtins.get("function.prototype");
+        let to_string =
+            self.alloc_intrinsic(IntrinsicKey::new("Function", Slot::Prototype, "toString"));
+        self.heap
+            .define_data(
+                function_prototype,
+                "toString",
+                Value::Object(to_string),
+                Attributes::METHOD,
+            )
+            .expect("Function.prototype stores toString");
+        let identity = Value::Object(self.alloc_intrinsic(ITERATOR_IDENTITY));
+        for owner in owners() {
+            if let Some(install) = owner.install {
+                install(self, &identity);
+            }
+        }
+        let global_this = self.builtins.get(GLOBAL_THIS);
+        for (index, name) in BUILTINS.into_iter().enumerate() {
+            let value = self.builtin_value(index as u32).expect("global builtin");
+            self.heap
+                .define_data(global_this, name, value, Attributes::ORDINARY)
+                .expect("global builtin property");
+        }
+        self.heap
+            .define_data(
+                global_this,
+                "undefined",
+                Value::Undefined,
+                Attributes::ORDINARY,
+            )
+            .expect("global undefined property");
+    }
+}

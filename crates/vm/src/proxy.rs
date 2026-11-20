@@ -1,13 +1,33 @@
 //! Proxy internal methods. Traps may mutate the target, so invariants are
 //! checked against descriptors obtained after calling the trap.
 
+use crate::builtin_globals::Owner;
+use crate::builtins::{ROOT_FUNCTION_PROTOTYPE, ROOT_PROXY, RootKind, RootSpec};
 use crate::error::VmError;
-use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, Property};
+use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, PlainObject, Property};
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
+
+const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
+
+pub(crate) const PROXY_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
+    CONSTRUCTOR,
+    |vm, _, _, _| vm.throw_type_error("Proxy requires new"),
+    |vm, _, args, _| vm.construct_proxy(&args),
+)
+.without_new_target_prototype()];
+
+pub(crate) const OWNER: Owner = Owner::new(ROOT_PROXY, PROXY_ROOTS, &[PROXY_INTRINSICS], None);
+
+pub(crate) const PROXY_ROOTS: &[RootSpec] = &[RootSpec::new(
+    ROOT_PROXY,
+    RootKind::Native(CONSTRUCTOR),
+    Some(ROOT_FUNCTION_PROTOTYPE),
+)];
 
 macro_rules! unwrap_script {
     ($expression:expr) => {
@@ -19,6 +39,31 @@ macro_rules! unwrap_script {
 }
 
 impl Vm {
+    fn construct_proxy(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+        let Some(Value::Object(target)) = args.first() else {
+            return self.throw_type_error("Proxy requires an object target");
+        };
+        let Some(Value::Object(handler)) = args.get(1) else {
+            return self.throw_type_error("Proxy requires an object handler");
+        };
+        let base = self.heap.proxy_target(*target)?;
+        if !matches!(
+            self.heap.get(base)?,
+            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. }
+        ) {
+            return self.throw_type_error(
+                "Proxy supports only plain object, array, and primitive wrapper targets",
+            );
+        }
+        Ok(Invocation::Value(Value::Object(self.heap.alloc(
+            Object::Proxy {
+                target: *target,
+                handler: *handler,
+                object: PlainObject::new(None),
+            },
+        ))))
+    }
+
     fn proxy_trap(
         &mut self,
         host: &mut dyn Host,

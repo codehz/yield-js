@@ -7,318 +7,349 @@
 //! result promise and is delivered through `Host::report_error`. Unhandled
 //! promise rejections are not tracked.
 
-use std::collections::BTreeMap;
-
 use crate::JsString;
-use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
 use crate::heap::BoxedPrimitive;
-use crate::heap::CollectionKind;
 use crate::heap::{
-    Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
-    ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, PlainObject,
-    PromiseCallback, PromiseState, Property, REPLACE_SYMBOL, ReactionJob, Resolution,
-    SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
+    Attributes, BoundObject, CombineKind, CombineState, DescriptorUpdate, ITERATOR_SYMBOL,
+    IntegrityLevel, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, PlainObject, PromiseCallback,
+    PromiseState, Property, REPLACE_SYMBOL, ReactionJob, Resolution, SEARCH_SYMBOL, SPECIES_SYMBOL,
+    SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
-use crate::json::namespace as json_namespace;
-use crate::math::namespace as math_namespace;
-use crate::number::members as number_members;
+use crate::intrinsic::{CallableTarget, IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
-use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::string::{members as string_members, utf16_len, utf16_unit};
+use crate::string::utf16_len;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
-macro_rules! builtin_globals {
-    ($($field:ident: $kind:ident($($args:tt)*)),* $(,)?) => {
-        #[allow(non_camel_case_types)]
-        enum GlobalIndex { $($field),* }
+pub use crate::builtin_globals::BUILTINS;
+use crate::builtin_globals::Owner;
+pub(crate) use crate::builtin_roots::{BuiltinRoots, RootKind, RootSpec};
 
-        const GLOBAL_INDICES: &[GlobalIndex] = &[$(GlobalIndex::$field),*];
+const OBJECT_PARENT: Option<&str> = Some("object.prototype");
+const FUNCTION_PARENT: Option<&str> = Some("function.prototype");
 
-        /// VM-provided global names, in bytecode builtin-index order.
-        /// Append new entries; never reorder existing ones.
-        pub const BUILTINS: [&str; GLOBAL_INDICES.len()] = [
-            $(builtin_globals!(@name $kind($($args)*))),*
-        ];
+fn define_builtin_data(
+    vm: &mut Vm,
+    target: ObjectId,
+    key: impl Into<PropertyKey>,
+    value: Value,
+    attrs: Attributes,
+) {
+    vm.heap
+        .define_data(target, key, value, attrs)
+        .expect("builtin data property");
+}
 
-        const _: () = {
-            let mut i = 0;
-            while i < BUILTINS.len() {
-                let name = BUILTINS[i].as_bytes();
-                assert!(!name.is_empty(), "empty builtin name");
-                let mut j = 0;
-                while j < i {
-                    let previous = BUILTINS[j].as_bytes();
-                    if name.len() == previous.len() {
-                        let mut k = 0;
-                        while k < name.len() && name[k] == previous[k] {
-                            k += 1;
-                        }
-                        assert!(k != name.len(), "duplicate builtin name");
-                    }
-                    j += 1;
+fn link_constructor(vm: &mut Vm, constructor: ObjectId, prototype: ObjectId) {
+    define_builtin_data(
+        vm,
+        constructor,
+        "prototype",
+        Value::Object(prototype),
+        Attributes::FIXED,
+    );
+    define_builtin_data(
+        vm,
+        prototype,
+        "constructor",
+        Value::Object(constructor),
+        Attributes::METHOD,
+    );
+}
+
+fn install_getter(vm: &mut Vm, target: ObjectId, key: PropertyKey, intrinsic: IntrinsicKey) {
+    let getter = vm.alloc_intrinsic(intrinsic);
+    assert!(
+        vm.heap
+            .apply_descriptor(
+                target,
+                key,
+                DescriptorUpdate {
+                    get: Some(Some(getter)),
+                    configurable: Some(true),
+                    ..DescriptorUpdate::default()
                 }
-                i += 1;
-            }
+            )
+            .expect("builtin getter")
+    );
+}
+
+pub(super) mod queue_family {
+    use super::*;
+    const NAME: &str = "queueMicrotask";
+    const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
+    pub(crate) const OWNER: Owner = Owner::new(
+        NAME,
+        &[RootSpec::new(NAME, RootKind::Native(KEY), FUNCTION_PARENT)],
+        &[&[IntrinsicDef::call(KEY, |vm, _, args, _| {
+            vm.queue_microtask(args)
+        })]],
+        None,
+    );
+}
+
+#[yield_binding_macros::builtin_global(name = "Boolean", root = "boolean", kind = "constructor")]
+pub(super) mod boolean_family {
+    use super::*;
+    const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
+    const PROTOTYPE: &str = "boolean.prototype";
+    pub(crate) const OWNER: Owner = Owner::new(
+        ROOT,
+        &[
+            RootSpec::new(ROOT, RootKind::Native(KEY), FUNCTION_PARENT).fixed(PROTOTYPE),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[
+            &[IntrinsicDef::constructor(
+                KEY,
+                |_, _, args, _| {
+                    Ok(Invocation::Value(Value::Bool(
+                        args.first().is_some_and(Value::truthy),
+                    )))
+                },
+                |vm, _, args, prototype| {
+                    let result = vm.construct_object(&[Value::Bool(
+                        args.first().is_some_and(Value::truthy),
+                    )])?;
+                    vm.with_result_prototype(result, prototype)
+                },
+            )],
+            INTRINSICS,
+        ],
+        Some(install),
+    );
+
+    fn install(vm: &mut Vm, _: &Value) {
+        let constructor = vm.builtins.get(ROOT);
+        let prototype = vm.builtins.get(PROTOTYPE);
+        link_constructor(vm, constructor, prototype);
+        install_members(vm, constructor, prototype);
+    }
+
+    fn boolean_value(
+        vm: &mut Vm,
+        receiver: &Value,
+        stringify: bool,
+    ) -> Result<Invocation, VmError> {
+        let value = match receiver {
+            Value::Bool(value) => *value,
+            Value::Object(id) => match vm.heap.get(*id)? {
+                Object::Boxed {
+                    primitive: BoxedPrimitive::Bool(value),
+                    ..
+                } => *value,
+                _ => return vm.throw_type_error("incompatible Boolean receiver"),
+            },
+            _ => return vm.throw_type_error("incompatible Boolean receiver"),
         };
+        Ok(Invocation::Value(if stringify {
+            Value::String(value.to_string().into())
+        } else {
+            Value::Bool(value)
+        }))
+    }
 
-        impl Vm {
-            pub(crate) fn builtin_value(&self, builtin: u32) -> Result<Value, VmError> {
-                let Some(index) = GLOBAL_INDICES.get(builtin as usize) else {
-                    return Err(VmError::InvalidState(format!("builtin {} does not exist", builtin)));
-                };
-                Ok(match index {
-                    $(GlobalIndex::$field => builtin_globals!(@value self, $field, $kind $($args)*)),*
-                })
-            }
-        }
-
-        fn registered_call(owner: &str, member: &str) -> Option<BuiltinCall> {
-            $(builtin_globals!(@resolve owner, member, $kind($($args)*));)*
-            None
-        }
-    };
-    (@name root($name:literal)) => { $name };
-    (@name number($name:literal, $value:expr)) => { $name };
-    (@name module($module:ident)) => { $module::NAME };
-    (@value $vm:ident, $field:ident, $kind:ident $arg:tt) => {
-        Value::Object($vm.builtins.$field)
-    };
-    (@value $vm:ident, $field:ident, number $name:literal, $value:expr) => {
-        Value::Number($value)
-    };
-    (@resolve $owner:ident, $member:ident, module($module:ident)) => {
-        if $owner == $module::NAME {
-            return $module::resolve($member);
-        }
-    };
-    (@resolve $owner:ident, $member:ident, root($name:literal)) => {};
-    (@resolve $owner:ident, $member:ident, number($name:literal, $value:expr)) => {};
-}
-
-builtin_globals!(
-    promise: module(promise_members),
-    queue_microtask: root("queueMicrotask"),
-    error: root("Error"),
-    typeerror: root("TypeError"),
-    symbol: root("Symbol"),
-    reflect: module(reflect_namespace),
-    object: module(object_members),
-    nan: number("NaN", f64::NAN),
-    infinity: number("Infinity", f64::INFINITY),
-    array: root("Array"),
-    string: module(string_members),
-    rangeerror: root("RangeError"),
-    referenceerror: root("ReferenceError"),
-    syntaxerror: root("SyntaxError"),
-    evalerror: root("EvalError"),
-    urierror: root("URIError"),
-    aggregateerror: root("AggregateError"),
-    number: module(number_members),
-    math: module(math_namespace),
-    json: module(json_namespace),
-    map: root("Map"),
-    set: root("Set"),
-    weakmap: root("WeakMap"),
-    proxy: root("Proxy"),
-    boolean_constructor: root("Boolean"),
-    global_this: root("globalThis"),
-    regexp: root("RegExp"),
-);
-
-pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
-pub(crate) const ROOT_PROMISE_PROTOTYPE: &str = "promise.prototype";
-pub(crate) const ROOT_QUEUE_MICROTASK: &str = "queueMicrotask";
-pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
-pub(crate) const ROOT_ARRAY: &str = "array";
-pub(crate) const ROOT_ARRAY_PROTOTYPE: &str = "array.prototype";
-pub(crate) const ROOT_ARRAY_VALUES: &str = "array.values";
-pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
-pub(crate) const ROOT_REGEXP: &str = "regexp";
-pub(crate) const ROOT_REGEXP_PROTOTYPE: &str = "regexp.prototype";
-pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
-pub(crate) const ROOT_BOOLEAN: &str = "boolean";
-pub(crate) const ROOT_BOOLEAN_PROTOTYPE: &str = "boolean.prototype";
-pub(crate) const ROOT_SYMBOL_PROTOTYPE: &str = "symbol.prototype";
-pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
-pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
-pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
-pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
-pub(crate) const ROOT_REGEXP_ITERATOR_PROTOTYPE: &str = "regexpIterator.prototype";
-pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
-pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
-pub(crate) const ROOT_ERROR: &str = "error";
-pub(crate) const ROOT_TYPEERROR: &str = "typeerror";
-pub(crate) const ROOT_RANGEERROR: &str = "rangeerror";
-pub(crate) const ROOT_RANGEERROR_PROTOTYPE: &str = "rangeerror.prototype";
-pub(crate) const ROOT_REFERENCEERROR: &str = "referenceerror";
-pub(crate) const ROOT_REFERENCEERROR_PROTOTYPE: &str = "referenceerror.prototype";
-pub(crate) const ROOT_SYNTAXERROR: &str = "syntaxerror";
-pub(crate) const ROOT_SYNTAXERROR_PROTOTYPE: &str = "syntaxerror.prototype";
-pub(crate) const ROOT_EVALERROR: &str = "evalerror";
-pub(crate) const ROOT_EVALERROR_PROTOTYPE: &str = "evalerror.prototype";
-pub(crate) const ROOT_URIERROR: &str = "urierror";
-pub(crate) const ROOT_URIERROR_PROTOTYPE: &str = "urierror.prototype";
-pub(crate) const ROOT_AGGREGATEERROR: &str = "aggregateerror";
-pub(crate) const ROOT_AGGREGATEERROR_PROTOTYPE: &str = "aggregateerror.prototype";
-pub(crate) const ROOT_SYMBOL: &str = "symbol";
-pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
-pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
-pub(crate) const ROOT_PROXY: &str = "proxy";
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct BuiltinRoots {
-    pub global_this: ObjectId,
-    pub promise: ObjectId,
-    pub promise_prototype: ObjectId,
-    pub queue_microtask: ObjectId,
-    pub object_prototype: ObjectId,
-    pub array: ObjectId,
-    pub array_prototype: ObjectId,
-    pub array_values: ObjectId,
-    pub string: ObjectId,
-    pub string_prototype: ObjectId,
-    pub regexp: ObjectId,
-    pub regexp_prototype: ObjectId,
-    pub number: ObjectId,
-    pub number_prototype: ObjectId,
-    pub boolean_constructor: ObjectId,
-    pub boolean_prototype: ObjectId,
-    pub symbol_prototype: ObjectId,
-    pub function_prototype: ObjectId,
-    pub array_iterator_prototype: ObjectId,
-    pub string_iterator: ObjectId,
-    pub string_iterator_prototype: ObjectId,
-    pub regexp_iterator_prototype: ObjectId,
-    pub error_prototype: ObjectId,
-    pub typeerror_prototype: ObjectId,
-    pub error: ObjectId,
-    pub typeerror: ObjectId,
-    pub rangeerror_prototype: ObjectId,
-    pub referenceerror_prototype: ObjectId,
-    pub syntaxerror_prototype: ObjectId,
-    pub evalerror_prototype: ObjectId,
-    pub urierror_prototype: ObjectId,
-    pub aggregateerror_prototype: ObjectId,
-    pub rangeerror: ObjectId,
-    pub referenceerror: ObjectId,
-    pub syntaxerror: ObjectId,
-    pub evalerror: ObjectId,
-    pub urierror: ObjectId,
-    pub aggregateerror: ObjectId,
-    pub symbol: ObjectId,
-    pub reflect: ObjectId,
-    pub object: ObjectId,
-    pub math: ObjectId,
-    pub json: ObjectId,
-    pub map: ObjectId,
-    pub map_prototype: ObjectId,
-    pub map_iterator_prototype: ObjectId,
-    pub set: ObjectId,
-    pub set_prototype: ObjectId,
-    pub set_iterator_prototype: ObjectId,
-    pub weakmap: ObjectId,
-    pub weakmap_prototype: ObjectId,
-    pub proxy: ObjectId,
-}
-
-impl BuiltinRoots {
-    pub(crate) fn to_map(self) -> BTreeMap<String, ObjectId> {
-        BTreeMap::from([
-            (ROOT_GLOBAL_THIS.to_owned(), self.global_this),
-            ("map".to_owned(), self.map),
-            ("map.prototype".to_owned(), self.map_prototype),
-            (
-                "mapIterator.prototype".to_owned(),
-                self.map_iterator_prototype,
-            ),
-            ("set".to_owned(), self.set),
-            ("set.prototype".to_owned(), self.set_prototype),
-            (
-                "setIterator.prototype".to_owned(),
-                self.set_iterator_prototype,
-            ),
-            (ROOT_WEAK_MAP.to_owned(), self.weakmap),
-            (ROOT_WEAK_MAP_PROTOTYPE.to_owned(), self.weakmap_prototype),
-            (ROOT_PROXY.to_owned(), self.proxy),
-            (promise_members::ROOT.to_owned(), self.promise),
-            (ROOT_PROMISE_PROTOTYPE.to_owned(), self.promise_prototype),
-            (ROOT_QUEUE_MICROTASK.to_owned(), self.queue_microtask),
-            (ROOT_OBJECT_PROTOTYPE.to_owned(), self.object_prototype),
-            (ROOT_ARRAY.to_owned(), self.array),
-            (ROOT_ARRAY_PROTOTYPE.to_owned(), self.array_prototype),
-            (ROOT_ARRAY_VALUES.to_owned(), self.array_values),
-            (string_members::ROOT.to_owned(), self.string),
-            (ROOT_STRING_PROTOTYPE.to_owned(), self.string_prototype),
-            (ROOT_REGEXP.to_owned(), self.regexp),
-            (ROOT_REGEXP_PROTOTYPE.to_owned(), self.regexp_prototype),
-            (number_members::ROOT.to_owned(), self.number),
-            (ROOT_NUMBER_PROTOTYPE.to_owned(), self.number_prototype),
-            (ROOT_BOOLEAN.to_owned(), self.boolean_constructor),
-            (ROOT_BOOLEAN_PROTOTYPE.to_owned(), self.boolean_prototype),
-            (ROOT_SYMBOL_PROTOTYPE.to_owned(), self.symbol_prototype),
-            (ROOT_FUNCTION_PROTOTYPE.to_owned(), self.function_prototype),
-            (
-                ROOT_ARRAY_ITERATOR_PROTOTYPE.to_owned(),
-                self.array_iterator_prototype,
-            ),
-            (ROOT_STRING_ITERATOR.to_owned(), self.string_iterator),
-            (
-                ROOT_STRING_ITERATOR_PROTOTYPE.to_owned(),
-                self.string_iterator_prototype,
-            ),
-            (
-                ROOT_REGEXP_ITERATOR_PROTOTYPE.to_owned(),
-                self.regexp_iterator_prototype,
-            ),
-            (ROOT_ERROR_PROTOTYPE.to_owned(), self.error_prototype),
-            (
-                ROOT_TYPEERROR_PROTOTYPE.to_owned(),
-                self.typeerror_prototype,
-            ),
-            (ROOT_ERROR.to_owned(), self.error),
-            (ROOT_TYPEERROR.to_owned(), self.typeerror),
-            (ROOT_RANGEERROR.to_owned(), self.rangeerror),
-            (
-                ROOT_RANGEERROR_PROTOTYPE.to_owned(),
-                self.rangeerror_prototype,
-            ),
-            (ROOT_REFERENCEERROR.to_owned(), self.referenceerror),
-            (
-                ROOT_REFERENCEERROR_PROTOTYPE.to_owned(),
-                self.referenceerror_prototype,
-            ),
-            (ROOT_SYNTAXERROR.to_owned(), self.syntaxerror),
-            (
-                ROOT_SYNTAXERROR_PROTOTYPE.to_owned(),
-                self.syntaxerror_prototype,
-            ),
-            (ROOT_EVALERROR.to_owned(), self.evalerror),
-            (
-                ROOT_EVALERROR_PROTOTYPE.to_owned(),
-                self.evalerror_prototype,
-            ),
-            (ROOT_URIERROR.to_owned(), self.urierror),
-            (ROOT_URIERROR_PROTOTYPE.to_owned(), self.urierror_prototype),
-            (ROOT_AGGREGATEERROR.to_owned(), self.aggregateerror),
-            (
-                ROOT_AGGREGATEERROR_PROTOTYPE.to_owned(),
-                self.aggregateerror_prototype,
-            ),
-            (ROOT_SYMBOL.to_owned(), self.symbol),
-            (reflect_namespace::ROOT.to_owned(), self.reflect),
-            (object_members::ROOT.to_owned(), self.object),
-            (math_namespace::ROOT.to_owned(), self.math),
-            (crate::json::namespace::ROOT.to_owned(), self.json),
-        ])
+    prototype_calls! {
+        valueOf => |vm, _, _, receiver| boolean_value(vm, receiver, false);
+        toString => |vm, _, _, receiver| boolean_value(vm, receiver, true);
     }
 }
 
-pub(crate) type BuiltinHandler =
-    fn(&mut Vm, &mut dyn Host, &Value, &[Value]) -> Result<Invocation, VmError>;
+pub(super) mod symbol_family {
+    use super::*;
+    pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Symbol", Slot::Global, "");
+    const DESCRIPTION: IntrinsicKey =
+        IntrinsicKey::new("Symbol", Slot::PrototypeGetter, "description");
+    const ROOT: &str = "symbol";
+    const PROTOTYPE: &str = "symbol.prototype";
+
+    macro_rules! symbol_methods {
+        ($($slot:ident $name:literal => $call:expr),* $(,)?) => {
+            const METHODS: &[IntrinsicDef] = &[$(IntrinsicDef::call(IntrinsicKey::new("Symbol", Slot::$slot, $name), $call)),*];
+        };
+    }
+
+    symbol_methods! {
+        Prototype "valueOf" => |vm, _, _, receiver| vm.symbol_method(receiver, "valueOf"),
+        Prototype "toString" => |vm, _, _, receiver| vm.symbol_method(receiver, "toString"),
+        Static "for" => |vm, host, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args),
+        Static "keyFor" => |vm, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args),
+    }
+
+    pub(crate) const OWNER: Owner = Owner::new(
+        ROOT,
+        &[
+            RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT).fixed(PROTOTYPE),
+            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
+        ],
+        &[
+            &[
+                IntrinsicDef::call(CONSTRUCTOR, |vm, host, args, _| {
+                    vm.symbol_constructor(host, args)
+                }),
+                IntrinsicDef::call(DESCRIPTION, |vm, _, _, receiver| {
+                    vm.symbol_method(receiver, "get description")
+                }),
+            ],
+            METHODS,
+        ],
+        Some(install),
+    );
+
+    fn install(vm: &mut Vm, _: &Value) {
+        let constructor = vm.builtins.get(ROOT);
+        let prototype = vm.builtins.get(PROTOTYPE);
+        link_constructor(vm, constructor, prototype);
+        for def in METHODS {
+            let target = if def.key.slot == Slot::Static {
+                constructor
+            } else {
+                prototype
+            };
+            let method = vm.alloc_intrinsic(def.key);
+            define_builtin_data(
+                vm,
+                target,
+                def.key.member,
+                Value::Object(method),
+                Attributes::METHOD,
+            );
+        }
+        install_getter(
+            vm,
+            prototype,
+            PropertyKey::String("description".into()),
+            DESCRIPTION,
+        );
+        for (name, id) in [
+            ("iterator", ITERATOR_SYMBOL),
+            ("toPrimitive", TO_PRIMITIVE_SYMBOL),
+            ("species", SPECIES_SYMBOL),
+            ("match", MATCH_SYMBOL),
+            ("matchAll", MATCH_ALL_SYMBOL),
+            ("replace", REPLACE_SYMBOL),
+            ("search", SEARCH_SYMBOL),
+            ("split", SPLIT_SYMBOL),
+        ] {
+            define_builtin_data(vm, constructor, name, Value::Symbol(id), Attributes::FIXED);
+        }
+    }
+}
+
+pub(super) mod error_family {
+    use super::*;
+
+    macro_rules! error_class {
+        ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal) => {
+            pub(crate) const $owner: Owner = {
+                const PROTOTYPE: &str = concat!($root, ".prototype");
+                const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                Owner::new(
+                    $root,
+                    &[
+                        RootSpec::new($root, RootKind::Native(KEY), FUNCTION_PARENT)
+                            .fixed(PROTOTYPE)
+                            .backlink(Some(Attributes::METHOD)),
+                        RootSpec::new(PROTOTYPE, RootKind::Plain, $parent)
+                            .with_fixed_parent(!$base),
+                    ],
+                    &[&[IntrinsicDef::constructor(
+                        KEY,
+                        |vm, host, args, _| vm.construct_error(host, $name, PROTOTYPE, args),
+                        |vm, host, args, prototype| {
+                            let result = vm.construct_error(host, $name, PROTOTYPE, args)?;
+                            vm.with_result_prototype(result, prototype)
+                        },
+                    )]],
+                    Some(|vm, _| {
+                        let prototype = vm.builtins.get(PROTOTYPE);
+                        let constructor = vm.builtins.get($root);
+                        define_builtin_data(
+                            vm,
+                            prototype,
+                            "name",
+                            Value::String($name.into()),
+                            Attributes::METHOD,
+                        );
+                        if $base {
+                            define_builtin_data(
+                                vm,
+                                prototype,
+                                "message",
+                                Value::String(JsString::default()),
+                                Attributes::METHOD,
+                            );
+                        }
+                        link_constructor(vm, constructor, prototype);
+                    }),
+                )
+            };
+        };
+    }
+
+    error_class!(ERROR, "Error", "error", OBJECT_PARENT, true);
+    error_class!(
+        TYPE_ERROR,
+        "TypeError",
+        "typeerror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        RANGE_ERROR,
+        "RangeError",
+        "rangeerror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        REFERENCE_ERROR,
+        "ReferenceError",
+        "referenceerror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        SYNTAX_ERROR,
+        "SyntaxError",
+        "syntaxerror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        EVAL_ERROR,
+        "EvalError",
+        "evalerror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        URI_ERROR,
+        "URIError",
+        "urierror",
+        Some("error.prototype"),
+        false
+    );
+    error_class!(
+        AGGREGATE_ERROR,
+        "AggregateError",
+        "aggregateerror",
+        Some("error.prototype"),
+        false
+    );
+}
+
+pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
+pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
+pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
+pub(crate) const ROOT_RANGEERROR_PROTOTYPE: &str = "rangeerror.prototype";
+pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
+pub(crate) const ROOT_PROXY: &str = "proxy";
+pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
+pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 
 #[yield_binding_macros::builtin_global(name = "Reflect", root = "reflect")]
 pub(crate) mod reflect_namespace {
@@ -465,98 +496,160 @@ pub(crate) mod reflect_namespace {
 
 #[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
 pub(crate) mod object_members {
-    use super::{BuiltinCall, IntegrityLevel};
+    use super::*;
+
+    const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
+    pub(crate) const ROOTS: &[RootSpec] = &[
+        RootSpec::new("object.prototype", RootKind::Plain, None).fixed_parent(),
+        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
+            .fixed("object.prototype"),
+    ];
+    pub(crate) const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
+        CONSTRUCTOR,
+        |vm, _, args, _| vm.construct_object(&args),
+        |vm, _, args, prototype| match prototype {
+            Some(prototype) => Ok(Invocation::Value(Value::Object(
+                vm.heap.alloc_plain_with(Some(prototype)),
+            ))),
+            None => vm.construct_object(&args),
+        },
+    )];
+
+    pub(crate) fn install(vm: &mut Vm, _: &Value) {
+        let constructor = vm.builtins.get(ROOT);
+        let prototype = vm.builtins.get("object.prototype");
+        link_constructor(vm, constructor, prototype);
+        install_members(vm, constructor, prototype);
+    }
 
     static_calls! {
-        assign => BuiltinCall::ObjectAssign;
-        is => BuiltinCall::ObjectIs;
-        keys => BuiltinCall::ObjectKeys;
-        create => BuiltinCall::ObjectCreate;
-        getPrototypeOf => BuiltinCall::GetPrototypeOf;
-        setPrototypeOf => BuiltinCall::SetPrototypeOf;
-        getOwnPropertyDescriptor => BuiltinCall::ObjectGetOwnPropertyDescriptor;
-        getOwnPropertyDescriptors => BuiltinCall::ObjectGetOwnPropertyDescriptors;
-        defineProperty => BuiltinCall::DefineProperty;
-        defineProperties => BuiltinCall::ObjectDefineProperties;
-        preventExtensions => BuiltinCall::PreventExtensions;
-        isExtensible => BuiltinCall::IsExtensible;
-        seal => BuiltinCall::SetIntegrityLevel(IntegrityLevel::Sealed);
-        isSealed => BuiltinCall::TestIntegrityLevel(IntegrityLevel::Sealed);
-        freeze => BuiltinCall::SetIntegrityLevel(IntegrityLevel::Frozen);
-        isFrozen => BuiltinCall::TestIntegrityLevel(IntegrityLevel::Frozen);
+        assign => |vm, host, args, _| vm.object_assign(host, &args);
+        is => |_, _, args, _| Ok(Invocation::Value(Value::Bool(ops::same_value(
+            args.first().unwrap_or(&Value::Undefined), args.get(1).unwrap_or(&Value::Undefined),
+        ))));
+        keys => |vm, host, args, _| vm.object_keys(host, &args);
+        create => |vm, host, args, _| vm.object_create(host, &args);
+        getPrototypeOf => |vm, _, args, _| vm.get_prototype_of(&args, false);
+        setPrototypeOf => |vm, _, args, _| vm.set_prototype_of(&args, false);
+        getOwnPropertyDescriptor => |vm, host, args, _| vm.get_own_property_descriptor(host, &args);
+        getOwnPropertyDescriptors => |vm, host, args, _| vm.get_own_property_descriptors(host, &args);
+        defineProperty => |vm, host, args, _| vm.define_property_builtin(host, &args, false);
+        defineProperties => |vm, host, args, _| {
+            let Some(Value::Object(target)) = args.first() else {
+                return vm.throw_type_error("Object.defineProperties requires an object target");
+            };
+            vm.define_properties(host, *target, args.get(1))
+        };
+        preventExtensions => |vm, _, args, _| vm.prevent_extensions_builtin_impl(&args, false);
+        isExtensible => |vm, _, args, _| vm.is_extensible_builtin_impl(&args, false);
+        seal => |vm, host, args, _| vm.set_integrity(host, &args, IntegrityLevel::Sealed);
+        isSealed => |vm, host, args, _| vm.test_integrity(host, &args, IntegrityLevel::Sealed);
+        freeze => |vm, host, args, _| vm.set_integrity(host, &args, IntegrityLevel::Frozen);
+        isFrozen => |vm, host, args, _| vm.test_integrity(host, &args, IntegrityLevel::Frozen);
     }
 
     prototype_calls! {
-        hasOwnProperty | valueOf | toString as key => BuiltinCall::ObjectMethod { name: key };
+        hasOwnProperty => |vm, host, args, receiver| {
+            let id = match *receiver {
+                Value::Object(id) if vm.heap.is_environment(id) == Some(false) => id,
+                _ => return vm.throw_type_error("incompatible Object.prototype receiver"),
+            };
+            let key = match vm.coerce_property_key(host, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(key) => key,
+                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+            };
+            match vm.own_descriptor(host, id, key.borrowed())? {
+                Ok(descriptor) => Ok(Invocation::Value(Value::Bool(descriptor.is_some()))),
+                Err(error) => Ok(Invocation::Thrown(error)),
+            }
+        };
+        valueOf => |vm, _, _, receiver| match *receiver {
+            Value::Object(id) if vm.heap.is_environment(id) == Some(false) => {
+                Ok(Invocation::Value(Value::Object(id)))
+            }
+            _ => vm.throw_type_error("incompatible Object.prototype receiver"),
+        };
+        toString => |vm, _, _, receiver| match receiver {
+            Value::Object(id) if vm.heap.is_environment(*id) == Some(true) => {
+                vm.throw_type_error("incompatible Object.prototype receiver")
+            }
+            Value::Object(id) => Ok(Invocation::Value(Value::String(
+                format!("[object {}]", vm.object_tag(*id)?).into(),
+            ))),
+            _ => Ok(Invocation::Value(Value::String("[object Undefined]".into()))),
+        };
     }
 }
 
 #[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
 pub(crate) mod promise_members {
-    use super::BuiltinCall;
+    use super::*;
+
+    const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
+    const SPECIES: IntrinsicKey = IntrinsicKey::new(NAME, Slot::StaticSymbolGetter, "species");
+    pub(crate) const THEN: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Prototype, "then");
+    pub(crate) const ROOTS: &[RootSpec] = &[
+        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
+            .fixed("promise.prototype"),
+        RootSpec::new("promise.prototype", RootKind::Plain, OBJECT_PARENT),
+    ];
+    pub(crate) const GLOBAL: &[IntrinsicDef] = &[
+        IntrinsicDef::constructor(
+            CONSTRUCTOR,
+            |vm, _, _, _| vm.throw_type_error("Promise constructor requires new"),
+            |vm, host, args, prototype| vm.construct_promise(host, args, prototype),
+        ),
+        IntrinsicDef::call(SPECIES, |_, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        }),
+    ];
+
+    pub(crate) fn install(vm: &mut Vm, _: &Value) {
+        let constructor = vm.builtins.get(ROOT);
+        let prototype = vm.builtins.get("promise.prototype");
+        install_getter(
+            vm,
+            constructor,
+            PropertyKey::Symbol(SPECIES_SYMBOL),
+            SPECIES,
+        );
+        install_members(vm, constructor, prototype);
+        define_builtin_data(
+            vm,
+            prototype,
+            "constructor",
+            Value::Object(constructor),
+            Attributes::METHOD,
+        );
+        define_builtin_data(
+            vm,
+            constructor,
+            "prototype",
+            Value::Object(prototype),
+            Attributes::FIXED,
+        );
+    }
 
     static_calls! {
-        resolve | reject | all | allSettled | race | any as key => BuiltinCall::Static(key);
+        resolve | reject | all | allSettled | race | any as key => |vm, host, args, receiver| {
+            if !matches!(receiver, Value::Object(id) if *id == vm.builtins.get(ROOT)) {
+                return vm.throw_type_error("incompatible Promise receiver");
+            }
+            vm.call_promise_static(host, receiver, key, args)
+        };
     }
 
     prototype_calls! {
-        then | catch | finally as key => BuiltinCall::Method { name: key };
+        then | catch | finally as key => |vm, host, args, receiver| {
+            let Value::Object(id) = receiver else {
+                return vm.throw_type_error("incompatible Promise receiver");
+            };
+            if vm.heap.get(*id)?.as_promise().is_none() {
+                return vm.throw_type_error("incompatible Promise receiver");
+            }
+            vm.call_promise_method(host, *id, key, args)
+        };
     }
-}
-
-pub(crate) enum BuiltinCall {
-    Constructor,
-    PromiseSpecies,
-    ErrorConstructor { name: String },
-    FunctionMethod { name: String },
-    ObjectMethod { name: &'static str },
-    QueueMicrotask,
-    Static(&'static str),
-    Method { name: &'static str },
-    Resolution { id: ObjectId },
-    PromiseCallback { id: ObjectId },
-    SymbolConstructor,
-    SymbolFor,
-    SymbolKeyFor,
-    SymbolMethod(&'static str),
-    BooleanConstructor,
-    BooleanMethod { stringify: bool },
-    ArrayConstructor,
-    CollectionConstructor(CollectionKind),
-    CollectionMethod(CollectionKind, CollectionMethod),
-    CollectionNext(CollectionKind),
-    WeakMapConstructor,
-    WeakMapMethod(WeakMapMethod),
-    ArrayOperation(String),
-    ArrayValues,
-    ArrayIteratorNext,
-    StringConstructor,
-    RegExpConstructor,
-    RegExpMethod(RegExpMethod),
-    NumberConstructor,
-    StringIterator,
-    StringIteratorNext,
-    RegExpStringIteratorNext,
-    ArrayJoin,
-    ArrayToString,
-    IteratorIdentity,
-    ObjectConstructor,
-    ProxyConstructor,
-    ObjectCreate,
-    GetPrototypeOf,
-    SetPrototypeOf,
-    ObjectKeys,
-    ObjectGetOwnPropertyDescriptor,
-    ObjectGetOwnPropertyDescriptors,
-    DefineProperty,
-    ObjectDefineProperties,
-    PreventExtensions,
-    IsExtensible,
-    SetIntegrityLevel(IntegrityLevel),
-    TestIntegrityLevel(IntegrityLevel),
-    ObjectAssign,
-    ObjectIs,
-    Registered(BuiltinHandler),
 }
 
 enum Dispatch<'a> {
@@ -564,429 +657,21 @@ enum Dispatch<'a> {
         func_id: u32,
         env: ObjectId,
     },
-    Builtin(BuiltinCall),
+    Resolution(ObjectId),
+    PromiseCallback(ObjectId),
     Bound(&'a BoundObject),
     Native {
-        target: crate::binding::NativeTarget,
+        target: CallableTarget,
         constructable: bool,
     },
 }
 
 enum Constructor {
     Script { func_id: u32, env: ObjectId },
-    Native(crate::binding::NativeTarget),
-    Promise,
-    Object,
-    String,
-    RegExp,
-    Number,
-    Boolean,
-    Proxy,
-    Array,
-    Collection(CollectionKind),
-    WeakMap,
-    Error { name: String },
+    Native(CallableTarget),
 }
 
 impl Vm {
-    fn init_wrapper_prototype(&mut self, name: &str, constructor: ObjectId) -> ObjectId {
-        let prototype = self.heap.alloc_plain();
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("constructor stores its prototype");
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(constructor),
-                Attributes::METHOD,
-            )
-            .expect("prototype stores its constructor");
-        for method in ["valueOf", "toString"] {
-            let function = self.heap.alloc_builtin(name, Some(method));
-            self.heap
-                .define_data(
-                    prototype,
-                    method,
-                    Value::Object(function),
-                    Attributes::METHOD,
-                )
-                .expect("prototype stores its methods");
-        }
-        prototype
-    }
-
-    fn init_string_constructor(&mut self, prototype: ObjectId, iterator: ObjectId) -> ObjectId {
-        let constructor = self.heap.alloc_builtin(string_members::NAME, None);
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("String stores its prototype");
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(constructor),
-                Attributes::METHOD,
-            )
-            .expect("String.prototype stores its constructor");
-        self.heap
-            .define_data(
-                prototype,
-                PropertyKey::Symbol(ITERATOR_SYMBOL),
-                Value::Object(iterator),
-                Attributes::METHOD,
-            )
-            .expect("String.prototype stores Symbol.iterator");
-        string_members::install_members(self, constructor, prototype);
-        constructor
-    }
-
-    pub(crate) fn init_builtins(&mut self) {
-        let object_prototype = self.heap.alloc_plain();
-        self.heap.object_prototype = Some(object_prototype);
-        let function_prototype = self.heap.alloc_plain();
-        self.heap.function_prototype = Some(function_prototype);
-        let to_string = Value::Object(self.heap.alloc_builtin("Function", Some("toString")));
-        self.heap
-            .define_data(
-                function_prototype,
-                "toString",
-                to_string,
-                Attributes::METHOD,
-            )
-            .expect("Function.prototype stores toString");
-        let object = self.heap.alloc_builtin(object_members::NAME, None);
-        self.heap
-            .define_data(
-                object,
-                "prototype",
-                Value::Object(object_prototype),
-                Attributes::FIXED,
-            )
-            .expect("Object stores its prototype");
-        self.heap
-            .define_data(
-                object_prototype,
-                "constructor",
-                Value::Object(object),
-                Attributes::METHOD,
-            )
-            .expect("Object.prototype stores its constructor");
-        object_members::install_members(self, object, object_prototype);
-
-        let array_prototype = self.heap.alloc_array(Vec::new());
-        self.heap
-            .set_prototype(array_prototype, Some(object_prototype))
-            .expect("Array.prototype inherits Object.prototype");
-        let array = self.init_array_constructor(array_prototype);
-        let array_iterator_prototype = self.heap.alloc_plain();
-        self.heap.array_prototype = Some(array_prototype);
-        let join = Value::Object(self.heap.alloc_builtin("Array", Some("join")));
-        let to_string = Value::Object(self.heap.alloc_builtin("Array", Some("toString")));
-        self.heap
-            .define_data(array_prototype, "join", join, Attributes::METHOD)
-            .expect("Array.prototype stores join");
-        self.heap
-            .define_data(array_prototype, "toString", to_string, Attributes::METHOD)
-            .expect("Array.prototype stores toString");
-        let array_values = self.heap.alloc_builtin("Array", Some("values"));
-        let values = Value::Object(array_values);
-        let string_iterator_prototype = self.heap.alloc_plain();
-        let regexp_iterator_prototype = self.heap.alloc_plain();
-        let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
-        let string_prototype = self.heap.alloc_plain();
-        let string = self.init_string_constructor(string_prototype, string_iterator);
-        let (regexp, regexp_prototype) = self.init_regexp();
-        let number_prototype = self.heap.alloc_plain();
-        let number = self.init_number_constructor(number_prototype);
-        let boolean_constructor = self.heap.alloc_builtin("Boolean", None);
-        let boolean_prototype = self.init_wrapper_prototype("Boolean", boolean_constructor);
-        let math = math_namespace::install(self);
-        let json = crate::json::namespace::install(self);
-        let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
-        self.heap
-            .define_data(
-                array_prototype,
-                "values",
-                values.clone(),
-                Attributes::METHOD,
-            )
-            .expect("Array.prototype stores values");
-        self.heap
-            .define_data(
-                array_prototype,
-                PropertyKey::Symbol(ITERATOR_SYMBOL),
-                values,
-                Attributes::METHOD,
-            )
-            .expect("Array.prototype stores Symbol.iterator");
-        for (prototype, kind) in [
-            (array_iterator_prototype, "ArrayIterator"),
-            (string_iterator_prototype, "StringIterator"),
-            (regexp_iterator_prototype, "RegExpStringIterator"),
-        ] {
-            let next = Value::Object(self.heap.alloc_builtin(kind, Some("next")));
-            self.heap
-                .define_data(prototype, "next", next, Attributes::METHOD)
-                .expect("iterator prototype stores next");
-            self.heap
-                .define_data(
-                    prototype,
-                    PropertyKey::Symbol(ITERATOR_SYMBOL),
-                    identity.clone(),
-                    Attributes::METHOD,
-                )
-                .expect("iterator prototype stores Symbol.iterator");
-        }
-
-        let prototype = self.heap.alloc_plain();
-        let promise = self.heap.alloc_builtin(promise_members::NAME, None);
-        let species = self
-            .heap
-            .alloc_builtin(promise_members::NAME, Some("get species"));
-        assert!(
-            self.heap
-                .apply_descriptor(
-                    promise,
-                    PropertyKey::Symbol(SPECIES_SYMBOL),
-                    DescriptorUpdate {
-                        get: Some(Some(species)),
-                        configurable: Some(true),
-                        ..DescriptorUpdate::default()
-                    }
-                )
-                .expect("Promise stores its species getter")
-        );
-        let queue = self.heap.alloc_builtin("queueMicrotask", None);
-        promise_members::install_members(self, promise, prototype);
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(promise),
-                Attributes::METHOD,
-            )
-            .expect("Promise.prototype.constructor");
-        self.heap
-            .define_data(
-                promise,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("Promise.prototype");
-        self.heap.promise_prototype = Some(prototype);
-
-        let error_prototype = self.heap.alloc_plain();
-        let typeerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let rangeerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let referenceerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let syntaxerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let evalerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let urierror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let aggregateerror_prototype = self.heap.alloc_plain_with(Some(error_prototype));
-        let constructors = [
-            ("Error", error_prototype),
-            ("TypeError", typeerror_prototype),
-            ("RangeError", rangeerror_prototype),
-            ("ReferenceError", referenceerror_prototype),
-            ("SyntaxError", syntaxerror_prototype),
-            ("EvalError", evalerror_prototype),
-            ("URIError", urierror_prototype),
-            ("AggregateError", aggregateerror_prototype),
-        ];
-        let mut error_constructors = BTreeMap::new();
-        for (name, prototype) in constructors {
-            self.heap
-                .define_data(
-                    prototype,
-                    "name",
-                    Value::String(name.into()),
-                    Attributes::METHOD,
-                )
-                .expect("Error prototype stores name");
-            if name == "Error" {
-                self.heap
-                    .define_data(
-                        prototype,
-                        "message",
-                        Value::String(JsString::default()),
-                        Attributes::METHOD,
-                    )
-                    .expect("Error.prototype stores message");
-            }
-            let constructor = self.heap.alloc_builtin(name, None);
-            self.heap
-                .define_data(
-                    constructor,
-                    "prototype",
-                    Value::Object(prototype),
-                    Attributes::FIXED,
-                )
-                .expect("error constructor stores its prototype");
-            self.heap
-                .define_data(
-                    prototype,
-                    "constructor",
-                    Value::Object(constructor),
-                    Attributes::METHOD,
-                )
-                .expect("Error prototype stores its constructor");
-            error_constructors.insert(name, constructor);
-        }
-        let error = error_constructors["Error"];
-        let typeerror = error_constructors["TypeError"];
-        let rangeerror = error_constructors["RangeError"];
-        let referenceerror = error_constructors["ReferenceError"];
-        let syntaxerror = error_constructors["SyntaxError"];
-        let evalerror = error_constructors["EvalError"];
-        let urierror = error_constructors["URIError"];
-        let aggregateerror = error_constructors["AggregateError"];
-        let symbol = self.heap.alloc_builtin("Symbol", None);
-        let symbol_prototype = self.init_wrapper_prototype("Symbol", symbol);
-        let description = self.heap.alloc_builtin("Symbol", Some("get description"));
-        assert!(
-            self.heap
-                .apply_descriptor(
-                    symbol_prototype,
-                    PropertyKey::String("description".into()),
-                    DescriptorUpdate {
-                        get: Some(Some(description)),
-                        configurable: Some(true),
-                        ..DescriptorUpdate::default()
-                    }
-                )
-                .expect("Symbol.prototype stores its description getter")
-        );
-        for name in ["for", "keyFor"] {
-            let id = self.heap.alloc_builtin("Symbol", Some(name));
-            self.heap
-                .define_data(symbol, name, Value::Object(id), Attributes::METHOD)
-                .expect("Symbol constructor stores statics");
-        }
-        self.heap
-            .define_data(
-                symbol,
-                "iterator",
-                Value::Symbol(ITERATOR_SYMBOL),
-                Attributes::FIXED,
-            )
-            .expect("Symbol constructor stores the iterator symbol");
-        self.heap
-            .define_data(
-                symbol,
-                "toPrimitive",
-                Value::Symbol(TO_PRIMITIVE_SYMBOL),
-                Attributes::FIXED,
-            )
-            .expect("Symbol constructor stores the toPrimitive symbol");
-        self.heap
-            .define_data(
-                symbol,
-                "species",
-                Value::Symbol(SPECIES_SYMBOL),
-                Attributes::FIXED,
-            )
-            .expect("Symbol constructor stores the species symbol");
-        for (name, symbol_id) in [
-            ("match", MATCH_SYMBOL),
-            ("matchAll", MATCH_ALL_SYMBOL),
-            ("replace", REPLACE_SYMBOL),
-            ("search", SEARCH_SYMBOL),
-            ("split", SPLIT_SYMBOL),
-        ] {
-            self.heap
-                .define_data(symbol, name, Value::Symbol(symbol_id), Attributes::FIXED)
-                .expect("Symbol constructor stores regex protocol symbols");
-        }
-        let reflect = reflect_namespace::install(self);
-        let (map, map_prototype, map_iterator_prototype) =
-            self.init_collection(CollectionKind::Map, &identity);
-        let (set, set_prototype, set_iterator_prototype) =
-            self.init_collection(CollectionKind::Set, &identity);
-        let (weakmap, weakmap_prototype) = self.init_weakmap();
-        let proxy = self.heap.alloc_builtin("Proxy", None);
-        let global_this = self.heap.alloc_plain_with(Some(object_prototype));
-        self.builtins = BuiltinRoots {
-            global_this,
-            proxy,
-            map,
-            map_prototype,
-            map_iterator_prototype,
-            set,
-            set_prototype,
-            set_iterator_prototype,
-            weakmap,
-            weakmap_prototype,
-            promise,
-            promise_prototype: prototype,
-            queue_microtask: queue,
-            object_prototype,
-            array,
-            array_prototype,
-            array_values,
-            string,
-            string_prototype,
-            regexp,
-            regexp_prototype,
-            number,
-            math,
-            number_prototype,
-            boolean_constructor,
-            boolean_prototype,
-            symbol_prototype,
-            function_prototype,
-            array_iterator_prototype,
-            string_iterator,
-            string_iterator_prototype,
-            regexp_iterator_prototype,
-            error_prototype,
-            typeerror_prototype,
-            error,
-            typeerror,
-            rangeerror_prototype,
-            referenceerror_prototype,
-            syntaxerror_prototype,
-            evalerror_prototype,
-            urierror_prototype,
-            aggregateerror_prototype,
-            rangeerror,
-            referenceerror,
-            syntaxerror,
-            evalerror,
-            urierror,
-            aggregateerror,
-            symbol,
-            reflect,
-            object,
-            json,
-        };
-        for (index, name) in BUILTINS.into_iter().enumerate() {
-            let value = self.builtin_value(index as u32).expect("global builtin");
-            self.heap
-                .define_data(global_this, name, value, Attributes::ORDINARY)
-                .expect("global builtin property");
-        }
-        self.heap
-            .define_data(
-                global_this,
-                "undefined",
-                Value::Undefined,
-                Attributes::ORDINARY,
-            )
-            .expect("global undefined property");
-    }
-
     pub(crate) fn is_callable(&self, value: &Value) -> bool {
         let Value::Object(id) = value else {
             return false;
@@ -1042,16 +727,25 @@ impl Vm {
                 }
                 self.call_function(host, func_id, Some(env), args, receiver)
             }
-            Some(Dispatch::Builtin(call)) => self.call_builtin(host, call, args, receiver),
+            Some(Dispatch::Resolution(id)) => {
+                self.capability_call(
+                    host,
+                    id,
+                    args.into_iter().next().unwrap_or(Value::Undefined),
+                )?;
+                Ok(Invocation::Value(Value::Undefined))
+            }
+            Some(Dispatch::PromiseCallback(id)) => self.call_promise_callback(host, id, args),
             Some(Dispatch::Bound(bound)) => {
                 let target = Value::Object(bound.target);
                 let bound_this = bound.bound_this.clone();
                 let args = bound.args.iter().cloned().chain(args).collect();
                 self.invoke(host, &target, args, &bound_this)
             }
-            Some(Dispatch::Native { target, .. }) => {
-                self.call_host(host, target, args, receiver, false)
-            }
+            Some(Dispatch::Native { target, .. }) => match target {
+                CallableTarget::Host(target) => self.call_host(host, target, args, receiver, false),
+                CallableTarget::Intrinsic(id) => (id.definition().call)(self, host, args, receiver),
+            },
             None => self.throw_type_error("value is not a function"),
         }
     }
@@ -1068,21 +762,6 @@ impl Vm {
                 target,
                 constructable: true,
             }) => Some(Constructor::Native(target)),
-            Some(Dispatch::Builtin(BuiltinCall::Constructor)) => Some(Constructor::Promise),
-            Some(Dispatch::Builtin(BuiltinCall::ObjectConstructor)) => Some(Constructor::Object),
-            Some(Dispatch::Builtin(BuiltinCall::StringConstructor)) => Some(Constructor::String),
-            Some(Dispatch::Builtin(BuiltinCall::RegExpConstructor)) => Some(Constructor::RegExp),
-            Some(Dispatch::Builtin(BuiltinCall::NumberConstructor)) => Some(Constructor::Number),
-            Some(Dispatch::Builtin(BuiltinCall::BooleanConstructor)) => Some(Constructor::Boolean),
-            Some(Dispatch::Builtin(BuiltinCall::ProxyConstructor)) => Some(Constructor::Proxy),
-            Some(Dispatch::Builtin(BuiltinCall::ArrayConstructor)) => Some(Constructor::Array),
-            Some(Dispatch::Builtin(BuiltinCall::CollectionConstructor(kind))) => {
-                Some(Constructor::Collection(kind))
-            }
-            Some(Dispatch::Builtin(BuiltinCall::WeakMapConstructor)) => Some(Constructor::WeakMap),
-            Some(Dispatch::Builtin(BuiltinCall::ErrorConstructor { name })) => {
-                Some(Constructor::Error { name })
-            }
             _ => None,
         })
     }
@@ -1114,16 +793,19 @@ impl Vm {
             };
             return self.construct_with(host, &target, args, new_target);
         }
+        let symbol = matches!(&dispatch, Some(Dispatch::Native { target: CallableTarget::Intrinsic(id), .. })
+            if *id == symbol_family::CONSTRUCTOR.link());
         let Some(constructor) = self.constructor(dispatch)? else {
-            return match self.classify(callee)? {
-                Some(Dispatch::Builtin(BuiltinCall::SymbolConstructor)) => {
-                    self.throw_type_error("Symbol is not a constructor")
-                }
-                _ => self.throw_type_error("value is not a constructor"),
-            };
+            return self.throw_type_error(if symbol {
+                "Symbol is not a constructor"
+            } else {
+                "value is not a constructor"
+            });
         };
         let distinct_new_target = !ops::strict_equal(callee, new_target);
-        let prototype = if !matches!(constructor, Constructor::Proxy)
+        let skip_prototype = matches!(constructor, Constructor::Native(CallableTarget::Intrinsic(id))
+            if id.definition().skip_new_target_prototype);
+        let prototype = if !skip_prototype
             && (distinct_new_target || matches!(constructor, Constructor::Script { .. }))
         {
             match self.read_property(host, new_target, PropertyKeyRef::String("prototype"))? {
@@ -1134,58 +816,26 @@ impl Vm {
         } else {
             None
         };
-        let result = match constructor {
+        match constructor {
             Constructor::Script { func_id, env } => {
-                let prototype = prototype.unwrap_or(self.builtins.object_prototype);
+                let prototype = prototype.unwrap_or(self.builtins.get("object.prototype"));
                 let instance = Value::Object(self.heap.alloc_plain_with(Some(prototype)));
-                return match self.call_function(host, func_id, Some(env), args, &instance)? {
+                match self.call_function(host, func_id, Some(env), args, &instance)? {
                     Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
                         Ok(Invocation::Value(instance))
                     }
                     result => Ok(result),
-                };
-            }
-            Constructor::Native(target) => {
-                return self.call_host(host, target, args, &Value::Undefined, true);
-            }
-            Constructor::Promise => {
-                return self.construct_promise(host, args, prototype);
-            }
-            Constructor::Object => {
-                // Do not change the prototype of a supplied argument object.
-                if let Some(prototype) = prototype {
-                    return Ok(Invocation::Value(Value::Object(
-                        self.heap.alloc_plain_with(Some(prototype)),
-                    )));
                 }
-                return self.construct_object(&args);
             }
-            Constructor::RegExp => return self.construct_regexp(host, &args, prototype, false),
-            Constructor::String => match self.call_string(host, &args)? {
-                Invocation::Value(value) => self.construct_object(&[value])?,
-                thrown => thrown,
-            },
-            Constructor::Number => match self.call_number(host, &args)? {
-                Invocation::Value(value) => self.construct_object(&[value])?,
-                thrown => thrown,
-            },
-            Constructor::Boolean => {
-                self.construct_object(&[Value::Bool(args.first().is_some_and(Value::truthy))])?
+            Constructor::Native(CallableTarget::Host(target)) => {
+                self.call_host(host, target, args, &Value::Undefined, true)
             }
-            Constructor::Array => self.construct_array(args)?,
-            Constructor::Collection(kind) => {
-                return self.construct_collection(host, kind, &args, prototype);
+            Constructor::Native(CallableTarget::Intrinsic(id)) => {
+                (id.definition().construct.expect("classified constructor"))(
+                    self, host, args, prototype,
+                )
             }
-            Constructor::WeakMap => return self.construct_weakmap(host, &args, prototype),
-            Constructor::Proxy => return self.construct_proxy(&args),
-            Constructor::Error { name } => self.construct_error(host, &name, args)?,
-        };
-        if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
-            && !self.heap.set_prototype(*id, Some(prototype))?
-        {
-            return self.throw_type_error("cannot set constructor result prototype");
         }
-        Ok(result)
     }
 
     fn reflect_call(
@@ -1227,7 +877,7 @@ impl Vm {
         }
     }
 
-    fn arguments_from_array_like(
+    pub(crate) fn arguments_from_array_like(
         &mut self,
         host: &mut dyn Host,
         list: &Value,
@@ -1265,186 +915,18 @@ impl Vm {
             }));
         }
         Ok(match self.heap.get(*id)? {
-            Object::BuiltinStatic(function) => static_call(function).map(Dispatch::Builtin),
-            Object::Resolution(_) => Some(Dispatch::Builtin(BuiltinCall::Resolution { id: *id })),
-            Object::PromiseCallback { .. } => {
-                Some(Dispatch::Builtin(BuiltinCall::PromiseCallback { id: *id }))
-            }
+            Object::Resolution(_) => Some(Dispatch::Resolution(*id)),
+            Object::PromiseCallback { .. } => Some(Dispatch::PromiseCallback(*id)),
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             Object::Native(native) => Some(Dispatch::Native {
-                target: native.target,
-                constructable: native.constructable,
+                target: native.target(),
+                constructable: native.constructable(),
             }),
             _ => None,
         })
     }
 
-    pub(crate) fn call_builtin(
-        &mut self,
-        host: &mut dyn Host,
-        call: BuiltinCall,
-        args: Vec<Value>,
-        receiver: &Value,
-    ) -> Result<Invocation, VmError> {
-        match call {
-            BuiltinCall::Constructor => self.throw_type_error("Promise constructor requires new"),
-            BuiltinCall::PromiseSpecies => Ok(Invocation::Value(receiver.clone())),
-            BuiltinCall::ObjectConstructor => self.construct_object(&args),
-            BuiltinCall::ProxyConstructor => self.throw_type_error("Proxy requires new"),
-            BuiltinCall::ObjectCreate => self.object_create(host, &args),
-            BuiltinCall::GetPrototypeOf => self.get_prototype_of(&args, false),
-            BuiltinCall::SetPrototypeOf => self.set_prototype_of(&args, false),
-            BuiltinCall::ObjectKeys => self.object_keys(host, &args),
-            BuiltinCall::ObjectGetOwnPropertyDescriptors => {
-                self.get_own_property_descriptors(host, &args)
-            }
-            BuiltinCall::ObjectAssign => self.object_assign(host, &args),
-            BuiltinCall::ObjectIs => Ok(Invocation::Value(Value::Bool(ops::same_value(
-                args.first().unwrap_or(&Value::Undefined),
-                args.get(1).unwrap_or(&Value::Undefined),
-            )))),
-            BuiltinCall::ObjectGetOwnPropertyDescriptor => {
-                self.get_own_property_descriptor(host, &args)
-            }
-            BuiltinCall::DefineProperty => self.define_property_builtin(host, &args, false),
-            BuiltinCall::ObjectDefineProperties => {
-                let Some(Value::Object(target)) = args.first() else {
-                    return self
-                        .throw_type_error("Object.defineProperties requires an object target");
-                };
-                self.define_properties(host, *target, args.get(1))
-            }
-            BuiltinCall::PreventExtensions => self.prevent_extensions_builtin_impl(&args, false),
-            BuiltinCall::IsExtensible => self.is_extensible_builtin_impl(&args, false),
-            BuiltinCall::SetIntegrityLevel(level) => self.set_integrity(host, &args, level),
-            BuiltinCall::TestIntegrityLevel(level) => self.test_integrity(host, &args, level),
-            BuiltinCall::ErrorConstructor { name } => self.construct_error(host, &name, args),
-            BuiltinCall::FunctionMethod { name } => {
-                self.call_function_method(host, &name, args, receiver)
-            }
-            BuiltinCall::ObjectMethod { name } => match name {
-                "hasOwnProperty" => {
-                    let id = match *receiver {
-                        Value::Object(id) if self.heap.is_environment(id) == Some(false) => id,
-                        _ => {
-                            return self.throw_type_error("incompatible Object.prototype receiver");
-                        }
-                    };
-                    let key = match self
-                        .coerce_property_key(host, args.first().unwrap_or(&Value::Undefined))?
-                    {
-                        Ok(key) => key,
-                        Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-                    };
-                    match self.own_descriptor(host, id, key.borrowed())? {
-                        Ok(descriptor) => Ok(Invocation::Value(Value::Bool(descriptor.is_some()))),
-                        Err(error) => Ok(Invocation::Thrown(error)),
-                    }
-                }
-                "valueOf" => match *receiver {
-                    Value::Object(id) if self.heap.is_environment(id) == Some(false) => {
-                        Ok(Invocation::Value(Value::Object(id)))
-                    }
-                    _ => self.throw_type_error("incompatible Object.prototype receiver"),
-                },
-                "toString" => match receiver {
-                    Value::Object(id) if self.heap.is_environment(*id) == Some(true) => {
-                        self.throw_type_error("incompatible Object.prototype receiver")
-                    }
-                    Value::Object(id) => Ok(Invocation::Value(Value::String(
-                        format!("[object {}]", self.object_tag(*id)?).into(),
-                    ))),
-                    _ => Ok(Invocation::Value(Value::String(
-                        "[object Undefined]".into(),
-                    ))),
-                },
-                _ => Err(VmError::InvalidState(format!(
-                    "unknown Object method {name}"
-                ))),
-            },
-            BuiltinCall::ArrayValues => self.array_values(receiver),
-            BuiltinCall::ArrayConstructor => self.construct_array(args),
-            BuiltinCall::ArrayOperation(name) => self.array_operation(host, &name, receiver, args),
-            BuiltinCall::ArrayIteratorNext => self.array_iterator_next(host, receiver),
-            BuiltinCall::CollectionConstructor(_) => {
-                self.throw_type_error("Map and Set require new")
-            }
-            BuiltinCall::CollectionMethod(kind, method) => {
-                self.collection_method(host, kind, method, receiver, &args)
-            }
-            BuiltinCall::CollectionNext(kind) => self.collection_next(kind, receiver),
-            BuiltinCall::WeakMapConstructor => self.throw_type_error("WeakMap requires new"),
-            BuiltinCall::WeakMapMethod(method) => self.weakmap_method(method, receiver, &args),
-            BuiltinCall::StringConstructor => self.call_string(host, &args),
-            BuiltinCall::RegExpConstructor => self.construct_regexp(host, &args, None, true),
-            BuiltinCall::RegExpMethod(method) => {
-                self.call_regexp_method(host, method, receiver, &args)
-            }
-            BuiltinCall::NumberConstructor => self.call_number(host, &args),
-            BuiltinCall::BooleanConstructor => Ok(Invocation::Value(Value::Bool(
-                args.first().is_some_and(Value::truthy),
-            ))),
-            BuiltinCall::BooleanMethod { stringify } => {
-                let value = match receiver {
-                    Value::Bool(value) => *value,
-                    Value::Object(id) => match self.heap.get(*id)? {
-                        Object::Boxed {
-                            primitive: BoxedPrimitive::Bool(value),
-                            ..
-                        } => *value,
-                        _ => return self.throw_type_error("incompatible Boolean receiver"),
-                    },
-                    _ => return self.throw_type_error("incompatible Boolean receiver"),
-                };
-                Ok(Invocation::Value(if stringify {
-                    Value::String(value.to_string().into())
-                } else {
-                    Value::Bool(value)
-                }))
-            }
-            BuiltinCall::StringIterator => self.string_iterator(host, receiver),
-            BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
-            BuiltinCall::RegExpStringIteratorNext => {
-                self.regexp_string_iterator_next(host, receiver)
-            }
-            BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
-            BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
-            BuiltinCall::Registered(handler) => handler(self, host, receiver, &args),
-            BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
-            BuiltinCall::QueueMicrotask => self.queue_microtask(args),
-            BuiltinCall::SymbolConstructor => self.symbol_constructor(host, args),
-            BuiltinCall::SymbolMethod(method) => self.symbol_method(receiver, method),
-            BuiltinCall::SymbolFor => {
-                self.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args)
-            }
-            BuiltinCall::SymbolKeyFor => {
-                self.symbol_static(receiver, |vm, args| vm.symbol_key_for(args), args)
-            }
-            BuiltinCall::Static(name) => {
-                if !matches!(receiver, Value::Object(id) if *id == self.builtins.promise) {
-                    return self.throw_type_error("incompatible Promise receiver");
-                }
-                self.call_promise_static(host, receiver, name, args)
-            }
-            BuiltinCall::Method { name } => {
-                let Value::Object(id) = receiver else {
-                    return self.throw_type_error("incompatible Promise receiver");
-                };
-                if self.heap.get(*id)?.as_promise().is_none() {
-                    return self.throw_type_error("incompatible Promise receiver");
-                }
-                self.call_promise_method(host, *id, name, args)
-            }
-            BuiltinCall::Resolution { id } => {
-                let value = args.first().cloned().unwrap_or(Value::Undefined);
-                self.capability_call(host, id, value)?;
-                Ok(Invocation::Value(Value::Undefined))
-            }
-            BuiltinCall::PromiseCallback { id } => self.call_promise_callback(host, id, args),
-        }
-    }
-
-    fn array_to_string(
+    pub(crate) fn array_to_string(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -1476,7 +958,7 @@ impl Vm {
             },
             Object::Array(_) => "Array",
             Object::Function(_)
-            | Object::BuiltinStatic(_)
+            | Object::Native(crate::heap::NativeObject::Intrinsic { .. })
             | Object::Bound(_)
             | Object::PromiseCallback { .. }
             | Object::Resolution(_) => "Function",
@@ -1485,7 +967,7 @@ impl Vm {
         })
     }
 
-    fn array_join(
+    pub(crate) fn array_join(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -1566,25 +1048,25 @@ impl Vm {
         self.heap.define_data(
             id,
             PropertyKey::Symbol(ITERATOR_SYMBOL),
-            Value::Object(self.builtins.array_values),
+            Value::Object(self.builtins.get("array.values")),
             Attributes::METHOD,
         )?;
         Ok(Value::Object(id))
     }
 
-    fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+    pub(crate) fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
         let Value::Object(id) = *receiver else {
             return self.throw_type_error("Array.values requires an object");
         };
         let iterator = self.heap.alloc(Object::ArrayIterator {
-            object: PlainObject::new(Some(self.builtins.array_iterator_prototype)),
+            object: PlainObject::new(Some(self.builtins.get("arrayIterator.prototype"))),
             array: Some(id),
             next_index: 0,
         });
         Ok(Invocation::Value(Value::Object(iterator)))
     }
 
-    fn array_iterator_next(
+    pub(crate) fn array_iterator_next(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -1655,57 +1137,6 @@ impl Vm {
         self.iterator_result(value, done)
     }
 
-    fn string_iterator(
-        &mut self,
-        host: &mut dyn Host,
-        receiver: &Value,
-    ) -> Result<Invocation, VmError> {
-        if matches!(receiver, Value::Null | Value::Undefined) {
-            return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
-        }
-        let string = match self.coerce_string(host, receiver)? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let iterator = self.heap.alloc(Object::StringIterator {
-            object: PlainObject::new(Some(self.builtins.string_iterator_prototype)),
-            string,
-            position: 0,
-        });
-        Ok(Invocation::Value(Value::Object(iterator)))
-    }
-
-    fn string_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let invalid_receiver = "StringIterator.next requires a string iterator";
-        let Value::Object(id) = *receiver else {
-            return self.throw_type_error(invalid_receiver);
-        };
-        let Object::StringIterator {
-            string, position, ..
-        } = self.heap.get_mut(id)?
-        else {
-            return self.throw_type_error(invalid_receiver);
-        };
-        let Some(first) = utf16_unit(string, *position) else {
-            return self.iterator_result(Value::Undefined, true);
-        };
-        let width = if (0xd800..=0xdbff).contains(&first)
-            && matches!(utf16_unit(string, *position + 1), Some(0xdc00..=0xdfff))
-        {
-            2
-        } else {
-            1
-        };
-        let end = *position + width;
-        let value = string.slice_units(*position..end);
-        *position = end;
-        if end == utf16_len(string) {
-            *string = JsString::default();
-            *position = 0;
-        }
-        self.iterator_result(Value::String(value), false)
-    }
-
     pub(crate) fn iterator_result(
         &mut self,
         value: Value,
@@ -1718,65 +1149,9 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(result)))
     }
 
-    fn call_function_method(
-        &mut self,
-        host: &mut dyn Host,
-        name: &str,
-        args: Vec<Value>,
-        receiver: &Value,
-    ) -> Result<Invocation, VmError> {
-        if name == "toString" {
-            return if self.is_callable(receiver) {
-                Ok(Invocation::Value(Value::String(
-                    "function () { [native code] }".into(),
-                )))
-            } else {
-                self.throw_type_error("incompatible Function.prototype.toString receiver")
-            };
-        }
-        if name == "call" && self.is_callable(receiver) {
-            let mut args = args.into_iter();
-            let this_arg = args.next().unwrap_or(Value::Undefined);
-            return self.invoke(host, receiver, args.collect(), &this_arg);
-        }
-        let target = match *receiver {
-            Value::Object(id) if self.heap.get(id).is_ok_and(is_callable_object) => id,
-            _ => {
-                return self.throw_type_error("incompatible Function receiver");
-            }
-        };
-        let mut args = args.into_iter();
-        let this_arg = args.next().unwrap_or(Value::Undefined);
-        match name {
-            "apply" => {
-                let list = args.next();
-                let args = match list {
-                    None | Some(Value::Undefined | Value::Null) => Vec::new(),
-                    Some(list) => match self.arguments_from_array_like(host, &list)? {
-                        Ok(values) => values,
-                        Err(error) => return Ok(Invocation::Thrown(error)),
-                    },
-                };
-                self.invoke(host, receiver, args, &this_arg)
-            }
-            "bind" => {
-                let id = self.heap.alloc(Object::Bound(BoundObject {
-                    target,
-                    bound_this: this_arg,
-                    args: args.collect(),
-                    object: PlainObject::new(self.heap.function_prototype),
-                }));
-                Ok(Invocation::Value(Value::Object(id)))
-            }
-            _ => Err(VmError::InvalidState(format!(
-                "unknown Function method {name}"
-            ))),
-        }
-    }
-
     pub(crate) fn type_error(&mut self, message: &str) -> Result<Value, VmError> {
         self.alloc_error(
-            self.builtins.typeerror_prototype,
+            self.builtins.get("typeerror.prototype"),
             "TypeError",
             Some(message.into()),
         )
@@ -1787,7 +1162,7 @@ impl Vm {
     }
     pub(crate) fn make_range_error(&mut self, message: &str) -> Result<Value, VmError> {
         self.alloc_error(
-            self.builtins.rangeerror_prototype,
+            self.builtins.get("rangeerror.prototype"),
             "RangeError",
             Some(message.into()),
         )
@@ -1797,7 +1172,7 @@ impl Vm {
         self.make_range_error(message).map(Invocation::Thrown)
     }
 
-    fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+    pub(crate) fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
         match args.first() {
             None | Some(Value::Undefined | Value::Null) => {
                 Ok(Invocation::Value(Value::Object(self.heap.alloc_plain())))
@@ -1824,37 +1199,12 @@ impl Vm {
 
     pub(crate) fn primitive_prototype(&self, value: &Value) -> Option<ObjectId> {
         match value {
-            Value::String(_) => Some(self.builtins.string_prototype),
-            Value::Number(_) => Some(self.builtins.number_prototype),
-            Value::Bool(_) => Some(self.builtins.boolean_prototype),
-            Value::Symbol(_) => Some(self.builtins.symbol_prototype),
+            Value::String(_) => Some(self.builtins.get("string.prototype")),
+            Value::Number(_) => Some(self.builtins.get("number.prototype")),
+            Value::Bool(_) => Some(self.builtins.get("boolean.prototype")),
+            Value::Symbol(_) => Some(self.builtins.get("symbol.prototype")),
             _ => None,
         }
-    }
-
-    fn construct_proxy(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
-            return self.throw_type_error("Proxy requires an object target");
-        };
-        let Some(Value::Object(handler)) = args.get(1) else {
-            return self.throw_type_error("Proxy requires an object handler");
-        };
-        let base = self.heap.proxy_target(*target)?;
-        if !matches!(
-            self.heap.get(base)?,
-            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. }
-        ) {
-            return self.throw_type_error(
-                "Proxy supports only plain object, array, and primitive wrapper targets",
-            );
-        }
-        Ok(Invocation::Value(Value::Object(self.heap.alloc(
-            Object::Proxy {
-                target: *target,
-                handler: *handler,
-                object: PlainObject::new(None),
-            },
-        ))))
     }
 
     fn object_create(
@@ -2380,23 +1730,10 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         name: &str,
+        prototype: &'static str,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        let prototype = match name {
-            "Error" => self.builtins.error_prototype,
-            "TypeError" => self.builtins.typeerror_prototype,
-            "RangeError" => self.builtins.rangeerror_prototype,
-            "ReferenceError" => self.builtins.referenceerror_prototype,
-            "SyntaxError" => self.builtins.syntaxerror_prototype,
-            "EvalError" => self.builtins.evalerror_prototype,
-            "URIError" => self.builtins.urierror_prototype,
-            "AggregateError" => self.builtins.aggregateerror_prototype,
-            _ => {
-                return Err(VmError::InvalidState(format!(
-                    "unknown Error constructor {name}"
-                )));
-            }
-        };
+        let prototype = self.builtins.get(prototype);
         let (errors, message_arg) = if name == "AggregateError" {
             let iterable = args.first().unwrap_or(&Value::Undefined);
             let mut errors = Vec::new();
@@ -2454,7 +1791,7 @@ impl Vm {
     }
     fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
         let error = self.alloc_error(
-            self.builtins.aggregateerror_prototype,
+            self.builtins.get("aggregateerror.prototype"),
             "AggregateError",
             Some("All promises were rejected".into()),
         )?;
@@ -2501,7 +1838,7 @@ impl Vm {
         call: impl FnOnce(&mut Self, Vec<Value>) -> Result<Invocation, VmError>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        if !matches!(receiver, Value::Object(id) if *id == self.builtins.symbol) {
+        if !matches!(receiver, Value::Object(id) if *id == self.builtins.get("symbol")) {
             return self.throw_type_error("incompatible Symbol receiver");
         }
         call(self, args)
@@ -2589,9 +1926,11 @@ impl Vm {
     }
 
     pub(crate) fn is_intrinsic_promise_then(&self, value: &Value) -> bool {
+        static THEN: std::sync::LazyLock<crate::intrinsic::IntrinsicId> =
+            std::sync::LazyLock::new(|| promise_members::THEN.link());
         matches!(value, Value::Object(id) if matches!(self.heap.get(*id),
-            Ok(Object::BuiltinStatic(function))
-                if function.name == promise_members::NAME && function.member.as_deref() == Some("then")))
+            Ok(Object::Native(native))
+                if native.target() == CallableTarget::Intrinsic(*THEN)))
     }
 
     fn call_promise_static(
@@ -2703,7 +2042,7 @@ impl Vm {
         host: &mut dyn Host,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
-        let intrinsic = Value::Object(self.builtins.promise);
+        let intrinsic = Value::Object(self.builtins.get("promise"));
         let constructor =
             match self.read_property(host, receiver, PropertyKeyRef::String("constructor"))? {
                 Invocation::Value(Value::Undefined) => return Ok(Invocation::Value(intrinsic)),
@@ -2727,7 +2066,7 @@ impl Vm {
         host: &mut dyn Host,
         species: &Value,
     ) -> Result<Result<(Value, Value, Value), Value>, VmError> {
-        if *species == Value::Object(self.builtins.promise) {
+        if *species == Value::Object(self.builtins.get("promise")) {
             let result = self.heap.alloc_promise();
             let (resolve, reject) = self.alloc_resolution_pair(result, false, false)?;
             return Ok(Ok((
@@ -3195,94 +2534,14 @@ impl Vm {
 }
 
 pub(crate) fn is_callable_object(object: &Object) -> bool {
-    match object {
+    matches!(
+        object,
         Object::Function(_)
-        | Object::Resolution(_)
-        | Object::Bound(_)
-        | Object::PromiseCallback { .. } => true,
-        Object::Native(_) => true,
-        Object::BuiltinStatic(function) => static_call(function).is_some(),
-        _ => false,
-    }
-}
-
-fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
-    match (function.name.as_str(), function.member.as_deref()) {
-        (promise_members::NAME, None) => Some(BuiltinCall::Constructor),
-        (promise_members::NAME, Some("get species")) => Some(BuiltinCall::PromiseSpecies),
-        ("queueMicrotask", None) => Some(BuiltinCall::QueueMicrotask),
-        (
-            name @ ("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError"
-            | "EvalError" | "URIError" | "AggregateError"),
-            None,
-        ) => Some(BuiltinCall::ErrorConstructor {
-            name: name.to_owned(),
-        }),
-        ("Function", Some(name @ ("call" | "apply" | "bind" | "toString"))) => {
-            Some(BuiltinCall::FunctionMethod {
-                name: name.to_owned(),
-            })
-        }
-        (object_members::NAME, None) => Some(BuiltinCall::ObjectConstructor),
-        ("Proxy", None) => Some(BuiltinCall::ProxyConstructor),
-        ("Map", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Map)),
-        ("Set", None) => Some(BuiltinCall::CollectionConstructor(CollectionKind::Set)),
-        ("WeakMap", None) => Some(BuiltinCall::WeakMapConstructor),
-        ("WeakMap", Some(member)) => WeakMapMethod::lookup(member).map(BuiltinCall::WeakMapMethod),
-        ("MapIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Map)),
-        ("SetIterator", Some("next")) => Some(BuiltinCall::CollectionNext(CollectionKind::Set)),
-        (name @ ("Map" | "Set"), Some(member)) => {
-            let kind = if name == "Map" {
-                CollectionKind::Map
-            } else {
-                CollectionKind::Set
-            };
-            CollectionMethod::lookup(kind, member)
-                .map(|method| BuiltinCall::CollectionMethod(kind, method))
-        }
-        ("Array", Some("join")) => Some(BuiltinCall::ArrayJoin),
-        ("Array", Some("toString")) => Some(BuiltinCall::ArrayToString),
-        ("Array", Some("values")) => Some(BuiltinCall::ArrayValues),
-        ("Array", None) => Some(BuiltinCall::ArrayConstructor),
-        ("Array", Some(name)) if crate::array::is_array_operation(name) => {
-            Some(BuiltinCall::ArrayOperation(name.to_owned()))
-        }
-        ("ArrayIterator", Some("next")) => Some(BuiltinCall::ArrayIteratorNext),
-        ("Number", None) => Some(BuiltinCall::NumberConstructor),
-        ("Boolean", None) => Some(BuiltinCall::BooleanConstructor),
-        ("Boolean", Some("valueOf")) => Some(BuiltinCall::BooleanMethod { stringify: false }),
-        ("Boolean", Some("toString")) => Some(BuiltinCall::BooleanMethod { stringify: true }),
-        ("Symbol", Some("valueOf")) => Some(BuiltinCall::SymbolMethod("valueOf")),
-        ("Symbol", Some("toString")) => Some(BuiltinCall::SymbolMethod("toString")),
-        ("Symbol", Some("get description")) => Some(BuiltinCall::SymbolMethod("get description")),
-        ("RegExp", None) => Some(BuiltinCall::RegExpConstructor),
-        ("RegExp", Some(name)) => REGEXP_METHODS
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|(_, method)| BuiltinCall::RegExpMethod(*method))
-            .or_else(|| {
-                REGEXP_STATICS
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, method)| BuiltinCall::RegExpMethod(*method))
-            })
-            .or_else(|| {
-                REGEXP_SYMBOL_METHODS
-                    .iter()
-                    .find(|(_, key, _)| *key == name)
-                    .map(|(_, _, method)| BuiltinCall::RegExpMethod(*method))
-            }),
-        ("String", None) => Some(BuiltinCall::StringConstructor),
-        ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
-        ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
-        ("RegExpStringIterator", Some("next")) => Some(BuiltinCall::RegExpStringIteratorNext),
-        ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
-        ("Symbol", None) => Some(BuiltinCall::SymbolConstructor),
-        ("Symbol", Some("for")) => Some(BuiltinCall::SymbolFor),
-        ("Symbol", Some("keyFor")) => Some(BuiltinCall::SymbolKeyFor),
-        (owner, Some(member)) => registered_call(owner, member),
-        _ => None,
-    }
+            | Object::Resolution(_)
+            | Object::Bound(_)
+            | Object::PromiseCallback { .. }
+            | Object::Native(_)
+    )
 }
 
 fn settlement_value(settlement: &Settlement) -> Value {

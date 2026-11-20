@@ -373,7 +373,7 @@ impl Vm {
             Err(message) if message.contains("depth") => return self.throw_range_error(&message),
             Err(message) => {
                 let error = self.alloc_error(
-                    self.builtins.syntaxerror_prototype,
+                    self.builtins.get("syntaxerror.prototype"),
                     "SyntaxError",
                     Some(message.into()),
                 )?;

@@ -525,7 +525,7 @@ fn host_value_serde_preserves_utf16_units() {
 fn restore_rejects_previous_snapshot_format_version() {
     let mut s = Suspended::start(RUN, vec![]);
     let snapshot = s.snapshot();
-    for version in [7, 32] {
+    for version in [7, 32, 37] {
         let mut previous = snapshot.clone();
         previous.format_version = version;
         let error = s.restore(previous).expect_err("previous snapshot format");
@@ -533,6 +533,53 @@ fn restore_rejects_previous_snapshot_format_version() {
             matches!(error, VmError::InvalidSnapshot(message) if message.contains("unsupported snapshot format"))
         );
     }
+}
+
+#[test]
+fn snapshot_deserialization_rejects_an_unknown_intrinsic_key() {
+    let suspended = Suspended::start(RUN, vec![]);
+    let snapshot = suspended.snapshot();
+    let array_values = snapshot.roots["array.values"];
+    let mut wire = serde_json::to_value(snapshot).expect("serialize snapshot");
+    let record = wire["objects"]
+        .as_array_mut()
+        .expect("object records")
+        .iter_mut()
+        .find(|record| record["id"] == serde_json::json!(array_values))
+        .expect("array.values record");
+    let intrinsic = &mut record["object"]["native"]["Intrinsic"]["intrinsic"];
+    assert_eq!(intrinsic["owner"], "Array");
+    assert_eq!(intrinsic["member"], "values");
+    intrinsic["member"] = serde_json::json!("not_a_declared_member");
+    let error = serde_json::from_value::<yield_vm::Snapshot>(wire).unwrap_err();
+    assert!(error.to_string().contains("unknown intrinsic key"));
+}
+
+#[test]
+fn restore_rejects_duplicate_intrinsic_identity() {
+    let mut suspended = Suspended::start(RUN, vec![]);
+    let mut snapshot = suspended.snapshot();
+    let array_values = snapshot.roots["array.values"];
+    let mut duplicate = snapshot
+        .objects
+        .iter()
+        .find(|record| record.id == array_values)
+        .expect("array.values record")
+        .clone();
+    duplicate.id = snapshot
+        .objects
+        .iter()
+        .map(|record| record.id)
+        .max()
+        .unwrap()
+        + 1;
+    snapshot.objects.push(duplicate);
+    let error = suspended
+        .restore(json_round_trip(&snapshot))
+        .expect_err("duplicate intrinsic object identity");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("duplicate native object identity"))
+    );
 }
 
 #[test]

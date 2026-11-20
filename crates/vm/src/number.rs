@@ -1,8 +1,13 @@
 //! Number constructors, static functions, and prototype methods.
 
+use crate::builtin_globals::Owner;
+use crate::builtins::{
+    ROOT_FUNCTION_PROTOTYPE, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, RootKind, RootSpec,
+};
 use crate::error::VmError;
 use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value};
@@ -53,9 +58,51 @@ pub(crate) mod members {
     const NAN: f64 = f64::NAN;
 }
 
+const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Number", Slot::Global, "");
+
+pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
+    CONSTRUCTOR,
+    |vm, host, args, _| vm.call_number(host, &args),
+    |vm, host, args, prototype| {
+        let result = match vm.call_number(host, &args)? {
+            Invocation::Value(value) => vm.construct_object(&[value])?,
+            thrown => thrown,
+        };
+        vm.with_result_prototype(result, prototype)
+    },
+)];
+
+pub(crate) const OWNER: Owner = Owner::new(
+    members::ROOT,
+    NUMBER_ROOTS,
+    &[NUMBER_INTRINSICS, members::INTRINSICS],
+    Some(|vm, _| install(vm)),
+);
+
+pub(crate) const NUMBER_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        members::ROOT,
+        RootKind::Native(CONSTRUCTOR),
+        Some(ROOT_FUNCTION_PROTOTYPE),
+    )
+    .fixed(ROOT_NUMBER_PROTOTYPE)
+    .backlink(None),
+    RootSpec::new(
+        ROOT_NUMBER_PROTOTYPE,
+        RootKind::Plain,
+        Some(ROOT_OBJECT_PROTOTYPE),
+    ),
+];
+
+fn install(vm: &mut Vm) {
+    vm.init_number_constructor(
+        vm.builtins.get(members::ROOT),
+        vm.builtins.get(ROOT_NUMBER_PROTOTYPE),
+    );
+}
+
 impl Vm {
-    pub(crate) fn init_number_constructor(&mut self, prototype: ObjectId) -> ObjectId {
-        let constructor = self.heap.alloc_builtin(members::NAME, None);
+    fn init_number_constructor(&mut self, constructor: ObjectId, prototype: ObjectId) {
         self.heap
             .define_data(
                 constructor,
@@ -73,14 +120,9 @@ impl Vm {
             )
             .expect("Number.prototype stores its constructor");
         members::install_members(self, constructor, prototype);
-        constructor
     }
 
-    pub(crate) fn call_number(
-        &mut self,
-        host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
+    fn call_number(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
         Ok(match args.first() {
             None => Invocation::Value(Value::Number(0.0)),
             Some(arg) => match self.coerce_number(host, arg)? {

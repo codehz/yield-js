@@ -5,6 +5,7 @@ import { expect } from 'test';
 function near(x, y) { return Math.abs(x - y) < 1e-12; }
 export function run() {
   expect(Math.abs('-2')).toBe(2);
+  expect(Math.abs(-3)).toBe(3);
   expect(Math.acos(1) === 0).toBe(true);
   expect(Math.acosh(1) === 0).toBe(true);
   expect(near(Math.asin(1), Math.PI / 2)).toBe(true);
