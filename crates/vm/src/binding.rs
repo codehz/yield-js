@@ -527,6 +527,131 @@ pub struct ModuleDecl {
     exports: Vec<ExportDecl>,
 }
 
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use super::{
+        AccessorDecl, ArgKind, CallSignature, ExportDecl, MemberName, MethodDecl, ModuleDecl,
+        ReturnKind,
+    };
+    use super::{
+        Bindings, ClassDecl, HostClass, HostModuleState, Operation, OperationDecl, StateDecl,
+    };
+    use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
+    use std::any::Any;
+    use std::collections::btree_map::Entry;
+    use std::sync::Arc;
+
+    pub struct Class(ClassDecl);
+    pub struct State(StateDecl);
+    pub struct OperationType(OperationDecl);
+    pub struct Service(&'static str, u32, Arc<dyn Any + Send + Sync>);
+
+    pub fn class<T: HostClass>() -> Class {
+        Class(ClassDecl::of::<T>())
+    }
+
+    pub fn state<T: HostModuleState>() -> State {
+        State(StateDecl::of::<T>())
+    }
+
+    pub fn operation<T: Operation>() -> OperationType {
+        OperationType(OperationDecl::of::<T>())
+    }
+
+    pub fn service(id: &'static str, version: u32, value: impl Any + Send + Sync) -> Service {
+        Service(id, version, Arc::new(value))
+    }
+
+    pub fn link(
+        modules: impl IntoIterator<Item = ModuleDecl>,
+        classes: impl IntoIterator<Item = Class>,
+        states: impl IntoIterator<Item = State>,
+        operations: impl IntoIterator<Item = OperationType>,
+        services: impl IntoIterator<Item = Service>,
+    ) -> Result<Bindings, String> {
+        let mut table = Bindings::builder();
+        table.modules = modules.into_iter().collect();
+        table.classes = classes.into_iter().map(|class| class.0).collect();
+        table.states = states.into_iter().map(|state| state.0).collect();
+        table.operations = operations
+            .into_iter()
+            .map(|operation| operation.0)
+            .collect();
+        for Service(id, version, value) in services {
+            match table.services.values.entry(id.to_owned()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(value);
+                }
+                Entry::Occupied(_) => return Err(format!("duplicate host service {id:?}")),
+            }
+            table.service_ids.insert(format!("{id}:{version}"));
+        }
+        table.build()
+    }
+
+    pub fn module(name: &str, exports: Vec<ExportDecl>) -> ModuleDecl {
+        ModuleDecl {
+            name: name.to_owned(),
+            exports,
+        }
+    }
+
+    pub fn function(
+        name: &str,
+        constructable: bool,
+        class: Option<&'static str>,
+        call: HostCall,
+        signature: CallSignature,
+    ) -> ExportDecl {
+        ExportDecl::Function(FunctionDecl {
+            name: name.to_owned(),
+            arity: signature.args.len(),
+            constructable,
+            class,
+            call,
+            signature: Some(signature),
+        })
+    }
+
+    pub fn constant(name: &str, value: impl Into<ConstValue>) -> ExportDecl {
+        ExportDecl::Constant(ConstantDecl {
+            name: name.to_owned(),
+            value: value.into(),
+        })
+    }
+
+    pub const fn method(name: MemberName, call: HostCall, signature: CallSignature) -> MethodDecl {
+        MethodDecl {
+            name,
+            arity: signature.args.len(),
+            call,
+            signature: Some(signature),
+        }
+    }
+
+    pub const fn accessor(
+        name: MemberName,
+        get: Option<(HostCall, CallSignature)>,
+        set: Option<(HostCall, CallSignature)>,
+    ) -> AccessorDecl {
+        let (get, get_signature) = match get {
+            Some((call, signature)) => (Some(call), Some(signature)),
+            None => (None, None),
+        };
+        let (set, set_signature) = match set {
+            Some((call, signature)) => (Some(call), Some(signature)),
+            None => (None, None),
+        };
+        AccessorDecl {
+            name,
+            get,
+            set,
+            get_signature,
+            set_signature,
+        }
+    }
+}
+
 /// Immutable declaration table shared by every VM using the same contract.
 #[derive(Clone)]
 pub struct Bindings {
@@ -839,7 +964,24 @@ impl BindingsBuilder {
     }
 
     pub fn class<T: HostClass>(mut self) -> Self {
-        self.classes.push(ClassDecl {
+        self.classes.push(ClassDecl::of::<T>());
+        self
+    }
+
+    pub fn state<S: HostModuleState>(mut self) -> Self {
+        self.states.push(StateDecl::of::<S>());
+        self
+    }
+
+    pub fn operation<O: Operation>(mut self) -> Self {
+        self.operations.push(OperationDecl::of::<O>());
+        self
+    }
+}
+
+impl ClassDecl {
+    fn of<T: HostClass>() -> Self {
+        Self {
             tag: T::TAG.to_owned(),
             parent_tag: T::PARENT,
             parent: None,
@@ -864,12 +1006,13 @@ impl BindingsBuilder {
                     .downcast_ref::<T>()
                     .is_some_and(|payload| std::mem::size_of_val(payload) == 0)
             },
-        });
-        self
+        }
     }
+}
 
-    pub fn state<S: HostModuleState>(mut self) -> Self {
-        self.states.push(StateDecl {
+impl StateDecl {
+    fn of<S: HostModuleState>() -> Self {
+        Self {
             module: S::MODULE.to_owned(),
             slots: S::SLOTS.to_vec(),
             payload_schema: S::PAYLOAD_SCHEMA,
@@ -885,21 +1028,23 @@ impl BindingsBuilder {
                     .ok_or_else(|| CodecError::new("module state payload type mismatch"))?;
                 S::encode_payload(payload, out)
             },
-        });
-        self
+        }
     }
+}
 
-    pub fn operation<O: Operation>(mut self) -> Self {
-        self.operations.push(OperationDecl {
+impl OperationDecl {
+    fn of<O: Operation>() -> Self {
+        Self {
             name: O::NAME.to_owned(),
             schema: O::SCHEMA,
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
             decode: |input, bindings| O::decode(input, bindings).map(|_| ()),
-        });
-        self
+        }
     }
+}
 
+impl BindingsBuilder {
     pub fn module(mut self, module: ModuleDecl) -> Self {
         self.modules.push(module);
         self

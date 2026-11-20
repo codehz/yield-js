@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-模块描述是静态数据，可在宏展开期或手写 builder 中构造。VM、编译器和未来的 TypeScript 生成器消费同一个结构，不要求宿主实现统一的字符串分派入口。
+模块描述由 `#[host_module]` 生成，`host_bindings!` 一次性链接模块、类、状态、operation 与服务。VM、编译器和未来的 TypeScript 生成器消费同一份规范声明，不要求宿主实现统一的字符串分派入口。
 
 ```rust
 ModuleDecl {
@@ -424,7 +424,9 @@ flowchart TB
 
 ## 16. 首版落地状态
 
-已落地：静态 builder 声明与声明指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明（`HostClass::PARENT`）的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验类指纹、槽布局、payload schema 与 operation 声明。
+已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局、payload schema 与 operation 声明。
 
-尚未实现：宏声明入口（当前 builder 仍是实际 API）；脚本 `class` / `extends` / `super`（编译器按首版契约拒绝，因此脚本派生类路径不存在，声明层父类已经可用）；TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。构造器导出通过 `constructor_for::<T>` 绑定类，`new` 与 `instanceof` 可用。
+尚未实现：脚本 `class` / `extends` / `super`（编译器按首版契约拒绝，因此脚本派生类路径不存在，声明层父类已经可用）；TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。带 `class` 的 `#[constructor]` 导出将类原型用于 `new` 与 `instanceof`。
+
+Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。签名决定 `length` 和绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 
