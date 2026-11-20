@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 36;
+pub const BYTECODE_VERSION: u32 = 37;
 
 pub use crate::builtin::BUILTINS;
 
@@ -122,6 +122,15 @@ pub enum UnaryOp {
 #[serde(rename_all = "snake_case")]
 pub enum PropertyDefinition {
     Data,
+    Get,
+    Set,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateDefinition {
+    Field,
+    Method,
     Get,
     Set,
 }
@@ -240,6 +249,7 @@ pub enum Instr {
         heritage: Option<Slot>,
         constructor: u32,
         default_constructor: bool,
+        private_count: u32,
     },
     ScopedClosure {
         dst: Slot,
@@ -252,6 +262,31 @@ pub enum Instr {
         src: Slot,
         is_static: bool,
         kind: PropertyDefinition,
+    },
+    AddClassPrivate {
+        class: Slot,
+        index: u32,
+        src: Option<Slot>,
+        is_static: bool,
+        kind: PrivateDefinition,
+    },
+    GetPrivate {
+        dst: Slot,
+        object: Slot,
+        brand: Slot,
+        index: u32,
+    },
+    SetPrivate {
+        object: Slot,
+        brand: Slot,
+        src: Slot,
+        index: u32,
+    },
+    HasPrivate {
+        dst: Slot,
+        object: Slot,
+        brand: Slot,
+        index: u32,
     },
     AddClassField {
         class: Slot,
@@ -679,9 +714,22 @@ impl Build {
                 return Err(format!("duplicate function name {:?}", function.name));
             }
         }
+        let private_limit = self
+            .functions
+            .iter()
+            .flat_map(|f| &f.code)
+            .filter_map(|instr| {
+                if let Instr::CreateClass { private_count, .. } = instr {
+                    Some(*private_count)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
 
         for function in &self.functions {
-            self.validate_function(function)?;
+            self.validate_function(function, private_limit)?;
         }
         self.validate_script()?;
         Ok(())
@@ -820,7 +868,14 @@ impl Build {
         Ok(())
     }
 
-    fn validate_function(&self, function: &Function) -> Result<(), String> {
+    fn validate_function(&self, function: &Function, private_limit: u32) -> Result<(), String> {
+        let check_private = |index| {
+            if index < private_limit {
+                Ok(())
+            } else {
+                Err(format!("invalid class private index {index}"))
+            }
+        };
         let location = format!("function {} ({})", function.func_id, function.name);
         if function.code.is_empty() {
             return Err(format!("{location}: empty code"));
@@ -1099,6 +1154,46 @@ impl Build {
                     check_slot(*class, "DefineClassMethod.class")?;
                     check_slot(*key, "DefineClassMethod.key")?;
                     check_slot(*src, "DefineClassMethod.src")?;
+                }
+                Instr::AddClassPrivate {
+                    class,
+                    index,
+                    src,
+                    kind,
+                    ..
+                } => {
+                    check_slot(*class, "AddClassPrivate.class")?;
+                    if let Some(src) = src {
+                        check_slot(*src, "AddClassPrivate.src")?;
+                    } else if *kind != PrivateDefinition::Field {
+                        return Err(format!(
+                            "{location}: private method definition is missing its closure at pc {pc}"
+                        ));
+                    }
+                    check_private(*index)?;
+                }
+                Instr::GetPrivate {
+                    dst: value,
+                    object,
+                    brand,
+                    index,
+                }
+                | Instr::SetPrivate {
+                    src: value,
+                    object,
+                    brand,
+                    index,
+                }
+                | Instr::HasPrivate {
+                    dst: value,
+                    object,
+                    brand,
+                    index,
+                } => {
+                    check_slot(*value, "private element value")?;
+                    check_slot(*object, "private element receiver")?;
+                    check_slot(*brand, "private element brand")?;
+                    check_private(*index)?;
                 }
                 Instr::AddClassField {
                     class,

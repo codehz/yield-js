@@ -15,8 +15,8 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::heap::{
     Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
-    NativeObject, Object, OwnProperty, PlainObject, Property, ScriptClass, TO_PRIMITIVE_SYMBOL,
-    object_id,
+    NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property, ScriptClass,
+    TO_PRIMITIVE_SYMBOL, object_id,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -541,6 +541,7 @@ impl Vm {
                 constructor,
                 heritage,
                 default_constructor,
+                private_count,
             } => {
                 let env = self.class_scope(frame, scope)?;
                 let derived = heritage.is_some();
@@ -583,6 +584,8 @@ impl Vm {
                     derived,
                     default_constructor,
                     elements: Vec::new(),
+                    private_count,
+                    private: Default::default(),
                 });
                 function.home = Some(prototype);
                 let name = self.function_metadata(class, "name")?;
@@ -675,6 +678,69 @@ impl Vm {
                     Some(error) => Ok(Step::Throw(error)),
                     None => Ok(Step::Next),
                 }
+            }
+            Instr::AddClassPrivate {
+                class,
+                index,
+                src,
+                is_static,
+                kind,
+            } => {
+                let class = object_id(frame.read_ref(class)?, "private element class")?;
+                let closure = src
+                    .map(|slot| object_id(frame.read_ref(slot)?, "private element closure"))
+                    .transpose()?;
+                self.add_class_private(class, index, closure, is_static, kind)?;
+                Ok(Step::Next)
+            }
+            Instr::GetPrivate {
+                dst,
+                object,
+                brand,
+                index,
+            } => {
+                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
+                let value = self.get_private(host, frame.read_ref(object)?, brand, index)?;
+                store_invocation(frame, dst, value)
+            }
+            Instr::SetPrivate {
+                object,
+                brand,
+                src,
+                index,
+            } => {
+                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
+                match self.set_private(
+                    host,
+                    frame.read_ref(object)?,
+                    brand,
+                    index,
+                    frame.read(src)?,
+                )? {
+                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
+                    Invocation::Value(_) => Ok(Step::Next),
+                }
+            }
+            Instr::HasPrivate {
+                dst,
+                object,
+                brand,
+                index,
+            } => {
+                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
+                self.private_class(brand, index)?;
+                let Value::Object(object) = frame.read(object)? else {
+                    return Ok(Step::Throw(
+                        self.type_error("private brand check requires an object")?,
+                    ));
+                };
+                let present = self
+                    .heap
+                    .private
+                    .get(&object)
+                    .is_some_and(|elements| elements.contains_key(&(brand, index)));
+                frame.write(dst, Value::Bool(present))?;
+                Ok(Step::Next)
             }
             Instr::NewObject { dst } => {
                 let id = self.heap.alloc_plain();
@@ -1874,6 +1940,9 @@ impl Vm {
                 ClassElement::Field {
                     is_static: false, ..
                 } => class.prototype,
+                ClassElement::PrivateField { index, .. } if !class.private[&index].is_static => {
+                    class.prototype
+                }
                 _ => id,
             }
         };
@@ -1919,20 +1988,34 @@ impl Vm {
             .function(class)
             .and_then(|f| f.class.as_ref())
             .ok_or_else(|| VmError::InvalidState("initialization requires a class".into()))?;
-        for index in 0..record.elements.len() {
+        let element_count = record.elements.len();
+        if !self
+            .heap
+            .install_private_methods(class, receiver, is_static)
+        {
+            return Ok(Some(
+                self.type_error("private member is already installed")?,
+            ));
+        }
+        for index in 0..element_count {
             let element = &self
                 .heap
                 .function(class)
                 .and_then(|f| f.class.as_ref())
                 .expect("class record")
                 .elements[index];
-            let (key, closure) = match element {
+            let (key, private, closure) = match element {
                 ClassElement::Field {
                     key,
                     initializer,
                     is_static: field_static,
-                } if *field_static == is_static => (Some(key.clone()), *initializer),
-                ClassElement::Block { body } if is_static => (None, Some(*body)),
+                } if *field_static == is_static => (Some(key.clone()), None, *initializer),
+                ClassElement::PrivateField { index, initializer }
+                    if self.private_class(class, *index)?.private[index].is_static == is_static =>
+                {
+                    (None, Some(*index), *initializer)
+                }
+                ClassElement::Block { body } if is_static => (None, None, Some(*body)),
                 _ => continue,
             };
             let value = if let Some(closure) = closure {
@@ -1948,6 +2031,12 @@ impl Vm {
             } else {
                 Value::Undefined
             };
+            if let Some(index) = private {
+                if !self.stamp_private(receiver, class, index, PrivateElement::Field(value)) {
+                    return Ok(Some(self.type_error("private field is already installed")?));
+                }
+                continue;
+            }
             if let Some(key) = key {
                 let update = DescriptorUpdate {
                     value: Some(value),

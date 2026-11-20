@@ -18,12 +18,13 @@ use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
 pub(super) enum PropertyRef {
     Member { object: Reg, key: Reg },
     Super { base: Reg, key: Reg, receiver: Reg },
+    Private { object: Reg, brand: Reg, index: u32 },
 }
 
 impl PropertyRef {
     fn receiver(self) -> Reg {
         match self {
-            Self::Member { object, .. } => object,
+            Self::Member { object, .. } | Self::Private { object, .. } => object,
             Self::Super { receiver, .. } => receiver,
         }
     }
@@ -100,6 +101,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 })
             }
             Expression::BinaryExpression(expression) => self.compile_binary(expression),
+            Expression::PrivateInExpression(expression) => {
+                let object = self.compile_expression(&expression.right)?;
+                let (brand, index) = self.load_private_brand(&expression.left)?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::HasPrivate {
+                    dst: self.slot(dst),
+                    object: self.slot(object),
+                    brand: self.slot(brand),
+                    index,
+                });
+                Ok(dst)
+            }
             Expression::LogicalExpression(expression) => self.compile_logical(expression),
             Expression::ConditionalExpression(expression) => {
                 let result = self.alloc_reg()?;
@@ -142,12 +155,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ClassExpression(class) => self.compile_class(class, ""),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
-            Expression::StaticMemberExpression(member) => {
-                let reference = self.compile_static_member(member, None)?;
-                self.emit_get_property(reference)
-            }
-            Expression::ComputedMemberExpression(member) => {
-                let reference = self.compile_computed_member(member, None)?;
+            expression if let Some(member) = expression.as_member_expression() => {
+                let reference = self.compile_member_ref(member, None)?;
                 self.emit_get_property(reference)
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
@@ -549,12 +558,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         if let Some(member) = argument.as_member_expression() {
+            self.check_delete_member(member)?;
             let reference = self.compile_member_ref(member, None)?;
             return self.emit_delete_property(reference);
         }
         if let Expression::ChainExpression(chain) = argument
             && let Some(member) = chain.expression.as_member_expression()
         {
+            self.check_delete_member(member)?;
             let mut exits = Vec::new();
             let reference = self.compile_member_ref(member, Some(&mut exits))?;
             let result = self.emit_delete_property(reference)?;
@@ -575,6 +586,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
         self.compile_expression(argument)?;
         self.emit_constant(Constant::Bool(true))
+    }
+
+    fn check_delete_member(&self, member: &MemberExpression<'_>) -> Result<(), CompileError> {
+        if let MemberExpression::PrivateFieldExpression(member) = member {
+            return Err(CompileError::new(
+                self.source_text(),
+                member.field.span,
+                "cannot delete a private element",
+            ));
+        }
+        Ok(())
     }
 
     fn emit_delete_property(&mut self, reference: PropertyRef) -> Result<Reg, CompileError> {
@@ -688,6 +710,20 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn emit_get_property(&mut self, reference: PropertyRef) -> Result<Reg, CompileError> {
         let (base, key, receiver) = match reference {
             PropertyRef::Member { object, key } => return self.emit_get_member(object, key),
+            PropertyRef::Private {
+                object,
+                brand,
+                index,
+            } => {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetPrivate {
+                    dst: self.slot(dst),
+                    object: self.slot(object),
+                    brand: self.slot(brand),
+                    index,
+                });
+                return Ok(dst);
+            }
             PropertyRef::Super {
                 base,
                 key,
@@ -711,6 +747,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 object: self.slot(object),
                 key: self.slot(key),
                 src,
+            },
+            PropertyRef::Private {
+                object,
+                brand,
+                index,
+            } => Instr::SetPrivate {
+                object: self.slot(object),
+                brand: self.slot(brand),
+                src,
+                index,
             },
             PropertyRef::Super {
                 base,
@@ -1186,11 +1232,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             MemberExpression::ComputedMemberExpression(member) => {
                 self.compile_computed_member(member, exits)
             }
-            MemberExpression::PrivateFieldExpression(member) => Err(unsupported(
-                self.source_text(),
-                member.span,
-                "private field access",
-            )),
+            MemberExpression::PrivateFieldExpression(member) => {
+                if matches!(member.object, Expression::Super(_)) {
+                    return Err(CompileError::new(
+                        self.source_text(),
+                        member.span,
+                        "cannot access a private element on super",
+                    ));
+                }
+                let object = self.compile_member_object(&member.object, member.optional, exits)?;
+                let (brand, index) = self.load_private_brand(&member.field)?;
+                Ok(PropertyRef::Private {
+                    object,
+                    brand,
+                    index,
+                })
+            }
         }
     }
 
@@ -1254,12 +1311,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             });
         }
 
-        let object = if let Some(exits) = exits {
+        let object = self.compile_member_object(object, optional, exits)?;
+        let key = compile_key(self)?;
+        Ok(PropertyRef::Member { object, key })
+    }
+
+    fn compile_member_object(
+        &mut self,
+        object: &'ast Expression<'ast>,
+        optional: bool,
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<Reg, CompileError> {
+        if let Some(exits) = exits {
             let (object, _) = self.compile_chain_link(object, exits)?;
             if optional {
                 self.guard_chain_link(object, exits)?;
             }
-            object
+            Ok(object)
         } else {
             if optional {
                 return Err(unsupported(
@@ -1268,10 +1336,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "optional member access",
                 ));
             }
-            self.compile_expression(object)?
-        };
-        let key = compile_key(self)?;
-        Ok(PropertyRef::Member { object, key })
+            self.compile_expression(object)
+        }
     }
 
     fn compile_object(

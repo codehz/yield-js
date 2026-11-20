@@ -46,6 +46,7 @@ pub(crate) fn lower_program<'ast>(
             name: name.to_owned(),
             outer: CapturedEnv::default(),
             class_bindings: BTreeSet::new(),
+            private_scopes: Vec::new(),
             derived_this: false,
         },
     )?);
@@ -122,6 +123,7 @@ struct Task<'ast> {
     name: String,
     outer: CapturedEnv,
     class_bindings: BTreeSet<BindingId>,
+    private_scopes: Vec<std::rc::Rc<class::PrivateScope<'ast>>>,
     derived_this: bool,
 }
 
@@ -142,6 +144,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     env: Env,
     // Inner names live in the class-scope chain, never in ordinary binding cells.
     class_bindings: BTreeSet<BindingId>,
+    private_scopes: Vec<std::rc::Rc<class::PrivateScope<'ast>>>,
     // None uses the ambient scope inherited by the current closure.
     class_scope: Option<Reg>,
     emit: Emitter<'src>,
@@ -193,6 +196,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             derived_this: task.derived_this,
             env: Env::new(task.outer),
             class_bindings: task.class_bindings,
+            private_scopes: task.private_scopes,
             class_scope: None,
             emit: Emitter::new(source_text, span),
             control: Control::new(),
@@ -613,6 +617,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             name: format!("{hint}@{func_id}"),
             outer: self.capture_for(source),
             class_bindings: self.class_bindings.clone(),
+            private_scopes: self.private_scopes.clone(),
             derived_this: matches!(source, FunctionSource::DerivedConstructor(_))
                 || (source.is_arrow() && self.derived_this),
         });
@@ -675,6 +680,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             },
             outer: self.capture_for(FunctionSource::Function(function)),
             class_bindings: self.class_bindings.clone(),
+            private_scopes: self.private_scopes.clone(),
             derived_this: false,
         });
         Ok(func_id)

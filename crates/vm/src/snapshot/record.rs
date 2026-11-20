@@ -9,7 +9,7 @@ use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Native callables persist stable intrinsic keys, not linked IDs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 44;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 45;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -137,6 +137,14 @@ pub struct ModuleStateRecord {
     pub payload: PayloadRecord,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PrivateRecord {
+    pub receiver: ObjectId,
+    pub brand: ObjectId,
+    pub index: u32,
+    pub element: crate::heap::PrivateElement,
+}
+
 /// Host-held script roots live outside the VM. The snapshot deliberately does
 /// not contain native pointers, host callbacks, or pending microtasks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -146,6 +154,7 @@ pub struct Snapshot {
     pub build_id: String,
     pub binding_fingerprint: String,
     pub objects: Vec<ObjectRecord>,
+    pub(crate) private_elements: Vec<PrivateRecord>,
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
     #[serde(with = "ordered_pairs")]
@@ -177,6 +186,7 @@ impl Snapshot {
             build_id,
             binding_fingerprint: String::new(),
             objects: Vec::new(),
+            private_elements: Vec::new(),
             continuations: Vec::new(),
             operations: Vec::new(),
             imports: Vec::new(),

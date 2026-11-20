@@ -67,6 +67,7 @@ pub mod heap;
 pub mod host;
 mod intrinsic;
 mod ops;
+mod private;
 mod regexp;
 mod resolve;
 mod runtime;

@@ -23,6 +23,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::ThrowDeleteSuper
         | Instr::GetSuper { .. }
         | Instr::SetSuper { .. }
+        | Instr::GetPrivate { .. }
+        | Instr::SetPrivate { .. }
+        | Instr::HasPrivate { .. }
         | Instr::CallValue { .. }
         | Instr::LoadClassBinding { .. }
         | Instr::CreateClass { .. }
@@ -63,6 +66,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetImport { .. }
         | Instr::Closure { .. }
         | Instr::SetHome { .. }
+        | Instr::AddClassPrivate { .. }
         | Instr::GetSuperBase { .. }
         | Instr::NewClassScope { .. }
         | Instr::InitClassBinding { .. }
@@ -205,6 +209,24 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             class, key, src, ..
         } => {
             uses.extend([class.index, key.index, src.index]);
+        }
+        Instr::AddClassPrivate { class, src, .. } => {
+            uses.insert(class.index);
+            uses.extend(src.map(|slot| slot.index));
+        }
+        Instr::GetPrivate {
+            dst, object, brand, ..
+        }
+        | Instr::HasPrivate {
+            dst, object, brand, ..
+        } => {
+            uses.extend([object.index, brand.index]);
+            defs.insert(dst.index);
+        }
+        Instr::SetPrivate {
+            object, brand, src, ..
+        } => {
+            uses.extend([object.index, brand.index, src.index]);
         }
         Instr::AddClassField {
             class,
@@ -458,12 +480,14 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             heritage,
             constructor,
             default_constructor,
+            private_count,
         } => Instr::CreateClass {
             dst: remap(dst),
             scope: scope.map(remap),
             heritage: heritage.map(remap),
             constructor,
             default_constructor,
+            private_count,
         },
         Instr::ScopedClosure {
             dst,
@@ -486,6 +510,52 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             src: remap(src),
             is_static,
             kind,
+        },
+        Instr::AddClassPrivate {
+            class,
+            index,
+            src,
+            is_static,
+            kind,
+        } => Instr::AddClassPrivate {
+            class: remap(class),
+            index,
+            src: src.map(remap),
+            is_static,
+            kind,
+        },
+        Instr::GetPrivate {
+            dst,
+            object,
+            brand,
+            index,
+        } => Instr::GetPrivate {
+            dst: remap(dst),
+            object: remap(object),
+            brand: remap(brand),
+            index,
+        },
+        Instr::SetPrivate {
+            object,
+            brand,
+            src,
+            index,
+        } => Instr::SetPrivate {
+            object: remap(object),
+            brand: remap(brand),
+            src: remap(src),
+            index,
+        },
+        Instr::HasPrivate {
+            dst,
+            object,
+            brand,
+            index,
+        } => Instr::HasPrivate {
+            dst: remap(dst),
+            object: remap(object),
+            brand: remap(brand),
+            index,
         },
         Instr::AddClassField {
             class,

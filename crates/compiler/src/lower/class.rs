@@ -1,12 +1,54 @@
+use std::collections::{BTreeMap, btree_map::Entry};
+use std::rc::Rc;
+
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
-use yield_vm::bytecode::{Instr, PropertyDefinition};
+use yield_vm::BindingId;
+use yield_vm::bytecode::{Instr, PrivateDefinition, PropertyDefinition};
 
 use super::{FunctionSource, Lowerer};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 
+pub(super) struct PrivateScope<'ast> {
+    brand: BindingId,
+    names: BTreeMap<&'ast str, PrivateName>,
+}
+
+struct PrivateName {
+    index: u32,
+    is_static: bool,
+    // Only an unpaired accessor can accept another declaration.
+    unpaired_get: Option<bool>,
+}
+
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
+    pub(super) fn load_private_brand(
+        &mut self,
+        name: &PrivateIdentifier<'_>,
+    ) -> Result<(Reg, u32), CompileError> {
+        let (binding, index) = self
+            .private_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| {
+                scope
+                    .names
+                    .get(name.name.as_str())
+                    .map(|entry| (scope.brand, entry.index))
+            })
+            .ok_or_else(|| {
+                CompileError::new(
+                    self.source_text(),
+                    name.span,
+                    format!("undeclared private name #{}", name.name),
+                )
+            })?;
+        let brand = self.alloc_reg()?;
+        self.emit_binding_read(brand, binding);
+        Ok((brand, index))
+    }
+
     pub(super) fn compile_class_declaration(
         &mut self,
         class: &'ast Class<'ast>,
@@ -41,12 +83,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         let mut constructor = FunctionSource::DefaultConstructor(class.span);
+        let mut names: BTreeMap<_, PrivateName> = BTreeMap::new();
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    let feature = if matches!(method.key, PropertyKey::PrivateIdentifier(_)) {
-                        Some("private class method")
-                    } else if !method.decorators.is_empty() {
+                    let feature = if !method.decorators.is_empty() {
                         Some("class method decorator")
                     } else if method.value.generator {
                         Some("generator")
@@ -80,9 +121,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 ClassElement::StaticBlock(_) => {}
                 ClassElement::PropertyDefinition(field) => {
-                    let feature = if matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
-                        Some("private class field")
-                    } else if !field.decorators.is_empty() {
+                    let feature = if !field.decorators.is_empty() {
                         Some("class field decorator")
                     } else {
                         None
@@ -99,21 +138,73 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     ));
                 }
             }
+            let (key, is_static, accessor) = match element {
+                ClassElement::MethodDefinition(method) => (
+                    &method.key,
+                    method.r#static,
+                    match method.kind {
+                        MethodDefinitionKind::Get => Some(true),
+                        MethodDefinitionKind::Set => Some(false),
+                        _ => None,
+                    },
+                ),
+                ClassElement::PropertyDefinition(field) => (&field.key, field.r#static, None),
+                _ => continue,
+            };
+            let PropertyKey::PrivateIdentifier(id) = key else {
+                continue;
+            };
+            let name = id.name.as_str();
+            if name == "constructor" {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    id.span,
+                    "illegal private name #constructor",
+                ));
+            }
+            let index = names.len() as u32;
+            match names.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(PrivateName {
+                        index,
+                        is_static,
+                        unpaired_get: accessor,
+                    });
+                }
+                Entry::Occupied(mut entry) => {
+                    let prior = entry.get_mut();
+                    if prior.is_static != is_static
+                        || !matches!(
+                            (prior.unpaired_get, accessor),
+                            (Some(true), Some(false)) | (Some(false), Some(true))
+                        )
+                    {
+                        return Err(CompileError::new(
+                            self.source_text(),
+                            id.span,
+                            format!("duplicate private name #{name}"),
+                        ));
+                    }
+                    prior.unpaired_get = None;
+                }
+            }
         }
 
         let parent = self.class_scope;
-        let inner = if let Some(id) = &class.id {
+        if class.id.is_some() || !names.is_empty() {
             let scope = self.alloc_reg()?;
             self.emit(Instr::NewClassScope {
                 dst: self.slot(scope),
                 parent: parent.map(|scope| self.slot(scope)),
             });
             self.class_scope = Some(scope);
+        }
+        let inner = if let Some(id) = &class.id {
             self.env.enter_block();
             let (binding, _) =
                 self.declare(id.name.as_str(), VariableDeclarationKind::Const, id.span)?;
             self.class_bindings.insert(binding);
-            Some((scope, binding))
+            Some(binding)
         } else {
             None
         };
@@ -121,8 +212,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             .id
             .as_ref()
             .map_or(inferred_name, |id| id.name.as_str());
-        let result = self.emit_class(class, name, constructor, inner);
-        if let Some((_, binding)) = inner {
+        let private_scope = (!names.is_empty()).then(|| {
+            Rc::new(PrivateScope {
+                brand: self.alloc_binding(),
+                names,
+            })
+        });
+        let depth = self.private_scopes.len();
+        let result = self.emit_class(class, name, constructor, inner, private_scope);
+        for scope in self.private_scopes.drain(depth..) {
+            self.class_bindings.remove(&scope.brand);
+        }
+        if let Some(binding) = inner {
             self.class_bindings.remove(&binding);
             self.env.exit_block();
         }
@@ -135,13 +236,20 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         class: &'ast Class<'ast>,
         name: &str,
         constructor: FunctionSource<'ast>,
-        inner: Option<(Reg, yield_vm::BindingId)>,
+        inner: Option<BindingId>,
+        private_scope: Option<Rc<PrivateScope<'ast>>>,
     ) -> Result<Reg, CompileError> {
         let heritage = class
             .heritage
             .as_ref()
             .map(|heritage| self.compile_expression(&heritage.expression))
             .transpose()?;
+        // The heritage sees outer private names only; computed keys and
+        // member bodies see all names declared by this class.
+        if let Some(scope) = &private_scope {
+            self.class_bindings.insert(scope.brand);
+            self.private_scopes.push(Rc::clone(scope));
+        }
         let default_constructor = matches!(constructor, FunctionSource::DefaultConstructor(_));
         let constructor = self.enqueue_function(constructor, name, constructor.span())?;
         let dst = self.alloc_reg()?;
@@ -151,12 +259,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             constructor,
             default_constructor,
             heritage: heritage.map(|reg| self.slot(reg)),
+            private_count: private_scope
+                .as_ref()
+                .map_or(0, |scope| scope.names.len() as u32),
         });
+        if let Some(scope) = &private_scope {
+            self.emit(Instr::InitClassBinding {
+                scope: self.slot(self.class_scope.expect("private class scope")),
+                binding: scope.brand,
+                src: self.slot(dst),
+            });
+        }
         for element in &class.body.body {
             let method = match element {
                 ClassElement::MethodDefinition(method) => method,
                 ClassElement::PropertyDefinition(field) => {
-                    let key = self.compile_property_key(&field.key, field.computed)?;
+                    let key = match &field.key {
+                        PropertyKey::PrivateIdentifier(_) => None,
+                        key => Some(self.compile_property_key(key, field.computed)?),
+                    };
                     let initializer = if let Some(value) = &field.value {
                         let function = self.enqueue_function(
                             FunctionSource::ClassField(value),
@@ -167,12 +288,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     } else {
                         None
                     };
-                    self.emit(Instr::AddClassField {
-                        class: self.slot(dst),
-                        key: self.slot(key),
-                        initializer: initializer.map(|reg| self.slot(reg)),
-                        is_static: field.r#static,
-                    });
+                    if let Some(key) = key {
+                        self.emit(Instr::AddClassField {
+                            class: self.slot(dst),
+                            key: self.slot(key),
+                            initializer: initializer.map(|reg| self.slot(reg)),
+                            is_static: field.r#static,
+                        });
+                    } else if let PropertyKey::PrivateIdentifier(id) = &field.key {
+                        self.emit(Instr::AddClassPrivate {
+                            class: self.slot(dst),
+                            index: private_scope.as_ref().unwrap().names[id.name.as_str()].index,
+                            src: initializer.map(|reg| self.slot(reg)),
+                            is_static: field.r#static,
+                            kind: PrivateDefinition::Field,
+                        });
+                    }
                     continue;
                 }
                 ClassElement::StaticBlock(block) => {
@@ -196,9 +327,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 MethodDefinitionKind::Get => (PropertyDefinition::Get, "get "),
                 MethodDefinitionKind::Set => (PropertyDefinition::Set, "set "),
             };
-            let key = self.compile_property_key(&method.key, method.computed)?;
+            let key = match &method.key {
+                PropertyKey::PrivateIdentifier(_) => None,
+                key => Some(self.compile_property_key(key, method.computed)?),
+            };
             let mut buffer = ryu_js::Buffer::new();
             let name = match &method.key {
+                PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name).into()),
                 PropertyKey::NumericLiteral(literal) => Some(buffer.format(literal.value).into()),
                 key => key.static_name().and_then(|name| name.into_cow_str()),
             };
@@ -208,17 +343,31 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 method.value.span,
             )?;
             let src = self.emit_function_value(function)?;
-            self.emit(Instr::DefineClassMethod {
-                class: self.slot(dst),
-                key: self.slot(key),
-                src: self.slot(src),
-                is_static: method.r#static,
-                kind,
-            });
+            if let Some(key) = key {
+                self.emit(Instr::DefineClassMethod {
+                    class: self.slot(dst),
+                    key: self.slot(key),
+                    src: self.slot(src),
+                    is_static: method.r#static,
+                    kind,
+                });
+            } else if let PropertyKey::PrivateIdentifier(id) = &method.key {
+                self.emit(Instr::AddClassPrivate {
+                    class: self.slot(dst),
+                    index: private_scope.as_ref().unwrap().names[id.name.as_str()].index,
+                    src: Some(self.slot(src)),
+                    is_static: method.r#static,
+                    kind: match kind {
+                        PropertyDefinition::Data => PrivateDefinition::Method,
+                        PropertyDefinition::Get => PrivateDefinition::Get,
+                        PropertyDefinition::Set => PrivateDefinition::Set,
+                    },
+                });
+            }
         }
-        if let Some((scope, binding)) = inner {
+        if let Some(binding) = inner {
             self.emit(Instr::InitClassBinding {
-                scope: self.slot(scope),
+                scope: self.slot(self.class_scope.expect("named class scope")),
                 binding,
                 src: self.slot(dst),
             });

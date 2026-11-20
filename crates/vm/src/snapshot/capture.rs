@@ -9,9 +9,10 @@ use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::heap::{
     EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, ITERATOR_DESCRIPTION,
     ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
-    NativeObject, Object, OwnProperty, OwnedEdge, PromiseState, Property, REPLACE_DESCRIPTION,
-    REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
-    SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind, PromiseState,
+    Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
+    SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
+    TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
 use crate::regexp::compile_pattern;
@@ -117,6 +118,16 @@ impl Vm {
                 object => object.clone(),
             };
             snapshot.objects.push(ObjectRecord { id: *id, object });
+            if let Some(elements) = self.heap.private.get(id) {
+                snapshot.private_elements.extend(elements.iter().map(
+                    |(&(brand, index), element)| PrivateRecord {
+                        receiver: *id,
+                        brand,
+                        index,
+                        element: element.clone(),
+                    },
+                ));
+            }
         }
         for (object, instance) in &self.host_instances {
             if !tracer.objects.contains(object) {
@@ -297,6 +308,7 @@ impl Vm {
             snapshot.symbol_registry.clone(),
             snapshot.next_symbol_id,
         );
+        load_private_elements(&mut heap, &snapshot.private_elements)?;
         if snapshot.imports.len() != build.imports.len() {
             return Err(VmError::InvalidSnapshot(format!(
                 "import namespace count mismatch: snapshot {}, build {}",
@@ -741,6 +753,55 @@ fn validate_preload_globals(
     Ok(())
 }
 
+fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(), VmError> {
+    for record in records {
+        let invalid = || {
+            VmError::InvalidSnapshot(format!(
+                "invalid private brand {} index {} on receiver {}",
+                record.brand, record.index, record.receiver
+            ))
+        };
+        if matches!(
+            heap.get(record.receiver),
+            Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+        ) {
+            return Err(invalid());
+        }
+        let class = heap
+            .function(record.brand)
+            .and_then(|f| f.class.as_ref())
+            .ok_or_else(invalid)?;
+        let member = class
+            .private
+            .get(&record.index)
+            .filter(|_| record.index < class.private_count)
+            .ok_or_else(invalid)?;
+        if (member.is_static && record.brand != record.receiver)
+            || matches!(member.kind, PrivateMemberKind::Field)
+                != matches!(record.element, PrivateElement::Field(_))
+        {
+            return Err(invalid());
+        }
+        if let PrivateElement::Field(value) = &record.element {
+            require_value_objects(heap, std::iter::once(value))?;
+            if matches!(value, Value::Object(id) if matches!(heap.get(*id), Ok(Object::Environment(_) | Object::ForInIterator { .. })))
+            {
+                return Err(invalid());
+            }
+        }
+        if heap
+            .private
+            .entry(record.receiver)
+            .or_default()
+            .insert((record.brand, record.index), record.element.clone())
+            .is_some()
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
@@ -803,7 +864,51 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 )));
             }
             if let Some(class) = &function.class {
+                let mut fields = BTreeSet::new();
+                for (&index, member) in &class.private {
+                    let home = Some(if member.is_static {
+                        id
+                    } else {
+                        class.prototype
+                    });
+                    let valid_closure = |target, accessor: bool| {
+                        heap.function(target).is_some_and(|f| {
+                            f.home == home
+                                && build.function(f.func_id).is_some_and(|code| {
+                                    !build.is_initializer(code.func_id)
+                                        && code.is_method
+                                        && (!accessor || code.is_accessor_method())
+                                })
+                        })
+                    };
+                    let valid = match member.kind {
+                        PrivateMemberKind::Field => {
+                            fields.insert(index);
+                            true
+                        }
+                        PrivateMemberKind::Method(target) => valid_closure(target, false),
+                        PrivateMemberKind::Accessor { get, set } => {
+                            (get.is_some() || set.is_some())
+                                && get
+                                    .into_iter()
+                                    .chain(set)
+                                    .all(|target| valid_closure(target, true))
+                        }
+                    };
+                    if index >= class.private_count || !valid {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "class {id} has an invalid private declaration {index}"
+                        )));
+                    }
+                }
                 for element in &class.elements {
+                    if let crate::heap::ClassElement::PrivateField { index, .. } = element
+                        && !fields.remove(index)
+                    {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "class {id} has an invalid private field {index}"
+                        )));
+                    }
                     if let Some(closure) = element.closure()
                         && !heap
                             .function(closure)
@@ -816,6 +921,11 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                             "class {id} has an invalid initializer closure"
                         )));
                     }
+                }
+                if !fields.is_empty() {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "class {id} has missing private field definitions"
+                    )));
                 }
             }
         }

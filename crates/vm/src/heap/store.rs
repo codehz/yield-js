@@ -6,13 +6,15 @@ use super::types::{
     ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
     HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL,
     MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object,
-    OrderedProperty, OwnProperty, PlainObject, PromiseObject, PromiseState, Property,
-    PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
-    SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
-    TO_PRIMITIVE_SYMBOL, array_index,
+    OrderedProperty, OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject,
+    PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION,
+    SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, array_index,
 };
 use crate::error::VmError;
 use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+
+type PrivateElements = BTreeMap<(ObjectId, u32), PrivateElement>;
 
 #[derive(Debug)]
 pub(crate) struct Heap {
@@ -25,6 +27,7 @@ pub(crate) struct Heap {
     pub(crate) symbol_registry: BTreeMap<JsString, SymbolId>,
     next_symbol_id: SymbolId,
     pub(crate) combines: BTreeMap<ObjectId, CombineState>,
+    pub(crate) private: BTreeMap<ObjectId, PrivateElements>,
     /// Uncalled [`Resolution`] objects. Capture rejects any id in this set that
     /// the tracer did not reach: that capability is only held by an in-flight
     /// `then` call, which is not a snapshot root.
@@ -55,6 +58,7 @@ impl Heap {
             symbol_registry: BTreeMap::new(),
             next_symbol_id: HAS_INSTANCE_SYMBOL + 1,
             combines: BTreeMap::new(),
+            private: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
             array_prototype: None,
@@ -148,7 +152,46 @@ impl Heap {
                 push_value(out, value);
             }
         }
+        if let Some(elements) = self.private.get(&id) {
+            for (&(brand, _), element) in elements {
+                out.push(OwnedEdge::Object(brand));
+                if let PrivateElement::Field(value) = element {
+                    push_value(out, value);
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub(crate) fn install_private_methods(
+        &mut self,
+        brand: ObjectId,
+        receiver: ObjectId,
+        is_static: bool,
+    ) -> bool {
+        let Some(Object::Function(function)) = self.objects.get(&brand) else {
+            unreachable!("validated class")
+        };
+        let class = function.class.as_ref().expect("validated class");
+        let mut indices = class
+            .private
+            .iter()
+            .filter_map(|(&index, member)| {
+                (member.is_static == is_static && member.kind != PrivateMemberKind::Field)
+                    .then_some(index)
+            })
+            .peekable();
+        if indices.peek().is_none() {
+            return true;
+        }
+        let elements = self.private.entry(receiver).or_default();
+        for index in indices {
+            let Entry::Vacant(entry) = elements.entry((brand, index)) else {
+                return false;
+            };
+            entry.insert(PrivateElement::Installed);
+        }
+        true
     }
 
     pub(crate) fn alloc_plain(&mut self) -> ObjectId {

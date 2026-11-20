@@ -506,6 +506,16 @@ impl Object {
                             out.push(OwnedEdge::Symbol(*symbol));
                         }
                     }
+                    for member in class.private.values() {
+                        use super::types::PrivateMemberKind;
+                        match member.kind {
+                            PrivateMemberKind::Field => {}
+                            PrivateMemberKind::Method(id) => out.push(OwnedEdge::Object(id)),
+                            PrivateMemberKind::Accessor { get, set } => {
+                                out.extend(get.into_iter().chain(set).map(OwnedEdge::Accessor));
+                            }
+                        }
+                    }
                 }
             }
             Self::Bound(bound) => {

@@ -300,6 +300,45 @@ fn rejects_unsupported_syntax_with_location() {
 }
 
 #[test]
+fn rejects_invalid_private_names() {
+    for (source, message) in [
+        (
+            "function f(o) { return o.#x; }",
+            "undeclared private name #x",
+        ),
+        (
+            "class C { m(o) { return #x in o; } }",
+            "undeclared private name #x",
+        ),
+        ("class C { #x; #x() {} }", "duplicate private name #x"),
+        (
+            "class C { get #x() {} static set #x(v) {} }",
+            "duplicate private name #x",
+        ),
+        (
+            "class C { get #x() {} set #x(v) {} get #x() {} }",
+            "duplicate private name #x",
+        ),
+        ("class C { #x; m() { delete (this.#x); } }", "private"),
+        ("class C { #x; m() { delete this?.#x; } }", "private"),
+        ("class C { #x; m() { return super.#x; } }", "private"),
+        ("class C { #constructor; }", "constructor"),
+        (
+            "class C extends (#x in {} ? Object : Object) { #x; }",
+            "undeclared private name #x",
+        ),
+    ] {
+        let error = compile(source, &CompileOptions::default()).expect_err(source);
+        assert!(
+            error.message().to_lowercase().contains(message),
+            "{source}: {error}"
+        );
+        assert_eq!(error.line(), 1, "{source}: {error}");
+        assert!(error.column() > 1, "{source}: {error}");
+    }
+}
+
+#[test]
 fn rejects_for_await_of_with_location() {
     let source = "async function run() {\n  for await (const x of []) {}\n}";
     let error = compile(source, &CompileOptions::default()).unwrap_err();
@@ -845,8 +884,6 @@ fn rejects_unsupported_module_syntax() {
 #[test]
 fn rejects_gated_class_features() {
     for (source, feature) in [
-        ("class C { #x() {} }", "private class method"),
-        ("class C { #x = 1 }", "private class field"),
         ("class C { x = arguments; }", "arguments"),
         ("class C { static { (() => arguments)(); } }", "arguments"),
         ("class C { *m() {} }", "generator"),

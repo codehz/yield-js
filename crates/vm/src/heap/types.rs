@@ -623,6 +623,30 @@ pub(crate) struct ScriptClass {
     pub derived: bool,
     pub default_constructor: bool,
     pub elements: Vec<ClassElement>,
+    pub private_count: u32,
+    pub private: BTreeMap<u32, PrivateMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PrivateMember {
+    pub is_static: bool,
+    pub kind: PrivateMemberKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PrivateMemberKind {
+    Field,
+    Method(ObjectId),
+    Accessor {
+        get: Option<ObjectId>,
+        set: Option<ObjectId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) enum PrivateElement {
+    Field(Value),
+    Installed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -632,6 +656,10 @@ pub(crate) enum ClassElement {
         initializer: Option<ObjectId>,
         is_static: bool,
     },
+    PrivateField {
+        index: u32,
+        initializer: Option<ObjectId>,
+    },
     Block {
         body: ObjectId,
     },
@@ -640,7 +668,9 @@ pub(crate) enum ClassElement {
 impl ClassElement {
     pub(crate) fn closure(&self) -> Option<ObjectId> {
         match self {
-            Self::Field { initializer, .. } => *initializer,
+            Self::Field { initializer, .. } | Self::PrivateField { initializer, .. } => {
+                *initializer
+            }
             Self::Block { body } => Some(*body),
         }
     }

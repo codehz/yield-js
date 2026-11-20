@@ -6,6 +6,36 @@ use yield_vm::heap::Property;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
 
 #[test]
+fn restore_rejects_private_stamp_with_non_class_brand() {
+    let mut suspended = Suspended::start(
+        r#"
+        import { wait } from 'test';
+        class C { #x = 4; read() { return this.#x; } }
+        export async function run() {
+            const value = new C();
+            await wait('private');
+            return value.read();
+        }
+    "#,
+        vec![],
+    );
+    let snapshot = suspended.snapshot();
+    let mut corrupt = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    let stamp = &mut corrupt["private_elements"][0];
+    stamp["brand"] = stamp["receiver"].clone();
+    let corrupt = serde_json::from_value(corrupt).expect("deserialize snapshot");
+    assert!(
+        matches!(suspended.restore(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("private brand"))
+    );
+    suspended.restore(snapshot).expect("valid snapshot");
+    suspended.complete("wait:private", Completion::Fulfilled(number(0.0)));
+    assert_eq!(
+        suspended.state(),
+        PromiseState::Fulfilled(Value::Number(4.0))
+    );
+}
+
+#[test]
 fn restore_rejects_missing_method_home() {
     let source = r#"
 import { wait } from 'test';
