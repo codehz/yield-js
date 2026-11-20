@@ -412,7 +412,7 @@ flowchart TB
 
 1. **弱引用槽与 `JsMap` 槽：暂不增加。** 宿主实例槽维持 `Js` / `JsList`；弱键缓存使用 VM 已有的 `WeakMap`。出现具体绑定需求后再评估是否扩展槽种类。
 2. **访问器失败时机：延迟到脚本访问。** 恢复只做结构和声明校验，不执行 getter/setter 或其他脚本可观察逻辑。
-3. **绑定类继承：允许 `class extends` 并调用 `super`。** 派生类可复用基类构造路径和基类槽初始化；脚本定义的派生类不增加 `HostClass` 槽或 payload。`new.target`、派生实例初始化及非法构造路径须按此约束验证。声明层的 `HostClass::PARENT` 已实现原型链、槽合并、基类接收者校验与快照往返；脚本 `class extends` 仍随首版约定由编译器拒绝，脚本派生类路径尚未存在。
+3. **绑定类继承：允许 `class extends` 并调用 `super`。** 声明层父类支持原型链、槽合并和基类接收者校验。脚本派生构造复用基类构造及槽初始化，只对本次匹配的宿主分配使用派生原型，不改写替换对象的原型。脚本私元素单独存储，不增加 `HostClass` 槽或 payload。
 4. **符号成员：支持显式列出的 well-known Symbol。** 声明使用稳定的符号枚举 ID，不接受任意运行期 Symbol；宿主私有状态仍走隐藏槽，不映射为 JS 私有名。
 5. **C ABI：暂缓。** Rust 应用链接 VM、实现 `Host` 并调用平台服务；本库不提供 C ABI 或移动端绑定。若未来需要外部语言直接声明绑定，再单独设计 ABI。
 6. **声明入口：宏是最终用户 API，builder 是过渡/内部实现工具。** 最终由宏生成或校验规范声明结构；不保留公开 builder 作为平行的声明逃生口。codec、operation 等行为可由 Rust trait 实现。
@@ -426,7 +426,7 @@ flowchart TB
 
 已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局、payload schema 与 operation 声明。
 
-尚未实现：脚本 `class` / `extends` / `super`（编译器按首版契约拒绝，因此脚本派生类路径不存在，声明层父类已经可用）；TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽与流式 payload 按第 15 节暂缓；恢复资源限制仅由可信本地快照这一前提约束。带 `class` 的 `#[constructor]` 导出将类原型用于 `new` 与 `instanceof`。
+脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 
 Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。参数位置数（含可选位置）决定声明的 arity，完整签名进入绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 

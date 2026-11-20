@@ -26,7 +26,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn load_private_brand(
         &mut self,
         name: &PrivateIdentifier<'_>,
-    ) -> Result<(Reg, u32), CompileError> {
+    ) -> Result<(Reg, BindingId, u32), CompileError> {
         let (binding, index) = self
             .private_scopes
             .iter()
@@ -46,7 +46,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             })?;
         let brand = self.alloc_reg()?;
         self.emit_binding_read(brand, binding);
-        Ok((brand, index))
+        Ok((brand, binding, index))
     }
 
     pub(super) fn compile_class_declaration(
@@ -262,6 +262,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             private_count: private_scope
                 .as_ref()
                 .map_or(0, |scope| scope.names.len() as u32),
+            private_binding: private_scope.as_ref().map(|scope| scope.brand),
         });
         if let Some(scope) = &private_scope {
             self.emit(Instr::InitClassBinding {
@@ -299,6 +300,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         self.emit(Instr::AddClassPrivate {
                             class: self.slot(dst),
                             index: private_scope.as_ref().unwrap().names[id.name.as_str()].index,
+                            lexical: private_scope.as_ref().unwrap().brand,
                             src: initializer.map(|reg| self.slot(reg)),
                             is_static: field.r#static,
                             kind: PrivateDefinition::Field,
@@ -355,6 +357,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit(Instr::AddClassPrivate {
                     class: self.slot(dst),
                     index: private_scope.as_ref().unwrap().names[id.name.as_str()].index,
+                    lexical: private_scope.as_ref().unwrap().brand,
                     src: Some(self.slot(src)),
                     is_static: method.r#static,
                     kind: match kind {

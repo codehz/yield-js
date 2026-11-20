@@ -8,6 +8,27 @@ use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]
+fn loader_rejects_private_index_outside_its_lexical_class() {
+    let mut corrupt = build("class A { #x; read(){ return this.#x; } } class B { #x; #y; }");
+    let index = corrupt
+        .functions
+        .iter_mut()
+        .flat_map(|f| &mut f.code)
+        .find_map(|instr| {
+            if let Instr::GetPrivate { index, .. } = instr {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .expect("private access");
+    *index = 1; // An index in B, but not in the class this instruction belongs to.
+    corrupt.finalize();
+    assert!(matches!(Vm::new(corrupt, &mut TestHost::default()),
+        Err(VmError::InvalidBuild(detail)) if detail.contains("invalid class private index")));
+}
+
+#[test]
 fn loader_rejects_invalid_class_constructor_reference() {
     let mut corrupt = build("export class C {}");
     let constructor = corrupt

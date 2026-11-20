@@ -196,7 +196,14 @@ impl Vm {
                 unreachable!()
             };
             if default {
-                return self.construct_super_and_initialize(host, class, new_target, args, None);
+                let parent = self.super_parent(class)?;
+                return self.construct_super_and_initialize(
+                    host,
+                    class,
+                    new_target,
+                    args,
+                    (&parent, None),
+                );
             }
             let context = self.heap.alloc_environment(
                 None,
@@ -298,10 +305,27 @@ impl Vm {
         }
     }
 
+    fn super_parent(&self, class: ObjectId) -> Result<Value, VmError> {
+        Ok(self
+            .heap
+            .prototype_of(class)?
+            .map_or(Value::Null, Value::Object))
+    }
+
+    pub(crate) fn super_constructor(&self, context: ObjectId) -> Result<Value, VmError> {
+        let Value::Object(class) = self.heap.get_binding(context, DERIVED_CLASS)? else {
+            return Err(VmError::InvalidState(
+                "invalid derived constructor context".into(),
+            ));
+        };
+        self.super_parent(class)
+    }
+
     pub(crate) fn super_construct(
         &mut self,
         host: &mut dyn Host,
         context: ObjectId,
+        callee: &Value,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let bindings = &self.heap.environment(context)?.bindings;
@@ -312,7 +336,13 @@ impl Vm {
                 "invalid derived constructor context".into(),
             ));
         };
-        self.construct_super_and_initialize(host, *class, &new_target.clone(), args, Some(context))
+        self.construct_super_and_initialize(
+            host,
+            *class,
+            &new_target.clone(),
+            args,
+            (callee, Some(context)),
+        )
     }
 
     fn construct_super_and_initialize(
@@ -321,12 +351,9 @@ impl Vm {
         class: ObjectId,
         new_target: &Value,
         args: Vec<Value>,
-        context: Option<ObjectId>,
+        (callee, context): (&Value, Option<ObjectId>),
     ) -> Result<Invocation, VmError> {
-        let Some(parent) = self.heap.prototype_of(class)? else {
-            return self.throw_type_error("super is not a constructor");
-        };
-        let receiver = match self.construct_with(host, &Value::Object(parent), args, new_target)? {
+        let receiver = match self.construct_with(host, callee, args, new_target)? {
             Invocation::Value(Value::Object(id)) => id,
             Invocation::Value(_) => {
                 return self.throw_type_error("super constructor must return an object");

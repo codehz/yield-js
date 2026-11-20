@@ -16,9 +16,21 @@ use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
 
 #[derive(Clone, Copy)]
 pub(super) enum PropertyRef {
-    Member { object: Reg, key: Reg },
-    Super { base: Reg, key: Reg, receiver: Reg },
-    Private { object: Reg, brand: Reg, index: u32 },
+    Member {
+        object: Reg,
+        key: Reg,
+    },
+    Super {
+        base: Reg,
+        key: Reg,
+        receiver: Reg,
+    },
+    Private {
+        object: Reg,
+        brand: Reg,
+        lexical: BindingId,
+        index: u32,
+    },
 }
 
 impl PropertyRef {
@@ -103,13 +115,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::BinaryExpression(expression) => self.compile_binary(expression),
             Expression::PrivateInExpression(expression) => {
                 let object = self.compile_expression(&expression.right)?;
-                let (brand, index) = self.load_private_brand(&expression.left)?;
+                let (brand, lexical, index) = self.load_private_brand(&expression.left)?;
                 let dst = self.alloc_reg()?;
                 self.emit(Instr::HasPrivate {
                     dst: self.slot(dst),
                     object: self.slot(object),
                     brand: self.slot(brand),
                     index,
+                    lexical,
                 });
                 Ok(dst)
             }
@@ -714,6 +727,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 object,
                 brand,
                 index,
+                lexical,
             } => {
                 let dst = self.alloc_reg()?;
                 self.emit(Instr::GetPrivate {
@@ -721,6 +735,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     object: self.slot(object),
                     brand: self.slot(brand),
                     index,
+                    lexical,
                 });
                 return Ok(dst);
             }
@@ -752,11 +767,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 object,
                 brand,
                 index,
+                lexical,
             } => Instr::SetPrivate {
                 object: self.slot(object),
                 brand: self.slot(brand),
                 src,
                 index,
+                lexical,
             },
             PropertyRef::Super {
                 base,
@@ -836,11 +853,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ));
             }
             let context = self.load_derived_context()?;
+            let callee = self.alloc_reg()?;
+            self.emit(Instr::GetSuperConstructor {
+                dst: self.slot(callee),
+                context: self.slot(context),
+            });
             let args = self.compile_arguments(&expression.arguments)?;
             let dst = self.alloc_reg()?;
             self.emit(Instr::SuperConstruct {
                 dst: self.slot(dst),
                 context: self.slot(context),
+                callee: self.slot(callee),
                 args,
             });
             return Ok(dst);
@@ -1241,11 +1264,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     ));
                 }
                 let object = self.compile_member_object(&member.object, member.optional, exits)?;
-                let (brand, index) = self.load_private_brand(&member.field)?;
+                let (brand, lexical, index) = self.load_private_brand(&member.field)?;
                 Ok(PropertyRef::Private {
                     object,
                     brand,
                     index,
+                    lexical,
                 })
             }
         }

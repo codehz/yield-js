@@ -68,6 +68,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::SetHome { .. }
         | Instr::AddClassPrivate { .. }
         | Instr::GetSuperBase { .. }
+        | Instr::GetSuperConstructor { .. }
         | Instr::NewClassScope { .. }
         | Instr::InitClassBinding { .. }
         | Instr::ScopedClosure { .. }
@@ -175,10 +176,13 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         } => {
             uses.extend([base.index, key.index, receiver.index, src.index]);
         }
-        Instr::GetDerivedThis { dst, context } | Instr::SuperConstruct { dst, context, .. } => {
+        Instr::GetDerivedThis { dst, context }
+        | Instr::GetSuperConstructor { dst, context }
+        | Instr::SuperConstruct { dst, context, .. } => {
             uses.insert(context.index);
             defs.insert(dst.index);
-            if let Instr::SuperConstruct { args, .. } = instruction {
+            if let Instr::SuperConstruct { args, callee, .. } = instruction {
+                uses.insert(callee.index);
                 uses.extend(args.slots().iter().map(|arg| arg.index));
             }
         }
@@ -443,9 +447,19 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             context: remap(context),
         },
-        Instr::SuperConstruct { dst, context, args } => Instr::SuperConstruct {
+        Instr::GetSuperConstructor { dst, context } => Instr::GetSuperConstructor {
             dst: remap(dst),
             context: remap(context),
+        },
+        Instr::SuperConstruct {
+            dst,
+            context,
+            callee,
+            args,
+        } => Instr::SuperConstruct {
+            dst: remap(dst),
+            context: remap(context),
+            callee: remap(callee),
             args: remap_args(args, remap),
         },
         Instr::Closure { dst, function } => Instr::Closure {
@@ -481,6 +495,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             constructor,
             default_constructor,
             private_count,
+            private_binding,
         } => Instr::CreateClass {
             dst: remap(dst),
             scope: scope.map(remap),
@@ -488,6 +503,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             constructor,
             default_constructor,
             private_count,
+            private_binding,
         },
         Instr::ScopedClosure {
             dst,
@@ -514,12 +530,14 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::AddClassPrivate {
             class,
             index,
+            lexical,
             src,
             is_static,
             kind,
         } => Instr::AddClassPrivate {
             class: remap(class),
             index,
+            lexical,
             src: src.map(remap),
             is_static,
             kind,
@@ -529,33 +547,39 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             object,
             brand,
             index,
+            lexical,
         } => Instr::GetPrivate {
             dst: remap(dst),
             object: remap(object),
             brand: remap(brand),
             index,
+            lexical,
         },
         Instr::SetPrivate {
             object,
             brand,
             src,
             index,
+            lexical,
         } => Instr::SetPrivate {
             object: remap(object),
             brand: remap(brand),
             src: remap(src),
             index,
+            lexical,
         },
         Instr::HasPrivate {
             dst,
             object,
             brand,
             index,
+            lexical,
         } => Instr::HasPrivate {
             dst: remap(dst),
             object: remap(object),
             brand: remap(brand),
             index,
+            lexical,
         },
         Instr::AddClassField {
             class,

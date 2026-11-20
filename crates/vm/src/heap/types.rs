@@ -632,6 +632,7 @@ pub(crate) struct ScriptClassSource {
     pub default_constructor: bool,
     pub elements: Vec<ClassElement>,
     pub private_count: u32,
+    pub private_binding: Option<BindingId>,
     pub private: BTreeMap<u32, PrivateMember>,
 }
 

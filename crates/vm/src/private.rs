@@ -25,6 +25,20 @@ impl Vm {
             .ok_or_else(|| VmError::InvalidState("invalid private class reference".into()))
     }
 
+    pub(crate) fn check_private_lexical(
+        &self,
+        brand: ObjectId,
+        lexical: crate::BindingId,
+        index: u32,
+    ) -> Result<(), VmError> {
+        if self.private_class(brand, index)?.source.private_binding != Some(lexical) {
+            return Err(VmError::InvalidState(
+                "private brand does not match its lexical class".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn stamp_private(
         &mut self,
         receiver: ObjectId,

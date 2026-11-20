@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 37;
+pub const BYTECODE_VERSION: u32 = 38;
 
 pub use crate::builtin::BUILTINS;
 
@@ -219,9 +219,14 @@ pub enum Instr {
         dst: Slot,
         context: Slot,
     },
+    GetSuperConstructor {
+        dst: Slot,
+        context: Slot,
+    },
     SuperConstruct {
         dst: Slot,
         context: Slot,
+        callee: Slot,
         args: CallArgs,
     },
     /// Creates a closure that captures the frame's current environment.
@@ -250,6 +255,7 @@ pub enum Instr {
         constructor: u32,
         default_constructor: bool,
         private_count: u32,
+        private_binding: Option<BindingId>,
     },
     ScopedClosure {
         dst: Slot,
@@ -266,6 +272,7 @@ pub enum Instr {
     AddClassPrivate {
         class: Slot,
         index: u32,
+        lexical: BindingId,
         src: Option<Slot>,
         is_static: bool,
         kind: PrivateDefinition,
@@ -275,18 +282,21 @@ pub enum Instr {
         object: Slot,
         brand: Slot,
         index: u32,
+        lexical: BindingId,
     },
     SetPrivate {
         object: Slot,
         brand: Slot,
         src: Slot,
         index: u32,
+        lexical: BindingId,
     },
     HasPrivate {
         dst: Slot,
         object: Slot,
         brand: Slot,
         index: u32,
+        lexical: BindingId,
     },
     AddClassField {
         class: Slot,
@@ -714,22 +724,30 @@ impl Build {
                 return Err(format!("duplicate function name {:?}", function.name));
             }
         }
-        let private_limit = self
-            .functions
-            .iter()
-            .flat_map(|f| &f.code)
-            .filter_map(|instr| {
-                if let Instr::CreateClass { private_count, .. } = instr {
-                    Some(*private_count)
-                } else {
-                    None
+        let mut private_limits = BTreeMap::new();
+        for instr in self.functions.iter().flat_map(|f| &f.code) {
+            if let Instr::CreateClass {
+                private_count,
+                private_binding,
+                ..
+            } = instr
+            {
+                match private_binding {
+                    None if *private_count == 0 => {}
+                    Some(binding)
+                        if *private_count != 0 && *binding < crate::builtin::call::DERIVED_THIS =>
+                    {
+                        if private_limits.insert(*binding, *private_count).is_some() {
+                            return Err(format!("duplicate private class binding {binding}"));
+                        }
+                    }
+                    _ => return Err("invalid private class binding".into()),
                 }
-            })
-            .max()
-            .unwrap_or(0);
+            }
+        }
 
         for function in &self.functions {
-            self.validate_function(function, private_limit)?;
+            self.validate_function(function, &private_limits)?;
         }
         self.validate_script()?;
         Ok(())
@@ -868,12 +886,21 @@ impl Build {
         Ok(())
     }
 
-    fn validate_function(&self, function: &Function, private_limit: u32) -> Result<(), String> {
-        let check_private = |index| {
-            if index < private_limit {
+    fn validate_function(
+        &self,
+        function: &Function,
+        private_limits: &BTreeMap<BindingId, u32>,
+    ) -> Result<(), String> {
+        let check_private = |lexical, index| {
+            if private_limits
+                .get(&lexical)
+                .is_some_and(|limit| index < *limit)
+            {
                 Ok(())
             } else {
-                Err(format!("invalid class private index {index}"))
+                Err(format!(
+                    "invalid class private index {index} for binding {lexical}"
+                ))
             }
         };
         let location = format!("function {} ({})", function.func_id, function.name);
@@ -1070,10 +1097,12 @@ impl Build {
                     check_slot(*receiver, "super receiver")?;
                 }
                 Instr::GetDerivedThis { dst, context }
+                | Instr::GetSuperConstructor { dst, context }
                 | Instr::SuperConstruct { dst, context, .. } => {
                     check_slot(*dst, "derived constructor result")?;
                     check_slot(*context, "derived constructor context")?;
-                    if let Instr::SuperConstruct { args, .. } = instr {
+                    if let Instr::SuperConstruct { args, callee, .. } = instr {
+                        check_slot(*callee, "SuperConstruct.callee")?;
                         for arg in args.slots() {
                             check_slot(*arg, "SuperConstruct.arg")?;
                         }
@@ -1158,6 +1187,7 @@ impl Build {
                 Instr::AddClassPrivate {
                     class,
                     index,
+                    lexical,
                     src,
                     kind,
                     ..
@@ -1170,30 +1200,33 @@ impl Build {
                             "{location}: private method definition is missing its closure at pc {pc}"
                         ));
                     }
-                    check_private(*index)?;
+                    check_private(*lexical, *index)?;
                 }
                 Instr::GetPrivate {
                     dst: value,
                     object,
                     brand,
                     index,
+                    lexical,
                 }
                 | Instr::SetPrivate {
                     src: value,
                     object,
                     brand,
                     index,
+                    lexical,
                 }
                 | Instr::HasPrivate {
                     dst: value,
                     object,
                     brand,
                     index,
+                    lexical,
                 } => {
                     check_slot(*value, "private element value")?;
                     check_slot(*object, "private element receiver")?;
                     check_slot(*brand, "private element brand")?;
-                    check_private(*index)?;
+                    check_private(*lexical, *index)?;
                 }
                 Instr::AddClassField {
                     class,

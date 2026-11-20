@@ -489,10 +489,21 @@ impl Vm {
                 let invocation = self.derived_this(context)?;
                 store_invocation(frame, dst, invocation)
             }
-            Instr::SuperConstruct { dst, context, args } => {
+            Instr::GetSuperConstructor { dst, context } => {
+                let context = object_id(frame.read_ref(context)?, "super construction context")?;
+                frame.write(dst, self.super_constructor(context)?)?;
+                Ok(Step::Next)
+            }
+            Instr::SuperConstruct {
+                dst,
+                context,
+                callee,
+                args,
+            } => {
                 let context = object_id(frame.read_ref(context)?, "super construction context")?;
                 let args = self.read_call_args(frame, &args)?;
-                let invocation = self.super_construct(host, context, args)?;
+                let invocation =
+                    self.super_construct(host, context, frame.read_ref(callee)?, args)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
@@ -542,6 +553,7 @@ impl Vm {
                 heritage,
                 default_constructor,
                 private_count,
+                private_binding,
             } => {
                 let env = self.class_scope(frame, scope)?;
                 let derived = heritage.is_some();
@@ -586,6 +598,7 @@ impl Vm {
                         default_constructor,
                         elements: Vec::new(),
                         private_count,
+                        private_binding,
                         private: Default::default(),
                     },
                 });
@@ -684,11 +697,13 @@ impl Vm {
             Instr::AddClassPrivate {
                 class,
                 index,
+                lexical,
                 src,
                 is_static,
                 kind,
             } => {
                 let class = object_id(frame.read_ref(class)?, "private element class")?;
+                self.check_private_lexical(class, lexical, index)?;
                 let closure = src
                     .map(|slot| object_id(frame.read_ref(slot)?, "private element closure"))
                     .transpose()?;
@@ -700,8 +715,10 @@ impl Vm {
                 object,
                 brand,
                 index,
+                lexical,
             } => {
                 let brand = object_id(frame.read_ref(brand)?, "private brand")?;
+                self.check_private_lexical(brand, lexical, index)?;
                 let value = self.get_private(host, frame.read_ref(object)?, brand, index)?;
                 store_invocation(frame, dst, value)
             }
@@ -710,8 +727,10 @@ impl Vm {
                 brand,
                 src,
                 index,
+                lexical,
             } => {
                 let brand = object_id(frame.read_ref(brand)?, "private brand")?;
+                self.check_private_lexical(brand, lexical, index)?;
                 match self.set_private(
                     host,
                     frame.read_ref(object)?,
@@ -728,9 +747,10 @@ impl Vm {
                 object,
                 brand,
                 index,
+                lexical,
             } => {
                 let brand = object_id(frame.read_ref(brand)?, "private brand")?;
-                self.private_class(brand, index)?;
+                self.check_private_lexical(brand, lexical, index)?;
                 let Value::Object(object) = frame.read(object)? else {
                     return Ok(Step::Throw(
                         self.type_error("private brand check requires an object")?,

@@ -91,6 +91,14 @@ export function run() {
   expect(Object.getPrototypeOf(lexical)).toBe(Alternate.prototype);
   throwsName(() => Lexical(6), 'TypeError');
 
+  class Original { constructor() { this.selected = 'original'; } }
+  class Changed { constructor() { this.selected = 'changed'; } }
+  class Switch extends Original {
+    constructor() { super(Object.setPrototypeOf(Switch, Changed)); }
+  }
+  expect(new Switch().selected).toBe('original');
+  expect(new Switch().selected).toBe('changed');
+
   class NullDefault extends null {}
   class NullSuper extends null { constructor() { super(); } }
   class NullMissingThis extends null { constructor() {} }

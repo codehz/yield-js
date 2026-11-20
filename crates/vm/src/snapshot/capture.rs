@@ -801,6 +801,35 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
 fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
+    use crate::bytecode::Instr;
+    let definitions = build
+        .functions
+        .iter()
+        .flat_map(|f| &f.code)
+        .filter_map(|instr| {
+            if let Instr::CreateClass {
+                constructor,
+                heritage,
+                default_constructor,
+                private_count,
+                private_binding,
+                ..
+            } = instr
+            {
+                Some((
+                    *constructor,
+                    (
+                        heritage.is_some(),
+                        *default_constructor,
+                        *private_count,
+                        *private_binding,
+                    ),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
     for id in heap.ids() {
         use crate::builtin::call::{DERIVED_CLASS, DERIVED_TARGET, DERIVED_THIS};
         if let Object::Environment(env) = heap.get(id)?
@@ -850,6 +879,9 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             }
             if let Some(class) = &function.class
                 && (!code.is_constructable()
+                    || definitions.get(&function.func_id) != Some(&(class.source.derived, class.source.default_constructor, class.source.private_count, class.source.private_binding))
+                    || function.home != Some(class.prototype)
+                    || class.source.private_binding.is_some_and(|binding| !matches!(heap.environment(function.env), Ok(env) if env.bindings.get(&binding) == Some(&Value::Object(id))))
                     || !matches!(heap.get(class.prototype), Ok(Object::Plain(_)))
                     || !matches!(heap.get(id)?.own_property(PropertyKeyRef::String("prototype")),
                         Some(OwnProperty::Stored(Property::Data(Value::Object(prototype)), attributes))
