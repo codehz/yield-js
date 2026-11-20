@@ -635,9 +635,16 @@ impl Vm {
         let prepared = self.build.functions[index]
             .needs_environment()
             .then(|| self.heap.alloc_environment(None, BTreeMap::new()));
-        self.activate(host, func_id, None, prepared, Vec::new(), &Value::Undefined)?
-            .into_result()
-            .map(|_| prepared)
+        self.activate(
+            host,
+            func_id,
+            None,
+            prepared,
+            Vec::new(),
+            (&Value::Undefined, &Value::Undefined),
+        )?
+        .into_result()
+        .map(|_| prepared)
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the
@@ -925,8 +932,16 @@ impl Vm {
         parent_env: Option<ObjectId>,
         args: Vec<Value>,
         receiver: &Value,
+        new_target: &Value,
     ) -> Result<Invocation, VmError> {
-        self.activate(host, func_id, parent_env, None, args, receiver)
+        self.activate(
+            host,
+            func_id,
+            parent_env,
+            None,
+            args,
+            (receiver, new_target),
+        )
     }
 
     fn activate(
@@ -936,13 +951,16 @@ impl Vm {
         parent_env: Option<ObjectId>,
         prepared_env: Option<ObjectId>,
         args: Vec<Value>,
-        receiver: &Value,
+        (receiver, new_target): (&Value, &Value),
     ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
         let params = self.build.functions[function_index].params.clone();
         let rest_param = self.build.functions[function_index].rest_param.clone();
         let this_param = self.build.functions[function_index].this_param.clone();
+        let new_target_param = self.build.functions[function_index]
+            .new_target_param
+            .clone();
         let arguments_param = self.build.functions[function_index].arguments_param.clone();
         let async_promise = is_async.then(|| self.heap.alloc_promise());
 
@@ -956,6 +974,9 @@ impl Vm {
         };
         if let Some(param) = this_param {
             bind(param, receiver.clone());
+        }
+        if let Some(param) = new_target_param {
+            bind(param, new_target.clone());
         }
         if let Some(param) = arguments_param {
             bind(param, self.create_arguments_object(&args)?);

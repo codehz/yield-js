@@ -9,7 +9,7 @@ use oxc::syntax::operator::{
 use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
 use yield_vm::{BindingId, JsString};
 
-use super::{FunctionSource, Lowerer, THIS_BINDING};
+use super::{FunctionSource, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
@@ -124,6 +124,21 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
             Expression::ThisExpression(expression) => self.compile_this(expression.span),
+            Expression::NewTarget(property) => {
+                let binding = self.lookup(NEW_TARGET_BINDING).ok_or_else(|| {
+                    unsupported(
+                        self.source_text(),
+                        property.span,
+                        "new.target outside a function",
+                    )
+                })?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetBinding {
+                    dst: self.slot(dst),
+                    binding,
+                });
+                Ok(dst)
+            }
             Expression::FunctionExpression(function) => {
                 let hint = function
                     .id

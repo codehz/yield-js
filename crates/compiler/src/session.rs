@@ -189,6 +189,7 @@ impl<'src> Session<'src> {
                         params: Vec::new(),
                         rest_param: None,
                         this_param: None,
+                        new_target_param: None,
                         arguments_param: None,
                         transient_slots: 1,
                         persistent_slots: 0,

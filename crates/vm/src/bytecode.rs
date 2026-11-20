@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 31;
+pub const BYTECODE_VERSION: u32 = 32;
 
 pub use crate::builtin::BUILTINS;
 
@@ -386,6 +386,8 @@ pub struct Function {
     /// Receiver binding when this function, or an arrow nested in it, uses `this`.
     /// Not a JavaScript argument.
     pub this_param: Option<ParamTarget>,
+    /// Destination for the lexical `new.target`, not a JavaScript argument.
+    pub new_target_param: Option<ParamTarget>,
     /// Destination for the fresh, unmapped arguments object.
     pub arguments_param: Option<ParamTarget>,
     pub transient_slots: u16,
@@ -415,6 +417,7 @@ impl Function {
             .iter()
             .chain(&self.rest_param)
             .chain(&self.this_param)
+            .chain(&self.new_target_param)
             .chain(&self.arguments_param)
             .any(|param| matches!(param, ParamTarget::Binding(_)))
         {
@@ -656,6 +659,7 @@ impl Build {
                 || !getter.params.is_empty()
                 || getter.rest_param.is_some()
                 || getter.this_param.is_some()
+                || getter.new_target_param.is_some()
                 || getter.arguments_param.is_some()
                 || !getter.resumes.is_empty()
                 || !getter.handlers.is_empty()
@@ -693,6 +697,7 @@ impl Build {
         if !script.params.is_empty()
             || script.rest_param.is_some()
             || script.this_param.is_some()
+            || script.new_target_param.is_some()
             || script.arguments_param.is_some()
         {
             return Err(format!(
@@ -765,6 +770,11 @@ impl Build {
         if function.is_arrow && function.arguments_param.is_some() {
             return Err(format!("{location}: arrow cannot have an arguments target"));
         }
+        if function.is_arrow && function.new_target_param.is_some() {
+            return Err(format!(
+                "{location}: arrow cannot have a new.target destination"
+            ));
+        }
         let mut seen_bindings = std::collections::BTreeSet::new();
         let mut seen_slots = Vec::new();
         for param in function
@@ -772,6 +782,7 @@ impl Build {
             .iter()
             .chain(&function.rest_param)
             .chain(&function.this_param)
+            .chain(&function.new_target_param)
             .chain(&function.arguments_param)
         {
             match param {

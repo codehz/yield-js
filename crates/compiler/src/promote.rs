@@ -78,6 +78,7 @@ fn promotion_inits(
     let is_param = function.param_bindings.contains(&binding)
         || function.rest_binding == Some(binding)
         || function.this_binding == Some(binding)
+        || function.new_target_binding == Some(binding)
         || function.arguments_binding == Some(binding);
     let incoming = declared_in(function, resumes, binding, is_param)?;
     let mut inits = BTreeMap::new();

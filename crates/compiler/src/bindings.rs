@@ -26,6 +26,7 @@ pub(crate) fn classify(functions: &[LoweredFunction]) -> Result<BindingFacts, Co
             .iter()
             .chain(&function.rest_binding)
             .chain(&function.this_binding)
+            .chain(&function.new_target_binding)
             .chain(&function.arguments_binding)
         {
             record_owner(&mut owners, *binding, function.func_id)?;

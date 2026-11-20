@@ -844,6 +844,59 @@ fn rejects_unsupported_module_syntax() {
 }
 
 #[test]
+fn new_target_is_promoted_or_captured_on_demand() {
+    use yield_vm::bytecode::ParamTarget;
+
+    let build = compile(
+        r#"
+function direct(value = new.target) { return value; }
+function capture() { return async () => () => new.target; }
+function outer() { function inner() { return new.target; } return inner; }
+"#,
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    build.validate().unwrap();
+    let function = |name: &str| {
+        build
+            .functions
+            .iter()
+            .find(|f| f.name.split('@').next() == Some(name))
+            .unwrap()
+    };
+    assert!(matches!(
+        function("direct").new_target_param,
+        Some(ParamTarget::Slot(_))
+    ));
+    assert!(matches!(
+        function("capture").new_target_param,
+        Some(ParamTarget::Binding(_))
+    ));
+    assert!(function("outer").new_target_param.is_none());
+    assert!(function("inner").new_target_param.is_some());
+    assert!(
+        build
+            .functions
+            .iter()
+            .filter(|f| f.is_arrow)
+            .all(|f| f.new_target_param.is_none())
+    );
+}
+
+#[test]
+fn rejects_new_target_without_an_enclosing_ordinary_function() {
+    for statement in [
+        "new.target;",
+        "const f = () => new.target;",
+        "const f = async () => new.target;",
+    ] {
+        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        assert_eq!(error.line(), 2, "{error}");
+        assert!(error.message().contains("new.target"), "{error}");
+    }
+}
+
+#[test]
 fn lowers_named_default_namespace_and_side_effect_imports() {
     let imports = manifest(&[("host", &["", "default", "fn", "value"])]);
     let build = compile(

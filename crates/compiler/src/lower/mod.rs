@@ -120,6 +120,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     param_bindings: Vec<BindingId>,
     rest_binding: Option<BindingId>,
     this_binding: Option<BindingId>,
+    new_target_binding: Option<BindingId>,
     arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
     exported_imports: BTreeMap<(u32, Option<u32>), BindingId>,
@@ -160,6 +161,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: Vec::new(),
             rest_binding: None,
             this_binding: None,
+            new_target_binding: None,
             arguments_binding: None,
             hoisted: BTreeSet::new(),
             exported_imports: BTreeMap::new(),
@@ -169,6 +171,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn compile(&mut self) -> Result<LoweredFunction, CompileError> {
         let source = self.source;
         self.install_this_binding(source);
+        self.install_new_target_binding(source);
         let length = self.compile_parameters(source)?;
         match source {
             FunctionSource::Script(statements) => {
@@ -236,6 +239,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: self.param_bindings.clone(),
             rest_binding: self.rest_binding,
             this_binding: self.this_binding,
+            new_target_binding: self.new_target_binding,
             arguments_binding: self.arguments_binding,
             promoted: BTreeMap::new(),
             reg_count: self.emit.reg_count(),
@@ -252,6 +256,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let binding = self.alloc_binding();
         self.env.insert_function(THIS_BINDING.to_owned(), binding);
         self.this_binding = Some(binding);
+    }
+
+    fn install_new_target_binding(&mut self, source: FunctionSource<'ast>) {
+        let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {
+            return;
+        };
+        let mut scan = NewTargetScan { found: false };
+        scan.visit_formal_parameters(&function.params);
+        if let Some(body) = &function.body {
+            scan.visit_function_body(body);
+        }
+        if scan.found {
+            let binding = self.alloc_binding();
+            self.env
+                .insert_function(NEW_TARGET_BINDING.to_owned(), binding);
+            self.new_target_binding = Some(binding);
+        }
     }
 
     fn compile_parameters(&mut self, source: FunctionSource<'ast>) -> Result<u16, CompileError> {
@@ -951,6 +972,20 @@ fn as_binding_kind(
 
 /// Not a JavaScript identifier, so script cannot name or shadow this binding.
 pub(super) const THIS_BINDING: &str = "\0this";
+const NEW_TARGET_BINDING: &str = "\0new.target";
+
+struct NewTargetScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for NewTargetScan {
+    fn visit_new_target(&mut self, _: &NewTarget) {
+        self.found = true;
+    }
+
+    // Ordinary nested functions provide their own target; arrows inherit ours.
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+}
 
 fn function_uses_this(source: FunctionSource<'_>) -> bool {
     let (FunctionSource::Function(function) | FunctionSource::Method(function)) = source else {

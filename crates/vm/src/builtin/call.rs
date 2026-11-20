@@ -87,7 +87,7 @@ impl Vm {
                         "script function is not callable".to_owned(),
                     ));
                 }
-                self.call_function(host, func_id, Some(env), args, receiver)
+                self.call_function(host, func_id, Some(env), args, receiver, &Value::Undefined)
             }
             Some(Dispatch::Resolution(id)) => {
                 self.capability_call(
@@ -185,7 +185,7 @@ impl Vm {
             Constructor::Script { func_id, env } => {
                 let prototype = prototype.unwrap_or(self.builtins.get("object.prototype"));
                 let instance = Value::Object(self.heap.alloc_plain_with(Some(prototype)));
-                match self.call_function(host, func_id, Some(env), args, &instance)? {
+                match self.call_function(host, func_id, Some(env), args, &instance, new_target)? {
                     Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
                         Ok(Invocation::Value(instance))
                     }
