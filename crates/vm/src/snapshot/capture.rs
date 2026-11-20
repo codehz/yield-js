@@ -311,6 +311,7 @@ impl Vm {
         }
         let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
+        validate_preload_globals(&build, &heap, &builtins, script_env)?;
         let operations = load_operations(&bindings, &heap, &snapshot.operations)?;
         let mut vm = Self::restored(
             build,
@@ -682,12 +683,59 @@ fn load_script_env(
     }
 }
 
+fn validate_preload_globals(
+    build: &Build,
+    heap: &Heap,
+    builtins: &BuiltinRoots,
+    script_env: Option<ObjectId>,
+) -> Result<(), VmError> {
+    let Some(preload) = &build.preload else {
+        return Ok(());
+    };
+    let global = heap.get(builtins.get("globalThis"))?;
+    let mut common_env = None;
+    let mut closures = BTreeMap::new();
+    for (name, binding) in &preload.exports {
+        let error = |detail| VmError::InvalidSnapshot(format!("preload global {name:?}: {detail}"));
+        let Some(OwnProperty::Stored(
+            Property::Accessor {
+                get: Some(id),
+                set: None,
+            },
+            attrs,
+        )) = global.own_property(PropertyKeyRef::String(name))
+        else {
+            return Err(error("missing getter-only own property"));
+        };
+        if attrs != crate::vm::PRELOAD_EXPORT_ATTRIBUTES {
+            return Err(error("invalid attributes"));
+        }
+        let func_id = preload.getters[name];
+        let getter = heap
+            .function(*id)
+            .filter(|getter| getter.func_id == func_id)
+            .ok_or_else(|| error("wrong getter function"))?;
+        if *closures.entry(func_id).or_insert(*id) != *id {
+            return Err(error("aliases do not share a getter"));
+        }
+        if Some(getter.env) == script_env || *common_env.get_or_insert(getter.env) != getter.env {
+            return Err(error("wrong preload environment"));
+        }
+        if !matches!(heap.get(getter.env), Ok(Object::Environment(env))
+            if env.parent.is_none() && env.bindings.contains_key(binding))
+        {
+            return Err(error("missing top-level export binding"));
+        }
+    }
+    Ok(())
+}
+
 fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     for id in heap.ids() {
         if let Object::Function(function) = heap.get(id)?
-            && function.func_id == build.script
+            && build.is_initializer(function.func_id)
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "function object {id} references the script function"
@@ -1334,7 +1382,7 @@ fn validate_continuation(
             record.id, record.func_id
         ))
     })?;
-    if record.func_id == build.script {
+    if build.is_initializer(record.func_id) {
         return Err(VmError::InvalidSnapshot(format!(
             "continuation {} references the script function",
             record.id

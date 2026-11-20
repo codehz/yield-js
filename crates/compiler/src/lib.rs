@@ -50,9 +50,35 @@ pub struct CompileOptions {
 /// Evaluation is a synthetic script (function id 0). Direct function
 /// declarations become entries in that script's environment.
 pub fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
+    let mut session = session::Session::new(source, options);
+    lower_module(&mut session, source, 0, "\0script")?;
+    session.finish()
+}
+
+/// Compiles a main module and a separate host-supplied preload module.
+pub fn compile_with_preload(
+    source: &str,
+    preload: &str,
+    options: &CompileOptions,
+) -> Result<Build, CompileError> {
+    let mut session = session::Session::new(preload, options);
+    let initializer = session.alloc_func_id(oxc::span::Span::default())?;
+    lower_module(&mut session, preload, initializer, "\0preload")
+        .map_err(CompileError::in_preload)?;
+    session
+        .finish_preload(initializer, source)
+        .map_err(CompileError::in_preload)?;
+    lower_module(&mut session, source, 0, "\0script")?;
+    session.finish()
+}
+
+fn lower_module(
+    session: &mut session::Session<'_>,
+    source: &str,
+    initializer: u32,
+    name: &str,
+) -> Result<(), CompileError> {
     let allocator = Allocator::default();
     let program = frontend::parse(&allocator, source)?;
-    let mut session = session::Session::new(source, options);
-    lower::lower_program(&mut session, &program)?;
-    session.finish()
+    lower::lower_program(session, &program, initializer, name)
 }

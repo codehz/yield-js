@@ -46,7 +46,7 @@ impl Vm {
         func_id: u32,
         env: ObjectId,
     ) -> Result<ObjectId, VmError> {
-        if func_id == self.build.script {
+        if self.build.is_initializer(func_id) {
             return Err(VmError::InvalidState(
                 "script function cannot be materialized".to_owned(),
             ));
@@ -82,7 +82,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
-                if func_id == self.build.script {
+                if self.build.is_initializer(func_id) {
                     return Err(VmError::InvalidState(
                         "script function is not callable".to_owned(),
                     ));
@@ -118,7 +118,7 @@ impl Vm {
     ) -> Result<Option<Constructor>, VmError> {
         Ok(match dispatch {
             Some(Dispatch::Script { func_id, env })
-                if func_id != self.build.script
+                if !self.build.is_initializer(func_id)
                     && self.build.functions[self.function_index(func_id)?].is_constructable() =>
             {
                 Some(Constructor::Script { func_id, env })

@@ -6,15 +6,13 @@ use oxc::span::GetSpan;
 use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use yield_vm::bytecode::{
-    BinaryOp, CallArgs, Constant, ImportDecl, Instr, PropertyDefinition, UnaryOp,
-};
+use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
 use yield_vm::{BindingId, JsString};
 
 use super::{FunctionSource, Lowerer, THIS_BINDING};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
-use crate::names::{Callee, ValueName};
+use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_expression<'node>(
@@ -302,14 +300,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
-            ValueName::Import(import) => {
-                let dst = self.alloc_reg()?;
-                self.emit(Instr::GetImport {
-                    dst: self.slot(dst),
-                    import,
-                });
-                Ok(dst)
-            }
+            ValueName::ReadOnly(read_only) => self.emit_read_only(read_only),
             ValueName::Undefined => self.emit_undefined(),
             ValueName::Builtin(index) => {
                 let dst = self.alloc_reg()?;
@@ -324,6 +315,28 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 identifier.span,
                 format!("unknown binding {name:?}"),
             )),
+        }
+    }
+
+    fn emit_read_only(&mut self, name: ReadOnlyName<'_>) -> Result<Reg, CompileError> {
+        match name {
+            ReadOnlyName::Import(import) => {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetImport {
+                    dst: self.slot(dst),
+                    import,
+                });
+                Ok(dst)
+            }
+            ReadOnlyName::Preload(name) => {
+                let global = self.alloc_reg()?;
+                self.emit(Instr::GetBuiltin {
+                    dst: self.slot(global),
+                    builtin: builtin_index("globalThis").expect("globalThis builtin") as u32,
+                });
+                let key = self.emit_constant(Constant::String(name.into()))?;
+                self.emit_get_member(global, key)
+            }
         }
     }
 
@@ -701,14 +714,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     });
                     value
                 }
-                Callee::Import(import) => {
-                    let value = self.alloc_reg()?;
-                    self.emit(Instr::GetImport {
-                        dst: self.slot(value),
-                        import,
-                    });
-                    value
-                }
+                Callee::ReadOnly(read_only) => self.emit_read_only(read_only)?,
                 Callee::Builtin(index) => {
                     let value = self.alloc_reg()?;
                     self.emit(Instr::GetBuiltin {
@@ -857,8 +863,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left {
             let name = identifier.name.as_str();
             let Some(binding) = self.lookup(name) else {
-                if let Some(import) = self.session.import(name) {
-                    return self.compile_import_assignment(expression, import);
+                if let Some(read_only) = self.session.names().read_only(name) {
+                    return self.compile_read_only_assignment(expression, read_only);
                 }
                 return Err(CompileError::new(
                     self.source_text(),
@@ -991,24 +997,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         ))
     }
 
-    fn compile_import_assignment(
+    fn compile_read_only_assignment(
         &mut self,
         expression: &'ast AssignmentExpression<'ast>,
-        import: ImportDecl,
+        name: ReadOnlyName<'_>,
     ) -> Result<Reg, CompileError> {
         let old = if matches!(expression.operator, AssignmentOperator::Assign) {
             None
         } else {
-            let old = self.alloc_reg()?;
-            self.emit(Instr::GetImport {
-                dst: self.slot(old),
-                import,
-            });
-            Some(old)
+            Some(self.emit_read_only(name)?)
         };
 
         if let Some(op) = logical_assignment_operator(expression.operator) {
-            let result = old.expect("logical assignment reads the current import value");
+            let result = old.expect("logical assignment reads the current value");
             let end = self.begin_logical_rhs(op, result)?;
             let _right = self.compile_expression(&expression.right)?;
             self.emit(Instr::ThrowAssignmentToConst);
@@ -1037,9 +1038,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         expression: &'ast UpdateExpression<'ast>,
     ) -> Result<Reg, CompileError> {
-        enum Target {
+        enum Target<'name> {
             Binding(BindingId),
-            Import(ImportDecl),
+            ReadOnly(ReadOnlyName<'name>),
             Member(Reg, Reg),
         }
 
@@ -1053,8 +1054,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             if let Some(binding) = self.lookup(name) {
                 self.check_tdz(binding, name, identifier.span)?;
                 Target::Binding(binding)
-            } else if let Some(import) = self.session.import(name) {
-                Target::Import(import)
+            } else if let Some(read_only) = self.session.names().read_only(name) {
+                Target::ReadOnly(read_only)
             } else {
                 return Err(CompileError::new(
                     self.source_text(),
@@ -1078,21 +1079,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         };
 
-        let old = self.alloc_reg()?;
-        match &target {
-            Target::Binding(binding) => self.emit(Instr::GetBinding {
-                dst: self.slot(old),
-                binding: *binding,
-            }),
-            Target::Import(import) => self.emit(Instr::GetImport {
-                dst: self.slot(old),
-                import: *import,
-            }),
-            Target::Member(object, key) => self.emit(Instr::GetMember {
-                dst: self.slot(old),
-                object: self.slot(*object),
-                key: self.slot(*key),
-            }),
+        let old = match &target {
+            Target::ReadOnly(name) => self.emit_read_only(*name)?,
+            Target::Member(object, key) => self.emit_get_member(*object, *key)?,
+            Target::Binding(binding) => {
+                let old = self.alloc_reg()?;
+                self.emit(Instr::GetBinding {
+                    dst: self.slot(old),
+                    binding: *binding,
+                });
+                old
+            }
         };
         let numeric = self.alloc_reg()?;
         self.emit(Instr::Unary {
@@ -1114,7 +1111,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         });
         match &target {
             Target::Binding(binding) => self.put_binding(*binding, updated),
-            Target::Import(_) => self.emit(Instr::ThrowAssignmentToConst),
+            Target::ReadOnly(_) => self.emit(Instr::ThrowAssignmentToConst),
             Target::Member(object, key) => self.emit(Instr::SetMember {
                 object: self.slot(*object),
                 key: self.slot(*key),

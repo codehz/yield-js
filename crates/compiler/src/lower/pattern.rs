@@ -18,7 +18,7 @@ enum Pattern<'ast> {
 enum Destination<'ast> {
     Pattern(Pattern<'ast>),
     AssignmentBinding(BindingId),
-    AssignmentImport,
+    AssignmentReadOnly,
     Member { object: Reg, key: Reg },
 }
 
@@ -48,8 +48,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Some(binding) = self.lookup(name) {
             self.check_tdz(binding, name, id.span)?;
             Ok(Destination::AssignmentBinding(binding))
-        } else if self.session.import(name).is_some() {
-            Ok(Destination::AssignmentImport)
+        } else if self.session.names().read_only(name).is_some() {
+            Ok(Destination::AssignmentReadOnly)
         } else {
             Err(CompileError::new(
                 self.source_text(),
@@ -84,7 +84,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match destination {
             Destination::Pattern(pattern) => return self.compile_pattern(pattern, value),
             Destination::AssignmentBinding(binding) => self.put_binding(binding, value),
-            Destination::AssignmentImport => self.emit(Instr::ThrowAssignmentToConst),
+            Destination::AssignmentReadOnly => self.emit(Instr::ThrowAssignmentToConst),
             Destination::Member { object, key } => self.emit(Instr::SetMember {
                 object: self.slot(object),
                 key: self.slot(key),

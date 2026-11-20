@@ -29,8 +29,9 @@ source (strict .mjs; explicit local named exports, no module loading)
 Public entry points:
 
 - `yield_compiler::compile(source, &CompileOptions { imports }) -> Result<Build, CompileError>`
-- `Vm::new(build, &mut host)` validates the build and imports, runs the script once, and drains initialization microtasks
-- `Vm::get_export("name")` reads the current value of an explicitly exported module binding
+- `yield_compiler::compile_with_preload(source, preload, options)` compiles two separate strict modules with one host import manifest. The preload export names are read-only globals in the main module.
+- `Vm::new(build, &mut host)` validates the build and imports, runs the optional preload once, installs its live getters on `globalThis`, runs the main initializer once, and drains initialization microtasks without waiting on host operations
+- `Vm::get_export("name")` reads the current value of an explicitly exported main module binding
 - `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver; `args` are `JsValue` constants, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::restore(snapshot, same_build, host)` rebinds declarations and operations before execution
@@ -92,7 +93,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingOperation`, `Host`, `HostFault`, `UnknownOperation`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host binding functions return `JsResult` (`JsError::Throw` / `JsError::Fault`); host scheduling failures use `HostFault`. `Host::report_error` receives a `JsValue`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
-- Name policy (`compiler/src/names.rs`): script and local bindings shadow globals and static host imports. Host imports are indexed first-class values; calls lower through `GetImport` + `CallValue`. Preserve `typeof` behavior for a local shadowing an import or top-level function; an unshadowed imported value is evaluated.
+- Name policy (`compiler/src/names.rs`): local/module bindings, static host imports, preload globals, then builtins. Host imports are indexed first-class values; preload names read getter-only properties through the fixed `globalThis` root. Preserve legacy `typeof` shadowing folds outside the preload export list.
 - Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `poc/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
 - `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Failure injection: `reject_restore_operation`; corrupt snapshot payloads by editing the record.
 

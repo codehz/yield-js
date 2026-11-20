@@ -3,6 +3,109 @@ use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::Instr;
 
 #[test]
+fn compiles_preload_and_main_in_separate_module_scopes() {
+    let options = CompileOptions::default();
+    let build = yield_compiler::compile_with_preload(
+        "export function shared() { return 'same'; }",
+        "export function shared() { return 'same'; }",
+        &options,
+    )
+    .unwrap();
+    let preload = build.preload.as_ref().unwrap();
+    assert_eq!(build.script, 0);
+    assert_eq!(preload.initializer, 1);
+    assert_ne!(build.exports["shared"], preload.exports["shared"]);
+    assert_eq!(build.constants.len(), 1);
+
+    let error = yield_compiler::compile_with_preload("", "\nmissing;", &options).unwrap_err();
+    assert!(error.message().starts_with("preload: "), "{error}");
+    assert_eq!(error.line(), 2);
+
+    let error = yield_compiler::compile_with_preload("\nmissing;", "", &options).unwrap_err();
+    assert!(!error.message().starts_with("preload: "), "{error}");
+    assert_eq!(error.line(), 2);
+}
+
+#[test]
+fn validates_preload_initializer_and_its_own_exports() {
+    let build = yield_compiler::compile_with_preload(
+        "export let main = 0; export function run() {}",
+        "export let n = 1;",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let mut changed = build.clone();
+    changed.preload.as_mut().unwrap().initializer = changed.script;
+    assert!(changed.validate().unwrap_err().contains("build_id"));
+    changed.finalize();
+    assert!(changed.validate().unwrap_err().contains("distinct"));
+
+    let mut changed = build.clone();
+    changed.preload.as_mut().unwrap().initializer = u32::MAX;
+    changed.finalize();
+    assert!(changed.validate().unwrap_err().contains("does not exist"));
+
+    let mut changed = build.clone();
+    changed
+        .preload
+        .as_mut()
+        .unwrap()
+        .exports
+        .insert("n".into(), changed.exports["main"]);
+    changed.finalize();
+    assert!(
+        changed
+            .validate()
+            .unwrap_err()
+            .contains("not declared in the preload")
+    );
+
+    let mut changed = build;
+    let initializer = changed.preload.as_ref().unwrap().initializer;
+    let main = changed
+        .functions
+        .iter_mut()
+        .find(|f| f.func_id == changed.script)
+        .unwrap();
+    let closure = main
+        .code
+        .iter_mut()
+        .find_map(|op| match op {
+            Instr::Closure { function, .. } => Some(function),
+            _ => None,
+        })
+        .unwrap();
+    *closure = initializer;
+    changed.finalize();
+    assert!(
+        changed
+            .validate()
+            .unwrap_err()
+            .contains("closes over the preload")
+    );
+}
+
+#[test]
+fn rejects_preload_getters_reading_the_wrong_binding() {
+    let mut build = yield_compiler::compile_with_preload(
+        "",
+        "export let x = 1, y = 2;",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let preload = build.preload.as_mut().unwrap();
+    preload.getters.insert("x".into(), preload.getters["y"]);
+    assert!(build.validate().unwrap_err().contains("build_id"));
+    build.finalize();
+    assert!(
+        build
+            .validate()
+            .unwrap_err()
+            .contains("invalid preload getter")
+    );
+}
+
+#[test]
 fn builtin_indices_preserve_bytecode_abi() {
     let original = [
         "Promise",
@@ -670,16 +773,15 @@ fn rejects_exports_of_unknown_local_bindings() {
 }
 
 #[test]
-fn rejects_re_exporting_an_imported_binding() {
-    let error = compile(
-        "import { inspect } from 'test';\nexport { inspect };",
+fn host_import_export_aliases_share_one_binding() {
+    let build = compile(
+        "import { inspect } from 'test';\nexport { inspect, inspect as check };",
         &CompileOptions {
             imports: manifest(&[("test", &["inspect"])]),
         },
     )
-    .unwrap_err();
-    assert!(error.message().contains("re-export"), "{error}");
-    assert_eq!(error.line(), 2, "{error}");
+    .unwrap();
+    assert_eq!(build.exports["inspect"], build.exports["check"]);
 }
 
 #[test]

@@ -7,7 +7,7 @@ use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
-use crate::heap::{Heap, Object, PromiseState, ReactionJob};
+use crate::heap::{Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
 use crate::runtime::{
     ExecOutcome, HostInstance, Invocation, Microtask, PendingOperation, Settlement,
@@ -58,6 +58,8 @@ const IMPORT_EXPORT_ATTRIBUTES: crate::heap::Attributes = crate::heap::Attribute
     enumerable: true,
     configurable: false,
 };
+
+pub(crate) const PRELOAD_EXPORT_ATTRIBUTES: Attributes = IMPORT_EXPORT_ATTRIBUTES;
 
 /// A pending operation as exposed to the host after a call or restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +125,11 @@ impl Vm {
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);
         vm.install_imports(&bindings, resolved)?;
-        vm.run_script(host)?;
+        if let Some(initializer) = vm.build.preload.as_ref().map(|preload| preload.initializer) {
+            let env = vm.run_script(host, initializer)?;
+            vm.install_preload_globals(env)?;
+        }
+        vm.script_env = vm.run_script(host, vm.build.script)?;
         vm.run_until_idle(host)?;
         Ok(vm)
     }
@@ -589,16 +595,49 @@ impl Vm {
         self.invoke(host, &callee, args, &Value::Undefined)?
             .into_result()
     }
-    fn run_script(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
-        let func_id = self.build.script;
+    fn install_preload_globals(&mut self, env: Option<ObjectId>) -> Result<(), VmError> {
+        let preload = self.build.preload.as_ref().expect("preload metadata");
+        if preload.getters.is_empty() {
+            return Ok(());
+        }
+        let env = env.ok_or_else(|| VmError::InvalidState("missing preload environment".into()))?;
+        let global = self.builtins.get("globalThis");
+        let mut closures = BTreeMap::new();
+        for (name, &func_id) in &preload.getters {
+            let getter = *closures
+                .entry(func_id)
+                .or_insert_with(|| self.heap.alloc_function(func_id, env));
+            let descriptor = DescriptorUpdate {
+                get: Some(Some(getter)),
+                set: Some(None),
+                enumerable: Some(PRELOAD_EXPORT_ATTRIBUTES.enumerable),
+                configurable: Some(PRELOAD_EXPORT_ATTRIBUTES.configurable),
+                ..DescriptorUpdate::default()
+            };
+            if !self
+                .heap
+                .apply_descriptor(global, name.as_str().into(), descriptor)?
+            {
+                return Err(VmError::InvalidState(format!(
+                    "cannot install preload global {name:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn run_script(
+        &mut self,
+        host: &mut dyn Host,
+        func_id: u32,
+    ) -> Result<Option<ObjectId>, VmError> {
         let index = self.function_index(func_id)?;
         let prepared = self.build.functions[index]
             .needs_environment()
             .then(|| self.heap.alloc_environment(None, BTreeMap::new()));
-        self.script_env = prepared;
         self.activate(host, func_id, None, prepared, Vec::new(), &Value::Undefined)?
             .into_result()
-            .map(|_| ())
+            .map(|_| prepared)
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the

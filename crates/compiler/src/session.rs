@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxc::span::Span;
 use yield_vm::BindingId;
-use yield_vm::bytecode::{Build, Constant, Function as BytecodeFunction, ImportDecl};
+use yield_vm::bytecode::{
+    Build, Constant, Function as BytecodeFunction, ImportDecl, Instr, Preload, Slot,
+};
 
 use crate::CompileOptions;
 use crate::error::CompileError;
@@ -19,6 +21,7 @@ pub(crate) struct Session<'src> {
     import_bindings: BTreeMap<String, ImportDecl>,
     top_level_functions: BTreeMap<String, BindingId>,
     exports: BTreeMap<String, BindingId>,
+    preload: Option<Preload>,
     constants: Vec<Constant>,
     string_constants: BTreeMap<yield_vm::JsString, u32>,
     functions: Vec<BytecodeFunction>,
@@ -33,6 +36,7 @@ impl<'src> Session<'src> {
             source,
             top_level_functions: BTreeMap::new(),
             exports: BTreeMap::new(),
+            preload: None,
             constants: Vec::new(),
             string_constants: BTreeMap::new(),
             functions: Vec::new(),
@@ -87,10 +91,6 @@ impl<'src> Session<'src> {
         self.import_bindings.insert(local.to_owned(), import);
     }
 
-    pub(crate) fn is_import(&self, name: &str) -> bool {
-        self.import_bindings.contains_key(name)
-    }
-
     pub(crate) fn import(&self, name: &str) -> Option<ImportDecl> {
         self.import_bindings.get(name).copied()
     }
@@ -99,6 +99,7 @@ impl<'src> Session<'src> {
         Tables {
             imports: &self.import_bindings,
             top_level_functions: &self.top_level_functions,
+            preload: self.preload.as_ref().map(|preload| &preload.exports),
         }
     }
 
@@ -156,7 +157,62 @@ impl<'src> Session<'src> {
     }
 
     pub(crate) fn push_function(&mut self, function: BytecodeFunction) {
-        self.functions.push(function);
+        if function.func_id == 0 {
+            // Main is lowered second, but stays at the head of the build table.
+            self.functions.insert(0, function);
+        } else {
+            self.functions.push(function);
+        }
+    }
+
+    pub(crate) fn finish_preload(
+        &mut self,
+        initializer: u32,
+        main_source: &'src str,
+    ) -> Result<(), CompileError> {
+        let exports = std::mem::take(&mut self.exports);
+        let mut by_binding = BTreeMap::new();
+        let mut getters = BTreeMap::new();
+        for (name, &binding) in &exports {
+            let func_id = match by_binding.entry(binding) {
+                std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let func_id = self.alloc_func_id(Span::default())?;
+                    let slot = Slot::transient(0);
+                    self.push_function(BytecodeFunction {
+                        func_id,
+                        name: format!("\0preload_getter@{func_id}"),
+                        is_async: false,
+                        is_arrow: false,
+                        is_method: true,
+                        length: 0,
+                        params: Vec::new(),
+                        rest_param: None,
+                        this_param: None,
+                        arguments_param: None,
+                        transient_slots: 1,
+                        persistent_slots: 0,
+                        code: vec![
+                            Instr::GetBinding { dst: slot, binding },
+                            Instr::Return { src: slot },
+                        ],
+                        resumes: Vec::new(),
+                        handlers: Vec::new(),
+                    });
+                    *entry.insert(func_id)
+                }
+            };
+            getters.insert(name.clone(), func_id);
+        }
+        self.preload = Some(Preload {
+            initializer,
+            exports,
+            getters,
+        });
+        self.import_bindings.clear();
+        self.top_level_functions.clear();
+        self.source = main_source;
+        Ok(())
     }
 
     pub(crate) fn finish(self) -> Result<Build, CompileError> {
@@ -168,6 +224,7 @@ impl<'src> Session<'src> {
             0,
             self.exports,
         );
+        build.preload = self.preload;
         build.finalize();
         build.validate().map_err(|error| {
             CompileError::new(

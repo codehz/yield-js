@@ -31,6 +31,8 @@ use control::Control;
 pub(crate) fn lower_program<'ast>(
     session: &mut Session<'_>,
     program: &'ast Program<'ast>,
+    initializer: u32,
+    name: &str,
 ) -> Result<(), CompileError> {
     let mut tasks = VecDeque::new();
     let mut lowered = Vec::new();
@@ -39,8 +41,8 @@ pub(crate) fn lower_program<'ast>(
         &mut tasks,
         Task {
             source: FunctionSource::Script(&program.body),
-            func_id: 0,
-            name: "\0script".to_owned(),
+            func_id: initializer,
+            name: name.to_owned(),
             outer: CapturedEnv::default(),
         },
     )?);
@@ -120,6 +122,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     this_binding: Option<BindingId>,
     arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
+    exported_imports: BTreeMap<(u32, Option<u32>), BindingId>,
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
@@ -159,6 +162,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             this_binding: None,
             arguments_binding: None,
             hoisted: BTreeSet::new(),
+            exported_imports: BTreeMap::new(),
         }
     }
 
@@ -504,7 +508,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.tasks.push_back(Task {
             source: FunctionSource::Function(function),
             func_id,
-            name: name.to_owned(),
+            name: if self.func_id == 0 {
+                name.to_owned()
+            } else {
+                format!("{name}@{func_id}")
+            },
             outer: self.env.capture(),
         });
         Ok(func_id)
@@ -670,20 +678,34 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "default export",
             ));
         }
-        if self.session.is_import(local) {
-            return Err(unsupported(
-                self.source_text(),
-                local_span,
-                "re-export of an imported binding",
-            ));
-        }
-        let binding = self.env.lookup(local).ok_or_else(|| {
-            CompileError::new(
-                self.source_text(),
-                local_span,
-                format!("unknown export binding {local:?}"),
-            )
-        })?;
+        let binding = if let Some(import) = self.session.import(local) {
+            let key = (import.module, import.export);
+            if let Some(binding) = self.exported_imports.get(&key) {
+                *binding
+            } else {
+                let binding = self.alloc_binding();
+                let value = self.alloc_reg()?;
+                self.emit(Instr::GetImport {
+                    dst: self.slot(value),
+                    import,
+                });
+                self.emit(Instr::DeclareBinding { binding });
+                self.emit(Instr::SetBinding {
+                    binding,
+                    src: self.slot(value),
+                });
+                self.exported_imports.insert(key, binding);
+                binding
+            }
+        } else {
+            self.env.lookup(local).ok_or_else(|| {
+                CompileError::new(
+                    self.source_text(),
+                    local_span,
+                    format!("unknown export binding {local:?}"),
+                )
+            })?
+        };
         self.session.insert_export(public, binding, public_span)
     }
 

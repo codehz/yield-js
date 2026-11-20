@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 29;
+pub const BYTECODE_VERSION: u32 = 30;
 
 pub use crate::builtin::BUILTINS;
 
@@ -433,6 +433,16 @@ impl Function {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preload {
+    pub initializer: u32,
+    #[serde(deserialize_with = "deserialize_exports")]
+    pub exports: BTreeMap<String, BindingId>,
+    /// Public names mapped to private getter functions. Aliases share a getter.
+    #[serde(deserialize_with = "deserialize_exports")]
+    pub getters: BTreeMap<String, u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Build {
     pub bytecode_version: u32,
     pub build_id: String,
@@ -444,6 +454,8 @@ pub struct Build {
     /// Public module name to a live binding declared in [`Self::script`].
     #[serde(deserialize_with = "deserialize_exports")]
     pub exports: BTreeMap<String, BindingId>,
+    #[serde(default)]
+    pub preload: Option<Preload>,
 }
 
 fn deserialize_exports<'de, D>(deserializer: D) -> Result<BTreeMap<String, BindingId>, D::Error>
@@ -490,6 +502,7 @@ struct DigestInput<'a> {
     functions: &'a [Function],
     script: u32,
     exports: &'a BTreeMap<String, BindingId>,
+    preload: &'a Option<Preload>,
 }
 
 impl Build {
@@ -508,6 +521,7 @@ impl Build {
             functions,
             script,
             exports,
+            preload: None,
         }
     }
 
@@ -527,6 +541,7 @@ impl Build {
             functions: &self.functions,
             script: self.script,
             exports: &self.exports,
+            preload: &self.preload,
         };
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
         let digest = Sha256::digest(bytes);
@@ -595,14 +610,92 @@ impl Build {
         Ok(())
     }
 
+    pub(crate) fn is_initializer(&self, func_id: u32) -> bool {
+        func_id == self.script
+            || self
+                .preload
+                .as_ref()
+                .is_some_and(|preload| func_id == preload.initializer)
+    }
+
     fn validate_script(&self) -> Result<(), String> {
-        let Some(script) = self.function(self.script) else {
-            return Err(format!("script function {} does not exist", self.script));
+        self.validate_initializer(self.script, &self.exports, "script")?;
+        if let Some(preload) = &self.preload {
+            if self.script == preload.initializer {
+                return Err("script and preload initializers must be distinct".to_owned());
+            }
+            self.validate_initializer(preload.initializer, &preload.exports, "preload")?;
+            self.validate_preload_getters(preload)?;
+        }
+        for function in &self.functions {
+            for instruction in &function.code {
+                if let Instr::Closure {
+                    function: callee, ..
+                } = instruction
+                    && self.is_initializer(*callee)
+                {
+                    let kind = if *callee == self.script {
+                        "script"
+                    } else {
+                        "preload"
+                    };
+                    return Err(format!(
+                        "function {} ({}) closes over the {kind} function",
+                        function.func_id, function.name
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_preload_getters(&self, preload: &Preload) -> Result<(), String> {
+        if !preload.getters.keys().eq(preload.exports.keys()) {
+            return Err("preload getter names do not match exports".to_owned());
+        }
+        let mut by_binding = BTreeMap::new();
+        for (name, &binding) in &preload.exports {
+            let id = preload.getters[name];
+            let Some(getter) = self.function(id) else {
+                return Err(format!("missing preload getter {id} for {name:?}"));
+            };
+            if self.is_initializer(id)
+                || !getter.is_accessor_method()
+                || !getter.params.is_empty()
+                || getter.rest_param.is_some()
+                || getter.this_param.is_some()
+                || getter.arguments_param.is_some()
+                || !getter.resumes.is_empty()
+                || !getter.handlers.is_empty()
+                || !matches!(getter.code.as_slice(), [
+                    Instr::GetBinding { dst, binding: read }, Instr::Return { src }
+                ] if dst == src && *read == binding)
+            {
+                return Err(format!(
+                    "invalid preload getter {id} for {name:?} binding {binding}"
+                ));
+            }
+            if *by_binding.entry(binding).or_insert(id) != id {
+                return Err(format!(
+                    "preload aliases for binding {binding} must share a getter"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_initializer(
+        &self,
+        initializer: u32,
+        exports: &BTreeMap<String, BindingId>,
+        kind: &str,
+    ) -> Result<(), String> {
+        let Some(script) = self.function(initializer) else {
+            return Err(format!("{kind} function {initializer} does not exist"));
         };
         if script.is_async || script.is_arrow || script.is_method {
             return Err(format!(
-                "script function {} must be a synchronous ordinary function",
-                self.script
+                "{kind} function {initializer} must be a synchronous ordinary function"
             ));
         }
         if !script.params.is_empty()
@@ -611,34 +704,21 @@ impl Build {
             || script.arguments_param.is_some()
         {
             return Err(format!(
-                "script function {} must not take arguments or a receiver",
-                self.script
+                "{kind} function {initializer} must not take arguments or a receiver"
             ));
         }
-        let mut declared = std::collections::BTreeSet::new();
-        for function in &self.functions {
-            for instruction in &function.code {
-                if let Instr::Closure {
-                    function: callee, ..
-                } = instruction
-                    && *callee == self.script
-                {
-                    return Err(format!(
-                        "function {} ({}) closes over the script function",
-                        function.func_id, function.name
-                    ));
-                }
-                if function.func_id == self.script
-                    && let Instr::DeclareBinding { binding } = instruction
-                {
-                    declared.insert(*binding);
-                }
-            }
-        }
-        for (name, binding) in &self.exports {
+        let declared: BTreeSet<_> = script
+            .code
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instr::DeclareBinding { binding } => Some(*binding),
+                _ => None,
+            })
+            .collect();
+        for (name, binding) in exports {
             if !declared.contains(binding) {
                 return Err(format!(
-                    "export {name:?} binding {binding} is not declared in the script"
+                    "export {name:?} binding {binding} is not declared in the {kind}"
                 ));
             }
         }

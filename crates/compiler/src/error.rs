@@ -35,6 +35,11 @@ impl CompileError {
         Self::new("", Span::default(), message)
     }
 
+    pub(crate) fn in_preload(mut self) -> Self {
+        self.message.insert_str(0, "preload: ");
+        self
+    }
+
     pub fn message(&self) -> &str {
         &self.message
     }

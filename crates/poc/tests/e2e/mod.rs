@@ -3,6 +3,7 @@
 mod bindings;
 mod liveness;
 mod objects;
+mod preload;
 mod promises;
 mod resume;
 mod support;

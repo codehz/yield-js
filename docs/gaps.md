@@ -46,7 +46,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 | `queueMicrotask` / Promise 拒绝 | `queueMicrotask` 回调抛出的异常通过 `Host::report_error` 交给宿主；未处理的 Promise 拒绝仍不跟踪 |
 | 函数对象 | 函数的 `name` / `length` 是只读虚拟属性：可读取并用 `in` / `Reflect.has` 检查，但不出现在自有键或自有描述符中。匿名函数与箭头函数不推断名称；计算方法名只使用静态可知的键或编译期提示，不按运行时键命名。内建函数的 `length` 统一为 `0`。共享的 `Function.prototype` 不可调用，默认 `toString` 返回固定通用文本，不保留源码。`call` / `apply` / `bind` 仍是脚本函数按次分配的虚拟方法。绑定函数不自动创建 `.prototype`，其可构造性取决于目标。 |
 | 原型与描述符 | `Object.getPrototypeOf` 对四种非空原始值返回对应共享原型，但这不意味着所有 `Object` / `Reflect` API 都会隐式装箱；例如 `Reflect.getPrototypeOf` 仍要求对象。宿主类实例是普通对象，原型为 VM 创建的类原型；`Object.create(prototype)` 只能得到普通对象，不能伪造隐藏槽。 |
-| 未声明名字 | `globalThis` 提供内建全局属性，可用 `typeof globalThis.MessageChannel` 等方式探测功能。未声明的裸名字仍不能读取或赋值（编译错误，不是运行时 `ReferenceError`）；`typeof` 对这类名字折叠为 `"undefined"` |
+| 未声明名字 | `globalThis` 提供内建属性及 preload 导出。动态添加的属性不会自动成为编译期可见的裸名称；未知裸名称的读取和赋值是编译错误，`typeof` 折叠为 `"undefined"`。 |
 
 `for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
 
@@ -94,11 +94,11 @@ flowchart LR
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造、`with`
 - `class` 与标签模板：首版由离线构建降级。编译器拒绝它们是符合契约的，不是 VM 还欠的语法
-- 严格 ESM 支持本地命名导出和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和再导出在编译期拒绝。
+- 严格 ESM 支持本地命名导出（含本地宿主导入绑定）和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和带模块来源的再导出在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
-- 快照迁移：只接受当前格式（38），拒绝旧记录；字节码格式仍为 29。
+- 快照迁移：只接受当前快照格式（38）与字节码版本（30），拒绝旧记录。
 - 重复 `default`、匿名函数声明：按语法错误拒绝，不是未实现的特性
 - 严格模式下删除裸标识符（包括加括号的标识符）：按语法错误拒绝。

@@ -4,6 +4,7 @@
 
 - 字节码版本、构建 ID 摘要、函数/导入/导出/常量/恢复表/异常表结构校验；导出表拒绝重复公开名，目标必须是初始化函数声明的绑定。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
+- `compile_with_preload(main, preload, options)` 分别编译两个模块，共用宿主导入清单。模块可将宿主导入以本地命名导出语法发布。新的 VM 先执行 preload，再将其显式导出安装为 `globalThis` 的可枚举、不可配置、仅 getter 的活绑定，然后执行主模块并排空微任务；不会等待宿主异步操作。主模块裸名称按局部绑定、显式导入、preload 导出、内建的顺序解析。`Vm::get_export` 和 `Vm::start` 仍只访问主模块导出；恢复校验 getter 和其环境，不重跑初始化。
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。Rust 宿主用 `#[host_module]`、`#[host_class]` / `#[methods]`、`#[host_state]` 和 `#[operation]` 声明绑定，`host_bindings!` 一次性链接；编译器清单由同一份声明派生。`#[function]` / `#[method]` 的 `async fn -> JsResult<HostStep>` 可用受限 CPS 语法表达 guest 调用续接，不创建 Rust Future。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。非零大小载荷必须声明 schema 与 codec，否则分配实例是 `HostFault`，避免恢复时静默丢失数据。带 `class` 的 `#[constructor]` 导出暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并，子类槽索引按自身布局计数；基类方法与访问器接受派生实例，`instanceof` 沿原型链检查，快照保存原型链和合并后的槽。payload 仍属于具体实例类，不沿继承链合并。脚本 `class` / `extends` 语法不在当前编译器子集内。
@@ -79,5 +80,5 @@
 - `WeakMap` 构造器及其共享原型也是快照根。快照按 ephemeron 规则追踪：仅在 WeakMap 和键均已可达时追踪对应值，反复处理直至没有新增可达对象；不会仅因条目存在而保留键。不可达键的条目从快照省略，恢复拒绝条目中的悬空引用。这不表示运行期间会回收堆对象。
 - `Proxy` 构造器是快照根；代理到目标、handler 的边是强引用，handler 捕获的闭包环境沿普通堆边保存。保存和恢复直接处理记录，不通过 trap 查询代理。恢复拒绝缺失或类型不合法的代理引用。
 - 快照格式 **38** 保存包装对象的原始值、自有属性、原型和对象身份，并保存 `Boolean` 构造器及共享原型根；同时保存绑定指纹、类原型映射、可达宿主实例的槽/payload 和模块状态。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
-- 字节码格式 **29** 和快照格式 **38** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
+- 字节码格式 **30** 和快照格式 **38** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。
 - 快照要求微任务队列已排空。
