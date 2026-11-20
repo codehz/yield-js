@@ -97,6 +97,7 @@ pub(crate) fn allocate(
         params,
         rest_param,
         this_param,
+        home_param: lowered.home_binding.map(param_target),
         new_target_param: lowered.new_target_binding.map(param_target),
         arguments_param: lowered.arguments_binding.map(param_target),
         transient_slots: layout.transient_count,

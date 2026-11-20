@@ -199,6 +199,7 @@ impl Heap {
             func_id,
             env,
             home: None,
+            has_class_metadata: false,
             class: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),

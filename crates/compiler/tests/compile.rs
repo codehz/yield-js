@@ -847,10 +847,6 @@ fn rejects_gated_class_features() {
     for (source, feature) in [
         ("class C { #x() {} }", "private class method"),
         ("class C { #x = 1 }", "private class field"),
-        (
-            "class C extends Object { m() { return super.x; } }",
-            "unsupported syntax",
-        ),
         ("class C { x = arguments; }", "arguments"),
         ("class C { static { (() => arguments)(); } }", "arguments"),
         ("class C { *m() {} }", "generator"),
@@ -876,6 +872,21 @@ fn rejects_super_calls_outside_derived_constructor_context() {
         assert!(
             error.message().to_ascii_lowercase().contains("super"),
             "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_super_properties_and_optional_links() {
+    for source in [
+        "super.x;",
+        "class C { m() { return super?.x; } }",
+        "class C extends Object { constructor() { super?.(); } }",
+        "class C { m() { function f() { return () => super.x; } } }",
+    ] {
+        assert!(
+            compile(source, &CompileOptions::default()).is_err(),
+            "{source}"
         );
     }
 }

@@ -96,7 +96,18 @@ impl Vm {
                         "script function is not callable".to_owned(),
                     ));
                 }
-                self.call_function(host, func_id, Some(env), args, receiver, &Value::Undefined)
+                let home = match callee {
+                    Value::Object(id) => self.heap.function(*id).and_then(|f| f.home),
+                    _ => None,
+                };
+                self.call_function(
+                    host,
+                    func_id,
+                    Some(env),
+                    args,
+                    receiver,
+                    (&Value::Undefined, home),
+                )
             }
             Some(Dispatch::Resolution(id)) => {
                 self.capability_call(
@@ -200,7 +211,7 @@ impl Vm {
                 Some(env),
                 args,
                 &Value::Object(context),
-                new_target,
+                (new_target, self.heap.function(class).and_then(|f| f.home)),
             )? {
                 Invocation::Value(Value::Undefined) => self.derived_this(context),
                 Invocation::Value(value) if !matches!(value, Value::Object(_)) => self
@@ -239,7 +250,18 @@ impl Vm {
                 {
                     return Ok(Invocation::Thrown(error));
                 }
-                match self.call_function(host, func_id, Some(env), args, &instance, new_target)? {
+                let home = match callee {
+                    Value::Object(id) => self.heap.function(*id).and_then(|f| f.home),
+                    _ => None,
+                };
+                match self.call_function(
+                    host,
+                    func_id,
+                    Some(env),
+                    args,
+                    &instance,
+                    (new_target, home),
+                )? {
                     Invocation::Value(value) if !matches!(value, Value::Object(_)) => {
                         Ok(Invocation::Value(instance))
                     }

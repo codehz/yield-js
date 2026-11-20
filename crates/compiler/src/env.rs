@@ -34,6 +34,14 @@ pub(crate) struct CapturedEnv {
     const_bindings: BTreeSet<BindingId>,
 }
 
+impl CapturedEnv {
+    pub(crate) fn remove(&mut self, name: &str) {
+        for scope in &mut self.scopes {
+            scope.remove(name);
+        }
+    }
+}
+
 pub(crate) struct Env {
     function_scope: BTreeMap<String, BindingId>,
     scopes: Vec<BTreeMap<String, BindingId>>,

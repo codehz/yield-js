@@ -74,7 +74,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         constructor = if class.heritage.is_some() {
                             FunctionSource::DerivedConstructor(&method.value)
                         } else {
-                            FunctionSource::Function(&method.value)
+                            FunctionSource::Constructor(&method.value)
                         };
                     }
                 }

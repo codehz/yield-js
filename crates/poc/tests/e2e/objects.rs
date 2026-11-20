@@ -6,6 +6,43 @@ use yield_vm::heap::Property;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
 
 #[test]
+fn restore_rejects_missing_method_home() {
+    let source = r#"
+import { wait } from 'test';
+class A { m() { return 3; } }
+class B extends A { m() { return super.m(); } }
+export async function run() {
+  const b = new B();
+  await wait('home');
+  return b.m();
+}
+"#;
+    let mut suspended = Suspended::start(source, vec![]);
+    let snapshot = suspended.snapshot();
+    let mut corrupt = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    let records = corrupt["objects"].as_array_mut().expect("object records");
+    let record = records
+        .iter_mut()
+        .find_map(|record| {
+            let function = record.get_mut("object")?.get_mut("function")?;
+            (function["has_class_metadata"] == true && function["home"].is_number())
+                .then_some(function)
+        })
+        .expect("class method record");
+    record["home"] = serde_json::Value::Null;
+    let corrupt = serde_json::from_value(corrupt).expect("deserialize snapshot");
+    assert!(
+        matches!(suspended.restore(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("home object"))
+    );
+    suspended.restore(snapshot).expect("valid snapshot");
+    suspended.complete("wait:home", Completion::Fulfilled(number(0.0)));
+    assert_eq!(
+        suspended.state(),
+        PromiseState::Fulfilled(Value::Number(3.0))
+    );
+}
+
+#[test]
 fn accessor_only_closures_survive_restore_and_bad_descriptors_are_rejected() {
     let source = r#"
 import { seed, wait } from "test";

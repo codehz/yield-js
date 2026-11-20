@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 35;
+pub const BYTECODE_VERSION: u32 = 36;
 
 pub use crate::builtin::BUILTINS;
 
@@ -186,6 +186,26 @@ pub enum Instr {
         callee: Slot,
         args: CallArgs,
     },
+    SetHome {
+        function: Slot,
+        home: Slot,
+    },
+    GetSuperBase {
+        dst: Slot,
+        home: Slot,
+    },
+    GetSuper {
+        dst: Slot,
+        base: Slot,
+        key: Slot,
+        receiver: Slot,
+    },
+    SetSuper {
+        base: Slot,
+        key: Slot,
+        receiver: Slot,
+        src: Slot,
+    },
     GetDerivedThis {
         dst: Slot,
         context: Slot,
@@ -335,6 +355,7 @@ pub enum Instr {
     },
     /// Throws a TypeError for an assignment to a constant binding.
     ThrowAssignmentToConst,
+    ThrowDeleteSuper,
     /// Loads a cached builtin value (object builtins, or the number globals
     /// `NaN` and `Infinity`).
     GetBuiltin {
@@ -443,6 +464,8 @@ pub struct Function {
     pub this_param: Option<ParamTarget>,
     /// Destination for the lexical `new.target`, not a JavaScript argument.
     pub new_target_param: Option<ParamTarget>,
+    /// Destination for the method's lexical home object.
+    pub home_param: Option<ParamTarget>,
     /// Destination for the fresh, unmapped arguments object.
     pub arguments_param: Option<ParamTarget>,
     pub transient_slots: u16,
@@ -473,6 +496,7 @@ impl Function {
             .chain(&self.rest_param)
             .chain(&self.this_param)
             .chain(&self.new_target_param)
+            .chain(&self.home_param)
             .chain(&self.arguments_param)
             .any(|param| matches!(param, ParamTarget::Binding(_)))
         {
@@ -718,6 +742,7 @@ impl Build {
                 || getter.rest_param.is_some()
                 || getter.this_param.is_some()
                 || getter.new_target_param.is_some()
+                || getter.home_param.is_some()
                 || getter.arguments_param.is_some()
                 || !getter.resumes.is_empty()
                 || !getter.handlers.is_empty()
@@ -756,6 +781,7 @@ impl Build {
             || script.rest_param.is_some()
             || script.this_param.is_some()
             || script.new_target_param.is_some()
+            || script.home_param.is_some()
             || script.arguments_param.is_some()
         {
             return Err(format!(
@@ -840,6 +866,9 @@ impl Build {
                 "{location}: arrow cannot have a new.target destination"
             ));
         }
+        if function.is_arrow && function.home_param.is_some() {
+            return Err(format!("{location}: arrow cannot have a home destination"));
+        }
         let mut seen_bindings = std::collections::BTreeSet::new();
         let mut seen_slots = Vec::new();
         for param in function
@@ -848,6 +877,7 @@ impl Build {
             .chain(&function.rest_param)
             .chain(&function.this_param)
             .chain(&function.new_target_param)
+            .chain(&function.home_param)
             .chain(&function.arguments_param)
         {
             match param {
@@ -958,6 +988,31 @@ impl Build {
                     for arg in args.slots() {
                         check_slot(*arg, "Construct.arg")?;
                     }
+                }
+                Instr::SetHome { function, home } => {
+                    check_slot(*function, "SetHome.function")?;
+                    check_slot(*home, "SetHome.home")?;
+                }
+                Instr::GetSuperBase { dst, home } => {
+                    check_slot(*dst, "GetSuperBase.dst")?;
+                    check_slot(*home, "GetSuperBase.home")?;
+                }
+                Instr::GetSuper {
+                    dst: result,
+                    base,
+                    key,
+                    receiver,
+                }
+                | Instr::SetSuper {
+                    src: result,
+                    base,
+                    key,
+                    receiver,
+                } => {
+                    check_slot(*result, "super value")?;
+                    check_slot(*base, "super base")?;
+                    check_slot(*key, "super key")?;
+                    check_slot(*receiver, "super receiver")?;
                 }
                 Instr::GetDerivedThis { dst, context }
                 | Instr::SuperConstruct { dst, context, .. } => {
@@ -1216,7 +1271,7 @@ impl Build {
                 }
                 Instr::Return { src } => check_slot(*src, "Return.src")?,
                 Instr::Throw { src } => check_slot(*src, "Throw.src")?,
-                Instr::ThrowAssignmentToConst => {}
+                Instr::ThrowAssignmentToConst | Instr::ThrowDeleteSuper => {}
                 Instr::GetBuiltin { dst, builtin } => {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;

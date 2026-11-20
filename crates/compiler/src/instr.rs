@@ -20,6 +20,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
     match instruction {
         Instr::Throw { .. }
         | Instr::ThrowAssignmentToConst
+        | Instr::ThrowDeleteSuper
+        | Instr::GetSuper { .. }
+        | Instr::SetSuper { .. }
         | Instr::CallValue { .. }
         | Instr::LoadClassBinding { .. }
         | Instr::CreateClass { .. }
@@ -59,6 +62,8 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Move { .. }
         | Instr::GetImport { .. }
         | Instr::Closure { .. }
+        | Instr::SetHome { .. }
+        | Instr::GetSuperBase { .. }
         | Instr::NewClassScope { .. }
         | Instr::InitClassBinding { .. }
         | Instr::ScopedClosure { .. }
@@ -141,6 +146,30 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(callee.index);
             uses.extend(args.slots().iter().map(|arg| arg.index));
             defs.insert(dst.index);
+        }
+        Instr::SetHome { function, home } => {
+            uses.extend([function.index, home.index]);
+        }
+        Instr::GetSuperBase { dst, home } => {
+            defs.insert(dst.index);
+            uses.insert(home.index);
+        }
+        Instr::GetSuper {
+            dst,
+            base,
+            key,
+            receiver,
+        } => {
+            defs.insert(dst.index);
+            uses.extend([base.index, key.index, receiver.index]);
+        }
+        Instr::SetSuper {
+            base,
+            key,
+            receiver,
+            src,
+        } => {
+            uses.extend([base.index, key.index, receiver.index, src.index]);
         }
         Instr::GetDerivedThis { dst, context } | Instr::SuperConstruct { dst, context, .. } => {
             uses.insert(context.index);
@@ -293,7 +322,7 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
         }
-        Instr::ThrowAssignmentToConst => {}
+        Instr::ThrowAssignmentToConst | Instr::ThrowDeleteSuper => {}
     }
     (uses, defs)
 }
@@ -357,6 +386,36 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             callee: remap(callee),
             args: remap_args(args, remap),
+        },
+        Instr::SetHome { function, home } => Instr::SetHome {
+            function: remap(function),
+            home: remap(home),
+        },
+        Instr::GetSuperBase { dst, home } => Instr::GetSuperBase {
+            dst: remap(dst),
+            home: remap(home),
+        },
+        Instr::GetSuper {
+            dst,
+            base,
+            key,
+            receiver,
+        } => Instr::GetSuper {
+            dst: remap(dst),
+            base: remap(base),
+            key: remap(key),
+            receiver: remap(receiver),
+        },
+        Instr::SetSuper {
+            base,
+            key,
+            receiver,
+            src,
+        } => Instr::SetSuper {
+            base: remap(base),
+            key: remap(key),
+            receiver: remap(receiver),
+            src: remap(src),
         },
         Instr::GetDerivedThis { dst, context } => Instr::GetDerivedThis {
             dst: remap(dst),
@@ -580,6 +639,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::Return { src } => Instr::Return { src: remap(src) },
         Instr::Throw { src } => Instr::Throw { src: remap(src) },
         Instr::ThrowAssignmentToConst => Instr::ThrowAssignmentToConst,
+        Instr::ThrowDeleteSuper => Instr::ThrowDeleteSuper,
         Instr::GetBuiltin { dst, builtin } => Instr::GetBuiltin {
             dst: remap(dst),
             builtin,

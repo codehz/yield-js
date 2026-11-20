@@ -607,6 +607,7 @@ pub struct FunctionObject {
     pub func_id: u32,
     pub env: ObjectId,
     pub(crate) home: Option<ObjectId>,
+    pub(crate) has_class_metadata: bool,
     pub(crate) class: Option<ScriptClass>,
     #[serde(with = "property_pairs")]
     pub props: PropertyTable<JsString, Property>,

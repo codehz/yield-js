@@ -13,7 +13,7 @@ mod stmt;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxc::ast::ast::*;
-use oxc::ast_visit::Visit;
+use oxc::ast_visit::{Visit, walk};
 use oxc::span::{GetSpan, Span};
 use oxc::syntax::scope::ScopeFlags;
 use yield_vm::BindingId;
@@ -71,6 +71,7 @@ enum FunctionSource<'ast> {
     Script(&'ast [Statement<'ast>]),
     Function(&'ast Function<'ast>),
     Method(&'ast Function<'ast>),
+    Constructor(&'ast Function<'ast>),
     DerivedConstructor(&'ast Function<'ast>),
     Arrow(&'ast ArrowFunctionExpression<'ast>),
     DefaultConstructor(Span),
@@ -83,6 +84,7 @@ impl FunctionSource<'_> {
         match self {
             Self::Function(function)
             | Self::Method(function)
+            | Self::Constructor(function)
             | Self::DerivedConstructor(function) => function.span,
             Self::Arrow(arrow) => arrow.span,
             Self::DefaultConstructor(span) => span,
@@ -99,6 +101,7 @@ impl FunctionSource<'_> {
         match self {
             Self::Function(function)
             | Self::Method(function)
+            | Self::Constructor(function)
             | Self::DerivedConstructor(function) => function.r#async,
             Self::Arrow(arrow) => arrow.r#async,
             Self::Script(_)
@@ -146,6 +149,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     param_bindings: Vec<BindingId>,
     rest_binding: Option<BindingId>,
     this_binding: Option<BindingId>,
+    home_binding: Option<BindingId>,
     new_target_binding: Option<BindingId>,
     arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
@@ -195,6 +199,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: Vec::new(),
             rest_binding: None,
             this_binding: None,
+            home_binding: None,
             new_target_binding: None,
             arguments_binding: None,
             hoisted: BTreeSet::new(),
@@ -204,6 +209,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn compile(&mut self) -> Result<LoweredFunction, CompileError> {
         let source = self.source;
+        self.install_home_binding(source);
         self.install_this_binding(source);
         self.install_new_target_binding(source);
         let length = self.compile_parameters(source)?;
@@ -244,6 +250,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             FunctionSource::Function(function)
             | FunctionSource::Method(function)
+            | FunctionSource::Constructor(function)
             | FunctionSource::DerivedConstructor(function) => {
                 let body = function.body.as_ref().ok_or_else(|| {
                     unsupported(
@@ -300,6 +307,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             param_bindings: self.param_bindings.clone(),
             rest_binding: self.rest_binding,
             this_binding: self.this_binding,
+            home_binding: self.home_binding,
             new_target_binding: self.new_target_binding,
             arguments_binding: self.arguments_binding,
             promoted: BTreeMap::new(),
@@ -311,7 +319,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         })
     }
     fn install_this_binding(&mut self, source: FunctionSource<'ast>) {
-        if self.is_arrow || !(self.derived_this || function_uses_this(source)) {
+        if self.is_arrow
+            || !(self.derived_this || self.home_binding.is_some() || function_uses_this(source))
+        {
             return;
         }
         let binding = self.alloc_binding();
@@ -319,11 +329,34 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.this_binding = Some(binding);
     }
 
+    fn install_home_binding(&mut self, source: FunctionSource<'ast>) {
+        let mut scan = SuperScan { found: false };
+        match source {
+            FunctionSource::Method(function)
+            | FunctionSource::Constructor(function)
+            | FunctionSource::DerivedConstructor(function) => {
+                scan.visit_formal_parameters(&function.params);
+                if let Some(body) = &function.body {
+                    scan.visit_function_body(body);
+                }
+            }
+            FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+            FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
+            _ => return,
+        }
+        if scan.found {
+            let binding = self.alloc_binding();
+            self.env.insert_function(HOME_BINDING.to_owned(), binding);
+            self.home_binding = Some(binding);
+        }
+    }
+
     fn install_new_target_binding(&mut self, source: FunctionSource<'ast>) {
         let mut scan = NewTargetScan { found: false };
         match source {
             FunctionSource::Function(function)
             | FunctionSource::Method(function)
+            | FunctionSource::Constructor(function)
             | FunctionSource::DerivedConstructor(function) => {
                 scan.visit_formal_parameters(&function.params);
                 if let Some(body) = &function.body {
@@ -346,6 +379,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match source {
             FunctionSource::Function(function)
             | FunctionSource::Method(function)
+            | FunctionSource::Constructor(function)
             | FunctionSource::DerivedConstructor(function) => {
                 if function.generator {
                     return Err(unsupported(self.source_text(), function.span, "generator"));
@@ -577,12 +611,20 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             source,
             func_id,
             name: format!("{hint}@{func_id}"),
-            outer: self.env.capture(),
+            outer: self.capture_for(source),
             class_bindings: self.class_bindings.clone(),
             derived_this: matches!(source, FunctionSource::DerivedConstructor(_))
                 || (source.is_arrow() && self.derived_this),
         });
         Ok(func_id)
+    }
+
+    fn capture_for(&self, source: FunctionSource<'ast>) -> CapturedEnv {
+        let mut outer = self.env.capture();
+        if !source.is_arrow() {
+            outer.remove(HOME_BINDING);
+        }
+        outer
     }
 
     pub(super) fn emit_function_value(&mut self, func_id: u32) -> Result<Reg, CompileError> {
@@ -631,7 +673,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             } else {
                 format!("{name}@{func_id}")
             },
-            outer: self.env.capture(),
+            outer: self.capture_for(FunctionSource::Function(function)),
             class_bindings: self.class_bindings.clone(),
             derived_this: false,
         });
@@ -1091,6 +1133,7 @@ fn as_binding_kind(
 
 /// Not a JavaScript identifier, so script cannot name or shadow this binding.
 pub(super) const THIS_BINDING: &str = "\0this";
+const HOME_BINDING: &str = "\0home";
 const NEW_TARGET_BINDING: &str = "\0new.target";
 
 // Class element bodies have their own execution context. Heritage and
@@ -1105,6 +1148,25 @@ macro_rules! scan_class_keys {
 
         fn visit_static_block(&mut self, _: &StaticBlock<'a>) {}
     };
+}
+
+struct SuperScan {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for SuperScan {
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        self.found |= matches!(member.object, Expression::Super(_));
+        walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_computed_member_expression(&mut self, member: &ComputedMemberExpression<'a>) {
+        self.found |= matches!(member.object, Expression::Super(_));
+        walk::walk_computed_member_expression(self, member);
+    }
+
+    fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+    scan_class_keys!();
 }
 
 struct NewTargetScan {
@@ -1124,7 +1186,9 @@ impl<'a> Visit<'a> for NewTargetScan {
 fn function_uses_this(source: FunctionSource<'_>) -> bool {
     let mut scan = ThisScan { found: false };
     match source {
-        FunctionSource::Function(function) | FunctionSource::Method(function) => {
+        FunctionSource::Function(function)
+        | FunctionSource::Method(function)
+        | FunctionSource::Constructor(function) => {
             scan.visit_formal_parameters(&function.params);
             if let Some(body) = &function.body {
                 scan.visit_function_body(body);
@@ -1155,6 +1219,7 @@ fn function_uses_arguments(source: FunctionSource<'_>) -> bool {
     match source {
         FunctionSource::Function(function)
         | FunctionSource::Method(function)
+        | FunctionSource::Constructor(function)
         | FunctionSource::DerivedConstructor(function) => {
             scan.visit_formal_parameters(&function.params);
             if let Some(body) = &function.body {

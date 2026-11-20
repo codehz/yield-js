@@ -641,7 +641,7 @@ impl Vm {
             None,
             prepared,
             Vec::new(),
-            (&Value::Undefined, &Value::Undefined),
+            (&Value::Undefined, &Value::Undefined, None),
         )?
         .into_result()
         .map(|_| prepared)
@@ -932,7 +932,7 @@ impl Vm {
         parent_env: Option<ObjectId>,
         args: Vec<Value>,
         receiver: &Value,
-        new_target: &Value,
+        (new_target, home): (&Value, Option<ObjectId>),
     ) -> Result<Invocation, VmError> {
         self.activate(
             host,
@@ -940,7 +940,7 @@ impl Vm {
             parent_env,
             None,
             args,
-            (receiver, new_target),
+            (receiver, new_target, home),
         )
     }
 
@@ -951,7 +951,7 @@ impl Vm {
         parent_env: Option<ObjectId>,
         prepared_env: Option<ObjectId>,
         args: Vec<Value>,
-        (receiver, new_target): (&Value, &Value),
+        (receiver, new_target, home): (&Value, &Value, Option<ObjectId>),
     ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
@@ -977,6 +977,11 @@ impl Vm {
         }
         if let Some(param) = new_target_param {
             bind(param, new_target.clone());
+        }
+        if let Some(param) = self.build.functions[function_index].home_param.clone() {
+            let home =
+                home.ok_or_else(|| VmError::InvalidState("function has no home object".into()))?;
+            bind(param, Value::Object(home));
         }
         if let Some(param) = arguments_param {
             bind(param, self.create_arguments_object(&args)?);

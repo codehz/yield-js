@@ -22,11 +22,7 @@
 - 私有字段（`private field access`）。设计已将 `class`（含私有字段）提升为一等支持（见 [`design.md`](design.md)），当前拒绝是待实现的缺口，不再由离线构建降级
 - 标签模板。非标签模板已支持
 - 不支持的正则字面量模式与标志在编译时拒绝；若未被 Oxc 提前拒绝，报告带行列的 `unsupported syntax: ...`。模式子集见第 4 节。
-- 未单列的表达式形式落到 `expression form outside the PoC subset`：`super`、`import.meta`、`import()`、`yield`、`bigint`（类表达式归入下方 `class` 缺口）。`new.target` 可在函数中使用，但不能在模块顶层或其箭头函数中使用。
-
-### 2.3 控制流与顶层
-
-- 类定义支持 `extends`，派生构造器支持 `super()`；`super` 属性引用尚未实现。
+- 未单列的表达式形式落到 `expression form outside the PoC subset`：`import.meta`、`import()`、`yield`、`bigint`。`new.target` 可在函数中使用，但不能在模块顶层或其箭头函数中使用。
 
 ## 3. 能编过，但语义不完整
 

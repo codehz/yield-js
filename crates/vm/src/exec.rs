@@ -409,6 +409,81 @@ impl Vm {
                 let invocation = self.construct_with(host, &callee, args, &callee)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::SetHome { function, home } => {
+                let function = object_id(frame.read_ref(function)?, "method function")?;
+                let home = object_id(frame.read_ref(home)?, "method home")?;
+                if !matches!(self.heap.get(home)?, Object::Plain(_)) {
+                    return Err(VmError::InvalidState(
+                        "invalid object literal method home".into(),
+                    ));
+                }
+                let Object::Function(function) = self.heap.get_mut(function)? else {
+                    return Err(VmError::InvalidState("home requires a method".into()));
+                };
+                if function.home.is_some()
+                    || !self
+                        .build
+                        .function(function.func_id)
+                        .is_some_and(|f| f.is_method)
+                {
+                    return Err(VmError::InvalidState("home requires a new method".into()));
+                }
+                function.home = Some(home);
+                Ok(Step::Next)
+            }
+            Instr::GetSuperBase { dst, home } => {
+                let home = object_id(frame.read_ref(home)?, "super home")?;
+                let base = self
+                    .heap
+                    .prototype_of(home)?
+                    .map_or(Value::Null, Value::Object);
+                frame.write(dst, base)?;
+                Ok(Step::Next)
+            }
+            Instr::GetSuper {
+                dst,
+                base,
+                key,
+                receiver,
+            } => {
+                let Value::Object(base) = frame.read(base)? else {
+                    return Ok(Step::Throw(self.type_error("super base is null")?));
+                };
+                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                    Ok(key) => key,
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
+                let receiver = frame.read_ref(receiver)?;
+                let result =
+                    self.read_property_with_receiver(host, base, receiver, key.borrowed())?;
+                store_invocation(frame, dst, result)
+            }
+            Instr::SetSuper {
+                base,
+                key,
+                receiver,
+                src,
+            } => {
+                let Value::Object(base) = frame.read(base)? else {
+                    return Ok(Step::Throw(self.type_error("super base is null")?));
+                };
+                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                    Ok(key) => key,
+                    Err(error) => return Ok(Step::Throw(error)),
+                };
+                let result = self.set_property(
+                    host,
+                    base,
+                    frame.read_ref(receiver)?,
+                    key,
+                    frame.read(src)?,
+                    true,
+                )?;
+                match result {
+                    Invocation::Value(_) => Ok(Step::Next),
+                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
+                }
+            }
             Instr::GetDerivedThis { dst, context } => {
                 let context = object_id(frame.read_ref(context)?, "derived this context")?;
                 let invocation = self.derived_this(context)?;
@@ -847,6 +922,9 @@ impl Vm {
             }
             Instr::Return { src } => Ok(Step::Return(frame.read(src)?)),
             Instr::Throw { src } => Ok(Step::Throw(frame.read(src)?)),
+            Instr::ThrowDeleteSuper => Ok(Step::Throw(
+                self.reference_error("cannot delete a super property")?,
+            )),
             Instr::ThrowAssignmentToConst => Ok(Step::Throw(
                 self.type_error("Assignment to constant variable.")?,
             )),
@@ -1459,7 +1537,7 @@ impl Vm {
             && (id == self.builtins.get("function.prototype")
                 || (is_callable_object(self.heap.get(id)?)
                     && !self.heap.function(id).is_some_and(|function| {
-                        function.class.is_some() || function.home.is_some()
+                        function.class.is_some() || function.has_class_metadata
                     }))))
     }
 
@@ -1934,6 +2012,7 @@ impl Vm {
             unreachable!()
         };
         function.home = Some(target);
+        function.has_class_metadata = true;
         let metadata = Attributes {
             configurable: true,
             ..Attributes::FIXED

@@ -7,6 +7,7 @@ use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Constant, ExceptionHandler, Instr};
 
 use super::Lowerer;
+use super::expr::PropertyRef;
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 
@@ -19,7 +20,7 @@ enum Destination<'ast> {
     Pattern(Pattern<'ast>),
     AssignmentBinding(BindingId),
     AssignmentReadOnly,
-    Member { object: Reg, key: Reg },
+    Member(PropertyRef),
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
@@ -68,8 +69,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 return self.assignment_binding(id);
             }
             if let Some(member) = target.as_member_expression() {
-                let (object, key) = self.compile_member_parts(member)?;
-                return Ok(Destination::Member { object, key });
+                return Ok(Destination::Member(self.compile_member_ref(member, None)?));
             }
         }
         Ok(Destination::Pattern(pattern))
@@ -80,16 +80,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         destination: Destination<'ast>,
         value: Reg,
     ) -> Result<(), CompileError> {
-        let src = self.slot(value);
         match destination {
             Destination::Pattern(pattern) => return self.compile_pattern(pattern, value),
             Destination::AssignmentBinding(binding) => self.put_binding(binding, value),
             Destination::AssignmentReadOnly => self.emit(Instr::ThrowAssignmentToConst),
-            Destination::Member { object, key } => self.emit(Instr::SetMember {
-                object: self.slot(object),
-                key: self.slot(key),
-                src,
-            }),
+            Destination::Member(reference) => self.emit_set_property(reference, value),
         };
         Ok(())
     }

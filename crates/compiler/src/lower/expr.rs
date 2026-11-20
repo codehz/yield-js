@@ -9,10 +9,25 @@ use oxc::syntax::operator::{
 use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
 use yield_vm::{BindingId, JsString};
 
-use super::{FunctionSource, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
+use super::{FunctionSource, HOME_BINDING, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
+
+#[derive(Clone, Copy)]
+pub(super) enum PropertyRef {
+    Member { object: Reg, key: Reg },
+    Super { base: Reg, key: Reg, receiver: Reg },
+}
+
+impl PropertyRef {
+    fn receiver(self) -> Reg {
+        match self {
+            Self::Member { object, .. } => object,
+            Self::Super { receiver, .. } => receiver,
+        }
+    }
+}
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_named_expression(
@@ -127,16 +142,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ClassExpression(class) => self.compile_class(class, ""),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
-            Expression::StaticMemberExpression(member) => self.compile_static_member_value(member),
+            Expression::StaticMemberExpression(member) => {
+                let reference = self.compile_static_member(member, None)?;
+                self.emit_get_property(reference)
+            }
             Expression::ComputedMemberExpression(member) => {
-                let (object, key) = self.compile_computed_member(member)?;
-                let dst = self.alloc_reg()?;
-                self.emit(Instr::GetMember {
-                    dst: self.slot(dst),
-                    object: self.slot(object),
-                    key: self.slot(key),
-                });
-                Ok(dst)
+                let reference = self.compile_computed_member(member, None)?;
+                self.emit_get_property(reference)
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
             Expression::ThisExpression(_) => self.compile_this(),
@@ -537,15 +549,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         if let Some(member) = argument.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            return self.emit_delete_member(object, key);
+            let reference = self.compile_member_ref(member, None)?;
+            return self.emit_delete_property(reference);
         }
         if let Expression::ChainExpression(chain) = argument
             && let Some(member) = chain.expression.as_member_expression()
         {
             let mut exits = Vec::new();
-            let (object, key) = self.compile_chain_member_parts(member, &mut exits)?;
-            let result = self.emit_delete_member(object, key)?;
+            let reference = self.compile_member_ref(member, Some(&mut exits))?;
+            let result = self.emit_delete_property(reference)?;
             if !exits.is_empty() {
                 let end = self.jump();
                 let short_circuit = self.pc();
@@ -565,7 +577,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit_constant(Constant::Bool(true))
     }
 
-    fn emit_delete_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {
+    fn emit_delete_property(&mut self, reference: PropertyRef) -> Result<Reg, CompileError> {
+        let PropertyRef::Member { object, key } = reference else {
+            self.emit(Instr::ThrowDeleteSuper);
+            return self.emit_undefined();
+        };
         let dst = self.alloc_reg()?;
         self.emit(Instr::DeleteMember {
             dst: self.slot(dst),
@@ -655,40 +671,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         member: &'ast MemberExpression<'ast>,
         exits: &mut Vec<usize>,
     ) -> Result<(Reg, Reg), CompileError> {
-        let (object, key) = self.compile_chain_member_parts(member, exits)?;
-        Ok((self.emit_get_member(object, key)?, object))
-    }
-
-    fn compile_chain_member_parts(
-        &mut self,
-        member: &'ast MemberExpression<'ast>,
-        exits: &mut Vec<usize>,
-    ) -> Result<(Reg, Reg), CompileError> {
-        let (base, optional) = match member {
-            MemberExpression::StaticMemberExpression(member) => (&member.object, member.optional),
-            MemberExpression::ComputedMemberExpression(member) => (&member.object, member.optional),
-            MemberExpression::PrivateFieldExpression(member) => {
-                return Err(unsupported(
-                    self.source_text(),
-                    member.span,
-                    "private field access",
-                ));
-            }
-        };
-        let (object, _) = self.compile_chain_link(base, exits)?;
-        if optional {
-            self.guard_chain_link(object, exits)?;
-        }
-        let key = match member {
-            MemberExpression::StaticMemberExpression(member) => {
-                self.emit_constant(Constant::String(member.property.name.as_str().into()))?
-            }
-            MemberExpression::ComputedMemberExpression(member) => {
-                self.compile_expression(&member.expression)?
-            }
-            MemberExpression::PrivateFieldExpression(_) => unreachable!(),
-        };
-        Ok((object, key))
+        let reference = self.compile_member_ref(member, Some(exits))?;
+        Ok((self.emit_get_property(reference)?, reference.receiver()))
     }
 
     fn emit_get_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {
@@ -699,6 +683,71 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             key: self.slot(key),
         });
         Ok(dst)
+    }
+
+    fn emit_get_property(&mut self, reference: PropertyRef) -> Result<Reg, CompileError> {
+        let (base, key, receiver) = match reference {
+            PropertyRef::Member { object, key } => return self.emit_get_member(object, key),
+            PropertyRef::Super {
+                base,
+                key,
+                receiver,
+            } => (base, key, receiver),
+        };
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::GetSuper {
+            dst: self.slot(dst),
+            base: self.slot(base),
+            key: self.slot(key),
+            receiver: self.slot(receiver),
+        });
+        Ok(dst)
+    }
+
+    pub(super) fn emit_set_property(&mut self, reference: PropertyRef, value: Reg) -> usize {
+        let src = self.slot(value);
+        self.emit(match reference {
+            PropertyRef::Member { object, key } => Instr::SetMember {
+                object: self.slot(object),
+                key: self.slot(key),
+                src,
+            },
+            PropertyRef::Super {
+                base,
+                key,
+                receiver,
+            } => Instr::SetSuper {
+                base: self.slot(base),
+                key: self.slot(key),
+                receiver: self.slot(receiver),
+                src,
+            },
+        })
+    }
+
+    // Property instructions convert their keys. Save the converted key
+    // explicitly when the same reference serves both a read and a write.
+    fn prepare_read_write_ref(
+        &mut self,
+        reference: PropertyRef,
+        computed: bool,
+    ) -> Result<PropertyRef, CompileError> {
+        match reference {
+            PropertyRef::Member { object, key } if computed => Ok(PropertyRef::Member {
+                object,
+                key: self.emit_to_property_key(key, Some(object))?,
+            }),
+            PropertyRef::Super {
+                base,
+                key,
+                receiver,
+            } if computed => Ok(PropertyRef::Super {
+                base,
+                key: self.emit_to_property_key(key, Some(base))?,
+                receiver,
+            }),
+            _ => Ok(reference),
+        }
     }
 
     fn compile_call(
@@ -726,6 +775,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             callee = &paren.expression;
         }
         if let Expression::Super(super_expr) = callee {
+            if expression.optional {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    super_expr.span,
+                    "optional super() call",
+                ));
+            }
             if !self.derived_this {
                 return Err(CompileError::new(
                     self.source_text(),
@@ -804,8 +860,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Expression::ChainExpression(chain) = callee {
             self.compile_chain(chain, true)
         } else if let Some(member) = callee.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            Ok((self.emit_get_member(object, key)?, Some(object)))
+            let reference = self.compile_member_ref(member, None)?;
+            Ok((
+                self.emit_get_property(reference)?,
+                Some(reference.receiver()),
+            ))
         } else {
             Ok((self.compile_expression(callee)?, None))
         }
@@ -888,27 +947,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
-    fn compile_static_member_value(
-        &mut self,
-        member: &'ast StaticMemberExpression<'ast>,
-    ) -> Result<Reg, CompileError> {
-        if member.optional {
-            return Err(unsupported(
-                self.source_text(),
-                member.span,
-                "optional member access",
-            ));
-        }
-        let (object, key) = self.compile_static_member(member)?;
-        let dst = self.alloc_reg()?;
-        self.emit(Instr::GetMember {
-            dst: self.slot(dst),
-            object: self.slot(object),
-            key: self.slot(key),
-        });
-        Ok(dst)
-    }
-
     fn compile_assignment(
         &mut self,
         expression: &'ast AssignmentExpression<'ast>,
@@ -965,26 +1003,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         if let Some(member) = expression.left.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            let key = if member.is_computed() && expression.operator != AssignmentOperator::Assign {
-                self.emit_to_property_key(key, Some(object))?
-            } else {
-                key
-            };
+            let mut reference = self.compile_member_ref(member, None)?;
+            if expression.operator != AssignmentOperator::Assign {
+                reference = self.prepare_read_write_ref(reference, member.is_computed())?;
+            }
             if let Some(op) = logical_assignment_operator(expression.operator) {
-                let result = self.alloc_reg()?;
-                self.emit(Instr::GetMember {
-                    dst: self.slot(result),
-                    object: self.slot(object),
-                    key: self.slot(key),
-                });
+                let result = self.emit_get_property(reference)?;
                 let end = self.begin_logical_rhs(op, result)?;
                 let right = self.compile_expression(&expression.right)?;
-                self.emit(Instr::SetMember {
-                    object: self.slot(object),
-                    key: self.slot(key),
-                    src: self.slot(right),
-                });
+                self.emit_set_property(reference, right);
                 self.emit(Instr::Move {
                     dst: self.slot(result),
                     src: self.slot(right),
@@ -995,12 +1022,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let value = if matches!(expression.operator, AssignmentOperator::Assign) {
                 self.compile_expression(&expression.right)?
             } else {
-                let old = self.alloc_reg()?;
-                self.emit(Instr::GetMember {
-                    dst: self.slot(old),
-                    object: self.slot(object),
-                    key: self.slot(key),
-                });
+                let old = self.emit_get_property(reference)?;
                 let right = self.compile_expression(&expression.right)?;
                 let op = binary_assignment_operator(expression.operator);
                 let value = self.alloc_reg()?;
@@ -1012,11 +1034,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 value
             };
-            self.emit(Instr::SetMember {
-                object: self.slot(object),
-                key: self.slot(key),
-                src: self.slot(value),
-            });
+            self.emit_set_property(reference, value);
             let result = self.alloc_reg()?;
             self.emit(Instr::Move {
                 dst: self.slot(result),
@@ -1088,7 +1106,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         enum Target<'name> {
             Binding(BindingId),
             ReadOnly(ReadOnlyName<'name>),
-            Member(Reg, Reg),
+            Member(PropertyRef),
         }
 
         // The parser normalizes parenthesized simple assignment targets, so
@@ -1111,13 +1129,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ));
             }
         } else if let Some(member) = expression.argument.as_member_expression() {
-            let (object, key) = self.compile_member_parts(member)?;
-            let key = if member.is_computed() {
-                self.emit_to_property_key(key, Some(object))?
-            } else {
-                key
-            };
-            Target::Member(object, key)
+            let reference = self.compile_member_ref(member, None)?;
+            Target::Member(self.prepare_read_write_ref(reference, member.is_computed())?)
         } else {
             return Err(unsupported(
                 self.source_text(),
@@ -1128,7 +1141,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         let old = match &target {
             Target::ReadOnly(name) => self.emit_read_only(*name)?,
-            Target::Member(object, key) => self.emit_get_member(*object, *key)?,
+            Target::Member(reference) => self.emit_get_property(*reference)?,
             Target::Binding(binding) => {
                 let old = self.alloc_reg()?;
                 self.emit_binding_read(old, *binding);
@@ -1156,23 +1169,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         match &target {
             Target::Binding(binding) => self.put_binding(*binding, updated),
             Target::ReadOnly(_) => self.emit(Instr::ThrowAssignmentToConst),
-            Target::Member(object, key) => self.emit(Instr::SetMember {
-                object: self.slot(*object),
-                key: self.slot(*key),
-                src: self.slot(updated),
-            }),
+            Target::Member(reference) => self.emit_set_property(*reference, updated),
         };
         Ok(if expression.prefix { updated } else { numeric })
     }
 
-    pub(super) fn compile_member_parts(
+    pub(super) fn compile_member_ref(
         &mut self,
         member: &'ast MemberExpression<'ast>,
-    ) -> Result<(Reg, Reg), CompileError> {
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<PropertyRef, CompileError> {
         match member {
-            MemberExpression::StaticMemberExpression(member) => self.compile_static_member(member),
+            MemberExpression::StaticMemberExpression(member) => {
+                self.compile_static_member(member, exits)
+            }
             MemberExpression::ComputedMemberExpression(member) => {
-                self.compile_computed_member(member)
+                self.compile_computed_member(member, exits)
             }
             MemberExpression::PrivateFieldExpression(member) => Err(unsupported(
                 self.source_text(),
@@ -1185,33 +1197,81 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn compile_static_member(
         &mut self,
         member: &'ast StaticMemberExpression<'ast>,
-    ) -> Result<(Reg, Reg), CompileError> {
-        if member.optional {
-            return Err(unsupported(
-                self.source_text(),
-                member.span,
-                "optional member access",
-            ));
-        }
-        let object = self.compile_expression(&member.object)?;
-        let key = self.emit_constant(Constant::String(member.property.name.as_str().into()))?;
-        Ok((object, key))
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<PropertyRef, CompileError> {
+        self.compile_property_ref(&member.object, member.optional, exits, |this| {
+            this.emit_constant(Constant::String(member.property.name.as_str().into()))
+        })
     }
 
     fn compile_computed_member(
         &mut self,
         member: &'ast ComputedMemberExpression<'ast>,
-    ) -> Result<(Reg, Reg), CompileError> {
-        if member.optional {
-            return Err(unsupported(
-                self.source_text(),
-                member.span,
-                "optional member access",
-            ));
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<PropertyRef, CompileError> {
+        self.compile_property_ref(&member.object, member.optional, exits, |this| {
+            this.compile_expression(&member.expression)
+        })
+    }
+
+    fn compile_property_ref(
+        &mut self,
+        object: &'ast Expression<'ast>,
+        optional: bool,
+        exits: Option<&mut Vec<usize>>,
+        compile_key: impl FnOnce(&mut Self) -> Result<Reg, CompileError>,
+    ) -> Result<PropertyRef, CompileError> {
+        if matches!(object, Expression::Super(_)) {
+            if optional {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    object.span(),
+                    "optional access on super",
+                ));
+            }
+            let Some(binding) = self.lookup(HOME_BINDING) else {
+                return Err(CompileError::new(
+                    self.source_text(),
+                    object.span(),
+                    "super property access outside a method or class initializer",
+                ));
+            };
+            let receiver = self.compile_this()?;
+            let key = compile_key(self)?;
+            // Keep the raw key: a plain assignment converts it after the RHS,
+            // and delete super fails without converting it at all.
+            let home = self.alloc_reg()?;
+            self.emit_binding_read(home, binding);
+            let base = self.alloc_reg()?;
+            self.emit(Instr::GetSuperBase {
+                dst: self.slot(base),
+                home: self.slot(home),
+            });
+            return Ok(PropertyRef::Super {
+                base,
+                key,
+                receiver,
+            });
         }
-        let object = self.compile_expression(&member.object)?;
-        let key = self.compile_expression(&member.expression)?;
-        Ok((object, key))
+
+        let object = if let Some(exits) = exits {
+            let (object, _) = self.compile_chain_link(object, exits)?;
+            if optional {
+                self.guard_chain_link(object, exits)?;
+            }
+            object
+        } else {
+            if optional {
+                return Err(unsupported(
+                    self.source_text(),
+                    object.span(),
+                    "optional member access",
+                ));
+            }
+            self.compile_expression(object)?
+        };
+        let key = compile_key(self)?;
+        Ok(PropertyRef::Member { object, key })
     }
 
     fn compile_object(
@@ -1278,7 +1338,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     format_args!("{prefix}{name}"),
                     function.span,
                 )?;
-                self.emit_function_value(id)?
+                let function = self.emit_function_value(id)?;
+                self.emit(Instr::SetHome {
+                    function: self.slot(function),
+                    home: self.slot(dst),
+                });
+                function
             } else {
                 self.compile_named_expression(&property.value, name.as_deref().unwrap_or(""))?
             };
