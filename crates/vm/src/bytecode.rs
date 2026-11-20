@@ -14,41 +14,7 @@ use crate::value::{BindingId, JsString};
 
 pub const BYTECODE_VERSION: u32 = 29;
 
-/// VM-provided global names, in builtin-index order.
-/// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
-/// Entries `7` (`NaN`) and `8` (`Infinity`) are primitive number values, not
-/// objects; they load via [`Instr::GetBuiltin`]. Error constructors are appended
-/// after `String` at indices 11–16. The compiler and `Build::validate` both use
-/// this table; do not reorder it.
-pub const BUILTINS: [&str; 27] = [
-    "Promise",
-    "queueMicrotask",
-    "Error",
-    "TypeError",
-    "Symbol",
-    "Reflect",
-    "Object",
-    "NaN",
-    "Infinity",
-    "Array",
-    "String",
-    "RangeError",
-    "ReferenceError",
-    "SyntaxError",
-    "EvalError",
-    "URIError",
-    "AggregateError",
-    "Number",
-    "Math",
-    "JSON",
-    "Map",
-    "Set",
-    "WeakMap",
-    "Proxy",
-    "Boolean",
-    "globalThis",
-    "RegExp",
-];
+pub use crate::builtins::BUILTINS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

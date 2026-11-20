@@ -2,6 +2,40 @@ use std::collections::{BTreeMap, BTreeSet};
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::bytecode::Instr;
 
+#[test]
+fn builtin_indices_preserve_bytecode_abi() {
+    let original = [
+        "Promise",
+        "queueMicrotask",
+        "Error",
+        "TypeError",
+        "Symbol",
+        "Reflect",
+        "Object",
+        "NaN",
+        "Infinity",
+        "Array",
+        "String",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "EvalError",
+        "URIError",
+        "AggregateError",
+        "Number",
+        "Math",
+        "JSON",
+        "Map",
+        "Set",
+        "WeakMap",
+        "Proxy",
+        "Boolean",
+        "globalThis",
+        "RegExp",
+    ];
+    assert!(yield_vm::bytecode::BUILTINS.starts_with(&original));
+}
+
 fn manifest(modules: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
     modules
         .iter()

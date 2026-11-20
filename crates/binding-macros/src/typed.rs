@@ -333,6 +333,113 @@ fn reject_markers(attrs: &[Attribute], names: &[&str], message: &str) -> Result<
     Ok(())
 }
 
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn nonempty_string(meta: &Meta) -> Result<LitStr> {
+    let name = string(meta)?;
+    if name.value().is_empty() {
+        return Err(Error::new_spanned(name, "expected a nonempty string"));
+    }
+    Ok(name)
+}
+
+pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
+    let mut module: ItemMod = syn::parse2(item)?;
+    let opts = options(args, &["name", "root"])?;
+    let span = module.ident.span();
+    let name = nonempty_string(required(&opts, "name", span)?)?;
+    let root = nonempty_string(required(&opts, "root", span)?)?;
+    let Some((_, items)) = &mut module.content else {
+        return Err(Error::new_spanned(
+            module,
+            "builtin_global requires an inline module",
+        ));
+    };
+
+    let mut keys = HashSet::new();
+    let mut install = Vec::new();
+    let mut resolve = Vec::new();
+    for item in &mut *items {
+        let Item::Fn(item) = item else {
+            reject_markers(
+                item_attrs(item),
+                &["function"],
+                "function marker requires a function",
+            )?;
+            continue;
+        };
+        let Some((_, marker)) = take_marker(&mut item.attrs, &["function"])? else {
+            continue;
+        };
+        let opts = options(marker.parse_args()?, &["name"])?;
+        let member = nonempty_string(required(&opts, "name", marker.span())?)?;
+        if !keys.insert(member.value()) {
+            return Err(Error::new_spanned(member, "duplicate builtin member name"));
+        }
+
+        let ident = &item.sig.ident;
+        let cfg = item.attrs.iter().filter(|attr| attr.path().is_ident("cfg"));
+        let resolve_cfg = cfg.clone();
+        install.push(quote! {
+            #(#cfg)*
+            {
+                let method = vm.heap.alloc_builtin(NAME, Some(#member));
+                vm.heap.define_data(
+                    object,
+                    #member,
+                    crate::value::Value::Object(method),
+                    crate::heap::Attributes::METHOD,
+                ).expect("fresh builtin namespace stores methods");
+            }
+        });
+        resolve.push(quote! {
+            #(#resolve_cfg)*
+            #member => {
+                let handler: crate::builtins::BuiltinHandler = self::#ident;
+                Some(handler)
+            },
+        });
+    }
+
+    items.push(syn::parse_quote!(pub(crate) const NAME: &str = #name;));
+    items.push(syn::parse_quote!(pub(crate) const ROOT: &str = #root;));
+    items.push(syn::parse_quote! {
+        pub(crate) fn install(vm: &mut crate::vm::Vm) -> crate::value::ObjectId {
+            let object = vm.heap.alloc_plain();
+            #(#install)*
+            object
+        }
+    });
+    items.push(syn::parse_quote! {
+        pub(crate) fn resolve(member: &str) -> Option<crate::builtins::BuiltinHandler> {
+            match member {
+                #(#resolve)*
+                _ => None,
+            }
+        }
+    });
+    Ok(quote!(#module))
+}
+
 const EXPORT_MARKERS: &[&str] = &["function", "constructor", "constant"];
 const MEMBER_MARKERS: &[&str] = &["method", "get", "set"];
 
@@ -361,22 +468,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             }
             Item::Const(item) => &mut item.attrs,
             other => {
-                let attrs = match other {
-                    Item::Enum(item) => &item.attrs,
-                    Item::ExternCrate(item) => &item.attrs,
-                    Item::ForeignMod(item) => &item.attrs,
-                    Item::Impl(item) => &item.attrs,
-                    Item::Macro(item) => &item.attrs,
-                    Item::Mod(item) => &item.attrs,
-                    Item::Static(item) => &item.attrs,
-                    Item::Struct(item) => &item.attrs,
-                    Item::Trait(item) => &item.attrs,
-                    Item::TraitAlias(item) => &item.attrs,
-                    Item::Type(item) => &item.attrs,
-                    Item::Union(item) => &item.attrs,
-                    Item::Use(item) => &item.attrs,
-                    _ => continue,
-                };
+                let attrs = item_attrs(other);
                 reject_markers(
                     attrs,
                     EXPORT_MARKERS,
@@ -1004,6 +1096,77 @@ mod tests {
             error.contains(expected),
             "expected {expected:?}, got {error:?}"
         );
+    }
+
+    #[test]
+    fn builtin_global_rejects_invalid_declarations() {
+        let args = quote!(name = "JSON", root = "json");
+        diagnostic(
+            builtin_global(
+                args.clone(),
+                quote! {
+                    mod namespace {
+                        #[function(name = "parse")]
+                        fn first() {}
+                        #[function(name = "parse")]
+                        fn second() {}
+                    }
+                },
+            ),
+            "duplicate builtin member name",
+        );
+        diagnostic(
+            builtin_global(
+                args.clone(),
+                quote!(
+                    mod namespace;
+                ),
+            ),
+            "inline module",
+        );
+        diagnostic(
+            builtin_global(
+                args,
+                quote! {
+                    mod namespace {
+                        #[function(name = "parse")]
+                        struct Parse;
+                    }
+                },
+            ),
+            "function marker requires a function",
+        );
+        for (args, message) in [
+            (quote!(root = "json"), "missing `name` option"),
+            (quote!(name = "JSON"), "missing `root` option"),
+            (
+                quote!(name = "JSON", root = "json", extra = "x"),
+                "unknown attribute option",
+            ),
+            (
+                quote!(name = "JSON", root = "json", root = "other"),
+                "duplicate attribute option",
+            ),
+            (
+                quote!(name = "", root = "json"),
+                "expected a nonempty string",
+            ),
+            (
+                quote!(name = "JSON", root = ""),
+                "expected a nonempty string",
+            ),
+        ] {
+            diagnostic(builtin_global(args, quote! { mod namespace {} }), message);
+        }
+    }
+
+    #[test]
+    fn builtin_global_accepts_empty_namespace() {
+        builtin_global(
+            quote!(name = "JSON", root = "json"),
+            quote! { mod namespace {} },
+        )
+        .expect("empty builtin namespace should expand");
     }
 
     #[test]

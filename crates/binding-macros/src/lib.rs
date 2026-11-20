@@ -1,4 +1,4 @@
-//! Typed Rust authoring macros for yield-vm's host binding declarations.
+//! Typed Rust authoring macros for yield-vm's host bindings and VM builtins.
 
 use proc_macro::TokenStream;
 
@@ -13,6 +13,12 @@ fn expand(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 #[proc_macro_attribute]
 pub fn host_module(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(typed::host_module(args.into(), item.into()))
+}
+
+/// Declares an internal VM namespace and its builtin function members.
+#[proc_macro_attribute]
+pub fn builtin_global(args: TokenStream, item: TokenStream) -> TokenStream {
+    expand(typed::builtin_global(args.into(), item.into()))
 }
 
 #[proc_macro_attribute]

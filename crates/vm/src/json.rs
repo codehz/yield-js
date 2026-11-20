@@ -7,6 +7,21 @@ use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
+#[yield_binding_macros::builtin_global(name = "JSON", root = "json")]
+pub(crate) mod namespace {
+    use super::{Host, Invocation, Value, Vm, VmError};
+
+    #[function(name = "parse")]
+    fn parse(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        vm.json_parse(host, args)
+    }
+
+    #[function(name = "stringify")]
+    fn stringify(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+        vm.json_stringify(host, args)
+    }
+}
+
 const MAX_DEPTH: usize = 256;
 
 #[derive(Debug)]
@@ -335,21 +350,6 @@ struct Serialize<'a> {
 }
 
 impl Vm {
-    pub(crate) fn call_json(
-        &mut self,
-        host: &mut dyn Host,
-        method: &str,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        match method {
-            "parse" => self.json_parse(host, args),
-            "stringify" => self.json_stringify(host, args),
-            _ => Err(VmError::InvalidState(format!(
-                "unknown JSON method {method}"
-            ))),
-        }
-    }
-
     fn json_parse(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
         let text = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
             Ok(text) => text,

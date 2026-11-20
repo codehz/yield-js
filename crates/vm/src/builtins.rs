@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 
 use crate::JsString;
-use crate::bytecode::BUILTINS;
 use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
 use crate::heap::BoxedPrimitive;
@@ -30,6 +29,85 @@ use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::string::{StringMethod, StringStatic, utf16_len, utf16_unit};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
+
+macro_rules! builtin_globals {
+    (|$roots:ident| [$($name:expr => $value:expr),* $(,)?]) => {
+        /// VM-provided global names, in bytecode builtin-index order.
+        /// Append new entries; never reorder existing ones.
+        pub const BUILTINS: [&str; [$(builtin_globals!(@unit $name)),*].len()] = [
+            $($name),*
+        ];
+
+        const _: () = {
+            let mut i = 0;
+            while i < BUILTINS.len() {
+                let name = BUILTINS[i].as_bytes();
+                assert!(!name.is_empty(), "empty builtin name");
+                let mut j = 0;
+                while j < i {
+                    let previous = BUILTINS[j].as_bytes();
+                    if name.len() == previous.len() {
+                        let mut k = 0;
+                        while k < name.len() && name[k] == previous[k] {
+                            k += 1;
+                        }
+                        assert!(k != name.len(), "duplicate builtin name");
+                    }
+                    j += 1;
+                }
+                i += 1;
+            }
+        };
+
+        impl Vm {
+            pub(crate) fn builtin_value(&self, builtin: u32) -> Result<Value, VmError> {
+                let $roots = &self.builtins;
+                builtin_globals!(@lookup builtin, 0u32; $($value),*)
+            }
+        }
+    };
+    (@unit $name:expr) => { () };
+    (@lookup $builtin:ident, $index:expr; $value:expr $(, $rest:expr)*) => {{
+        const INDEX: u32 = $index;
+        if $builtin == INDEX {
+            return Ok($value);
+        }
+        builtin_globals!(@lookup $builtin, $index + 1; $($rest),*)
+    }};
+    (@lookup $builtin:ident, $index:expr;) => {{
+        Err(VmError::InvalidState(format!("builtin {} does not exist", $builtin)))
+    }};
+}
+
+builtin_globals!(|roots| [
+    "Promise" => Value::Object(roots.promise),
+    "queueMicrotask" => Value::Object(roots.queue_microtask),
+    "Error" => Value::Object(roots.error),
+    "TypeError" => Value::Object(roots.typeerror),
+    "Symbol" => Value::Object(roots.symbol),
+    "Reflect" => Value::Object(roots.reflect),
+    "Object" => Value::Object(roots.object),
+    "NaN" => Value::Number(f64::NAN),
+    "Infinity" => Value::Number(f64::INFINITY),
+    "Array" => Value::Object(roots.array),
+    "String" => Value::Object(roots.string),
+    "RangeError" => Value::Object(roots.rangeerror),
+    "ReferenceError" => Value::Object(roots.referenceerror),
+    "SyntaxError" => Value::Object(roots.syntaxerror),
+    "EvalError" => Value::Object(roots.evalerror),
+    "URIError" => Value::Object(roots.urierror),
+    "AggregateError" => Value::Object(roots.aggregateerror),
+    "Number" => Value::Object(roots.number),
+    "Math" => Value::Object(roots.math),
+    crate::json::namespace::NAME => Value::Object(roots.json),
+    "Map" => Value::Object(roots.map),
+    "Set" => Value::Object(roots.set),
+    "WeakMap" => Value::Object(roots.weakmap),
+    "Proxy" => Value::Object(roots.proxy),
+    "Boolean" => Value::Object(roots.boolean_constructor),
+    "globalThis" => Value::Object(roots.global_this),
+    "RegExp" => Value::Object(roots.regexp),
+]);
 
 pub(crate) const ROOT_GLOBAL_THIS: &str = "globalThis";
 pub(crate) const ROOT_PROMISE: &str = "promise";
@@ -73,7 +151,6 @@ pub(crate) const ROOT_SYMBOL: &str = "symbol";
 pub(crate) const ROOT_REFLECT: &str = "reflect";
 pub(crate) const ROOT_OBJECT: &str = "object";
 pub(crate) const ROOT_MATH: &str = "math";
-pub(crate) const ROOT_JSON: &str = "json";
 pub(crate) const ROOT_WEAK_MAP: &str = "weakmap";
 pub(crate) const ROOT_WEAK_MAP_PROTOTYPE: &str = "weakmap.prototype";
 pub(crate) const ROOT_PROXY: &str = "proxy";
@@ -221,10 +298,13 @@ impl BuiltinRoots {
             (ROOT_REFLECT.to_owned(), self.reflect),
             (ROOT_OBJECT.to_owned(), self.object),
             (ROOT_MATH.to_owned(), self.math),
-            (ROOT_JSON.to_owned(), self.json),
+            (crate::json::namespace::ROOT.to_owned(), self.json),
         ])
     }
 }
+
+pub(crate) type BuiltinHandler =
+    fn(&mut Vm, &mut dyn Host, &[Value]) -> Result<Invocation, VmError>;
 
 pub(crate) enum BuiltinCall {
     Constructor,
@@ -291,7 +371,7 @@ pub(crate) enum BuiltinCall {
     TestIntegrityLevel(IntegrityLevel),
     ObjectAssign,
     ObjectIs,
-    JsonStatic(String),
+    Registered(BuiltinHandler),
 }
 
 enum Dispatch<'a> {
@@ -436,16 +516,6 @@ impl Vm {
         constructor
     }
 
-    fn init_json(&mut self) -> ObjectId {
-        let json = self.heap.alloc_plain();
-        for name in ["parse", "stringify"] {
-            let method = self.heap.alloc_builtin("JSON", Some(name));
-            self.heap
-                .define_data(json, name, Value::Object(method), Attributes::METHOD)
-                .expect("JSON stores methods");
-        }
-        json
-    }
     pub(crate) fn init_builtins(&mut self) {
         let object_prototype = self.heap.alloc_plain();
         self.heap.object_prototype = Some(object_prototype);
@@ -540,7 +610,7 @@ impl Vm {
         let boolean_constructor = self.heap.alloc_builtin("Boolean", None);
         let boolean_prototype = self.init_wrapper_prototype("Boolean", boolean_constructor);
         let math = self.init_math();
-        let json = self.init_json();
+        let json = crate::json::namespace::install(self);
         let identity = Value::Object(self.heap.alloc_builtin("Iterator", Some("identity")));
         self.heap
             .define_data(
@@ -849,41 +919,6 @@ impl Vm {
             return false;
         };
         self.heap.get(*id).is_ok_and(is_callable_object)
-    }
-
-    pub(crate) fn builtin_value(&self, builtin: u32) -> Result<Value, VmError> {
-        match builtin {
-            0 => Ok(Value::Object(self.builtins.promise)),
-            1 => Ok(Value::Object(self.builtins.queue_microtask)),
-            2 => Ok(Value::Object(self.builtins.error)),
-            3 => Ok(Value::Object(self.builtins.typeerror)),
-            4 => Ok(Value::Object(self.builtins.symbol)),
-            5 => Ok(Value::Object(self.builtins.reflect)),
-            6 => Ok(Value::Object(self.builtins.object)),
-            7 => Ok(Value::Number(f64::NAN)),
-            8 => Ok(Value::Number(f64::INFINITY)),
-            9 => Ok(Value::Object(self.builtins.array)),
-            10 => Ok(Value::Object(self.builtins.string)),
-            11 => Ok(Value::Object(self.builtins.rangeerror)),
-            12 => Ok(Value::Object(self.builtins.referenceerror)),
-            13 => Ok(Value::Object(self.builtins.syntaxerror)),
-            14 => Ok(Value::Object(self.builtins.evalerror)),
-            15 => Ok(Value::Object(self.builtins.urierror)),
-            16 => Ok(Value::Object(self.builtins.aggregateerror)),
-            17 => Ok(Value::Object(self.builtins.number)),
-            18 => Ok(Value::Object(self.builtins.math)),
-            19 => Ok(Value::Object(self.builtins.json)),
-            20 => Ok(Value::Object(self.builtins.map)),
-            21 => Ok(Value::Object(self.builtins.set)),
-            22 => Ok(Value::Object(self.builtins.weakmap)),
-            23 => Ok(Value::Object(self.builtins.proxy)),
-            24 => Ok(Value::Object(self.builtins.boolean_constructor)),
-            25 => Ok(Value::Object(self.builtins.global_this)),
-            26 => Ok(Value::Object(self.builtins.regexp)),
-            _ => Err(VmError::InvalidState(format!(
-                "builtin {builtin} does not exist"
-            ))),
-        }
     }
 
     pub(crate) fn materialize_function(
@@ -1339,7 +1374,7 @@ impl Vm {
             }
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
-            BuiltinCall::JsonStatic(method) => self.call_json(host, &method, &args),
+            BuiltinCall::Registered(handler) => handler(self, host, &args),
             BuiltinCall::IteratorIdentity => Ok(Invocation::Value(receiver.clone())),
             BuiltinCall::ReflectApply => self.reflect_call(host, &args, false),
             BuiltinCall::ReflectConstruct => self.reflect_call(host, &args, true),
@@ -3325,8 +3360,8 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("Reflect", Some("get")) => Some(BuiltinCall::ReflectGet),
         ("Reflect", Some("set")) => Some(BuiltinCall::ReflectSet),
         ("Reflect", Some("has")) => Some(BuiltinCall::ReflectHas),
-        ("JSON", Some(name @ ("parse" | "stringify"))) => {
-            Some(BuiltinCall::JsonStatic(name.to_owned()))
+        (crate::json::namespace::NAME, Some(member)) => {
+            crate::json::namespace::resolve(member).map(BuiltinCall::Registered)
         }
         ("Promise", Some(member)) if PROMISE_STATICS.contains(&member) => {
             Some(BuiltinCall::Static(member.to_owned()))
