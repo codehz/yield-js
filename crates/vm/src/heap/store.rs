@@ -1,3 +1,18 @@
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::object::{OwnedEdge, push_state, push_value};
+use super::types::{
+    ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
+    ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
+    MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OrderedProperty, OwnProperty,
+    PlainObject, PromiseObject, PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION,
+    REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
+    SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, array_index,
+};
+use crate::error::VmError;
+use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+
 #[derive(Debug)]
 pub(crate) struct Heap {
     objects: BTreeMap<ObjectId, Object>,
@@ -612,7 +627,7 @@ impl Heap {
     }
 }
 
-pub(crate) fn lookup_tables<'m, V>(
+pub(super) fn lookup_tables<'m, V>(
     props: &'m PropertyTable<JsString, V>,
     symbol_props: &'m PropertyTable<SymbolId, V>,
     key: PropertyKeyRef<'_>,
@@ -624,7 +639,7 @@ pub(crate) fn lookup_tables<'m, V>(
     }
 }
 
-pub(crate) fn insert_table<V>(
+fn insert_table<V>(
     props: &mut PropertyTable<JsString, V>,
     symbol_props: &mut PropertyTable<SymbolId, V>,
     key: PropertyKey,
@@ -644,14 +659,14 @@ pub(crate) fn object_id(value: &Value, what: &str) -> Result<ObjectId, VmError> 
     }
 }
 
-pub(crate) fn missing_object(id: ObjectId) -> VmError {
+fn missing_object(id: ObjectId) -> VmError {
     VmError::InvalidState(format!("object {id} does not exist"))
 }
 
-pub(crate) fn not_promise(id: ObjectId) -> VmError {
+fn not_promise(id: ObjectId) -> VmError {
     VmError::InvalidState(format!("object {id} is not a Promise"))
 }
 
-pub(crate) fn not_environment(id: ObjectId) -> VmError {
+fn not_environment(id: ObjectId) -> VmError {
     VmError::InvalidState(format!("object {id} is not an environment"))
 }

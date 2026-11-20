@@ -1,3 +1,57 @@
+use super::store::lookup_tables;
+use super::types::{
+    BoundObject, BoxedPrimitive, CombineKind, EnvironmentObject, FunctionObject, IntegrityLevel,
+    NativeObject, Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property,
+    PropertyTables, PropertyTablesMut, Resolution, array_index, collect_own_keys,
+};
+use crate::ops::canonical_index_key;
+use crate::value::{
+    ContinuationId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
+};
+use serde::{Deserialize, Serialize};
+
+/// Why an object id must be an environment. The role selects the restore error.
+#[derive(Clone, Copy)]
+pub(crate) enum EnvRole {
+    Closure,
+    Parent,
+}
+
+/// Owned edge so a walker can drop the source object and then query the table.
+#[derive(Clone, Copy)]
+pub(crate) enum OwnedEdge {
+    Object(ObjectId),
+    Accessor(ObjectId),
+    Prototype(ObjectId),
+    Environment { id: ObjectId, role: EnvRole },
+    Continuation(ContinuationId),
+    Symbol(SymbolId),
+}
+
+/// One waiter on a promise. `Await` is the original continuation reaction.
+/// The other variants are script handlers, adoption, and combinators.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionJob {
+    Await(ContinuationId),
+    /// `then` / `catch`. A missing handler passes the settlement through.
+    Script {
+        resolve: Value,
+        reject: Value,
+        on_fulfilled: Option<Value>,
+        on_rejected: Option<Value>,
+    },
+    /// Copy the source settlement onto `result`; `result.adopting` points back here.
+    Adopt {
+        result: ObjectId,
+    },
+    Combine {
+        result: ObjectId,
+        index: usize,
+        kind: CombineKind,
+    },
+}
+
 impl Object {
     pub fn as_promise(&self) -> Option<&PromiseObject> {
         match self {
@@ -92,9 +146,8 @@ impl Object {
     pub(crate) fn set_integrity_level(&mut self, level: IntegrityLevel) {
         self.prevent_extensions();
         if let Some((props, symbols)) = self.tables_mut() {
-            for entry in props.0.values_mut().chain(symbols.0.values_mut()) {
-                level.restrict(&entry.value, &mut entry.attributes);
-            }
+            props.restrict(level);
+            symbols.restrict(level);
         }
         if let Self::Array(array) = self {
             for (property, attributes) in array.elements.values_mut() {
@@ -116,16 +169,11 @@ impl Object {
         {
             return false;
         }
-        self.tables().is_none_or(|(props, symbols)| {
-            props
-                .0
-                .values()
-                .chain(symbols.0.values())
-                .all(|entry| level.allows(&entry.value, entry.attributes))
-        })
+        self.tables()
+            .is_none_or(|(props, symbols)| props.satisfies(level) && symbols.satisfies(level))
     }
 
-    pub(crate) fn tables(&self) -> Option<PropertyTables<'_>> {
+    pub(super) fn tables(&self) -> Option<PropertyTables<'_>> {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
@@ -151,7 +199,7 @@ impl Object {
         })
     }
 
-    fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
+    pub(super) fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
@@ -187,7 +235,10 @@ impl Object {
         }
     }
 
-    fn string_own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'static>> {
+    pub(super) fn string_own_property(
+        &self,
+        key: PropertyKeyRef<'_>,
+    ) -> Option<OwnProperty<'static>> {
         let text = self.boxed_string()?;
         if key.is_str("length") {
             return Some(OwnProperty::StringLength(text.unit_len()));
@@ -255,7 +306,7 @@ impl Object {
             .chain(keys.into_iter().map(|(_, key)| key.to_owned()))
     }
 
-    fn valid_property_tables(&self) -> bool {
+    pub(super) fn valid_property_tables(&self) -> bool {
         if let Some((props, symbols)) = self.tables()
             && (!props.valid_order() || !symbols.valid_order())
         {
@@ -268,7 +319,7 @@ impl Object {
                         .elements
                         .last_key_value()
                         .is_none_or(|(&index, _)| index < array.length)
-                    && array.props.0.keys().all(|key| {
+                    && array.props.iter().all(|(key, _)| {
                         let key = PropertyKeyRef::JsString(key);
                         !key.is_str("length") && array_index(key).is_none()
                     })
@@ -278,7 +329,7 @@ impl Object {
                 object,
             } => {
                 let length = text.unit_len();
-                object.props.0.keys().all(|key| {
+                object.props.iter().all(|(key, _)| {
                     let key = PropertyKeyRef::JsString(key);
                     !key.is_str("length")
                         && canonical_index_key(key).is_none_or(|index| index >= length)
@@ -312,7 +363,7 @@ impl Object {
         }
     }
 
-    fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
+    pub(super) fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
         Some(match self {
             Self::Plain(o)
             | Self::Boxed { object: o, .. }
@@ -461,7 +512,7 @@ impl Object {
     }
 }
 
-pub(crate) fn push_property(out: &mut Vec<OwnedEdge>, property: &Property) {
+fn push_property(out: &mut Vec<OwnedEdge>, property: &Property) {
     match property {
         Property::Data(value) => push_value(out, value),
         Property::Accessor { get, set } => {
@@ -478,7 +529,7 @@ pub(crate) fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
     }
 }
 
-pub(crate) fn push_state(out: &mut Vec<OwnedEdge>, state: &PromiseState) {
+pub(super) fn push_state(out: &mut Vec<OwnedEdge>, state: &PromiseState) {
     if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) = state {
         push_value(out, value);
     }
@@ -516,4 +567,3 @@ impl ReactionJob {
         }
     }
 }
-

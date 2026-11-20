@@ -1,6 +1,10 @@
 #[yield_binding_macros::builtin_global(name = "Reflect", root = "reflect")]
-pub(crate) mod reflect_namespace {
-    use super::{Host, Invocation, PropertyKey, Value, Vm, VmError};
+pub(crate) mod namespace {
+    use crate::error::VmError;
+    use crate::host::Host;
+    use crate::runtime::Invocation;
+    use crate::value::{PropertyKey, Value};
+    use crate::vm::Vm;
 
     #[function(name = "ownKeys")]
     fn own_keys(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {

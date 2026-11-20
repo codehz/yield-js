@@ -1,16 +1,17 @@
 use crate::builtin::array;
+use crate::builtin::boolean::members as boolean_family;
 use crate::builtin::collections;
 use crate::builtin::json::namespace as json;
 use crate::builtin::math::namespace as math;
 use crate::builtin::number;
+use crate::builtin::object::members as object_members;
+use crate::builtin::promise::members as promise_members;
 use crate::builtin::proxy;
+use crate::builtin::reflect::namespace as reflect_namespace;
 use crate::builtin::regexp_runtime as regexp;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::string;
-use crate::builtin::{
-    boolean_family, error_family, object_members, promise_members, queue_family, reflect_namespace,
-    symbol_family,
-};
+use crate::builtin::{error_family, queue_family, symbol_family};
 use crate::error::VmError;
 use crate::exec;
 use crate::heap::Attributes;

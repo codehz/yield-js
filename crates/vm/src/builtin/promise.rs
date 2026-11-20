@@ -1,6 +1,12 @@
 #[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
-pub(crate) mod promise_members {
-    use super::*;
+pub(crate) mod members {
+    use crate::builtin::roots::{RootKind, RootSpec};
+    use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, install_getter};
+    use crate::heap::{Attributes, SPECIES_SYMBOL};
+    use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+    use crate::runtime::Invocation;
+    use crate::value::{PropertyKey, Value};
+    use crate::vm::Vm;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     const SPECIES: IntrinsicKey = IntrinsicKey::new(NAME, Slot::StaticSymbolGetter, "species");

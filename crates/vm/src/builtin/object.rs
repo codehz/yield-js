@@ -1,6 +1,13 @@
 #[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
-pub(crate) mod object_members {
-    use super::*;
+pub(crate) mod members {
+    use crate::builtin::roots::{RootKind, RootSpec};
+    use crate::builtin::{FUNCTION_PARENT, link_constructor};
+    use crate::heap::IntegrityLevel;
+    use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+    use crate::ops;
+    use crate::runtime::Invocation;
+    use crate::value::Value;
+    use crate::vm::Vm;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     pub(crate) const ROOTS: &[RootSpec] = &[

@@ -1,4 +1,18 @@
-use super::*;
+use crate::builtin::promise::members::THEN;
+use crate::builtin::string::utf16_len;
+use crate::builtin::symbol_family;
+use crate::error::VmError;
+use crate::heap::{
+    Attributes, BoundObject, BoxedPrimitive, CombineKind, CombineState, DescriptorUpdate,
+    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseCallback, PromiseState, Property,
+    ReactionJob, Resolution, SPECIES_SYMBOL,
+};
+use crate::host::Host;
+use crate::intrinsic::CallableTarget;
+use crate::ops;
+use crate::runtime::{Invocation, Microtask, Settlement};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::vm::Vm;
 
 pub(crate) enum Dispatch<'a> {
     Script {
@@ -1297,11 +1311,11 @@ impl Vm {
     }
 
     pub(crate) fn is_intrinsic_promise_then(&self, value: &Value) -> bool {
-        static THEN: std::sync::LazyLock<crate::intrinsic::IntrinsicId> =
-            std::sync::LazyLock::new(|| promise_members::THEN.link());
+        static THEN_ID: std::sync::LazyLock<crate::intrinsic::IntrinsicId> =
+            std::sync::LazyLock::new(|| THEN.link());
         matches!(value, Value::Object(id) if matches!(self.heap.get(*id),
             Ok(Object::Native(native))
-                if native.target() == CallableTarget::Intrinsic(*THEN)))
+                if native.target() == CallableTarget::Intrinsic(*THEN_ID)))
     }
 
     pub(crate) fn call_promise_static(

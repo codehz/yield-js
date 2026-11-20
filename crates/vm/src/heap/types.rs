@@ -5,14 +5,12 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::JsString;
+use super::object::ReactionJob;
+use crate::builtin::string::utf16_unit_string;
 use crate::error::VmError;
 use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
-use crate::builtin::string::utf16_unit_string;
-use crate::value::{
-    BindingId, ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
-};
+use crate::value::{BindingId, JsString, ObjectId, PropertyKeyRef, SymbolId, Value};
 
 /// Reserved well-known symbols. Ordinary symbols allocate from 2 and are never
 /// interned by description; only the registry interns by key.
@@ -39,30 +37,6 @@ pub enum PromiseState {
     Pending,
     Fulfilled(Value),
     Rejected(Value),
-}
-
-/// One waiter on a promise. `Await` is the original continuation reaction.
-/// The other variants are script handlers, adoption, and combinators.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReactionJob {
-    Await(ContinuationId),
-    /// `then` / `catch`. A missing handler passes the settlement through.
-    Script {
-        resolve: Value,
-        reject: Value,
-        on_fulfilled: Option<Value>,
-        on_rejected: Option<Value>,
-    },
-    /// Copy the source settlement onto `result`; `result.adopting` points back here.
-    Adopt {
-        result: ObjectId,
-    },
-    Combine {
-        result: ObjectId,
-        index: usize,
-        kind: CombineKind,
-    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +78,7 @@ pub struct PromiseObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Promise instances share one identity.
     pub prototype: Option<ObjectId>,
-    extensible: bool,
+    pub(super) extensible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,24 +116,25 @@ impl NativeObject {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
 
-pub(crate) type PropertyTables<'a> = (
+pub(super) type PropertyTables<'a> = (
     &'a PropertyTable<JsString, Property>,
     &'a PropertyTable<SymbolId, Property>,
 );
-pub(crate) type PropertyTablesMut<'a> = (
+pub(super) type PropertyTablesMut<'a> = (
     &'a mut PropertyTable<JsString, Property>,
     &'a mut PropertyTable<SymbolId, Property>,
 );
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct OrderedProperty<V> {
+pub(super) struct OrderedProperty<V> {
     ordinal: usize,
-    value: V,
-    attributes: Attributes,
+    pub(super) value: V,
+    pub(super) attributes: Attributes,
 }
 
-pub(crate) mod property_pairs {
-    use super::*;
+mod property_pairs {
+    use super::{Property, PropertyTable};
+    use crate::value::JsString;
 
     pub(super) fn serialize<S: serde::Serializer>(
         table: &PropertyTable<JsString, Property>,
@@ -175,7 +150,7 @@ pub(crate) mod property_pairs {
     }
 }
 
-pub(crate) fn array_index(key: PropertyKeyRef<'_>) -> Option<usize> {
+pub(super) fn array_index(key: PropertyKeyRef<'_>) -> Option<usize> {
     canonical_index_key(key).filter(|&index| index < u32::MAX as usize)
 }
 
@@ -205,14 +180,14 @@ impl Attributes {
         writable: true,
         ..Self::FIXED
     };
-    const ACCESSOR: Self = Self {
+    pub(super) const ACCESSOR: Self = Self {
         writable: false,
         ..Self::ORDINARY
     };
 }
 
 impl<K: Ord, V> PropertyTable<K, V> {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self(BTreeMap::new())
     }
 
@@ -223,7 +198,7 @@ impl<K: Ord, V> PropertyTable<K, V> {
         self.0.get(key).map(|property| &property.value)
     }
 
-    fn entry<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&OrderedProperty<V>>
+    pub(super) fn entry<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&OrderedProperty<V>>
     where
         K: Borrow<Q>,
     {
@@ -242,7 +217,7 @@ impl<K: Ord, V> PropertyTable<K, V> {
         self.0.iter().map(|(key, property)| (key, &property.value))
     }
 
-    fn update(
+    pub(super) fn update(
         &mut self,
         key: K,
         attributes: Option<Attributes>,
@@ -267,7 +242,7 @@ impl<K: Ord, V> PropertyTable<K, V> {
         }
     }
 
-    fn remove_configurable<Q: Ord + ?Sized>(&mut self, key: &Q) -> bool
+    pub(super) fn remove_configurable<Q: Ord + ?Sized>(&mut self, key: &Q) -> bool
     where
         K: Borrow<Q>,
     {
@@ -291,7 +266,7 @@ impl<K: Ord, V> PropertyTable<K, V> {
         true
     }
 
-    fn valid_order(&self) -> bool {
+    pub(super) fn valid_order(&self) -> bool {
         let mut seen = vec![false; self.0.len()];
         self.0.values().all(|property| {
             seen.get_mut(property.ordinal)
@@ -300,7 +275,21 @@ impl<K: Ord, V> PropertyTable<K, V> {
     }
 }
 
-pub(crate) fn collect_own_keys<'a, V>(
+impl<K: Ord> PropertyTable<K, Property> {
+    pub(super) fn restrict(&mut self, level: IntegrityLevel) {
+        for entry in self.0.values_mut() {
+            level.restrict(&entry.value, &mut entry.attributes);
+        }
+    }
+
+    pub(super) fn satisfies(&self, level: IntegrityLevel) -> bool {
+        self.0
+            .values()
+            .all(|entry| level.allows(&entry.value, entry.attributes))
+    }
+}
+
+pub(super) fn collect_own_keys<'a, V>(
     keys: &mut Vec<((u8, usize), PropertyKeyRef<'a>)>,
     props: &'a PropertyTable<JsString, V>,
     symbols: &'a PropertyTable<SymbolId, V>,
@@ -434,7 +423,7 @@ impl DescriptorUpdate {
         Some((property, next))
     }
 
-    fn allows_fixed_string(&self, property: OwnProperty<'_>) -> bool {
+    pub(super) fn allows_fixed_string(&self, property: OwnProperty<'_>) -> bool {
         !self.is_accessor()
             && self.writable != Some(true)
             && self.configurable != Some(true)
@@ -514,7 +503,7 @@ pub struct PlainObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype.
     pub prototype: Option<ObjectId>,
-    extensible: bool,
+    pub(super) extensible: bool,
     pub(crate) is_error: bool,
 }
 
@@ -532,7 +521,7 @@ impl PlainObject {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayObject {
-    elements: BTreeMap<usize, (Property, Attributes)>,
+    pub(super) elements: BTreeMap<usize, (Property, Attributes)>,
     pub(crate) length: usize,
     pub(crate) length_writable: bool,
     /// Own properties other than `length` and canonical indices.
@@ -540,7 +529,7 @@ pub struct ArrayObject {
     pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
-    extensible: bool,
+    pub(super) extensible: bool,
 }
 
 impl ArrayObject {
@@ -592,7 +581,7 @@ impl ArrayObject {
 
     /// Delete in descending index order. A fixed element blocks further
     /// deletions, but neither prior deletions nor the writable change roll back.
-    fn set_length(&mut self, length: usize, writable: bool) -> bool {
+    pub(super) fn set_length(&mut self, length: usize, writable: bool) -> bool {
         while let Some((&index, (_, attributes))) = self.elements.last_key_value() {
             if index < length {
                 break;
@@ -620,7 +609,7 @@ pub struct FunctionObject {
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
-    extensible: bool,
+    pub(super) extensible: bool,
 }
 
 /// One invocation environment. Bindings are addressed by compile-time IDs, so
@@ -769,7 +758,7 @@ pub enum Object {
     },
 }
 
-pub(crate) fn serialize_regexp<S: serde::Serializer>(
+fn serialize_regexp<S: serde::Serializer>(
     source: &JsString,
     flags: &RegExpFlags,
     _: &regress::Regex,
@@ -791,7 +780,7 @@ pub(crate) fn serialize_regexp<S: serde::Serializer>(
     .serialize(serializer)
 }
 
-pub(crate) fn deserialize_regexp<'de, D: serde::Deserializer<'de>>(
+fn deserialize_regexp<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<(JsString, RegExpFlags, regress::Regex, PlainObject), D::Error> {
     #[derive(Deserialize)]
@@ -1001,33 +990,14 @@ impl IntegrityLevel {
         matches!(self, Self::Frozen) && matches!(property, Property::Data(_))
     }
 
-    fn restrict(self, property: &Property, attributes: &mut Attributes) {
+    pub(super) fn restrict(self, property: &Property, attributes: &mut Attributes) {
         attributes.configurable = false;
         if self.freeze_data(property) {
             attributes.writable = false;
         }
     }
 
-    fn allows(self, property: &Property, attributes: Attributes) -> bool {
+    pub(super) fn allows(self, property: &Property, attributes: Attributes) -> bool {
         !attributes.configurable && !(attributes.writable && self.freeze_data(property))
     }
 }
-
-/// Why an object id must be an environment. The role selects the restore error.
-#[derive(Clone, Copy)]
-pub(crate) enum EnvRole {
-    Closure,
-    Parent,
-}
-
-/// Owned edge so a walker can drop the source object and then query the table.
-#[derive(Clone, Copy)]
-pub(crate) enum OwnedEdge {
-    Object(ObjectId),
-    Accessor(ObjectId),
-    Prototype(ObjectId),
-    Environment { id: ObjectId, role: EnvRole },
-    Continuation(ContinuationId),
-    Symbol(SymbolId),
-}
-
