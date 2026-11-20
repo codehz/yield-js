@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function demo() {
   return 1;
@@ -6,5 +8,5 @@ function demo() {
 
 export function run() {
   const alias = demo;
-  return alias === demo;
+  expect(alias).toBe(demo);
 }

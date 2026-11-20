@@ -1,12 +1,17 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   try {
     await callWithoutNew();
   } catch (e) {
-    return typeof e === "object" && e.name === "TypeError" && e.message === "Promise constructor requires new";
+    expect(typeof e).toBe("object");
+    expect(e.name).toBe("TypeError");
+    expect(e.message).toBe("Promise constructor requires new");
+    return;
   }
-  return false;
+  expect("Promise call succeeded").toBe("Promise call threw");
 }
 
 async function callWithoutNew() {

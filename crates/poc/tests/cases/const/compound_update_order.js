@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   let trace = "";
@@ -14,11 +16,31 @@ export function run() {
     return 3;
   }
 
-  try { value += rhs(); return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "rv") return false; }
-  try { value++; return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "rvv") return false; }
-  try { --value; return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "rvvv") return false; }
-  return value === original;
+  let compoundError;
+  try {
+    value += rhs();
+  } catch (error) {
+    compoundError = error;
+  }
+  expect(compoundError instanceof TypeError).toBe(true);
+  expect(trace).toBe("rv");
+
+  let incrementError;
+  try {
+    value++;
+  } catch (error) {
+    incrementError = error;
+  }
+  expect(incrementError instanceof TypeError).toBe(true);
+  expect(trace).toBe("rvv");
+
+  let decrementError;
+  try {
+    --value;
+  } catch (error) {
+    decrementError = error;
+  }
+  expect(decrementError instanceof TypeError).toBe(true);
+  expect(trace).toBe("rvvv");
+  expect(value).toBe(original);
 }

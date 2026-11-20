@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 const moduleValue = 2;
 
@@ -13,11 +15,23 @@ export function run() {
     let value = 6;
     const writeInner = () => { value = 7; };
     writeInner();
-    if (value !== 7) return false;
+    expect(value).toBe(7);
   }
-  try { writeOuter(); return false; }
-  catch (error) { if (!(error instanceof TypeError)) return false; }
-  try { writeModuleValue(); return false; }
-  catch (error) { if (!(error instanceof TypeError)) return false; }
-  return value === 4 && moduleValue === 2;
+  let outerError;
+  try {
+    writeOuter();
+  } catch (error) {
+    outerError = error;
+  }
+  expect(outerError instanceof TypeError).toBe(true);
+
+  let moduleError;
+  try {
+    writeModuleValue();
+  } catch (error) {
+    moduleError = error;
+  }
+  expect(moduleError instanceof TypeError).toBe(true);
+  expect(value).toBe(4);
+  expect(moduleValue).toBe(2);
 }

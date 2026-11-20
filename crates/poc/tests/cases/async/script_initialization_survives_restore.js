@@ -1,9 +1,9 @@
 // @pending ["wait:boot"]
 // @restore
 // @fulfill ["wait:boot", 5]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 "use strict";
 const early = readLater();
@@ -28,6 +28,9 @@ async function startBoot() {
 export async function run() {
   const initialized = total;
   await boot;
-  return early === undefined && hoisted === undefined && initialized === 6 &&
-    total === 11 && topThis.call({ n: 1 }) === undefined;
+  expect(early).toBe(undefined);
+  expect(hoisted).toBe(undefined);
+  expect(initialized).toBe(6);
+  expect(total).toBe(11);
+  expect(topThis.call({ n: 1 })).toBe(undefined);
 }

@@ -1,17 +1,20 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a",0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { seed, wait } from 'test';
+import { expect, seed, wait } from 'test';
 
 export async function run() {
   const v = seed();
   const object = {get x() { throw 3; }};
   await wait("a");
+  let error;
   try {
-    return object.x;
-  } catch (e) {
-    return v + e === 13;
+    object.x;
+  } catch (caught) {
+    error = caught;
   }
+  expect(error).toBe(3);
+  expect(v + error).toBe(13);
 }

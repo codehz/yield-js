@@ -1,4 +1,6 @@
-// @fulfilled 124
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const a = Symbol("x");
@@ -7,11 +9,14 @@ export async function run() {
   obj[a] = 1;
   obj[b] = 2;
   obj.x = 4;
-  if (obj[a] !== 1 || obj[b] !== 2 || obj.x !== 4) return -1;
+  expect(obj[a]).toBe(1);
+  expect(obj[b]).toBe(2);
+  expect(obj.x).toBe(4);
   const zero = Symbol("0");
   const arr = [];
   arr[zero] = 9;
-  if (arr.length !== 0 || arr[zero] !== 9) return -1;
+  expect(arr.length === 0).toBe(true);
+  expect(arr[zero]).toBe(9);
   const marker = Symbol("prop");
   const holder = {
     n: 0,
@@ -19,6 +24,6 @@ export async function run() {
     set [marker](value) { this.n = value; },
   };
   holder[marker] = 5;
-  if (holder[marker] !== 5 || !holder.hasOwnProperty(marker)) return -1;
-  return obj[a] * 100 + obj[b] * 10 + obj.x;
+  expect(holder[marker]).toBe(5);
+  expect(holder.hasOwnProperty(marker)).toBe(true);
 }

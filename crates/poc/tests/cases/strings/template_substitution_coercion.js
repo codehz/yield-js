@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let order = "";
@@ -10,22 +12,26 @@ export async function run() {
     };
   }
 
-  if (`<${substitution("a", "A")}${substitution("b", "B")}>` !== "<AB>") return false;
-  if (order !== "eval:a;string:a;eval:b;string:b;") return false;
+  expect(`<${substitution("a", "A")}${substitution("b", "B")}>`).toBe("<AB>");
+  expect(order).toBe("eval:a;string:a;eval:b;string:b;");
 
   order = "";
   const symbol = Symbol("template");
+  let symbolErrorName;
   try {
     `${symbol}${substitution("late", "L")}`;
-    return false;
   } catch (error) {
-    if (error.name !== "TypeError" || order !== "") return false;
+    symbolErrorName = error.name;
   }
+  expect(symbolErrorName).toBe("TypeError");
+  expect(order).toBe("");
 
+  let substitutionErrorName;
   try {
     `${substitution("symbol", symbol)}${substitution("late", "L")}`;
-    return false;
   } catch (error) {
-    return error.name === "TypeError" && order === "eval:symbol;string:symbol;";
+    substitutionErrorName = error.name;
   }
+  expect(substitutionErrorName).toBe("TypeError");
+  expect(order).toBe("eval:symbol;string:symbol;");
 }

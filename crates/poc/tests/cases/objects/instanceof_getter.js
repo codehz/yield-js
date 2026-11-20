@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   let order = '';
@@ -12,13 +14,17 @@ export function run() {
     }
   });
   const bound = arrow.bind(null);
-  if (1 instanceof bound || order !== '') return false;
+  expect(1 instanceof bound).toBe(false);
+  expect(order).toBe('');
 
   function left() { order += 'l'; return {}; }
   function right() { order += 'r'; return bound; }
+  let error;
   try {
-    return left() instanceof right();
-  } catch (e) {
-    return e === thrown && order === 'lrg';
+    left() instanceof right();
+  } catch (caught) {
+    error = caught;
   }
+  expect(error).toBe(thrown);
+  expect(order).toBe('lrg');
 }

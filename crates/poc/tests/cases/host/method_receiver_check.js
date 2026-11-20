@@ -1,28 +1,31 @@
-// @returns true
+// @returns undefined
 
 import { expect } from 'test';
 
 export function run() {
   const a = expect({ n: 1 });
   const b = expect({ n: 2 });
-  if (a.toBe !== b.toBe) return false;
-  if (a.toEqual !== b.toEqual) return false;
+  expect(a.toBe).toBe(b.toBe);
+  expect(a.toEqual).toBe(b.toEqual);
 
   const bare = a.toBe;
+  let bareError;
   try {
     bare(1);
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    bareError = error;
   }
+  expect(bareError instanceof TypeError).toBe(true);
 
   const fake = Object.create(Object.getPrototypeOf(a));
+  let fakeError;
   try {
     fake.toBe(1);
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    fakeError = error;
   }
+  expect(fakeError instanceof TypeError).toBe(true);
 
-  return typeof a.toBe === 'function' && typeof a.label === 'undefined';
+  expect(typeof a.toBe).toBe('function');
+  expect(typeof a.label).toBe('undefined');
 }

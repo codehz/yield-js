@@ -1,21 +1,60 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
-  if (!Object.is(Number(), 0) || !Object.is(Number(" -0 "), -0)) return false;
-  if (Number(null) !== 0 || Number(true) !== 1 || Number(false) !== 0) return false;
-  if (Number(" 0x20 ") !== 32 || Number({valueOf() { return "3.5"; }}) !== 3.5) return false;
-  if (!Number.isNaN(Number(undefined)) || !Number.isNaN(Number("2xyz"))) return false;
-  if (Number.prototype.constructor !== Number || Object.getPrototypeOf(Number.prototype) !== Object.prototype) return false;
-  if ((1) instanceof Number || Object.is(Number.prototype, 0) || !(Object.create(Number.prototype) instanceof Number)) return false;
-  if ((1).missing !== undefined || (2).valueOf() !== 2 || !Object.is((-0).valueOf(), -0)) return false;
+  expect(Object.is(Number(), 0)).toBe(true);
+  expect(Object.is(Number(" -0 "), -0)).toBe(true);
+  expect(Number(null)).toBe(0);
+  expect(Number(true)).toBe(1);
+  expect(Number(false)).toBe(0);
+  expect(Number(" 0x20 ")).toBe(32);
+  expect(Number({valueOf() { return "3.5"; }})).toBe(3.5);
+  expect(Number.isNaN(Number(undefined))).toBe(true);
+  expect(Number.isNaN(Number("2xyz"))).toBe(true);
+  expect(Number.prototype.constructor).toBe(Number);
+  expect(Object.getPrototypeOf(Number.prototype)).toBe(Object.prototype);
+  expect((1) instanceof Number).toBe(false);
+  expect(Object.is(Number.prototype, 0)).toBe(false);
+  expect(Object.create(Number.prototype) instanceof Number).toBe(true);
+  expect((1).missing).toBe(undefined);
+  expect((2).valueOf()).toBe(2);
+  expect(Object.is((-0).valueOf(), -0)).toBe(true);
   let n = 4;
   Number.prototype.extra = "shared";
-  if (n.extra !== "shared" || n.toString !== Number.prototype.toString) return false;
+  expect(n.extra).toBe("shared");
+  expect(n.toString).toBe(Number.prototype.toString);
   Object.defineProperty(Number.prototype, "doubled", {get() { return this.valueOf() * 2; }});
-  if (n.doubled !== 8 || n["constructor"] !== Number) return false;
-  let errors = 0;
-  try { Number(Symbol()); } catch (e) { if (e instanceof TypeError) errors++; }
-  try { n.extra = "changed"; } catch (e) { if (e instanceof TypeError) errors++; }
-  try { n.other = 0; } catch (e) { if (e instanceof TypeError) errors++; }
-  try { Number.prototype.valueOf(); } catch (e) { if (e instanceof TypeError) errors++; }
-  return errors === 4 && n.extra === "shared" && n.other === undefined;
+  expect(n.doubled).toBe(8);
+  expect(n["constructor"]).toBe(Number);
+  let symbolError;
+  try {
+    Number(Symbol());
+  } catch (caught) {
+    symbolError = caught;
+  }
+  expect(symbolError instanceof TypeError).toBe(true);
+  let sharedPropertyError;
+  try {
+    n.extra = "changed";
+  } catch (caught) {
+    sharedPropertyError = caught;
+  }
+  expect(sharedPropertyError instanceof TypeError).toBe(true);
+  let newPropertyError;
+  try {
+    n.other = 0;
+  } catch (caught) {
+    newPropertyError = caught;
+  }
+  expect(newPropertyError instanceof TypeError).toBe(true);
+  let receiverError;
+  try {
+    Number.prototype.valueOf();
+  } catch (caught) {
+    receiverError = caught;
+  }
+  expect(receiverError instanceof TypeError).toBe(true);
+  expect(n.extra).toBe("shared");
+  expect(n.other).toBe(undefined);
 }

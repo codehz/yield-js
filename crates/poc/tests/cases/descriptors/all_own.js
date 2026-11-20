@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const symbol = Symbol("hidden");
@@ -12,8 +14,13 @@ export function run() {
   const descriptors = Object.getOwnPropertyDescriptors(object);
   const data = descriptors.data;
   const accessor = descriptors[symbol];
-  return Object.keys(descriptors).length === 1 && data.value === 7 &&
-    !data.writable && data.enumerable && !data.configurable &&
-    accessor.get === Object.keys && accessor.set === undefined &&
-    !accessor.enumerable && accessor.configurable;
+  expect(Object.keys(descriptors).length).toBe(1);
+  expect(data.value).toBe(7);
+  expect(data.writable).toBe(false);
+  expect(data.enumerable).toBe(true);
+  expect(data.configurable).toBe(false);
+  expect(accessor.get).toBe(Object.keys);
+  expect(accessor.set).toBe(undefined);
+  expect(accessor.enumerable).toBe(false);
+  expect(accessor.configurable).toBe(true);
 }

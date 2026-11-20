@@ -1,9 +1,9 @@
 // @pending ["wait:reflect"]
 // @restore
 // @fulfill ["wait:reflect", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 function Base() {}
 Base.prototype = { inherited: 1, get seen() { return this.receiver; } };
@@ -29,32 +29,69 @@ export async function run() {
   const descriptor = Reflect.getOwnPropertyDescriptor;
   await wait("reflect");
 
-  if (get(target, "inherited") !== 1 || get(target, "get") !== undefined ||
-      get(target, "seen", receiver) !== "child" || get(target, "value", undefined) !== 2) return false;
-  if (has(target, "inherited") !== true || has(target, "missing") !== false ||
-      has(target, "key") !== true || typeof descriptor(target, "key").get !== "function" || trace !== "") return false;
-  if (set(target, "value", 3, undefined) !== false || target.value !== 2 ||
-      set(target, "value", 3, receiver) !== true || receiver.value !== 3 || target.value !== 2) return false;
-  if (set(target, "set", 4, receiver) !== true || receiver.written !== 4 || "written" in target) return false;
-  if (set(target, "locked", 5, receiver) !== false || receiver.locked !== undefined ||
-      set(target, "value", 0, Object.preventExtensions({})) !== false ||
-      set(target, "value", 0, { set value(v) { throw "wrong setter"; } }) !== false) return false;
-  if (set(target, "primitive", "primitive;", undefined) !== true || trace !== "primitive;") return false;
+  expect(get(target, "inherited")).toBe(1);
+  expect(get(target, "get")).toBe(undefined);
+  expect(get(target, "seen", receiver)).toBe("child");
+  expect(get(target, "value", undefined)).toBe(2);
+  expect(has(target, "inherited")).toBe(true);
+  expect(has(target, "missing")).toBe(false);
+  expect(has(target, "key")).toBe(true);
+  expect(typeof descriptor(target, "key").get).toBe("function");
+  expect(trace).toBe("");
+  expect(set(target, "value", 3, undefined)).toBe(false);
+  expect(target.value).toBe(2);
+  expect(set(target, "value", 3, receiver)).toBe(true);
+  expect(receiver.value).toBe(3);
+  expect(target.value).toBe(2);
+  expect(set(target, "set", 4, receiver)).toBe(true);
+  expect(receiver.written).toBe(4);
+  expect("written" in target).toBe(false);
+  expect(set(target, "locked", 5, receiver)).toBe(false);
+  expect(receiver.locked).toBe(undefined);
+  expect(set(target, "value", 0, Object.preventExtensions({}))).toBe(false);
+  expect(set(target, "value", 0, { set value(v) { throw "wrong setter"; } })).toBe(false);
+  expect(set(target, "primitive", "primitive;", undefined)).toBe(true);
+  expect(trace).toBe("primitive;");
 
   const own = descriptor(target, "value");
-  if (own.value !== 2 || !own.writable || !own.enumerable || !own.configurable ||
-      descriptor(target, "inherited") !== undefined) return false;
-  if (descriptor(array, "length").value !== 2 || set(array, "length", 1) !== false ||
-      array.length !== 2 || array[0] !== 1) return false;
-  if (set(array, "1", 9) !== false || array[1] !== 2 || set(array, "2", 9) !== true || array[2] !== 9) return false;
+  expect(own.value).toBe(2);
+  expect(!!own.writable).toBe(true);
+  expect(!!own.enumerable).toBe(true);
+  expect(!!own.configurable).toBe(true);
+  expect(descriptor(target, "inherited")).toBe(undefined);
+  expect(descriptor(array, "length").value).toBe(2);
+  expect(set(array, "length", 1)).toBe(false);
+  expect(array.length).toBe(2);
+  expect(array[0]).toBe(1);
+  expect(set(array, "1", 9)).toBe(false);
+  expect(array[1]).toBe(2);
+  expect(set(array, "2", 9)).toBe(true);
+  expect(array[2]).toBe(9);
 
   const symbol = Symbol("reflect");
   const probe = { [Symbol.toPrimitive]() { trace += "key;"; return symbol; } };
-  if (!set(target, probe, 9) || !has(target, symbol) || get(target, symbol) !== 9 ||
-      descriptor(target, symbol).value !== 9) return false;
-  try { get(null, probe); return false; } catch (error) { trace += error.name + ";"; }
-  try { get(target, "key"); return false; } catch (error) { trace += error + ";"; }
-  try { set(target, "failure", "setter"); return false; } catch (error) { trace += error + ";"; }
-  try { set(array, "length", -1); return false; } catch (error) { trace += error.name; }
-  return trace === "primitive;key;TypeError;get;getter;setter;RangeError" && array.length === 3;
+  expect(!!set(target, probe, 9)).toBe(true);
+  expect(!!has(target, symbol)).toBe(true);
+  expect(get(target, symbol)).toBe(9);
+  expect(descriptor(target, symbol).value).toBe(9);
+  let invalidTarget;
+  try { get(null, probe); } catch (error) { invalidTarget = error; }
+  const invalidTargetName = invalidTarget && invalidTarget.name;
+  expect(invalidTargetName).toBe("TypeError");
+  trace += invalidTargetName + ";";
+  let getterError;
+  try { get(target, "key"); } catch (error) { getterError = error; }
+  expect(getterError).toBe("getter");
+  trace += getterError + ";";
+  let setterError;
+  try { set(target, "failure", "setter"); } catch (error) { setterError = error; }
+  expect(setterError).toBe("setter");
+  trace += setterError + ";";
+  let lengthError;
+  try { set(array, "length", -1); } catch (error) { lengthError = error; }
+  const lengthErrorName = lengthError && lengthError.name;
+  expect(lengthErrorName).toBe("RangeError");
+  trace += lengthErrorName;
+  expect(trace).toBe("primitive;key;TypeError;get;getter;setter;RangeError");
+  expect(array.length).toBe(3);
 }

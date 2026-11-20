@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function outer(a = arguments[2], read = () => arguments[2]) {
   function inner() { return arguments[0]; }
@@ -8,5 +10,6 @@ function outer(a = arguments[2], read = () => arguments[2]) {
 function shadow(arguments, value = arguments) { return value; }
 
 export function run() {
-  return outer(undefined, undefined, 5) && shadow(31) === 31;
+  expect(outer(undefined, undefined, 5)).toBe(true);
+  expect(shadow(31)).toBe(31);
 }

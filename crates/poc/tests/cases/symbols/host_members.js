@@ -1,13 +1,12 @@
-// @returns true
+// @returns undefined
 
-import { assert, bind } from 'test';
+import { bind, expect } from 'test';
 
 export function run() {
   const node = bind('alpha');
   const primitive = node[Symbol.toPrimitive];
-  assert(typeof primitive === 'function');
-  assert(primitive === node[Symbol.toPrimitive]);
-  assert(primitive.call(node, 'string') === 'alpha');
-  assert(primitive.call(node, 'number') === 'alpha');
-  return true;
+  expect(typeof primitive).toBe('function');
+  expect(primitive).toBe(node[Symbol.toPrimitive]);
+  expect(primitive.call(node, 'string')).toBe('alpha');
+  expect(primitive.call(node, 'number')).toBe('alpha');
 }

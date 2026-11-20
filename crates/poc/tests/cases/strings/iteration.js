@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 function collect(a, b, c, d, e, f) {
   return [a, b, c, d, e, f].join("|");
@@ -16,20 +18,30 @@ export async function run() {
   const other = text[symbol]();
   const empty = ""[symbol]().next();
   const next = iterator.next;
-  let invalid = false;
+  let errorName;
   try {
     next();
   } catch (error) {
-    invalid = error.name === "TypeError";
+    errorName = error.name;
   }
   const first = iterator.next();
   const tail = [...iterator].join("|");
   const done = iterator.next();
   const again = iterator.next();
-  return loop.join("|") === expected && [...text].join("|") === expected &&
-    collect(...text) === expected && text[symbol] === ""[symbol] &&
-    iterator[symbol]() === iterator && other.next().value === "A" &&
-    first.value === "A" && !first.done && tail === "é|汉|😀|e|\u0301" &&
-    empty.done && empty.value === undefined && done.done && done.value === undefined &&
-    again.done && again.value === undefined && invalid;
+  expect(loop.join("|")).toBe(expected);
+  expect([...text].join("|")).toBe(expected);
+  expect(collect(...text)).toBe(expected);
+  expect(text[symbol]).toBe(""[symbol]);
+  expect(iterator[symbol]()).toBe(iterator);
+  expect(other.next().value).toBe("A");
+  expect(first.value).toBe("A");
+  expect(!first.done).toBe(true);
+  expect(tail).toBe("é|汉|😀|e|\u0301");
+  expect(!!empty.done).toBe(true);
+  expect(empty.value).toBe(undefined);
+  expect(!!done.done).toBe(true);
+  expect(done.value).toBe(undefined);
+  expect(!!again.done).toBe(true);
+  expect(again.value).toBe(undefined);
+  expect(errorName).toBe("TypeError");
 }

@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const value = 7;
@@ -8,17 +10,22 @@ export function run() {
     return 8;
   }
 
+  let writeError;
   try {
     value = rhs();
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError) || error.message !== "Assignment to constant variable.") return false;
+    writeError = error;
   }
+  expect(writeError instanceof TypeError).toBe(true);
+  expect(writeError.message).toBe("Assignment to constant variable.");
+
+  let rhsError;
   try {
     value = (function () { throw "rhs"; })();
-    return false;
   } catch (error) {
-    if (error !== "rhs") return false;
+    rhsError = error;
   }
-  return value === 7 && calls === 1;
+  expect(rhsError).toBe("rhs");
+  expect(value).toBe(7);
+  expect(calls).toBe(1);
 }

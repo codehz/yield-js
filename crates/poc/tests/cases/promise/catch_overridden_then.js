@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const p = Promise.resolve(1);
@@ -12,5 +14,6 @@ export async function run() {
       };
     },
   });
-  return p.catch(reject) && reads === 1;
+  expect(p.catch(reject)).toBe(true);
+  expect(reads).toBe(1);
 }

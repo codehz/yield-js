@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function Target() {}
 async function asyncTarget() {}
@@ -9,16 +11,27 @@ export function run() {
   const invalid = [arrow, method, asyncTarget, arrow.bind(null), method.bind(null), asyncTarget.bind(null), Symbol, {}];
   let touched = false;
   const list = {get length() { touched = true; return 0; }};
-  let caught = 0;
   for (const value of invalid) {
-    try { Reflect.construct(value, list); } catch (e) { if (e instanceof TypeError) caught++; }
-    try { Reflect.construct(Target, list, value); } catch (e) { if (e instanceof TypeError) caught++; }
-    try { new value(); } catch (e) { if (e instanceof TypeError) caught++; }
+    let targetError;
+    try { Reflect.construct(value, list); } catch (e) { targetError = e; }
+    expect(targetError instanceof TypeError).toBe(true);
+    let newTargetError;
+    try { Reflect.construct(Target, list, value); } catch (e) { newTargetError = e; }
+    expect(newTargetError instanceof TypeError).toBe(true);
+    let newError;
+    try { new value(); } catch (e) { newError = e; }
+    expect(newError instanceof TypeError).toBe(true);
   }
-  try { Reflect.construct(Target, list, undefined); } catch (e) { if (e instanceof TypeError) caught++; }
-  try { Reflect.construct(Target, null); } catch (e) { if (e instanceof TypeError) caught++; }
+  let undefinedNewTarget;
+  try { Reflect.construct(Target, list, undefined); } catch (e) { undefinedNewTarget = e; }
+  expect(undefinedNewTarget instanceof TypeError).toBe(true);
+  let invalidList;
+  try { Reflect.construct(Target, null); } catch (e) { invalidList = e; }
+  expect(invalidList instanceof TypeError).toBe(true);
   const thrown = {};
   function Throws() { throw thrown; }
-  try { Reflect.construct(Throws, []); } catch (e) { if (e === thrown) caught++; }
-  return !touched && caught === invalid.length * 3 + 3;
+  let constructorError;
+  try { Reflect.construct(Throws, []); } catch (e) { constructorError = e; }
+  expect(constructorError).toBe(thrown);
+  expect(touched).toBe(false);
 }

@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const truthy = 7;
@@ -10,16 +12,38 @@ export function run() {
     return 9;
   }
 
-  if ((truthy ||= rhs("skip")) !== 7) return false;
-  if ((falsy &&= rhs("skip")) !== 0) return false;
-  if ((falsy ??= rhs("skip")) !== 0) return false;
-  if (trace !== "") return false;
+  expect(truthy ||= rhs("skip")).toBe(7);
+  expect(falsy &&= rhs("skip")).toBe(0);
+  expect(falsy ??= rhs("skip")).toBe(0);
+  expect(trace).toBe("");
 
-  try { truthy &&= rhs("a"); return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "a") return false; }
-  try { falsy ||= rhs("o"); return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "ao") return false; }
-  try { nil ??= rhs("n"); return false; }
-  catch (error) { if (!(error instanceof TypeError) || trace !== "aon") return false; }
-  return truthy === 7 && falsy === 0 && nil === null;
+  let andError;
+  try {
+    truthy &&= rhs("a");
+  } catch (error) {
+    andError = error;
+  }
+  expect(andError instanceof TypeError).toBe(true);
+  expect(trace).toBe("a");
+
+  let orError;
+  try {
+    falsy ||= rhs("o");
+  } catch (error) {
+    orError = error;
+  }
+  expect(orError instanceof TypeError).toBe(true);
+  expect(trace).toBe("ao");
+
+  let nullishError;
+  try {
+    nil ??= rhs("n");
+  } catch (error) {
+    nullishError = error;
+  }
+  expect(nullishError instanceof TypeError).toBe(true);
+  expect(trace).toBe("aon");
+  expect(truthy).toBe(7);
+  expect(falsy).toBe(0);
+  expect(nil).toBe(null);
 }

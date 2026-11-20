@@ -1,4 +1,4 @@
-// @returns true
+// @returns undefined
 
 import { assert, expect } from 'test';
 
@@ -15,5 +15,6 @@ export function run() {
   } catch (error) {
     assertionCaught = typeof error === 'string' && error.includes('checkpoint');
   }
-  return matcherCaught && assertionCaught;
+  expect(matcherCaught).toBe(true);
+  expect(assertionCaught).toBe(true);
 }

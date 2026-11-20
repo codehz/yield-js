@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const first = 1;
@@ -15,11 +17,14 @@ export function run() {
   };
   function fallback() { trace += "d"; return 3; }
 
+  let writeError;
   try {
     ({ a: receiver().value, nested: { b: first = fallback(), c: second } } = source);
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    writeError = error;
   }
-  return trace === "msbd" && first === 1 && second === 2;
+  expect(writeError instanceof TypeError).toBe(true);
+  expect(trace).toBe("msbd");
+  expect(first).toBe(1);
+  expect(second).toBe(2);
 }

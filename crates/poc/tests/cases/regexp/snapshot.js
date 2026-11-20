@@ -1,9 +1,9 @@
 // @pending ["wait:regexp"]
 // @restore
 // @fulfill ["wait:regexp", null]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const re = /foo/g;
@@ -16,9 +16,18 @@ export async function run() {
   match.groups.owner = match;
   await wait("regexp");
 
-  return alias.re === re && re.self === re && Object.getPrototypeOf(re) === RegExp.prototype &&
-    alias.sticky === sticky && alias.match === match && alias.groups === match.groups &&
-    match.groups.token === "foo" && match.groups.owner === match &&
-    re.lastIndex === 2 && re.exec("fofoo").index === 2 && re.lastIndex === 5 &&
-    sticky.lastIndex === 2 && sticky.exec("--foo").index === 2 && sticky.lastIndex === 5;
+  expect(alias.re).toBe(re);
+  expect(re.self).toBe(re);
+  expect(Object.getPrototypeOf(re)).toBe(RegExp.prototype);
+  expect(alias.sticky).toBe(sticky);
+  expect(alias.match).toBe(match);
+  expect(alias.groups).toBe(match.groups);
+  expect(match.groups.token).toBe("foo");
+  expect(match.groups.owner).toBe(match);
+  expect(re.lastIndex).toBe(2);
+  expect(re.exec("fofoo").index).toBe(2);
+  expect(re.lastIndex).toBe(5);
+  expect(sticky.lastIndex).toBe(2);
+  expect(sticky.exec("--foo").index).toBe(2);
+  expect(sticky.lastIndex).toBe(5);
 }

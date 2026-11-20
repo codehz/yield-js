@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function method() {
   return this === undefined;
@@ -6,5 +8,5 @@ function method() {
 
 export function run() {
   const call = method;
-  return call();
+  expect(call()).toBe(true);
 }

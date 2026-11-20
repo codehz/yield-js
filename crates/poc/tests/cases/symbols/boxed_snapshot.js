@@ -1,9 +1,9 @@
 // @pending ["wait:boxed"]
 // @restore
 // @fulfill ["wait:boxed", null]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const box = Object(Symbol("only reachable through the wrapper"));
@@ -13,9 +13,13 @@ export async function run() {
 
   const symbol = box.valueOf();
   const keyed = { [symbol]: 42 };
-  return alias.box === box && box.self === box && typeof symbol === "symbol" &&
-    box.description === "only reachable through the wrapper" &&
-    box.valueOf() === symbol && Object(symbol).valueOf() === symbol &&
-    Reflect.ownKeys(keyed)[0] === symbol && keyed[box.valueOf()] === 42 &&
-    Object.getPrototypeOf(box) === Symbol.prototype;
+  expect(alias.box).toBe(box);
+  expect(box.self).toBe(box);
+  expect(typeof symbol).toBe("symbol");
+  expect(box.description).toBe("only reachable through the wrapper");
+  expect(box.valueOf()).toBe(symbol);
+  expect(Object(symbol).valueOf()).toBe(symbol);
+  expect(Reflect.ownKeys(keyed)[0]).toBe(symbol);
+  expect(keyed[box.valueOf()]).toBe(42);
+  expect(Object.getPrototypeOf(box)).toBe(Symbol.prototype);
 }

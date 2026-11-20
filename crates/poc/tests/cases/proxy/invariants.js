@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function typeError(fn) {
   try { fn(); } catch (e) { return e.name === "TypeError"; }
@@ -20,12 +22,16 @@ export function run() {
     getOwnPropertyDescriptor() { return undefined; },
   };
   const p = new Proxy(fixed, handler);
-  if (!typeError(() => p.zero) || !Object.is(p.nan, NaN) || !typeError(() => p.accessor) ||
-      !typeError(() => Reflect.set(p, "zero", 0)) || !Reflect.set(p, "zero", -0) ||
-      !typeError(() => Reflect.set(p, "accessor", undefined)) ||
-      !typeError(() => "zero" in p) || !typeError(() => Reflect.deleteProperty(p, "zero")) ||
-      !typeError(() => Reflect.ownKeys(p)) ||
-      !typeError(() => Reflect.getOwnPropertyDescriptor(p, "zero"))) return false;
+  expect(typeError(() => p.zero)).toBe(true);
+  expect(Object.is(p.nan, NaN)).toBe(true);
+  expect(typeError(() => p.accessor)).toBe(true);
+  expect(typeError(() => Reflect.set(p, "zero", 0))).toBe(true);
+  expect(Reflect.set(p, "zero", -0)).toBe(true);
+  expect(typeError(() => Reflect.set(p, "accessor", undefined))).toBe(true);
+  expect(typeError(() => "zero" in p)).toBe(true);
+  expect(typeError(() => Reflect.deleteProperty(p, "zero"))).toBe(true);
+  expect(typeError(() => Reflect.ownKeys(p))).toBe(true);
+  expect(typeError(() => Reflect.getOwnPropertyDescriptor(p, "zero"))).toBe(true);
 
   const t = { present: 1 };
   const h = {
@@ -36,27 +42,34 @@ export function run() {
     getOwnPropertyDescriptor() { return 0; },
   };
   const q = new Proxy(t, h);
-  if (Reflect.set(q, "present", 2) !== false || Reflect.deleteProperty(q, "present") !== false ||
-      !typeError(() => { q.present = 2; }) || !typeError(() => delete q.present) || t.present !== 1 ||
-      !typeError(() => Reflect.ownKeys(q)) || !typeError(() => Object.getOwnPropertyDescriptor(q, "present"))) return false;
+  expect(Reflect.set(q, "present", 2)).toBe(false);
+  expect(Reflect.deleteProperty(q, "present")).toBe(false);
+  expect(typeError(() => { q.present = 2; })).toBe(true);
+  expect(typeError(() => delete q.present)).toBe(true);
+  expect(t.present).toBe(1);
+  expect(typeError(() => Reflect.ownKeys(q))).toBe(true);
+  expect(typeError(() => Object.getOwnPropertyDescriptor(q, "present"))).toBe(true);
   h.ownKeys = () => [1];
-  if (!typeError(() => Reflect.ownKeys(q))) return false;
+  expect(typeError(() => Reflect.ownKeys(q))).toBe(true);
   h.ownKeys = () => null;
-  if (!typeError(() => Reflect.ownKeys(q))) return false;
+  expect(typeError(() => Reflect.ownKeys(q))).toBe(true);
   h.getOwnPropertyDescriptor = () => ({ value: 1 });
-  if (!typeError(() => Object.getOwnPropertyDescriptor(q, "present"))) return false;
+  expect(typeError(() => Object.getOwnPropertyDescriptor(q, "present"))).toBe(true);
 
   Object.preventExtensions(t);
   h.deleteProperty = () => true;
   h.ownKeys = () => ["present", "extra"];
   h.getOwnPropertyDescriptor = () => ({ configurable: true });
-  if (!typeError(() => Reflect.has(q, "present")) || !typeError(() => delete q.present) ||
-      !typeError(() => Reflect.ownKeys(q)) || !typeError(() => Reflect.getOwnPropertyDescriptor(q, "extra"))) return false;
+  expect(typeError(() => Reflect.has(q, "present"))).toBe(true);
+  expect(typeError(() => delete q.present)).toBe(true);
+  expect(typeError(() => Reflect.ownKeys(q))).toBe(true);
+  expect(typeError(() => Reflect.getOwnPropertyDescriptor(q, "extra"))).toBe(true);
   h.ownKeys = () => [];
-  if (!typeError(() => Reflect.ownKeys(q))) return false;
+  expect(typeError(() => Reflect.ownKeys(q))).toBe(true);
   h.ownKeys = () => ["present"];
   h.getOwnPropertyDescriptor = () => undefined;
-  if (Reflect.ownKeys(q)[0] !== "present" || !typeError(() => Reflect.getOwnPropertyDescriptor(q, "present"))) return false;
+  expect(Reflect.ownKeys(q)[0]).toBe("present");
+  expect(typeError(() => Reflect.getOwnPropertyDescriptor(q, "present"))).toBe(true);
 
   const array = Object.freeze([1]);
   const a = new Proxy(array, {
@@ -64,6 +77,7 @@ export function run() {
     get() { return 2; },
     getOwnPropertyDescriptor() { return { value: 1, writable: true }; },
   });
-  return typeError(() => Reflect.ownKeys(a)) && typeError(() => a.length) &&
-    typeError(() => Object.getOwnPropertyDescriptor(a, "0"));
+  expect(typeError(() => Reflect.ownKeys(a))).toBe(true);
+  expect(typeError(() => a.length)).toBe(true);
+  expect(typeError(() => Object.getOwnPropertyDescriptor(a, "0"))).toBe(true);
 }

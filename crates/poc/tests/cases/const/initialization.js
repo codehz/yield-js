@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const { pair: [first, second = 2] } = { pair: [1] };
@@ -9,6 +11,10 @@ export function run() {
     box.total += right;
   }
   values[0]++;
-  return first === 1 && second === 2 && values.length === 2 &&
-    values[0] === 2 && values[1] === 3 && box.total === 6;
+  expect(first).toBe(1);
+  expect(second).toBe(2);
+  expect(values.length).toBe(2);
+  expect(values[0]).toBe(2);
+  expect(values[1]).toBe(3);
+  expect(box.total).toBe(6);
 }

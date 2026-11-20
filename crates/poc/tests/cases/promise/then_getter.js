@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let reads = 0;
@@ -7,22 +9,41 @@ export async function run() {
     accept(resolve) { resolve(this.n); },
     get then() { reads += 1; return this.accept; }
   };
-  if ((await thenable) !== 7 || reads !== 1) return false;
-  if ((await Promise.resolve(thenable)) !== 7 || reads !== 2) return false;
-  if ((await Promise.resolve(5).finally(() => thenable)) !== 5 || reads !== 3) return false;
+  expect(await thenable).toBe(7);
+  expect(reads).toBe(1);
+  expect(await Promise.resolve(thenable)).toBe(7);
+  expect(reads).toBe(2);
+  expect(await Promise.resolve(5).finally(() => thenable)).toBe(5);
+  expect(reads).toBe(3);
 
   let noncallableReads = 0;
   const noncallable = {get then() { noncallableReads += 1; return 0; }};
-  if ((await Promise.resolve(noncallable)) !== noncallable || noncallableReads !== 1) return false;
-  if ((await Promise.resolve(5).finally(() => noncallable)) !== 5 || noncallableReads !== 2) return false;
+  expect(await Promise.resolve(noncallable)).toBe(noncallable);
+  expect(noncallableReads).toBe(1);
+  expect(await Promise.resolve(5).finally(() => noncallable)).toBe(5);
+  expect(noncallableReads).toBe(2);
 
   let throws = 0;
   const bad = {get then() { throws += 1; throw "bad"; }};
-  try { await bad; return false; } catch (e) { if (e !== "bad" || throws !== 1) return false; }
+  let awaitError;
+  try { await bad; }
+  catch (error) { awaitError = error; }
+  expect(awaitError).toBe("bad");
+  expect(throws).toBe(1);
   const rejected = Promise.resolve(bad);
-  try { await rejected; return false; } catch (e) { if (e !== "bad" || throws !== 2) return false; }
-  try { await Promise.resolve(5).finally(() => bad); return false; }
-  catch (e) { if (e !== "bad" || throws !== 3) return false; }
-  try { await Promise.reject("original").finally(() => bad); return false; }
-  catch (e) { return e === "bad" && throws === 4; }
+  let resolveError;
+  try { await rejected; }
+  catch (error) { resolveError = error; }
+  expect(resolveError).toBe("bad");
+  expect(throws).toBe(2);
+  let fulfilledCleanupError;
+  try { await Promise.resolve(5).finally(() => bad); }
+  catch (error) { fulfilledCleanupError = error; }
+  expect(fulfilledCleanupError).toBe("bad");
+  expect(throws).toBe(3);
+  let rejectedCleanupError;
+  try { await Promise.reject("original").finally(() => bad); }
+  catch (error) { rejectedCleanupError = error; }
+  expect(rejectedCleanupError).toBe("bad");
+  expect(throws).toBe(4);
 }

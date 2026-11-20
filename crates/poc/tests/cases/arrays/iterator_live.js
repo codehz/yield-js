@@ -1,11 +1,14 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const a = [1, 2];
-  const shared = a.values === a[Symbol.iterator] && !a.hasOwnProperty(Symbol.iterator);
+  expect(a.values).toBe(a[Symbol.iterator]);
+  expect(a.hasOwnProperty(Symbol.iterator)).toBe(false);
   const it = a.values();
   const other = a[Symbol.iterator]();
-  const iterable = it[Symbol.iterator]() === it;
+  expect(it[Symbol.iterator]()).toBe(it);
   const first = it.next();
   a[1] = 7;
   a[2] = 8;
@@ -19,35 +22,46 @@ export async function run() {
   const empty = [].values().next();
 
   const next = it.next;
-  let badNext = false;
-  try {
-    next();
-  } catch (error) {
-    badNext = typeof error === "object" && error.name === "TypeError" &&
-      error.message === "ArrayIterator.next requires an array iterator";
-  }
+  let badNext;
+  try { next(); } catch (e) { badNext = e; }
+  expect(typeof badNext).toBe("object");
+  expect(badNext?.name).toBe("TypeError");
+  expect(badNext?.message).toBe("ArrayIterator.next requires an array iterator");
   const borrowed = { values: a.values, length: 1, 0: 42 };
   const borrowedValue = borrowed.values().next();
   const bareValues = a.values;
-  let badValues = false;
-  try {
-    bareValues();
-  } catch (error) {
-    badValues = typeof error === "object" && error.name === "TypeError" &&
-      error.message === "Array.values requires an object";
-  }
+  let badValues;
+  try { bareValues(); } catch (e) { badValues = e; }
+  expect(typeof badValues).toBe("object");
+  expect(badValues?.name).toBe("TypeError");
+  expect(badValues?.message).toBe("Array.values requires an object");
 
   it.next = 42;
   a[Symbol.iterator] = 43;
-  return shared && iterable && first.value === 1 && first.done === false
-    && second.value === 7 && second.done === false && third.value === 8 && third.done === false
-    && independent.value === 1 && independent.done === false
-    && end.done === true && after !== end && again !== after
-    && after.done === true && again.done === true
-    && after.hasOwnProperty("value") && after.value === undefined
-    && again.hasOwnProperty("value") && again.value === undefined
-    && empty.done === true && empty.hasOwnProperty("value") && empty.value === undefined
-    && borrowedValue.value === 42 && borrowedValue.done === false
-    && badNext && badValues && it.hasOwnProperty("next") && it.next === 42
-    && a.hasOwnProperty(Symbol.iterator) && a[Symbol.iterator] === 43;
+  expect(first.value).toBe(1);
+  expect(first.done).toBe(false);
+  expect(second.value).toBe(7);
+  expect(second.done).toBe(false);
+  expect(third.value).toBe(8);
+  expect(third.done).toBe(false);
+  expect(independent.value).toBe(1);
+  expect(independent.done).toBe(false);
+  expect(end.done).toBe(true);
+  expect(after === end).toBe(false);
+  expect(again === after).toBe(false);
+  expect(after.done).toBe(true);
+  expect(again.done).toBe(true);
+  expect(after.hasOwnProperty("value")).toBe(true);
+  expect(after.value).toBe(undefined);
+  expect(again.hasOwnProperty("value")).toBe(true);
+  expect(again.value).toBe(undefined);
+  expect(empty.done).toBe(true);
+  expect(empty.hasOwnProperty("value")).toBe(true);
+  expect(empty.value).toBe(undefined);
+  expect(borrowedValue.value).toBe(42);
+  expect(borrowedValue.done).toBe(false);
+  expect(it.hasOwnProperty("next")).toBe(true);
+  expect(it.next).toBe(42);
+  expect(a.hasOwnProperty(Symbol.iterator)).toBe(true);
+  expect(a[Symbol.iterator]).toBe(43);
 }

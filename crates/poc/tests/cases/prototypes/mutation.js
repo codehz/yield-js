@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 function throwsTypeError(action) {
   try { action(); return false; } catch (e) { return e.name === "TypeError"; }
@@ -8,24 +10,37 @@ export async function run() {
   const a = Object.create(null, { value: { value: 1 } });
   const b = Object.create(a);
   const c = Object.create(b);
-  if (Reflect.setPrototypeOf(a, a) !== false || Reflect.setPrototypeOf(a, c) !== false) return false;
-  if (!throwsTypeError(() => Object.setPrototypeOf(b, c))) return false;
-  if (Object.getPrototypeOf(a) !== null || Object.getPrototypeOf(b) !== a || c.value !== 1) return false;
+  expect(Reflect.setPrototypeOf(a, a)).toBe(false);
+  expect(Reflect.setPrototypeOf(a, c)).toBe(false);
+  expect(throwsTypeError(() => Object.setPrototypeOf(b, c))).toBe(true);
+  expect(Object.getPrototypeOf(a)).toBe(null);
+  expect(Object.getPrototypeOf(b)).toBe(a);
+  expect(c.value).toBe(1);
 
   const replacement = { next: 2 };
-  if (Object.setPrototypeOf(b, replacement) !== b || Reflect.getPrototypeOf(b) !== replacement) return false;
-  if ("value" in c || !("next" in c) || c.next !== 2) return false;
-  if (!Reflect.setPrototypeOf(b, null) || Object.getPrototypeOf(b) !== null || "next" in c) return false;
+  expect(Object.setPrototypeOf(b, replacement)).toBe(b);
+  expect(Reflect.getPrototypeOf(b)).toBe(replacement);
+  expect("value" in c).toBe(false);
+  expect("next" in c).toBe(true);
+  expect(c.next).toBe(2);
+  expect(Reflect.setPrototypeOf(b, null)).toBe(true);
+  expect(Object.getPrototypeOf(b)).toBe(null);
+  expect("next" in c).toBe(false);
 
   const fixed = Object.freeze(c);
-  if (!Reflect.setPrototypeOf(fixed, b) || Object.setPrototypeOf(fixed, b) !== fixed) return false;
-  if (Reflect.setPrototypeOf(fixed, null) !== false) return false;
-  if (!throwsTypeError(() => Object.setPrototypeOf(fixed, a)) || Object.getPrototypeOf(fixed) !== b) return false;
+  expect(Reflect.setPrototypeOf(fixed, b)).toBe(true);
+  expect(Object.setPrototypeOf(fixed, b)).toBe(fixed);
+  expect(Reflect.setPrototypeOf(fixed, null)).toBe(false);
+  expect(throwsTypeError(() => Object.setPrototypeOf(fixed, a))).toBe(true);
+  expect(Object.getPrototypeOf(fixed)).toBe(b);
 
   const root = Object.prototype;
-  if (!Object.isExtensible(root) || Reflect.getPrototypeOf(root) !== null) return false;
-  if (!Reflect.setPrototypeOf(root, null) || Object.setPrototypeOf(root, null) !== root) return false;
+  expect(Object.isExtensible(root)).toBe(true);
+  expect(Reflect.getPrototypeOf(root)).toBe(null);
+  expect(Reflect.setPrototypeOf(root, null)).toBe(true);
+  expect(Object.setPrototypeOf(root, null)).toBe(root);
   // A null-rooted candidate cannot introduce a cycle; the root link itself is immutable.
-  if (Reflect.setPrototypeOf(root, a) !== false || !throwsTypeError(() => Object.setPrototypeOf(root, a))) return false;
-  return Reflect.getPrototypeOf(root) === null;
+  expect(Reflect.setPrototypeOf(root, a)).toBe(false);
+  expect(throwsTypeError(() => Object.setPrototypeOf(root, a))).toBe(true);
+  expect(Reflect.getPrototypeOf(root)).toBe(null);
 }

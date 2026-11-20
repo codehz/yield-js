@@ -1,50 +1,71 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const global = /foo/g;
   const first = global.exec("-foo-foo");
-  if (first.index !== 1 || global.lastIndex !== 4) return false;
-  if (!global.test("-foo-foo") || global.lastIndex !== 8) return false;
-  if (global.exec("-foo-foo") !== null || global.lastIndex !== 0) return false;
+  expect(first.index).toBe(1);
+  expect(global.lastIndex).toBe(4);
+  expect(global.test("-foo-foo")).toBe(true);
+  expect(global.lastIndex).toBe(8);
+  expect(global.exec("-foo-foo")).toBe(null);
+  expect(global.lastIndex).toBe(0);
 
   const sticky = /foo/y;
-  if (sticky.test("-foo") || sticky.lastIndex !== 0) return false;
+  expect(sticky.test("-foo")).toBe(false);
+  expect(sticky.lastIndex).toBe(0);
   sticky.lastIndex = 1;
-  if (sticky.exec("-foo").index !== 1 || sticky.lastIndex !== 4) return false;
-  if (sticky.test("-foo") || sticky.lastIndex !== 0) return false;
+  expect(sticky.exec("-foo").index).toBe(1);
+  expect(sticky.lastIndex).toBe(4);
+  expect(sticky.test("-foo")).toBe(false);
+  expect(sticky.lastIndex).toBe(0);
 
   const empty = /a*/g;
   const zero = empty.exec("b");
-  if (zero[0] !== "" || zero.index !== 0 || empty.lastIndex !== 0) return false;
-  if (empty.exec("b").index !== 0 || empty.lastIndex !== 0) return false;
-  if (!empty.test("b") || !empty.test("b") || empty.lastIndex !== 0) return false;
+  expect(zero[0]).toBe("");
+  expect(zero.index).toBe(0);
+  expect(empty.lastIndex).toBe(0);
+  expect(empty.exec("b").index).toBe(0);
+  expect(empty.lastIndex).toBe(0);
+  expect(empty.test("b")).toBe(true);
+  expect(empty.test("b")).toBe(true);
+  expect(empty.lastIndex).toBe(0);
 
   const frozen = /a/g;
   Object.defineProperty(frozen, "lastIndex", { writable: false });
+  let frozenError;
   try {
     frozen.exec("a");
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    frozenError = error;
   }
+  expect(frozenError instanceof TypeError).toBe(true);
 
   const sentinel = {};
   const ordinary = /a/;
   ordinary.lastIndex = { valueOf() { throw sentinel; } };
+  let coercionError;
   try {
     ordinary.exec("a");
-    return false;
   } catch (error) {
-    if (error !== sentinel) return false;
+    coercionError = error;
   }
+  expect(coercionError).toBe(sentinel);
 
   const utf16 = /foo/g;
-  if (utf16.exec("😀foo").index !== 2 || utf16.lastIndex !== 5) return false;
+  expect(utf16.exec("😀foo").index).toBe(2);
+  expect(utf16.lastIndex).toBe(5);
 
   const plain = /foo/;
   const desc = Object.getOwnPropertyDescriptor(plain, "lastIndex");
   plain.lastIndex = 99;
-  return desc.value === 0 && desc.writable && !desc.enumerable && !desc.configurable &&
-    plain.exec("-foo").index === 1 && plain.lastIndex === 99 &&
-    !plain.test("other") && plain.lastIndex === 99;
+  expect(desc.value).toBe(0);
+  expect(desc.writable).toBe(true);
+  expect(desc.enumerable).toBe(false);
+  expect(desc.configurable).toBe(false);
+  expect(plain.exec("-foo").index).toBe(1);
+  expect(plain.lastIndex).toBe(99);
+  expect(plain.test("other")).toBe(false);
+  expect(plain.lastIndex).toBe(99);
 }

@@ -1,9 +1,9 @@
 // @pending ["wait:cleanup"]
 // @restore
 // @fulfill ["wait:cleanup", 8]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const p = Promise.resolve(1);
@@ -25,6 +25,11 @@ export async function run() {
   let reason;
   try { await Promise.reject("original").finally(() => Promise.resolve(0)); }
   catch (error) { reason = error; }
-  return argsOK && returned === marker && cleaned && value === 42 && p.finally(7)
-    && (await Promise.resolve(9).finally(null)) === 9 && reason === "original";
+  expect(argsOK).toBe(true);
+  expect(returned).toBe(marker);
+  expect(cleaned).toBe(true);
+  expect(value).toBe(42);
+  expect(p.finally(7)).toBe(true);
+  expect(await Promise.resolve(9).finally(null)).toBe(9);
+  expect(reason).toBe("original");
 }

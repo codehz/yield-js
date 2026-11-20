@@ -1,9 +1,9 @@
 // @pending ["wait:species"]
 // @restore
 // @fulfill ["wait:species", 5]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 let constructed;
 function Species(executor) {
@@ -19,6 +19,9 @@ export async function run() {
   const result = source.then(value => value + 1);
   const final = source.finally(() => 0);
   const used = result !== final && final === constructed;
-  return used && (await result) === 6 && (await final) === 5
-    && key === Symbol.species && box[Symbol.species] === Species;
+  expect(used).toBe(true);
+  expect(await result).toBe(6);
+  expect(await final).toBe(5);
+  expect(key).toBe(Symbol.species);
+  expect(box[Symbol.species]).toBe(Species);
 }

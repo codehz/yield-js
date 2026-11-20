@@ -1,15 +1,17 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a", null]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const before = globalThis;
   globalThis.marker = 7;
   await wait("a");
-  return globalThis.marker === 7 && globalThis === globalThis &&
-    globalThis === before && globalThis.globalThis === globalThis &&
-    globalThis.Promise === Promise;
+  expect(globalThis.marker).toBe(7);
+  expect(globalThis).toBe(globalThis);
+  expect(globalThis).toBe(before);
+  expect(globalThis.globalThis).toBe(globalThis);
+  expect(globalThis.Promise).toBe(Promise);
 }

@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let log = "";
@@ -7,5 +9,8 @@ export async function run() {
   function key() { log += "k"; return "v"; }
   let before = base()[key()]--;
   let after = ++obj.v;
-  return log === "bk" && before === 8 && after === 8 && obj.v === 8;
+  expect(log).toBe("bk");
+  expect(before).toBe(8);
+  expect(after).toBe(8);
+  expect(obj.v).toBe(8);
 }

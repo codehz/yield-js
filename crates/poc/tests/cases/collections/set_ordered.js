@@ -1,28 +1,47 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
   const obj = {};
   const s = new Set([NaN, NaN, -0, 0, obj, obj]);
-  if (s.size !== 3 || !s.has(NaN) || !s.has(-0) || !s.has(obj) || s.has({})) return false;
-  if (s.add(obj) !== s || s.size !== 3 || !s.delete(NaN) || s.delete(NaN)) return false;
-  if (s.keys !== s.values || s[Symbol.iterator] !== s.values) return false;
-  if (Set.prototype.constructor !== Set || Object.getPrototypeOf(Set.prototype) !== Object.prototype) return false;
+  expect(s.size).toBe(3);
+  expect(s.has(NaN)).toBe(true);
+  expect(s.has(-0)).toBe(true);
+  expect(s.has(obj)).toBe(true);
+  expect(s.has({})).toBe(false);
+  expect(s.add(obj)).toBe(s);
+  expect(s.size).toBe(3);
+  expect(s.delete(NaN)).toBe(true);
+  expect(s.delete(NaN)).toBe(false);
+  expect(s.keys).toBe(s.values);
+  expect(s[Symbol.iterator]).toBe(s.values);
+  expect(Set.prototype.constructor).toBe(Set);
+  expect(Object.getPrototypeOf(Set.prototype)).toBe(Object.prototype);
   const e = s.entries();
-  if (e[Symbol.iterator]() !== e) return false;
+  expect(e[Symbol.iterator]()).toBe(e);
   const zero = e.next().value;
-  if (1 / zero[0] !== Infinity || zero[1] !== 0) return false;
+  expect(1 / zero[0]).toBe(Infinity);
+  expect(zero[1] === 0).toBe(true);
   const dup = e.next().value;
-  if (dup[0] !== obj || dup[1] !== obj) return false;
-  if (s.clear() !== undefined || s.size !== 0) return false;
+  expect(dup[0]).toBe(obj);
+  expect(dup[1]).toBe(obj);
+  expect(s.clear()).toBe(undefined);
+  expect(s.size).toBe(0);
   s.add('a').add('b');
-  if (e.next().value[0] !== 'a') return false;
+  expect(e.next().value[0]).toBe('a');
   const ctx = { log: '' };
   s.forEach(function (v, k, self) {
-    if (k !== v || self !== s) throw 'bad set arguments';
+    expect(k).toBe(v);
+    expect(self).toBe(s);
     this.log += v;
     if (v === 'a') {
       s.clear();
       s.add('c');
     }
   }, ctx);
-  return ctx.log === 'ac' && e.next().value[0] === 'c' && e.next().done && s.size === 1;
+  expect(ctx.log).toBe('ac');
+  expect(e.next().value[0]).toBe('c');
+  expect(e.next().done).toBe(true);
+  expect(s.size).toBe(1);
 }

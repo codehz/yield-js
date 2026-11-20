@@ -1,12 +1,18 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
+  let error;
   try {
     await constructMethod();
-  } catch (e) {
-    return typeof e === "object" && e.name === "TypeError" && e.message === "value is not a constructor";
+  } catch (caught) {
+    error = caught;
   }
-  return false;
+  expect(typeof error).toBe("object");
+  expect(error !== null).toBe(true);
+  expect(error.name).toBe("TypeError");
+  expect(error.message).toBe("value is not a constructor");
 }
 
 async function constructMethod() {

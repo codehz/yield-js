@@ -1,17 +1,37 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
-  let count = 0;
   const value = String("é😀z");
-  if (typeof value !== "string" || String() !== "" || String(undefined) !== "undefined") return false;
-  try { String(Symbol("tag")); } catch (error) { if (error.name === "TypeError") count++; }
-  if (value.length !== 4 || value[0] !== "é" || value["3"] !== "z") return false;
-  if (value[4] !== undefined || value[-1] !== undefined || value["03"] !== undefined || value.missing !== undefined) return false;
-  if (value.constructor !== String || value.toString() !== value || value.valueOf() !== value) return false;
-  if (value[Symbol.iterator] !== String.prototype[Symbol.iterator]) return false;
+  expect(typeof value).toBe("string");
+  expect(String()).toBe("");
+  expect(String(undefined)).toBe("undefined");
+  let symbolErrorName;
+  try { String(Symbol("tag")); } catch (error) { symbolErrorName = error.name; }
+  expect(symbolErrorName).toBe("TypeError");
+  expect(value.length).toBe(4);
+  expect(value[0]).toBe("é");
+  expect(value["3"]).toBe("z");
+  expect(value[4]).toBe(undefined);
+  expect(value[-1]).toBe(undefined);
+  expect(value["03"]).toBe(undefined);
+  expect(value.missing).toBe(undefined);
+  expect(value.constructor).toBe(String);
+  expect(value.toString()).toBe(value);
+  expect(value.valueOf()).toBe(value);
+  expect(value[Symbol.iterator]).toBe(String.prototype[Symbol.iterator]);
 
-  try { value.length = 0; } catch (error) { if (error.name === "TypeError") count++; }
-  try { value[0] = "x"; } catch (error) { if (error.name === "TypeError") count++; }
-  try { value.extra = true; } catch (error) { if (error.name === "TypeError") count++; }
-  return count === 4 && value.length === 4 && value[0] === "é" && value.extra === undefined;
+  let lengthErrorName;
+  try { value.length = 0; } catch (error) { lengthErrorName = error.name; }
+  expect(lengthErrorName).toBe("TypeError");
+  let indexErrorName;
+  try { value[0] = "x"; } catch (error) { indexErrorName = error.name; }
+  expect(indexErrorName).toBe("TypeError");
+  let extraErrorName;
+  try { value.extra = true; } catch (error) { extraErrorName = error.name; }
+  expect(extraErrorName).toBe("TypeError");
+  expect(value.length).toBe(4);
+  expect(value[0]).toBe("é");
+  expect(value.extra).toBe(undefined);
 }

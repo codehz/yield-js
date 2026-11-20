@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function typeError(fn) {
   try { fn(); } catch (e) { return e.name === "TypeError"; }
@@ -6,21 +8,33 @@ function typeError(fn) {
 }
 
 export function run() {
-  if (!typeError(() => Proxy({}, {})) || !typeError(() => new Proxy()) ||
-      !typeError(() => new Proxy(1, {})) || !typeError(() => new Proxy({}, null)) ||
-      !typeError(() => new Proxy(() => 1, {})) || !typeError(() => new Proxy(new Map(), {}))) throw "constructor";
+  expect(typeError(() => Proxy({}, {}))).toBe(true);
+  expect(typeError(() => new Proxy())).toBe(true);
+  expect(typeError(() => new Proxy(1, {}))).toBe(true);
+  expect(typeError(() => new Proxy({}, null))).toBe(true);
+  expect(typeError(() => new Proxy(() => 1, {}))).toBe(true);
+  expect(typeError(() => new Proxy(new Map(), {}))).toBe(true);
 
   const array = [1, , 3];
   const handler = { get: null, set: undefined, deleteProperty: null, ownKeys: undefined };
   const proxy = Reflect.construct(Proxy, [array, handler]);
-  if (!typeError(() => proxy()) || !typeError(() => new proxy())) throw "callability";
-  if (proxy.length !== 3 || proxy[0] !== 1 || 1 in proxy || !(2 in proxy) ||
-      Reflect.ownKeys(proxy).join("|") !== "0|2|length" ||
-      Reflect.getOwnPropertyDescriptor(proxy, "length").enumerable) throw "array reads";
+  expect(typeError(() => proxy())).toBe(true);
+  expect(typeError(() => new proxy())).toBe(true);
+  expect(proxy.length).toBe(3);
+  expect(proxy[0]).toBe(1);
+  expect(1 in proxy).toBe(false);
+  expect(2 in proxy).toBe(true);
+  expect(Reflect.ownKeys(proxy).join("|")).toBe("0|2|length");
+  expect(Reflect.getOwnPropertyDescriptor(proxy, "length").enumerable).toBe(false);
   proxy[4] = 5;
-  if (array.length !== 5 || array[4] !== 5 || !Reflect.deleteProperty(proxy, 2) ||
-      2 in array || array.length !== 5) throw "array delete";
-  if (!Reflect.set(proxy, "length", 1) || array.length !== 1 || 4 in array) throw "array length";
+  expect(array.length).toBe(5);
+  expect(array[4]).toBe(5);
+  expect(Reflect.deleteProperty(proxy, 2)).toBe(true);
+  expect(2 in array).toBe(false);
+  expect(array.length).toBe(5);
+  expect(Reflect.set(proxy, "length", 1)).toBe(true);
+  expect(array.length).toBe(1);
+  expect(4 in array).toBe(false);
 
   const target = { get x() { return this.marker; }, set x(v) { this.marker = v; }, marker: 2 };
   let lookups = 0;
@@ -29,12 +43,19 @@ export function run() {
   const p = new Proxy(target, dynamic);
   const receiver = { marker: 3 };
   // The getter's this.marker lookup also goes through the proxy.
-  if (Reflect.get(p, "x", receiver) !== 3 || p.x !== 2 || lookups !== 3 ||
-      !Reflect.set(p, "x", 4, receiver) || receiver.marker !== 4) throw "receiver";
+  expect(Reflect.get(p, "x", receiver)).toBe(3);
+  expect(p.x).toBe(2);
+  expect(lookups).toBe(3);
+  expect(Reflect.set(p, "x", 4, receiver)).toBe(true);
+  expect(receiver.marker).toBe(4);
   Object.defineProperty(dynamic, "get", { value: 1, configurable: true });
-  if (!typeError(() => p.x)) throw "non-callable get";
+  expect(typeError(() => p.x)).toBe(true);
   Object.defineProperty(dynamic, "get", { get() { throw "lookup"; }, configurable: true });
-  try { p.x; throw "lookup did not throw"; } catch (e) { if (e !== "lookup") throw e; }
+  let lookupError;
+  try { p.x; } catch (e) { lookupError = e; }
+  expect(lookupError).toBe("lookup");
   Object.defineProperty(dynamic, "get", { value() { throw "trap"; }, configurable: true });
-  try { p.x; throw "trap did not throw"; } catch (e) { if (e !== "trap") throw e; return true; }
+  let trapError;
+  try { p.x; } catch (e) { trapError = e; }
+  expect(trapError).toBe("trap");
 }

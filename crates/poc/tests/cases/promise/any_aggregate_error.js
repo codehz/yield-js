@@ -1,4 +1,7 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
+
 export async function run() {
   let caught;
   try {
@@ -6,11 +9,15 @@ export async function run() {
   } catch (error) {
     caught = error;
   }
-  if (!(caught instanceof AggregateError)) return false;
-  if (caught.errors.length !== 3 || caught.errors[0] !== "first" || caught.errors[1] !== "second" || caught.errors[2] !== "third") return false;
-  if (await Promise.any([Promise.reject("no"), Promise.resolve("winner")]) !== "winner") return false;
-  try { await Promise.any([]); return false; } catch (error) {
-    if (!(error instanceof AggregateError) || error.errors.length !== 0) return false;
-  }
-  return true;
+  expect(caught instanceof AggregateError).toBe(true);
+  expect(caught.errors.length).toBe(3);
+  expect(caught.errors[0]).toBe("first");
+  expect(caught.errors[1]).toBe("second");
+  expect(caught.errors[2]).toBe("third");
+  expect(await Promise.any([Promise.reject("no"), Promise.resolve("winner")])).toBe("winner");
+  let emptyError;
+  try { await Promise.any([]); }
+  catch (error) { emptyError = error; }
+  expect(emptyError instanceof AggregateError).toBe(true);
+  expect(emptyError.errors.length).toBe(0);
 }

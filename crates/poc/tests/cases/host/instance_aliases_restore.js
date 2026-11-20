@@ -1,7 +1,7 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a",0]
-// @fulfilled true
+// @fulfilled undefined
 
 import { expect, wait } from 'test';
 
@@ -15,5 +15,7 @@ export async function run() {
   obj.n = 2;
   compare(obj);
   matcher.toEqual(obj);
-  return obj.matcher === matcher && obj.self === obj && matcher.toEqual === obj.matcher.toEqual;
+  expect(obj.matcher).toBe(matcher);
+  expect(obj.self).toBe(obj);
+  expect(matcher.toEqual).toBe(obj.matcher.toEqual);
 }

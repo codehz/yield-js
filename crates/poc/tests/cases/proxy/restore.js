@@ -4,9 +4,9 @@
 // @pending ["wait:again"]
 // @restore
 // @fulfill ["wait:again", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 function make() {
   let count = 0;
@@ -26,11 +26,14 @@ function make() {
 
 export async function run() {
   const saved = make();
-  if (saved.proxy.value !== 8) return false;
+  expect(saved.proxy.value).toBe(8);
   await wait("proxy");
-  if (saved.alias !== saved.proxy || saved.alias.count !== 1) return false;
+  expect(saved.alias).toBe(saved.proxy);
+  expect(saved.alias.count).toBe(1);
   saved.target.value = 10;
-  if (saved.alias.value !== 12) return false;
+  expect(saved.alias.value).toBe(12);
   await wait("again");
-  return saved.alias === saved.proxy && saved.proxy.count === 2 && saved.proxy.value === 13;
+  expect(saved.alias).toBe(saved.proxy);
+  expect(saved.proxy.count).toBe(2);
+  expect(saved.proxy.value).toBe(13);
 }

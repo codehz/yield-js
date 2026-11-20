@@ -1,14 +1,19 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const sparse = [1, , null, undefined, 5];
-  if (sparse.join("|") !== "1||||5" || `${sparse}` !== "1,,,,5") return false;
-  if (+[7] !== 7 || [7] + 1 !== "71") return false;
+  expect(sparse.join("|")).toBe("1||||5");
+  expect(`${sparse}`).toBe("1,,,,5");
+  expect(+[7]).toBe(7);
+  expect([7] + 1).toBe("71");
 
   const cyclic = [1];
   cyclic[1] = cyclic;
   cyclic[2] = 3;
-  if (cyclic.join("|") !== "1||3" || `${cyclic}` !== "1,,3") return false;
+  expect(cyclic.join("|")).toBe("1||3");
+  expect(`${cyclic}`).toBe("1,,3");
 
   let reads = 0;
   const withGetter = [0, 2];
@@ -20,13 +25,17 @@ export async function run() {
       return 7;
     }
   });
-  if (`${withGetter}` !== "7,8" || reads !== 1) return false;
+  expect(`${withGetter}`).toBe("7,8");
+  expect(reads).toBe(1);
 
   const custom = [4];
   let calls = "";
   custom.valueOf = function () { calls += "v"; return this[0]; };
   custom.join = function () { calls += "j"; return "joined:" + this[0]; };
-  if (+custom !== 4 || custom + 1 !== 5 || `${custom}` !== "joined:4") return false;
+  expect(+custom).toBe(4);
+  expect(custom + 1).toBe(5);
+  expect(`${custom}`).toBe("joined:4");
   custom.toString = function () { calls += "s"; return "overridden"; };
-  return `${custom}` === "overridden" && calls === "vvjs";
+  expect(`${custom}`).toBe("overridden");
+  expect(calls).toBe("vvjs");
 }

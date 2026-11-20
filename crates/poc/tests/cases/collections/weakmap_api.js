@@ -1,26 +1,34 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
   const key = {};
   const other = {};
   const value = { marker: 7 };
   const map = new WeakMap([[key, value]]);
-  if (map.get(key) !== value || !map.has(key) || map.get(other) !== undefined) return false;
-  if (map.set(key, other) !== map || map.get(key) !== other) return false;
-  if (!map.delete(key) || map.delete(key) || map.has(key)) return false;
+  expect(map.get(key)).toBe(value);
+  expect(map.has(key)).toBe(true);
+  expect(map.get(other)).toBe(undefined);
+  expect(map.set(key, other)).toBe(map);
+  expect(map.get(key)).toBe(other);
+  expect(map.delete(key)).toBe(true);
+  expect(map.delete(key)).toBe(false);
+  expect(map.has(key)).toBe(false);
   map.set(key, value);
-  if (map[Symbol.iterator] !== undefined || map.size !== undefined) return false;
+  expect(map[Symbol.iterator]).toBe(undefined);
+  expect(map.size).toBe(undefined);
   function throwsTypeError(f) {
     try { f(); } catch (e) { return e instanceof TypeError; }
     return false;
   }
-  if (!throwsTypeError(() => WeakMap()) ||
-      !throwsTypeError(() => new WeakMap([[1, value]]))) return false;
+  expect(throwsTypeError(() => WeakMap())).toBe(true);
+  expect(throwsTypeError(() => new WeakMap([[1, value]]))).toBe(true);
   const primitives = [null, undefined, true, 1, "x", Symbol("s"), Symbol.for("s")];
   for (const primitive of primitives) {
-    if (!throwsTypeError(() => map.get(primitive)) ||
-        !throwsTypeError(() => map.has(primitive)) ||
-        !throwsTypeError(() => map.set(primitive, value)) ||
-        !throwsTypeError(() => map.delete(primitive))) return false;
+    expect(throwsTypeError(() => map.get(primitive))).toBe(true);
+    expect(throwsTypeError(() => map.has(primitive))).toBe(true);
+    expect(throwsTypeError(() => map.set(primitive, value))).toBe(true);
+    expect(throwsTypeError(() => map.delete(primitive))).toBe(true);
   }
-  return true;
 }

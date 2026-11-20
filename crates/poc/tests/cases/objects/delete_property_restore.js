@@ -1,9 +1,9 @@
 // @pending ["wait:key"]
 // @restore
 // @fulfill ["wait:key", "first"]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const sym = Symbol("first");
@@ -20,21 +20,28 @@ export async function run() {
   object[other] = 4;
   const array = [1, 2, 3];
   Object.defineProperty(array, 2, {configurable: false});
-  if (!delete array[1] || !Reflect.deleteProperty(object, sym)) return false;
+  expect(delete array[1]).toBe(true);
+  expect(Reflect.deleteProperty(object, sym)).toBe(true);
   const remove = Reflect.deleteProperty;
-  if (!delete (object?.[await wait("key")])) return false;
-  if (getterCalls !== 0 || object.first !== 9 || object.hasOwnProperty("first")) return false;
-  if (!remove(object, "first") || !("first" in object)) return false;
-  if (array.length !== 3 || 1 in array || remove(array, "length") || remove(array, 2)) return false;
+  expect(delete (object?.[await wait("key")])).toBe(true);
+  expect(getterCalls).toBe(0);
+  expect(object.first).toBe(9);
+  expect(object.hasOwnProperty("first")).toBe(false);
+  expect(remove(object, "first")).toBe(true);
+  expect("first" in object).toBe(true);
+  expect(array.length).toBe(3);
+  expect(1 in array).toBe(false);
+  expect(remove(array, "length")).toBe(false);
+  expect(remove(array, 2)).toBe(false);
+  let error;
   try {
     delete array.length;
-    return false;
-  } catch (e) {
-    if (e.name !== "TypeError") return false;
+  } catch (caught) {
+    error = caught;
   }
+  expect(error?.name).toBe("TypeError");
   Object.defineProperty(object, "first", {value: 5, enumerable: true});
   object[sym] = 6;
-  const keys = Reflect.ownKeys(object);
-  return keys.length === 4 && keys[0] === "second" && keys[1] === "first" &&
-    keys[2] === other && keys[3] === sym && array[2] === 3;
+  expect(Reflect.ownKeys(object)).toEqual(["second", "first", other, sym]);
+  expect(array[2]).toBe(3);
 }

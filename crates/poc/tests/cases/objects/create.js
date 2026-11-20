@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const key = Symbol("inherited");
@@ -10,28 +12,48 @@ export async function run() {
       set(value) { this.count = value - 1; },
     },
   });
-  if (Object.getPrototypeOf(proto) !== null || "toString" in proto) return false;
+  expect(Object.getPrototypeOf(proto)).toBe(null);
+  expect("toString" in proto).toBe(false);
 
   const descriptors = Object.create({ ignored: { value: 10 } });
   descriptors.hidden = { value: 4 };
   const child = Object.create(proto, descriptors);
   const hidden = Object.getOwnPropertyDescriptor(child, "hidden");
-  if (hidden.value !== 4 || hidden.enumerable || hidden.configurable || hidden.writable) return false;
-  if (Reflect.getPrototypeOf(child) !== proto || "ignored" in child || "toString" in child) return false;
-  if (!(key in child) || child[key] !== 8 || !("score" in child) || child.score !== 3) return false;
-  if (Object.getOwnPropertyDescriptor(child, key) !== undefined) return false;
+  expect(hidden.value).toBe(4);
+  expect(hidden.enumerable).toBe(false);
+  expect(hidden.configurable).toBe(false);
+  expect(hidden.writable).toBe(false);
+  expect(Reflect.getPrototypeOf(child)).toBe(proto);
+  expect("ignored" in child).toBe(false);
+  expect("toString" in child).toBe(false);
+  expect(key in child).toBe(true);
+  expect(child[key]).toBe(8);
+  expect("score" in child).toBe(true);
+  expect(child.score).toBe(3);
+  expect(Object.getOwnPropertyDescriptor(child, key)).toBe(undefined);
 
   child.score = 12;
-  if (child.score !== 12 || child.count !== 11 || proto.count !== 2) return false;
-  if (Object.getOwnPropertyDescriptor(child, "score") !== undefined) return false;
-  try { child[key] = 9; return false; } catch (e) { if (e.name !== "TypeError") return false; }
-  if (child[key] !== 8 || Object.getOwnPropertyDescriptor(child, key) !== undefined) return false;
+  expect(child.score).toBe(12);
+  expect(child.count).toBe(11);
+  expect(proto.count).toBe(2);
+  expect(Object.getOwnPropertyDescriptor(child, "score")).toBe(undefined);
+  let inheritedWriteError;
+  try {
+    child[key] = 9;
+  } catch (caught) {
+    inheritedWriteError = caught;
+  }
+  expect(inheritedWriteError?.name).toBe("TypeError");
+  expect(child[key]).toBe(8);
+  expect(Object.getOwnPropertyDescriptor(child, key)).toBe(undefined);
 
   const marker = {};
+  let descriptorError;
   try {
     Object.create(null, { get bad() { throw marker; } });
-    return false;
-  } catch (e) {
-    return e === marker && Object.getPrototypeOf(Object.create(null, undefined)) === null;
+  } catch (caught) {
+    descriptorError = caught;
   }
+  expect(descriptorError).toBe(marker);
+  expect(Object.getPrototypeOf(Object.create(null, undefined))).toBe(null);
 }

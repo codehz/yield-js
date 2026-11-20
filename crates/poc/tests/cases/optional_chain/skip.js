@@ -1,8 +1,12 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let n = 0;
   let v = null?.[++n].m(++n);
   let u = undefined?.(++n);
-  return v === undefined && u === undefined && n === 0;
+  expect(v).toBe(undefined);
+  expect(u).toBe(undefined);
+  expect(n).toBe(0);
 }

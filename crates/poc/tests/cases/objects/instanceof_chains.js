@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   function C() {}
@@ -6,9 +8,15 @@ export function run() {
   const child = Object.create(Object.create(C.prototype));
   const bound = C.bind(null);
   bound.prototype = {};
-  return instance instanceof C && child instanceof C && instance instanceof bound &&
-    !(C.prototype instanceof C) && !({ prototype: C.prototype } instanceof C) &&
-    !(42 instanceof C) && {} instanceof Object && [] instanceof Object &&
-    new Error() instanceof Error && new TypeError() instanceof Error &&
-    Promise.resolve(1) instanceof Promise;
+  expect(instance instanceof C).toBe(true);
+  expect(child instanceof C).toBe(true);
+  expect(instance instanceof bound).toBe(true);
+  expect(C.prototype instanceof C).toBe(false);
+  expect({ prototype: C.prototype } instanceof C).toBe(false);
+  expect(42 instanceof C).toBe(false);
+  expect({} instanceof Object).toBe(true);
+  expect([] instanceof Object).toBe(true);
+  expect(new Error() instanceof Error).toBe(true);
+  expect(new TypeError() instanceof Error).toBe(true);
+  expect(Promise.resolve(1) instanceof Promise).toBe(true);
 }

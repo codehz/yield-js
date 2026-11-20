@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const resolve = Promise.resolve;
@@ -31,6 +33,12 @@ export async function run() {
     try { await promise; }
     catch (error) { errors += typeof error === "string" ? error : error.name; }
   }
-  return correct && reads === 4 && calls === "12345" && all[1] === 12
-    && settled[0].value === 13 && raced === 14 && any === 15 && errors === "TypeErrorgetcall";
+  expect(correct).toBe(true);
+  expect(reads).toBe(4);
+  expect(calls).toBe("12345");
+  expect(all[1]).toBe(12);
+  expect(settled[0].value).toBe(13);
+  expect(raced).toBe(14);
+  expect(any).toBe(15);
+  expect(errors).toBe("TypeErrorgetcall");
 }

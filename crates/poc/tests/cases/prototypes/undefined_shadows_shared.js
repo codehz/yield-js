@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function Box() {}
 
@@ -7,6 +9,8 @@ export function run() {
   let first = new Box();
   let second = new Box();
   first.x = undefined;
-  return first.x === undefined && second.x === 7 &&
-    first.missing === undefined && second.missing === undefined;
+  expect(first.x).toBe(undefined);
+  expect(second.x).toBe(7);
+  expect(first.missing).toBe(undefined);
+  expect(second.missing).toBe(undefined);
 }

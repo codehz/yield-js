@@ -1,7 +1,10 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const left = Promise.resolve(1);
   const right = Promise.resolve(2);
-  return left.then === right.then && left.then === Promise.prototype.then;
+  expect(left.then).toBe(right.then);
+  expect(left.then).toBe(Promise.prototype.then);
 }

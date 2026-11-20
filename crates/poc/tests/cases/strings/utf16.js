@@ -1,21 +1,44 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const value = "é😀z😀";
-  if (value.charAt(0) !== "é" || value.charAt(99) !== "" || value.charCodeAt(1) !== 55357) return false;
-  if (!Object.is(value.charCodeAt(-1), NaN) || value.charCodeAt(2) !== 56832) return false;
-  if (value.codePointAt(1) !== 128512 || value.codePointAt(2) !== 56832 || value.codePointAt(-1) !== undefined) return false;
-  if (value.at(-3) !== "z" || value.at(6) !== undefined) return false;
-  if (value.indexOf("😀", 2) !== 4 || value.lastIndexOf("😀", 3) !== 1 || value.lastIndexOf("😀") !== 4) return false;
-  if (!value.includes("😀", 2) || value.includes("é", 1) || value.indexOf("x") !== -1) return false;
-  if (!value.startsWith("😀", 1) || value.startsWith("😀") || !value.endsWith("😀", 3) || value.endsWith("z")) return false;
-  if (value.slice(-5, -3) !== "😀" || value.slice(3, 1) !== "" || value.substring(3, 1) !== "😀") return false;
-  if (value.substring(-2, 1) !== "é") return false;
+  expect(value.charAt(0)).toBe("é");
+  expect(value.charAt(99)).toBe("");
+  expect(value.charCodeAt(1)).toBe(55357);
+  expect(Object.is(value.charCodeAt(-1), NaN)).toBe(true);
+  expect(value.charCodeAt(2)).toBe(56832);
+  expect(value.codePointAt(1)).toBe(128512);
+  expect(value.codePointAt(2)).toBe(56832);
+  expect(value.codePointAt(-1)).toBe(undefined);
+  expect(value.at(-3)).toBe("z");
+  expect(value.at(6)).toBe(undefined);
+  expect(value.indexOf("😀", 2)).toBe(4);
+  expect(value.lastIndexOf("😀", 3)).toBe(1);
+  expect(value.lastIndexOf("😀")).toBe(4);
+  expect(value.includes("😀", 2)).toBe(true);
+  expect(value.includes("é", 1)).toBe(false);
+  expect(value.indexOf("x")).toBe(-1);
+  expect(value.startsWith("😀", 1)).toBe(true);
+  expect(value.startsWith("😀")).toBe(false);
+  expect(value.endsWith("😀", 3)).toBe(true);
+  expect(value.endsWith("z")).toBe(false);
+  expect(value.slice(-5, -3)).toBe("😀");
+  expect(value.slice(3, 1)).toBe("");
+  expect(value.substring(3, 1)).toBe("😀");
+  expect(value.substring(-2, 1)).toBe("é");
   const high = "\uD83D";
   const low = "\uDE00";
   const units = value.split("");
-  return value[1] === high && value[6] === undefined &&
-    value.charAt(1) === high && value.at(-1) === low &&
-    value.slice(0, 2) === "é" + high && value.substring(1, 2) === high &&
-    units.length === 6 && units[1] === high && units[2] === low && units.join("") === value;
+  expect(value[1]).toBe(high);
+  expect(value[6]).toBe(undefined);
+  expect(value.charAt(1)).toBe(high);
+  expect(value.at(-1)).toBe(low);
+  expect(value.slice(0, 2)).toBe("é" + high);
+  expect(value.substring(1, 2)).toBe(high);
+  expect(units.length).toBe(6);
+  expect(units[1]).toBe(high);
+  expect(units[2]).toBe(low);
+  expect(units.join("")).toBe(value);
 }

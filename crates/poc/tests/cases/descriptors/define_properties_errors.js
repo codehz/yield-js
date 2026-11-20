@@ -1,50 +1,67 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const define = Object.defineProperties;
   const target = {};
   const error = {};
+  let conversionError;
   try {
     define(target, { a: { value: 1 }, get b() { target.sideEffect = 2; throw error; } });
-    return false;
   } catch (caught) {
-    if (caught !== error || "a" in target || target.sideEffect !== 2) return false;
+    conversionError = caught;
   }
+  expect(conversionError).toBe(error);
+  expect("a" in target).toBe(false);
+  expect(target.sideEffect).toBe(2);
   Object.defineProperty(target, "fixed", { value: 1 });
   let converted = false;
+  let fixedError;
   try {
     define(target, {
       a: { value: 3 },
       fixed: { value: 2 },
       c: { get value() { converted = true; return 4; } },
     });
-    return false;
   } catch (caught) {
-    if (caught.name !== "TypeError" || !converted || target.a !== 3 || target.fixed !== 1 || "c" in target) return false;
+    fixedError = caught;
   }
+  expect(fixedError?.name).toBe("TypeError");
+  expect(converted).toBe(true);
+  expect(target.a).toBe(3);
+  expect(target.fixed).toBe(1);
+  expect("c" in target).toBe(false);
+  let invalidError;
   try {
     define(target, { b: { value: 5 }, invalid: 0 });
-    return false;
   } catch (caught) {
-    if (caught.name !== "TypeError" || "b" in target) return false;
+    invalidError = caught;
   }
+  expect(invalidError?.name).toBe("TypeError");
+  expect("b" in target).toBe(false);
+  let stringError;
   try {
     define(target, "x");
-    return false;
   } catch (caught) {
-    if (caught.name !== "TypeError" || "0" in target) return false;
+    stringError = caught;
   }
+  expect(stringError?.name).toBe("TypeError");
+  expect("0" in target).toBe(false);
+  let nullError;
   try {
     define(target, null);
-    return false;
   } catch (caught) {
-    if (caught.name !== "TypeError") return false;
+    nullError = caught;
   }
+  expect(nullError?.name).toBe("TypeError");
+  let targetError;
   try {
     define(1, { get a() { throw error; } });
-    return false;
   } catch (caught) {
-    if (caught.name !== "TypeError") return false;
+    targetError = caught;
   }
-  return define(target, 1) === target && define(target, "") === target;
+  expect(targetError?.name).toBe("TypeError");
+  expect(define(target, 1)).toBe(target);
+  expect(define(target, "")).toBe(target);
 }

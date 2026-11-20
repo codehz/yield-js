@@ -1,7 +1,7 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a",0]
-// @fulfilled true
+// @fulfilled undefined
 
 import { expect, wait } from 'test';
 
@@ -11,7 +11,7 @@ export async function run() {
   prototype.toBe = function () { return 'patched'; };
   delete prototype.toEqual;
   await wait('a');
-  return matcher.toBe(2) === 'patched'
-    && typeof matcher.toEqual === 'undefined'
-    && Object.getPrototypeOf(matcher) === prototype;
+  expect(matcher.toBe(2) === 'patched').toBeTruthy();
+  expect(typeof matcher.toEqual === 'undefined').toBeTruthy();
+  expect(Object.getPrototypeOf(matcher) === prototype).toBeTruthy();
 }

@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let order = "";
@@ -13,25 +15,36 @@ export async function run() {
     set x(v) { writes += 1; this.n = v; return 999; }
   };
   const result = (pair[key("c")] += rhs());
-  if (order !== "gscr" || result !== 7 || pair.n !== 7 || reads !== 1 || writes !== 1) return false;
+  expect(order).toBe("gscr");
+  expect(result).toBe(7);
+  expect(pair.n).toBe(7);
+  expect(reads).toBe(1);
+  expect(writes).toBe(1);
 
   const data = {set x(v) { throw "old setter"; }, [key("d")]: rhs()};
-  if (data.x !== 2 || order !== "gscrdr") return false;
+  expect(data.x).toBe(2);
+  expect(order).toBe("gscrdr");
   const setterOnly = {get x() { return 99; }, x: 3, set x(v) { this.n = v; }};
-  if (setterOnly.x !== undefined || (setterOnly.x = 8) !== 8 || setterOnly.n !== 8) return false;
+  expect(setterOnly.x).toBe(undefined);
+  expect((setterOnly.x = 8)).toBe(8);
+  expect(setterOnly.n).toBe(8);
 
   function C() {}
   C.prototype = {get x() { return this.n; }};
   const o = new C();
   o.n = 6;
+  let assignmentError;
   try {
     o.x = 0;
-    return false;
   } catch (e) {
-    if (typeof e !== "object" || e.name !== "TypeError" ||
-        e.message !== "Cannot set property without a setter" || o.x !== 6) return false;
+    assignmentError = e;
   }
+  expect(typeof assignmentError).toBe("object");
+  expect(assignmentError?.name).toBe("TypeError");
+  expect(assignmentError.message).toBe("Cannot set property without a setter");
+  expect(o.x).toBe(6);
   const throws = {set x(v) { throw v; }};
-  try { throws.x = 4; } catch (e) { return e === 4; }
-  return false;
+  let setterError;
+  try { throws.x = 4; } catch (e) { setterError = e; }
+  expect(setterError).toBe(4);
 }

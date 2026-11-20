@@ -1,13 +1,17 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   try {
     await assignPrototype();
   } catch (e) {
-    return typeof e === "object" && e.name === "TypeError" &&
-      e.message === "Cannot assign to read only property 'prototype'";
+    expect(typeof e).toBe("object");
+    expect(e.name).toBe("TypeError");
+    expect(e.message).toBe("Cannot assign to read only property 'prototype'");
+    return;
   }
-  return false;
+  expect("prototype assignment succeeded").toBe("prototype assignment threw");
 }
 
 async function assignPrototype() {

@@ -1,20 +1,55 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
-  if (typeof JSON !== "object" || JSON.prototype !== undefined) return false;
-  try { JSON(); return false; } catch (e) { if (!(e instanceof TypeError)) return false; }
-  try { new JSON(); return false; } catch (e) { if (!(e instanceof TypeError)) return false; }
-  if (JSON.stringify(null) !== "null" || JSON.stringify(true) !== "true") return false;
-  if (JSON.stringify(1.5) !== "1.5" || JSON.stringify(-0) !== "0") return false;
-  if (JSON.stringify("a\"b\\") !== "\"a\\\"b\\\\\"") return false;
-  if (JSON.stringify("\u0001") !== "\"\\u0001\"") return false;
-  if (JSON.stringify(undefined) !== undefined || JSON.stringify(() => 1) !== undefined) return false;
-  if (JSON.stringify(Symbol()) !== undefined || JSON.stringify(NaN) !== "null") return false;
-  if (JSON.stringify(Infinity) !== "null") return false;
+  expect(typeof JSON).toBe("object");
+  expect(JSON.prototype).toBe(undefined);
+  let callError;
+  try {
+    JSON();
+  } catch (error) {
+    callError = error;
+  }
+  expect(callError instanceof TypeError).toBe(true);
+
+  let constructError;
+  try {
+    new JSON();
+  } catch (error) {
+    constructError = error;
+  }
+  expect(constructError instanceof TypeError).toBe(true);
+  expect(JSON.stringify(null)).toBe("null");
+  expect(JSON.stringify(true)).toBe("true");
+  expect(JSON.stringify(1.5)).toBe("1.5");
+  expect(JSON.stringify(-0)).toBe("0");
+  expect(JSON.stringify("a\"b\\")).toBe("\"a\\\"b\\\\\"");
+  expect(JSON.stringify("\u0001")).toBe("\"\\u0001\"");
+  expect(JSON.stringify(undefined)).toBe(undefined);
+  expect(JSON.stringify(() => 1)).toBe(undefined);
+  expect(JSON.stringify(Symbol())).toBe(undefined);
+  expect(JSON.stringify(NaN)).toBe("null");
+  expect(JSON.stringify(Infinity)).toBe("null");
   const parsed = JSON.parse('{"b":1,"a":[true,null,false],"__proto__":{"x":1}}');
-  if (parsed.b !== 1 || parsed.a[2] !== false) return false;
-  if (Object.getPrototypeOf(parsed) !== Object.prototype) return false;
-  if (parsed.__proto__.x !== 1 || Object.getPrototypeOf(parsed) === parsed.__proto__) return false;
-  try { JSON.parse("{"); return false; } catch (e) { if (!(e instanceof SyntaxError)) return false; }
-  try { JSON.parse("1 2"); return false; } catch (e) { if (!(e instanceof SyntaxError)) return false; }
-  return true;
+  expect(parsed.b).toBe(1);
+  expect(parsed.a[2]).toBe(false);
+  expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+  expect(parsed.__proto__.x).toBe(1);
+  expect(Object.getPrototypeOf(parsed) === parsed.__proto__).toBe(false);
+  let incompleteError;
+  try {
+    JSON.parse("{");
+  } catch (error) {
+    incompleteError = error;
+  }
+  expect(incompleteError instanceof SyntaxError).toBe(true);
+
+  let trailingInputError;
+  try {
+    JSON.parse("1 2");
+  } catch (error) {
+    trailingInputError = error;
+  }
+  expect(trailingInputError instanceof SyntaxError).toBe(true);
 }

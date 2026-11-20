@@ -1,10 +1,10 @@
 // @pending ["pause:a"]
 // @restore
-// @fulfilled true
+// @fulfilled undefined
 
-import { pause } from 'test';
+import { expect, pause } from 'test';
 
 export async function run() {
   const value = await pause('a');
-  return value === undefined;
+  expect(value).toBe(undefined);
 }

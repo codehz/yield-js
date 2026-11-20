@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const key = Symbol("key");
@@ -12,23 +14,27 @@ export async function run() {
     valueOf() { throw "ordinary fallback"; }
   };
   const target = { [value]: 3 };
-  if (target[key] !== 3 || +value !== 7 || value + 1 !== 10 || !(value == 9)) return false;
+  expect(target[key]).toBe(3);
+  expect(+value).toBe(7);
+  expect(value + 1).toBe(10);
+  expect(value == 9).toBe(true);
+  let thrown;
   try {
     `${value}`;
-    return false;
   } catch (error) {
-    if (error.name !== "TypeError") return false;
+    thrown = error;
   }
-  if (hints !== "string;number;default;default;string;") return false;
+  expect(thrown?.name).toBe("TypeError");
+  expect(hints).toBe("string;number;default;default;string;");
   const fallback = { [Symbol.toPrimitive]: null, toString() { return "fallback"; } };
-  if (`${fallback}` !== "fallback") return false;
+  expect(`${fallback}`).toBe("fallback");
   for (const bad of [1, function () { return {}; }]) {
+    let thrown;
     try {
       +{ [Symbol.toPrimitive]: bad, valueOf() { return 1; } };
-      return false;
     } catch (error) {
-      if (error.name !== "TypeError") return false;
+      thrown = error;
     }
+    expect(thrown?.name).toBe("TypeError");
   }
-  return true;
 }

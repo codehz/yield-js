@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function Target(a, b) { this.sum = a + b; return 77; }
 function Other() { throw 'newTarget body must not run'; }
@@ -6,25 +8,34 @@ function Other() { throw 'newTarget body must not run'; }
 export function run() {
   const construct = Reflect.construct;
   const instance = construct(Target, {0: 20, 1: 22, length: '2'}, Other);
-  if (instance.sum !== 42 || !(instance instanceof Other) || instance instanceof Target) return false;
-  if (Object.getPrototypeOf(instance) !== Other.prototype) return false;
-  if (!(construct(Target, [1, 2]) instanceof Target)) return false;
+  expect(instance.sum).toBe(42);
+  expect(instance instanceof Other).toBe(true);
+  expect(instance instanceof Target).toBe(false);
+  expect(Object.getPrototypeOf(instance)).toBe(Other.prototype);
+  expect(construct(Target, [1, 2]) instanceof Target).toBe(true);
   const replacement = {};
   function ReturnsObject() { return replacement; }
-  if (construct(ReturnsObject, [], Other) !== replacement) return false;
+  expect(construct(ReturnsObject, [], Other)).toBe(replacement);
   const array = construct(Array, [3, 4], Other);
-  if (!Array.isArray(array) || array.length !== 2 || array[1] !== 4 || !(array instanceof Other)) return false;
+  expect(Array.isArray(array)).toBe(true);
+  expect(array.length).toBe(2);
+  expect(array[1]).toBe(4);
+  expect(array instanceof Other).toBe(true);
   const error = construct(TypeError, ['oops'], Other);
-  if (error.message !== 'oops' || !(error instanceof Other) || error instanceof TypeError) return false;
+  expect(error.message).toBe('oops');
+  expect(error instanceof Other).toBe(true);
+  expect(error instanceof TypeError).toBe(false);
   const argument = {};
   const object = construct(Object, [argument], Other);
-  if (object === argument || !(object instanceof Other) || Object.getPrototypeOf(argument) !== Object.prototype) return false;
+  expect(object !== argument).toBe(true);
+  expect(object instanceof Other).toBe(true);
+  expect(Object.getPrototypeOf(argument)).toBe(Object.prototype);
   const promise = construct(Promise, [resolve => resolve(42)], Other);
-  if (!(promise instanceof Other) || !(construct(Promise, [resolve => resolve(42)]) instanceof Promise)) return false;
+  expect(promise instanceof Other).toBe(true);
+  expect(construct(Promise, [resolve => resolve(42)]) instanceof Promise).toBe(true);
   Other.prototype = 0;
   function Fallback() {}
   Fallback.prototype = 0;
-  if (Object.getPrototypeOf(construct(Fallback, [], Other)) !== Object.getPrototypeOf(new Fallback())) return false;
-  if (Object.getPrototypeOf(construct(Array, [], Other)) !== Array.prototype) return false;
-  return true;
+  expect(Object.getPrototypeOf(construct(Fallback, [], Other))).toBe(Object.getPrototypeOf(new Fallback()));
+  expect(Object.getPrototypeOf(construct(Array, [], Other))).toBe(Array.prototype);
 }

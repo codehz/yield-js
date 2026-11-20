@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const obj = {
@@ -15,5 +17,5 @@ export function run() {
         && arguments.callee === undefined && arguments.caller === undefined;
     }
   };
-  return obj.read(2, 3, 5);
+  expect(obj.read(2, 3, 5)).toBe(true);
 }

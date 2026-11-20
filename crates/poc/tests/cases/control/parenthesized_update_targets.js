@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   let x = 4;
@@ -11,14 +13,12 @@ export function run() {
   const e = ((x))++;        // nested parens, postfix: old value 6
   const f = ++(((obj.x)));  // nested parens, prefix: new value 11
 
-  return (
-    a === 4 &&
-    b === 6 &&
-    c === 10 &&
-    d === 10 &&
-    e === 6 &&
-    f === 11 &&
-    x === 7 &&
-    obj.x === 11
-  );
+  expect(a).toBe(4);
+  expect(b).toBe(6);
+  expect(c).toBe(10);
+  expect(d).toBe(10);
+  expect(e).toBe(6);
+  expect(f).toBe(11);
+  expect(x).toBe(7);
+  expect(obj.x).toBe(11);
 }

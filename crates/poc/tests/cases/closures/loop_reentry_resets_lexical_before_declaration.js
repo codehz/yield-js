@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let read;
@@ -14,5 +16,6 @@ export async function run() {
     let x;
     x = 9;
   }
-  return first === undefined && second === undefined;
+  expect(first).toBe(undefined);
+  expect(second).toBe(undefined);
 }

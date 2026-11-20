@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let x = "4";
@@ -6,5 +8,9 @@ export async function run() {
   let b = --x;
   let c = ++x;
   let d = x--;
-  return a === 4 && b === 4 && c === 5 && d === 5 && x === 4;
+  expect(a).toBe(4);
+  expect(b).toBe(4);
+  expect(c).toBe(5);
+  expect(d).toBe(5);
+  expect(x).toBe(4);
 }

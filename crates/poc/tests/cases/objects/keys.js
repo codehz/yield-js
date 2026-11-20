@@ -1,9 +1,9 @@
 // @pending ["wait:keys"]
 // @restore
 // @fulfill ["wait:keys", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 function Box() {}
 
@@ -24,24 +24,26 @@ export async function run() {
   const keys = Object.keys;
   Reflect.ownKeys = Reflect.ownKeys;
   await wait("keys");
-  if (keys !== Object.keys) return false;
-  const result = keys(object);
-  if (result.length !== 4 || result[0] !== "2" || result[1] !== "10" ||
-      result[2] !== "z" || result[3] !== "a") return false;
-  if (keys(accessor)[0] !== "read") return false;
-  const indices = keys(array);
-  if (indices.length !== 3 || indices[0] !== "0" || indices[1] !== "1" ||
-      indices[2] !== "extra") return false;
-  if (keys(Reflect).length !== 0 || Reflect.ownKeys(Reflect)[0] !== "ownKeys" ||
-      keys(Box).length !== 0 || keys(Object).length !== 0 ||
-      keys(Object.prototype).length !== 0) return false;
+  expect(keys).toBe(Object.keys);
+  expect(keys(object)).toEqual(["2", "10", "z", "a"]);
+  expect(keys(accessor)[0]).toBe("read");
+  expect(keys(array)).toEqual(["0", "1", "extra"]);
+  expect(keys(Reflect).length).toBe(0);
+  expect(Reflect.ownKeys(Reflect)[0]).toBe("ownKeys");
+  expect(keys(Box).length).toBe(0);
+  expect(keys(Object).length).toBe(0);
+  expect(keys(Object.prototype).length).toBe(0);
+  let error;
   try {
     keys(null);
-    return false;
-  } catch (error) {
-    if (error.name !== "TypeError") return false;
+  } catch (caught) {
+    error = caught;
   }
+  expect(error?.name).toBe("TypeError");
   const stringKeys = keys("a😀");
-  return stringKeys.length === 3 && stringKeys[0] === "0" && stringKeys[2] === "2" &&
-    keys(1).length === 0 && keys(symbol).length === 0;
+  expect(stringKeys.length).toBe(3);
+  expect(stringKeys[0]).toBe("0");
+  expect(stringKeys[2]).toBe("2");
+  expect(keys(1).length).toBe(0);
+  expect(keys(symbol).length).toBe(0);
 }

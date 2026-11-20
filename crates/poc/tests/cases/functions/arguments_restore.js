@@ -1,9 +1,9 @@
 // @pending ["wait:args"]
 // @restore
 // @fulfill ["wait:args", 2]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 async function f() {
   const alias = arguments;
@@ -11,8 +11,12 @@ async function f() {
   const first = iter.next().value;
   const n = await wait("args");
   arguments[1] += n;
-  return alias === arguments && first === 4 && iter.next().value === 7
-    && alias.length === 2 && alias[0] === 4 && iter.next().done;
+  expect(alias).toBe(arguments);
+  expect(first).toBe(4);
+  expect(iter.next().value).toBe(7);
+  expect(alias.length).toBe(2);
+  expect(alias[0]).toBe(4);
+  expect(iter.next().done).toBeTruthy();
 }
 
 export function run() { return f(4, 5); }

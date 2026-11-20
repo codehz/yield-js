@@ -1,9 +1,9 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a",0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   function C() {}
@@ -18,6 +18,10 @@ export async function run() {
   o.x = 9;
   const f = o.m;
   await wait("a");
-  return o.n === 7 && C.prototype.n === undefined && f === o.m &&
-    ((o.m))() === 9 && (await o.a()) === 9 && o.m.prototype === undefined;
+  expect(o.n).toBe(7);
+  expect(C.prototype.n).toBe(undefined);
+  expect(f).toBe(o.m);
+  expect(((o.m))()).toBe(9);
+  expect((await o.a())).toBe(9);
+  expect(o.m.prototype).toBe(undefined);
 }

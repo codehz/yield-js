@@ -1,8 +1,9 @@
 // @pending ["wait:weakmap"]
 // @restore
 // @fulfill ["wait:weakmap", null]
-// @fulfilled true
-import { wait } from 'test';
+// @fulfilled undefined
+
+import { expect, wait } from 'test';
 
 export async function run() {
   const root = {};
@@ -12,5 +13,7 @@ export async function run() {
   await wait("weakmap");
   const entry = head.get(root);
   const value = tail.get(entry.next);
-  return tail.has(entry.next) && typeof value.marker === "symbol" && value.root === root;
+  expect(tail.has(entry.next)).toBe(true);
+  expect(typeof value.marker).toBe("symbol");
+  expect(value.root).toBe(root);
 }

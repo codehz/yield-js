@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function throwsTypeError(value, constructor) {
   try {
@@ -15,8 +17,11 @@ export function run() {
   const arrow = () => {};
   const method = { m() {} }.m;
   const asyncFunction = async () => {};
-  return throwsTypeError({}, {}) && throwsTypeError(0, null) &&
-    throwsTypeError({}, C) && throwsTypeError({}, arrow) &&
-    throwsTypeError({}, method) && throwsTypeError({}, asyncFunction) &&
-    throwsTypeError({}, arrow.bind(null));
+  expect(throwsTypeError({}, {})).toBe(true);
+  expect(throwsTypeError(0, null)).toBe(true);
+  expect(throwsTypeError({}, C)).toBe(true);
+  expect(throwsTypeError({}, arrow)).toBe(true);
+  expect(throwsTypeError({}, method)).toBe(true);
+  expect(throwsTypeError({}, asyncFunction)).toBe(true);
+  expect(throwsTypeError({}, arrow.bind(null))).toBe(true);
 }

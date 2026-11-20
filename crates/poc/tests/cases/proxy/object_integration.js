@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const symbol = Symbol("copy");
@@ -11,20 +13,32 @@ export function run() {
     },
     get(t, k, r) { return k === "a" ? 10 : Reflect.get(t, k, r); },
   });
-  if (Object.keys(source).join("|") !== "b|a" || !source.hasOwnProperty("hidden") ||
-      source.hasOwnProperty("missing")) return false;
-  if (JSON.stringify(source) !== '{"b":2,"a":10}') return false;
+  expect(Object.keys(source).join("|")).toBe("b|a");
+  expect(source.hasOwnProperty("hidden")).toBe(true);
+  expect(source.hasOwnProperty("missing")).toBe(false);
+  expect(JSON.stringify(source)).toBe('{"b":2,"a":10}');
   const descriptors = Object.getOwnPropertyDescriptors(source);
-  if (descriptors.a.value !== 1 || descriptors.hidden.enumerable ||
-      descriptors[symbol].value !== 4 || "missing" in descriptors) return false;
+  expect(descriptors.a.value).toBe(1);
+  expect(descriptors.hidden.enumerable).toBe(false);
+  expect(descriptors[symbol].value).toBe(4);
+  expect("missing" in descriptors).toBe(false);
   const spread = { ...source };
   const { a, ...rest } = source;
-  if (a !== 10 || spread.a !== 10 || spread[symbol] !== 4 || "hidden" in spread ||
-      "a" in rest || rest.b !== 2 || rest[symbol] !== 4) return false;
+  expect(a).toBe(10);
+  expect(spread.a).toBe(10);
+  expect(spread[symbol]).toBe(4);
+  expect("hidden" in spread).toBe(false);
+  expect("a" in rest).toBe(false);
+  expect(rest.b).toBe(2);
+  expect(rest[symbol]).toBe(4);
   const writes = [];
   const assigned = new Proxy({}, {
     set(t, k, v) { writes.push(k); t[k] = v; return true; },
   });
-  return Object.assign(assigned, source) === assigned && writes.length === 3 &&
-    writes[0] === symbol && writes[1] === "b" && writes[2] === "a" && assigned.a === 10;
+  expect(Object.assign(assigned, source)).toBe(assigned);
+  expect(writes.length).toBe(3);
+  expect(writes[0]).toBe(symbol);
+  expect(writes[1]).toBe("b");
+  expect(writes[2]).toBe("a");
+  expect(assigned.a).toBe(10);
 }

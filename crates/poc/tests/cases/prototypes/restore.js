@@ -1,9 +1,9 @@
 // @pending ["wait:prototype"]
 // @restore
 // @fulfill ["wait:prototype", null]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const child = Object.create(Object.create(Object.create(null, {
@@ -18,17 +18,25 @@ export async function run() {
 
   await wait("prototype");
 
-  if (!("doubled" in child) || child.doubled !== 42 || "toString" in child) return false;
+  expect("doubled" in child).toBe(true);
+  expect(child.doubled).toBe(42);
+  expect("toString" in child).toBe(false);
   const leaf = Object.getPrototypeOf(Object.getPrototypeOf(child));
-  if (Object.getPrototypeOf(leaf) !== null || leaf.value !== 21) return false;
+  expect(Object.getPrototypeOf(leaf)).toBe(null);
+  expect(leaf.value).toBe(21);
   child.value = 6;
-  if (child.doubled !== 12 || leaf.value !== 21) return false;
+  expect(child.doubled).toBe(12);
+  expect(leaf.value).toBe(21);
 
   const fresh = [];
-  if (Object.getPrototypeOf(existing) !== arrayPrototype || Object.getPrototypeOf(fresh) !== arrayPrototype) return false;
-  if (existing.restoredArrayValue !== 17 || fresh.restoredArrayValue !== 17) return false;
+  expect(Object.getPrototypeOf(existing)).toBe(arrayPrototype);
+  expect(Object.getPrototypeOf(fresh)).toBe(arrayPrototype);
+  expect(existing.restoredArrayValue).toBe(17);
+  expect(fresh.restoredArrayValue).toBe(17);
   const sharedParent = Object.getPrototypeOf(arrayPrototype);
-  if (Object.getPrototypeOf(sharedParent) !== Object.prototype) return false;
-  if (!Reflect.setPrototypeOf(arrayPrototype, Object.prototype)) return false;
-  return !("restoredArrayValue" in existing) && !("restoredArrayValue" in fresh) && existing[0] === 1;
+  expect(Object.getPrototypeOf(sharedParent)).toBe(Object.prototype);
+  expect(Reflect.setPrototypeOf(arrayPrototype, Object.prototype)).toBe(true);
+  expect("restoredArrayValue" in existing).toBe(false);
+  expect("restoredArrayValue" in fresh).toBe(false);
+  expect(existing[0]).toBe(1);
 }

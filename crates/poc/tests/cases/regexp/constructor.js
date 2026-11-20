@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function syntaxError(pattern, flags) {
   try {
@@ -15,10 +17,19 @@ export function run() {
   });
   const copy = new RegExp(re);
   const override = RegExp(re, "y");
-  return re.flags === "gi" && re.test("ABBC") && re.lastIndex === 4 &&
-    RegExp(re) === re && copy !== re && copy.source === re.source &&
-    copy.flags === re.flags && copy.lastIndex === 0 &&
-    override !== re && override.source === re.source && override.flags === "y" &&
-    RegExp("abc").test("abc") && syntaxError("[", "") &&
-    syntaxError("abc", "gg") && syntaxError("", "uv");
+  expect(re.flags).toBe("gi");
+  expect(re.test("ABBC")).toBe(true);
+  expect(re.lastIndex).toBe(4);
+  expect(RegExp(re)).toBe(re);
+  expect(copy !== re).toBe(true);
+  expect(copy.source).toBe(re.source);
+  expect(copy.flags).toBe(re.flags);
+  expect(copy.lastIndex).toBe(0);
+  expect(override !== re).toBe(true);
+  expect(override.source).toBe(re.source);
+  expect(override.flags).toBe("y");
+  expect(RegExp("abc").test("abc")).toBe(true);
+  expect(syntaxError("[", "")).toBe(true);
+  expect(syntaxError("abc", "gg")).toBe(true);
+  expect(syntaxError("", "uv")).toBe(true);
 }

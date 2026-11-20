@@ -1,11 +1,13 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const empty = Object(null);
-  if (Object.getPrototypeOf(empty) !== Object.prototype ||
-      Object.getPrototypeOf(Object(undefined)) !== Object.prototype ||
-      Object.getPrototypeOf(new Object()) !== Object.prototype ||
-      Object(null) === empty) return false;
+  expect(Object.getPrototypeOf(empty)).toBe(Object.prototype);
+  expect(Object.getPrototypeOf(Object(undefined))).toBe(Object.prototype);
+  expect(Object.getPrototypeOf(new Object())).toBe(Object.prototype);
+  expect(Object(null) === empty).toBe(false);
 
   const symbol = Symbol("token");
   const primitives = ["abc", 1, false, symbol];
@@ -16,51 +18,73 @@ export function run() {
     const value = primitives[i];
     const box = Object(value);
     const constructed = new Object(value);
-    if (typeof box !== "object" || box === value || box === Object(value) ||
-        box === constructed || Object(box) !== box || constructed.valueOf() !== value ||
-        box.valueOf() !== value || box.toString() !== texts[i] ||
-        Object.prototype.toString.call(box) !== "[object " + names[i] + "]" ||
-        Object.getPrototypeOf(box) !== prototypes[i] ||
-        Object.getPrototypeOf(value) !== prototypes[i] ||
-        Object.setPrototypeOf(value, null) !== value ||
-        box.hasOwnProperty("valueOf") || box.hasOwnProperty("toString")) {
-      return false;
-    }
+    expect(typeof box).toBe("object");
+    expect(box === value).toBe(false);
+    expect(box === Object(value)).toBe(false);
+    expect(box === constructed).toBe(false);
+    expect(Object(box)).toBe(box);
+    expect(constructed.valueOf()).toBe(value);
+    expect(box.valueOf()).toBe(value);
+    expect(box.toString()).toBe(texts[i]);
+    expect(Object.prototype.toString.call(box)).toBe("[object " + names[i] + "]");
+    expect(Object.getPrototypeOf(box)).toBe(prototypes[i]);
+    expect(Object.getPrototypeOf(value)).toBe(prototypes[i]);
+    expect(Object.setPrototypeOf(value, null)).toBe(value);
+    expect(box.hasOwnProperty("valueOf")).toBe(false);
+    expect(box.hasOwnProperty("toString")).toBe(false);
   }
 
   const string = new String("A😀");
-  if (string.valueOf() !== "A😀" || string.toString() !== "A😀" || string.length !== 3 ||
-      string[0] !== "A" || !("2" in string) || !Reflect.has(string, "length") ||
-      Reflect.has(string, "3")) return false;
+  expect(string.valueOf()).toBe("A😀");
+  expect(string.toString()).toBe("A😀");
+  expect(string.length).toBe(3);
+  expect(string[0]).toBe("A");
+  expect("2" in string).toBe(true);
+  expect(Reflect.has(string, "length")).toBe(true);
+  expect(Reflect.has(string, "3")).toBe(false);
 
+  let indexError;
   try {
     string[0] = "B";
-    return false;
-  } catch (error) {
-    if (!(error instanceof TypeError) || string[0] !== "A") return false;
+  } catch (caught) {
+    indexError = caught;
   }
+  expect(indexError instanceof TypeError).toBe(true);
+  expect(string[0]).toBe("A");
+  let lengthError;
   try {
     string.length = 0;
-    return false;
-  } catch (error) {
-    if (!(error instanceof TypeError) || string.length !== 3) return false;
+  } catch (caught) {
+    lengthError = caught;
   }
+  expect(lengthError instanceof TypeError).toBe(true);
+  expect(string.length).toBe(3);
   string.extra = 42;
-  if (string.extra !== 42 || !("extra" in string)) return false;
+  expect(string.extra).toBe(42);
+  expect("extra" in string).toBe(true);
 
   const number = new Number(1);
   const boolean = new Boolean(false);
-  if (number === 1 || number.valueOf() !== 1 || number.toString() !== "1" ||
-      number.toFixed(1) !== "1.0" || typeof boolean !== "object" ||
-      boolean.valueOf() !== false || boolean.toString() !== "false" ||
-      Boolean() !== false || Boolean(0) !== false || Boolean("false") !== true ||
-      Boolean(boolean) !== true || Object(symbol).description !== "token" ||
-      String(123) !== "123" || Number("2") !== 2) return false;
+  expect(number === 1).toBe(false);
+  expect(number.valueOf()).toBe(1);
+  expect(number.toString()).toBe("1");
+  expect(number.toFixed(1)).toBe("1.0");
+  expect(typeof boolean).toBe("object");
+  expect(boolean.valueOf()).toBe(false);
+  expect(boolean.toString()).toBe("false");
+  expect(Boolean()).toBe(false);
+  expect(Boolean(0)).toBe(false);
+  expect(Boolean("false")).toBe(true);
+  expect(Boolean(boolean)).toBe(true);
+  expect(Object(symbol).description).toBe("token");
+  expect(String(123)).toBe("123");
+  expect(Number("2")).toBe(2);
 
+  let symbolError;
   try {
     new Symbol("not a constructor");
-    return false;
-  } catch (error) {
-    return error instanceof TypeError;
+  } catch (caught) {
+    symbolError = caught;
   }
+  expect(symbolError instanceof TypeError).toBe(true);
 }

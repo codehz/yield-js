@@ -1,24 +1,33 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   function callable() {}
   const text = `${callable}`;
-  if (typeof text !== "string" || callable + "" !== text || `${callable}` !== text) return false;
+  expect(typeof text).toBe("string");
+  expect(callable + "").toBe(text);
+  expect(`${callable}`).toBe(text);
   const numeric = +callable;
-  if (numeric === numeric) return false;
+  expect(numeric !== numeric).toBe(true);
 
   let calls = "";
   callable.valueOf = function () { calls += "v"; return this === callable ? 6 : 0; };
   callable.toString = function () { calls += "s"; return this === callable ? "fn" : "wrong"; };
-  if (+callable !== 6 || callable + 1 !== 7 || `${callable}` !== "fn") return false;
+  expect(+callable).toBe(6);
+  expect(callable + 1).toBe(7);
+  expect(`${callable}`).toBe("fn");
 
   callable.valueOf = function () { calls += "o"; return this; };
-  if (callable + "!" !== "fn!" || calls !== "vvsos") return false;
+  expect(callable + "!").toBe("fn!");
+  expect(calls).toBe("vvsos");
   callable.toString = function () { calls += "t"; return this; };
   try {
     `${callable}`;
-    return false;
   } catch (error) {
-    return error.name === "TypeError" && calls === "vvsosto";
+    expect(error.name).toBe("TypeError");
+    expect(calls).toBe("vvsosto");
+    return;
   }
+  expect("coercion succeeded").toBe("coercion threw");
 }

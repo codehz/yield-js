@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   let order = "";
@@ -10,42 +12,54 @@ export async function run() {
   function value() { order += "value;"; return 4; }
 
   const target = { [key]: value() };
-  if (order !== "key;value;" || target[symbol] !== 4) return false;
+  expect(order).toBe("key;value;");
+  expect(target[symbol]).toBe(4);
   order = "";
-  if (target[key] !== 4 || !(key in target) || order !== "key;key;") return false;
+  expect(target[key]).toBe(4);
+  expect(key in target).toBe(true);
+  expect(order).toBe("key;key;");
 
   order = "";
   const sum = (target[key] += value());
-  if (sum !== 8 || target[symbol] !== 8 || order !== "key;value;") return false;
+  expect(sum).toBe(8);
+  expect(target[symbol]).toBe(8);
+  expect(order).toBe("key;value;");
 
   order = "";
   Object.defineProperty(target, key, { value: 10 });
-  if (!target.hasOwnProperty(key) || Object.getOwnPropertyDescriptor(target, key).value !== 10
-      || target[symbol] !== 10 || order !== "key;key;key;") return false;
+  expect(target.hasOwnProperty(key)).toBe(true);
+  expect(Object.getOwnPropertyDescriptor(target, key).value).toBe(10);
+  expect(target[symbol]).toBe(10);
+  expect(order).toBe("key;key;key;");
 
   const fallback = {
     toString() { return {}; },
     valueOf() { return 9; }
   };
   target[fallback] = 3;
-  if (target["9"] !== 3 || !(fallback in target)) return false;
+  expect(target["9"]).toBe(3);
+  expect(fallback in target).toBe(true);
 
   order = "";
   function invalidRhs() { order += "rhs;"; return 1; }
+  let invalidRhsError;
   try {
     key in invalidRhs();
-    return false;
   } catch (error) {
-    if (error.name !== "TypeError" || order !== "rhs;") return false;
+    invalidRhsError = error;
   }
+  expect(invalidRhsError?.name).toBe("TypeError");
+  expect(order).toBe("rhs;");
 
   order = "";
   const failure = {};
   const throwing = { toString() { throw failure; } };
+  let keyError;
   try {
     ({ [throwing]: value() });
-    return false;
   } catch (error) {
-    return error === failure && order === "";
+    keyError = error;
   }
+  expect(keyError).toBe(failure);
+  expect(order).toBe("");
 }

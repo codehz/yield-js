@@ -1,9 +1,9 @@
 // @pending ["wait:descriptor"]
 // @restore
 // @fulfill ["wait:descriptor", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 function Box() {}
 
@@ -19,38 +19,58 @@ export async function run() {
   const array = [1];
   await wait("descriptor");
   const accessor = describe(object, "x");
-  if (accessor.get !== before.get || accessor.set !== before.set ||
-      typeof accessor.get !== "function" || !accessor.enumerable || !accessor.configurable ||
-      "writable" in accessor || "value" in accessor) return false;
+  expect(accessor.get).toBe(before.get);
+  expect(accessor.set).toBe(before.set);
+  expect(typeof accessor.get).toBe("function");
+  expect(accessor.enumerable).toBe(true);
+  expect(accessor.configurable).toBe(true);
+  expect("writable" in accessor).toBe(false);
+  expect("value" in accessor).toBe(false);
   object.x = 7;
   const data = describe(object, symbol);
-  if (data.value !== 7 || !data.writable || !data.enumerable || !data.configurable ||
-      "get" in data || describe(object, "hasOwnProperty") !== undefined) return false;
+  expect(data.value).toBe(7);
+  expect(data.writable).toBe(true);
+  expect(data.enumerable).toBe(true);
+  expect(data.configurable).toBe(true);
+  expect("get" in data).toBe(false);
+  expect(describe(object, "hasOwnProperty")).toBe(undefined);
   data.value = 100;
-  if (object[symbol] !== 7) return false;
+  expect(object[symbol]).toBe(7);
   const length = describe(array, "length");
   const element = describe(array, "0");
-  if (length.value !== 1 || !length.writable || length.enumerable || length.configurable ||
-      !element.enumerable || !element.configurable || !element.writable) return false;
+  expect(length.value).toBe(1);
+  expect(length.writable).toBe(true);
+  expect(length.enumerable).toBe(false);
+  expect(length.configurable).toBe(false);
+  expect(element.enumerable).toBe(true);
+  expect(element.configurable).toBe(true);
+  expect(element.writable).toBe(true);
   const method = describe(Object, "keys");
-  if (method.value !== Object.keys || !method.writable || method.enumerable ||
-      !method.configurable) return false;
+  expect(method.value).toBe(Object.keys);
+  expect(method.writable).toBe(true);
+  expect(method.enumerable).toBe(false);
+  expect(method.configurable).toBe(true);
   const fixed = describe(Object, "prototype");
-  if (fixed.writable || fixed.enumerable || fixed.configurable ||
-      fixed.value !== Object.prototype) return false;
+  expect(fixed.writable).toBe(false);
+  expect(fixed.enumerable).toBe(false);
+  expect(fixed.configurable).toBe(false);
+  expect(fixed.value).toBe(Object.prototype);
+  let prototypeError;
   try {
     Object.prototype = {};
-    return false;
   } catch (error) {
-    if (error.name !== "TypeError") return false;
+    prototypeError = error;
   }
+  expect(prototypeError?.name).toBe("TypeError");
   Box.prototype = Symbol;
   const box = new Box();
+  let iteratorError;
   try {
     box.iterator = 1;
-    return false;
   } catch (error) {
-    return error.name === "TypeError" && box.iterator === Symbol.iterator &&
-      describe(box, "iterator") === undefined;
+    iteratorError = error;
   }
+  expect(iteratorError?.name).toBe("TypeError");
+  expect(box.iterator).toBe(Symbol.iterator);
+  expect(describe(box, "iterator")).toBe(undefined);
 }

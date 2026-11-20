@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const first = 1;
@@ -18,11 +20,16 @@ export function run() {
   };
 
   // Stop after reading the second value, preserving the first write and closing the iterator.
+  let writeError;
   try {
     [assigned, first, second] = source;
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    writeError = error;
   }
-  return trace === "invnvc" && next === 2 && assigned === 10 && first === 1 && second === 2;
+  expect(writeError instanceof TypeError).toBe(true);
+  expect(trace).toBe("invnvc");
+  expect(next).toBe(2);
+  expect(assigned).toBe(10);
+  expect(first).toBe(1);
+  expect(second).toBe(2);
 }

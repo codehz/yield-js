@@ -1,9 +1,9 @@
 // @pending ["wait:properties"]
 // @restore
 // @fulfill ["wait:properties", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 function Descriptors() {}
 
@@ -38,9 +38,16 @@ export async function run() {
       return function () { return this.z + this[2]; };
     },
   };
-  if (define(target, source) !== target || trace !== "2azhs") return false;
+  expect(define(target, source)).toBe(target);
+  expect(trace).toBe("2azhs");
   await wait("properties");
   const keys = Reflect.ownKeys(target);
-  return keys.length === 5 && keys[0] === "2" && keys[1] === "10" && keys[2] === "z"
-    && keys[3] === "hidden" && keys[4] === symbol && target.hidden === 40 && target[symbol] === 50;
+  expect(keys.length).toBe(5);
+  expect(keys[0]).toBe("2");
+  expect(keys[1]).toBe("10");
+  expect(keys[2]).toBe("z");
+  expect(keys[3]).toBe("hidden");
+  expect(keys[4]).toBe(symbol);
+  expect(target.hidden).toBe(40);
+  expect(target[symbol]).toBe(50);
 }

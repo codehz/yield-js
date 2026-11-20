@@ -1,41 +1,50 @@
-// @returns true
+// @returns undefined
 
 import { assert, expect, wait } from 'test';
 
 export function run() {
   const matcher = expect();
-  if (matcher.value !== undefined) return false;
-  if (matcher.toBe(undefined) !== undefined) return false;
+  expect(matcher.value).toBe(undefined);
+  expect(matcher.toBe(undefined)).toBe(undefined);
 
   const bare = matcher.toBe;
+  let bareError;
   try {
     bare(undefined);
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    bareError = error;
   }
+  expect(bareError instanceof TypeError).toBe(true);
+
+  let missingArgumentError;
   try {
     matcher.toBe();
-    return false;
   } catch (error) {
-    if (!(error instanceof TypeError)) return false;
+    missingArgumentError = error;
   }
+  expect(missingArgumentError instanceof TypeError).toBe(true);
+
+  let assertError;
   try {
     assert(false);
-    return false;
   } catch (error) {
-    if (error !== 'assert: expected truthy, actual false') return false;
+    assertError = error;
   }
+  expect(assertError).toBe('assert: expected truthy, actual false');
+
+  let explicitMessageError;
   try {
     assert(false, undefined);
-    return false;
   } catch (error) {
-    if (error !== 'assert: expected truthy, actual false: undefined') return false;
+    explicitMessageError = error;
   }
+  expect(explicitMessageError).toBe('assert: expected truthy, actual false: undefined');
+
+  let waitError;
   try {
     wait();
-    return false;
   } catch (error) {
-    return error instanceof TypeError;
+    waitError = error;
   }
+  expect(waitError instanceof TypeError).toBe(true);
 }

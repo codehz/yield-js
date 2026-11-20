@@ -1,14 +1,15 @@
 // @pending ["reject:a"]
 // @restore
-// @fulfilled true
+// @fulfilled undefined
 
-import { rejectAfterRestore } from 'test';
+import { expect, rejectAfterRestore } from 'test';
 
 export async function run() {
+  let outcome;
   try {
-    await rejectAfterRestore('a');
+    outcome = { fulfilled: await rejectAfterRestore('a') };
   } catch (error) {
-    return error === 'reject rejected during restore';
+    outcome = { rejected: error };
   }
-  return false;
+  expect(outcome).toEqual({ rejected: 'reject rejected during restore' });
 }

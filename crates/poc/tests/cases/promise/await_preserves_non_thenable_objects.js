@@ -1,9 +1,9 @@
 // @pending ["wait:objects"]
 // @restore
 // @fulfill ["wait:objects", 0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { bind, wait } from 'test';
+import { expect, bind, wait } from 'test';
 
 export async function run() {
   const obj = {value: 7};
@@ -15,8 +15,14 @@ export async function run() {
   let tick = false;
   queueMicrotask(() => { tick = true; });
   const result = await obj;
-  if (!tick || result !== obj || (await array) !== array || (await fn) !== fn ||
-      (await native) !== native || (await noThen) !== noThen || reads !== 1) return false;
+  expect(tick).toBe(true);
+  expect(result).toBe(obj);
+  expect(await array).toBe(array);
+  expect(await fn).toBe(fn);
+  expect(await native).toBe(native);
+  expect(await noThen).toBe(noThen);
+  expect(reads).toBe(1);
   await wait("objects");
-  return result === obj && result.value === 7;
+  expect(result).toBe(obj);
+  expect(result.value).toBe(7);
 }

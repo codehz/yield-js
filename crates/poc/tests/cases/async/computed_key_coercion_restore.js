@@ -1,9 +1,9 @@
 // @pending ["wait:key coercion"]
 // @restore
 // @fulfill ["wait:key coercion", 5]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const symbol = Symbol("saved key");
@@ -17,13 +17,18 @@ export async function run() {
     }
   };
   const target = { [symbol]: 2 };
-  let sum;
+  const sum = (target[key] += await wait(conversions === 1 ? "key coercion" : "unconverted key"));
+  expect(sum).toBe(7);
+  expect(target[symbol]).toBe(7);
+  expect(conversions).toBe(1);
+  let thrown;
   try {
-    sum = (target[key] += await wait(conversions === 1 ? "key coercion" : "unconverted key"));
-    if (sum !== 7 || target[symbol] !== 7 || conversions !== 1) return false;
     target[key];
-    return false;
   } catch (error) {
-    return error === failure && conversions === 2 && sum === 7 && target[symbol] === 7;
+    thrown = error;
   }
+  expect(thrown).toBe(failure);
+  expect(conversions).toBe(2);
+  expect(sum).toBe(7);
+  expect(target[symbol]).toBe(7);
 }

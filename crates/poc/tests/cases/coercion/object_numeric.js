@@ -1,12 +1,16 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const value = { valueOf() { return 7; } };
-  let caught = false;
+  let caught;
   try {
     ({ valueOf() { throw new TypeError("conversion failed"); } }) - 1;
   } catch (error) {
-    caught = error.name === "TypeError";
+    caught = error;
   }
-  return value + 1 === 8 && +{} !== +{} && caught;
+  expect(value + 1).toBe(8);
+  expect(+{} !== +{}).toBe(true);
+  expect(caught?.name).toBe("TypeError");
 }

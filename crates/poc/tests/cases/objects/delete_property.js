@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   let log = "";
@@ -9,41 +11,55 @@ export function run() {
   function base() { log += "base/"; return object; }
   function index() { log += "key/"; return key; }
   const absent = null;
-  if (!delete ((absent?.child[index()])) || log !== "") return false;
-  if (!delete ((base()[index()])) || log !== "base/key/string" || "x" in object) return false;
-  if (!delete object.missing?.(index()) || log !== "base/key/string") return false;
+  expect(delete ((absent?.child[index()]))).toBe(true);
+  expect(log).toBe("");
+  expect(delete ((base()[index()]))).toBe(true);
+  expect(log).toBe("base/key/string");
+  expect("x" in object).toBe(false);
+  expect(delete object.missing?.(index())).toBe(true);
+  expect(log).toBe("base/key/string");
+  let nullBaseError;
   try {
     delete (absent?.child)[index()];
-    return false;
-  } catch (e) {
-    if (e.name !== "TypeError" || log !== "base/key/stringkey/") return false;
+  } catch (caught) {
+    nullBaseError = caught;
   }
+  expect(nullBaseError?.name).toBe("TypeError");
+  expect(log).toBe("base/key/stringkey/");
   Object.defineProperty(object, "x", {value: 2});
-  if (Reflect.deleteProperty(object, key) || log !== "base/key/stringkey/string" || object.x !== 2) return false;
+  expect(Reflect.deleteProperty(object, key)).toBe(false);
+  expect(log).toBe("base/key/stringkey/string");
+  expect(object.x).toBe(2);
+  let nonConfigurableError;
   try {
     delete object.x;
-    return false;
-  } catch (e) {
-    if (e.name !== "TypeError") return false;
+  } catch (caught) {
+    nonConfigurableError = caught;
   }
+  expect(nonConfigurableError?.name).toBe("TypeError");
   const bad = {toString() { throw 42; }};
+  let coercionError;
   try {
     delete object[bad];
-    return false;
-  } catch (e) {
-    if (e !== 42) return false;
+  } catch (caught) {
+    coercionError = caught;
   }
+  expect(coercionError).toBe(42);
+  let reflectTargetError;
   try {
     Reflect.deleteProperty(1, bad);
-    return false;
-  } catch (e) {
-    if (e.name !== "TypeError") return false;
+  } catch (caught) {
+    reflectTargetError = caught;
   }
+  expect(reflectTargetError?.name).toBe("TypeError");
+  let stringIndexError;
   try {
     delete "😀"[1];
-    return false;
-  } catch (e) {
-    if (e.name !== "TypeError") return false;
+  } catch (caught) {
+    stringIndexError = caught;
   }
-  return delete "😀"[2] && delete "ab"["01"] && delete true.x;
+  expect(stringIndexError?.name).toBe("TypeError");
+  expect(delete "😀"[2]).toBe(true);
+  expect(delete "ab"["01"]).toBe(true);
+  expect(delete true.x).toBe(true);
 }

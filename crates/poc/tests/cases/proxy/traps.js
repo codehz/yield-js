@@ -1,4 +1,6 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run() {
   const symbol = Symbol("key");
@@ -8,45 +10,66 @@ export function run() {
   let proxy;
   const handler = {
     get(t, k, r) {
-      if (this !== handler || t !== target || k !== symbol || r !== receiver) throw "get args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(k).toBe(symbol);
+      expect(r).toBe(receiver);
       trace += "g";
       return t[k] + r.marker;
     },
     set(t, k, v, r) {
-      if (this !== handler || t !== target || k !== "x" || v !== 9 || r !== proxy) throw "set args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(k).toBe("x");
+      expect(v).toBe(9);
+      expect(r).toBe(proxy);
       trace += "s";
       t[k] = v;
       return "accepted";
     },
     has(t, k) {
-      if (this !== handler || t !== target || k !== symbol) throw "has args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(k).toBe(symbol);
       trace += "h";
       return 1;
     },
     deleteProperty(t, k) {
-      if (this !== handler || t !== target || k !== "x") throw "delete args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(k).toBe("x");
       trace += "d";
       return delete t[k];
     },
     ownKeys(t, extra) {
-      if (this !== handler || t !== target || extra !== undefined) throw "ownKeys args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(extra).toBe(undefined);
       trace += "k";
       return { length: 2, 0: symbol, 1: "x" };
     },
     getOwnPropertyDescriptor(t, k) {
-      if (this !== handler || t !== target || k !== symbol) throw "descriptor args";
+      expect(this).toBe(handler);
+      expect(t).toBe(target);
+      expect(k).toBe(symbol);
       trace += "p";
       return Reflect.getOwnPropertyDescriptor(t, k);
     },
   };
   proxy = new Proxy(target, handler);
   const key = { [Symbol.toPrimitive]() { trace += "c"; return symbol; } };
-  if (Reflect.get(proxy, key, receiver) !== 6) return false;
+  expect(Reflect.get(proxy, key, receiver)).toBe(6);
   proxy.x = 9;
-  if (target.x !== 9 || !(symbol in proxy)) return false;
+  expect(target.x).toBe(9);
+  expect(symbol in proxy).toBe(true);
   const keys = Reflect.ownKeys(proxy);
-  if (keys.length !== 2 || keys[0] !== symbol || keys[1] !== "x") return false;
+  expect(keys.length).toBe(2);
+  expect(keys[0]).toBe(symbol);
+  expect(keys[1]).toBe("x");
   const desc = Reflect.getOwnPropertyDescriptor(proxy, symbol);
-  return desc.value === 2 && desc.enumerable && delete proxy.x &&
-    !("x" in target) && trace === "cgshkpd";
+  expect(desc.value).toBe(2);
+  expect(desc.enumerable).toBe(true);
+  expect(delete proxy.x).toBe(true);
+  expect("x" in target).toBe(false);
+  expect(trace).toBe("cgshkpd");
 }

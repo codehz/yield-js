@@ -1,23 +1,38 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 function example(a) {}
 
 export function run() {
   const proto = Object.getPrototypeOf(example);
-  if (Object.getPrototypeOf(Array) !== proto) return false;
-  if (proto.name !== '' || proto.length !== 0 || Array.name !== 'Array' || Array.length !== 0 ||
-      Object.keys.name !== 'keys' || Object.keys.length !== 0) return false;
+  expect(Object.getPrototypeOf(Array)).toBe(proto);
+  expect(proto.name).toBe('');
+  expect(proto.length === 0).toBe(true);
+  expect(Array.name).toBe('Array');
+  expect(Array.length === 0).toBe(true);
+  expect(Object.keys.name).toBe('keys');
+  expect(Object.keys.length === 0).toBe(true);
 
   for (const fn of [example, proto, Array, Object.keys, example.bind(null)]) {
-    if (!('name' in fn) || !('length' in fn) || !Reflect.has(fn, 'name') || !Reflect.has(fn, 'length')) return false;
-    if (Object.keys(fn).includes('name') || Object.keys(fn).includes('length') ||
-        Reflect.ownKeys(fn).includes('name') || Reflect.ownKeys(fn).includes('length')) return false;
-    if (Object.getOwnPropertyDescriptor(fn, 'name') !== undefined ||
-        Reflect.getOwnPropertyDescriptor(fn, 'length') !== undefined) return false;
-    if (Reflect.set(fn, 'name', 'changed') || Reflect.set(fn, 'length', 99)) return false;
+    expect('name' in fn).toBe(true);
+    expect('length' in fn).toBe(true);
+    expect(Reflect.has(fn, 'name')).toBe(true);
+    expect(Reflect.has(fn, 'length')).toBe(true);
+    expect(Object.keys(fn).includes('name')).toBe(false);
+    expect(Object.keys(fn).includes('length')).toBe(false);
+    expect(Reflect.ownKeys(fn).includes('name')).toBe(false);
+    expect(Reflect.ownKeys(fn).includes('length')).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(fn, 'name')).toBe(undefined);
+    expect(Reflect.getOwnPropertyDescriptor(fn, 'length')).toBe(undefined);
+    expect(Reflect.set(fn, 'name', 'changed')).toBe(false);
+    expect(Reflect.set(fn, 'length', 99)).toBe(false);
   }
   try { example.name = 'changed'; } catch (e) {
-    return e instanceof TypeError && example.name === 'example' && example.length === 1;
+    expect(e instanceof TypeError).toBe(true);
+    expect(example.name).toBe('example');
+    expect(example.length).toBe(1);
+    return;
   }
-  return false;
+  expect('name assignment succeeded').toBe('name assignment threw');
 }

@@ -1,4 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   const method = [].join;
@@ -17,19 +19,21 @@ export async function run() {
     get 2() { throw "length was not truncated"; }
   };
   const sep = { toString() { order += "s"; return "-"; } };
-  if (join(source, sep) !== "a-b" || order !== "lvs01") return false;
-  if (join({ length: true, 0: "x" }) !== "x") return false;
-  if (join({ length: "\uFEFF0x2", 0: "x", 1: "y" }) !== "x,y") return false;
-  if (join({ length: "inf", get 0() { throw "invalid length"; } }) !== "") return false;
+  expect(join(source, sep)).toBe("a-b");
+  expect(order).toBe("lvs01");
+  expect(join({ length: true, 0: "x" })).toBe("x");
+  expect(join({ length: "\uFEFF0x2", 0: "x", 1: "y" })).toBe("x,y");
+  expect(join({ length: "inf", get 0() { throw "invalid length"; } })).toBe("");
 
   const marker = {};
-  try {
-    join({ length: { valueOf() { throw marker; } } }, sep);
-    return false;
-  } catch (e) { if (e !== marker || order !== "lvs01") return false; }
-  try {
-    join({ length: "Infinity", get 0() { throw marker; } });
-    return false;
-  } catch (e) { if (e !== marker) return false; }
-  try { join({ length: Symbol() }); return false; } catch (e) { return e.name === "TypeError"; }
+  let coercionError;
+  try { join({ length: { valueOf() { throw marker; } } }, sep); } catch (e) { coercionError = e; }
+  expect(coercionError).toBe(marker);
+  expect(order).toBe("lvs01");
+  let elementError;
+  try { join({ length: "Infinity", get 0() { throw marker; } }); } catch (e) { elementError = e; }
+  expect(elementError).toBe(marker);
+  let symbolError;
+  try { join({ length: Symbol() }); } catch (e) { symbolError = e; }
+  expect(symbolError?.name).toBe("TypeError");
 }

@@ -1,11 +1,14 @@
-// @fulfilled true
+// @fulfilled undefined
+
+import { expect } from 'test';
 
 export async function run() {
   function read() {
     return x;
   }
-  let before = read() === undefined;
+  let before = read();
   let x = 7;
-  let after = read() === 7;
-  return before && after;
+  let after = read();
+  expect(before).toBe(undefined);
+  expect(after).toBe(7);
 }

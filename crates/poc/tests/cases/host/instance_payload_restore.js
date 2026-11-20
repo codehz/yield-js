@@ -1,12 +1,12 @@
 // @pending ["wait:a"]
 // @restore
 // @fulfill ["wait:a",0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { bind, wait } from 'test';
+import { bind, expect, wait } from 'test';
 
 export async function run() {
   const node = bind('persisted');
   await wait('a');
-  return node.label() === 'persisted';
+  expect(node.label()).toBe('persisted');
 }

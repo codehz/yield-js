@@ -1,6 +1,6 @@
-// @fulfilled true
+// @fulfilled undefined
 
-import { bind } from 'test';
+import { expect, bind } from 'test';
 
 function throwsTypeError(action) {
   try { action(); return false; } catch (e) { return e.name === "TypeError"; }
@@ -9,28 +9,29 @@ function throwsTypeError(action) {
 export async function run() {
   const sym = Symbol("primitive");
   for (const value of [1, "text", false, sym]) {
-    if (Object.setPrototypeOf(value, null) !== value) return false;
-    if (Object.getPrototypeOf(value) !== Object.getPrototypeOf(Object(value))) return false;
-    if (!throwsTypeError(() => Reflect.getPrototypeOf(value))) return false;
-    if (!throwsTypeError(() => Reflect.setPrototypeOf(value, null))) return false;
-    if (!throwsTypeError(() => Object.create(value))) return false;
+    expect(Object.setPrototypeOf(value, null)).toBe(value);
+    expect(Object.getPrototypeOf(value)).toBe(Object.getPrototypeOf(Object(value)));
+    expect(throwsTypeError(() => Reflect.getPrototypeOf(value))).toBe(true);
+    expect(throwsTypeError(() => Reflect.setPrototypeOf(value, null))).toBe(true);
+    expect(throwsTypeError(() => Object.create(value))).toBe(true);
   }
-  if (!throwsTypeError(() => Object.setPrototypeOf(1, 2))) return false;
+  expect(throwsTypeError(() => Object.setPrototypeOf(1, 2))).toBe(true);
   for (const value of [null, undefined]) {
-    if (!throwsTypeError(() => Object.setPrototypeOf(value, null))) return false;
-    if (!throwsTypeError(() => Object.getPrototypeOf(value))) return false;
-    if (!throwsTypeError(() => Reflect.getPrototypeOf(value))) return false;
-    if (!throwsTypeError(() => Reflect.setPrototypeOf(value, null))) return false;
+    expect(throwsTypeError(() => Object.setPrototypeOf(value, null))).toBe(true);
+    expect(throwsTypeError(() => Object.getPrototypeOf(value))).toBe(true);
+    expect(throwsTypeError(() => Reflect.getPrototypeOf(value))).toBe(true);
+    expect(throwsTypeError(() => Reflect.setPrototypeOf(value, null))).toBe(true);
   }
   const target = {};
-  if (!throwsTypeError(() => Reflect.setPrototypeOf(target, undefined))) return false;
-  if (!throwsTypeError(() => Object.setPrototypeOf(target, false))) return false;
-  if (Object.getPrototypeOf(target) !== Object.prototype) return false;
+  expect(throwsTypeError(() => Reflect.setPrototypeOf(target, undefined))).toBe(true);
+  expect(throwsTypeError(() => Object.setPrototypeOf(target, false))).toBe(true);
+  expect(Object.getPrototypeOf(target)).toBe(Object.prototype);
 
   const native = bind("prototype-boundary");
-  if (Object.getPrototypeOf(native) === null) return false;
-  if (!Reflect.setPrototypeOf(native, null)) return false;
-  if (Object.setPrototypeOf(native, target) !== native) return false;
+  expect(Object.getPrototypeOf(native) === null).toBe(false);
+  expect(Reflect.setPrototypeOf(native, null)).toBe(true);
+  expect(Object.setPrototypeOf(native, target)).toBe(native);
   const child = Object.create(native);
-  return Object.getPrototypeOf(child) === native && "toString" in child;
+  expect(Object.getPrototypeOf(child)).toBe(native);
+  expect("toString" in child).toBe(true);
 }

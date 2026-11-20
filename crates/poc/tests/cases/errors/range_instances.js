@@ -1,7 +1,15 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
-  let count = 0;
-  try { "x".repeat(-1); } catch (error) { if (error instanceof RangeError && error.name === "RangeError") count++; }
-  try { String.fromCodePoint(0x110000); } catch (error) { if (error instanceof RangeError && error.name === "RangeError") count++; }
-  return count === 2;
+  let repeatError;
+  try { "x".repeat(-1); } catch (error) { repeatError = error; }
+  expect(repeatError instanceof RangeError).toBe(true);
+  expect(repeatError.name).toBe("RangeError");
+
+  let codePointError;
+  try { String.fromCodePoint(0x110000); } catch (error) { codePointError = error; }
+  expect(codePointError instanceof RangeError).toBe(true);
+  expect(codePointError.name).toBe("RangeError");
 }

@@ -1,8 +1,12 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export { probe as run };
 const Promise = 7;
 const top = this;
 function probe() {
-  return Promise === 7 && top === undefined && typeof run === 'undefined';
+  expect(Promise).toBe(7);
+  expect(top).toBe(undefined);
+  expect(typeof run).toBe('undefined');
 }

@@ -1,9 +1,9 @@
 // @pending ["wait:rhs"]
 // @restore
 // @fulfill ["wait:rhs",0]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const symbol = Symbol("x");
@@ -14,21 +14,32 @@ export async function run() {
   };
   const box = new Box();
   box.own = undefined;
-  if (!("own" in box) || !("inherited" in box) || "missing" in box) return false;
-  if (box.hasOwnProperty("inherited") || !("call" in Box) || !("hasOwnProperty" in box)) return false;
+  expect("own" in box).toBe(true);
+  expect("inherited" in box).toBe(true);
+  expect("missing" in box).toBe(false);
+  expect(box.hasOwnProperty("inherited")).toBe(false);
+  expect("call" in Box).toBe(true);
+  expect("hasOwnProperty" in box).toBe(true);
   const array = [undefined];
-  if (!(0 in array) || 1 in array || !("length" in array) || !(Symbol.iterator in array)) return false;
-  if (Symbol("x") in box || "x" in box) return false;
+  expect(0 in array).toBe(true);
+  expect(1 in array).toBe(false);
+  expect("length" in array).toBe(true);
+  expect(Symbol.iterator in array).toBe(true);
+  expect(Symbol("x") in box).toBe(false);
+  expect("x" in box).toBe(false);
 
   let order = "";
   function left() { order += "L"; return symbol; }
   function right() { order += "R"; return box; }
-  if (!(left() in (await wait("rhs"), right())) || order !== "LR") return false;
+  expect(left() in (await wait("rhs"), right())).toBe(true);
+  expect(order).toBe("LR");
 
+  let error;
   try {
     "x" in 1;
-  } catch (error) {
-    return error.name === "TypeError" && order === "LR";
+  } catch (caught) {
+    error = caught;
   }
-  return false;
+  expect(error?.name).toBe("TypeError");
+  expect(order).toBe("LR");
 }

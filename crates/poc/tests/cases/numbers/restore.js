@@ -1,16 +1,19 @@
 // @pending ["wait:number"]
 // @restore
 // @fulfill ["wait:number", null]
-// @fulfilled true
+// @fulfilled undefined
 
-import { wait } from 'test';
+import { expect, wait } from 'test';
 
 export async function run() {
   const constructor = Number;
   const prototype = Number.prototype;
   await wait("number");
-  return constructor === Number && prototype === Number.prototype
-    && prototype.constructor === Number && (1).valueOf === prototype.valueOf
-    && Number.isNaN(Number.NaN) && Number.POSITIVE_INFINITY === Infinity
-    && Number.NEGATIVE_INFINITY === -Infinity;
+  expect(constructor).toBe(Number);
+  expect(prototype).toBe(Number.prototype);
+  expect(prototype.constructor).toBe(Number);
+  expect((1).valueOf).toBe(prototype.valueOf);
+  expect(Number.isNaN(Number.NaN)).toBe(true);
+  expect(Number.POSITIVE_INFINITY).toBe(Infinity);
+  expect(Number.NEGATIVE_INFINITY === -Infinity).toBe(true);
 }

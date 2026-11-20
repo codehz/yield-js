@@ -1,4 +1,7 @@
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
+
 export function run() {
   const types = [
     [RangeError, "RangeError"], [ReferenceError, "ReferenceError"],
@@ -8,10 +11,14 @@ export function run() {
   for (const [Ctor, name] of types) {
     const called = Ctor("custom");
     const made = new Ctor();
-    if (!(called instanceof Ctor) || !(made instanceof Ctor)) return false;
-    if (called.name !== name || made.name !== name) return false;
-    if (called.message !== "custom" || made.message !== "") return false;
-    if (Object.getPrototypeOf(Ctor.prototype) !== Error.prototype || Ctor.prototype.constructor !== Ctor) return false;
+    expect(called instanceof Ctor).toBe(true);
+    expect(made instanceof Ctor).toBe(true);
+    expect(called.name).toBe(name);
+    expect(made.name).toBe(name);
+    expect(called.message).toBe("custom");
+    expect(made.message).toBe("");
+    expect(Object.getPrototypeOf(Ctor.prototype)).toBe(Error.prototype);
+    expect(Ctor.prototype.constructor).toBe(Ctor);
   }
   const list = new AggregateError([1, 2], "array");
   const string = AggregateError("ab", "string");
@@ -21,11 +28,21 @@ export function run() {
       return { next() { return i < 2 ? {value: ++i, done: false} : {done: true}; } };
     }
   });
-  if (!(list instanceof AggregateError) || list.name !== "AggregateError" || list.message !== "array") return false;
-  if (list.errors.length !== 2 || list.errors[0] !== 1 || list.errors[1] !== 2) return false;
-  if (string.errors.length !== 2 || string.errors[0] !== "a" || string.errors[1] !== "b") return false;
-  if (iterable.errors.length !== 2 || iterable.errors[0] !== 1 || iterable.errors[1] !== 2) return false;
-  if (AggregateError().errors.length !== 0 || AggregateError(undefined).errors.length !== 0) return false;
-  try { AggregateError(null); return false; } catch (error) { if (!(error instanceof TypeError)) return false; }
-  return true;
+  expect(list instanceof AggregateError).toBe(true);
+  expect(list.name).toBe("AggregateError");
+  expect(list.message).toBe("array");
+  expect(list.errors.length).toBe(2);
+  expect(list.errors[0]).toBe(1);
+  expect(list.errors[1]).toBe(2);
+  expect(string.errors.length).toBe(2);
+  expect(string.errors[0]).toBe("a");
+  expect(string.errors[1]).toBe("b");
+  expect(iterable.errors.length).toBe(2);
+  expect(iterable.errors[0]).toBe(1);
+  expect(iterable.errors[1]).toBe(2);
+  expect(AggregateError().errors.length).toBe(0);
+  expect(AggregateError(undefined).errors.length).toBe(0);
+  let aggregateError;
+  try { AggregateError(null); } catch (error) { aggregateError = error; }
+  expect(aggregateError instanceof TypeError).toBe(true);
 }

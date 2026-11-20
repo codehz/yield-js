@@ -1,5 +1,7 @@
 // @args [1, 2]
-// @returns true
+// @returns undefined
+
+import { expect } from 'test';
 
 export function run(parameter, ...rest) {
   let local = 3;
@@ -13,7 +15,11 @@ export function run(parameter, ...rest) {
     throw 9;
   } catch (caught) {
     caught = 10;
-    return local === 4 && variable === 5 && parameter === 6 && rest[0] === 7 &&
-      arguments[0] === 8 && caught === 10;
+    expect(local).toBe(4);
+    expect(variable).toBe(5);
+    expect(parameter).toBe(6);
+    expect(rest[0]).toBe(7);
+    expect(arguments[0]).toBe(8);
+    expect(caught).toBe(10);
   }
 }
