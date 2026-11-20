@@ -9,6 +9,7 @@
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并，子类槽索引按自身布局计数；基类方法与访问器接受派生实例，`instanceof` 沿原型链检查，快照保存原型链和合并后的槽。payload 仍属于具体实例类，不沿继承链合并。脚本 `class` / `extends` 语法不在当前编译器子集内。
 - `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec 使用 `DecodeCx` 访问平台服务；服务 ID 进入声明指纹，缺失或版本不符整体拒绝恢复。
 - 普通宿主函数和方法可返回 `HostStep::Call`，由 VM 在当前 `CallCx` 结束后同步执行脚本调用。恢复使用新的调用 ID、原始 `this` 和显式保存的参数；脚本异常传给恢复函数，VM 错误直接上传。旧调用创建的请求不能重复分派。
+- 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。

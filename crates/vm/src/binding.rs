@@ -2062,6 +2062,38 @@ impl<'a> Inspect<'a> {
         }
     }
 
+    /// Whether this value is a RegExp object, without following proxies.
+    pub fn is_regexp(&self) -> bool {
+        matches!(self.object(), Some(Object::RegExp { .. }))
+    }
+
+    /// Match from index zero without running methods or reading or writing `lastIndex`.
+    pub fn regexp_matches(&self, text: &JsString) -> Option<bool> {
+        let Object::RegExp {
+            flags, compiled, ..
+        } = self.object()?
+        else {
+            return None;
+        };
+        let units = crate::regexp::encode_input(text, *flags);
+        Some(crate::regexp::find_match(compiled, *flags, &units, 0).is_some())
+    }
+
+    /// The stored pattern source and canonical flags, without property access.
+    pub fn regexp_source_flags(&self) -> Option<(&JsString, String)> {
+        let Object::RegExp { source, flags, .. } = self.object()? else {
+            return None;
+        };
+        Some((source, flags.as_string()))
+    }
+
+    fn object(&self) -> Option<&Object> {
+        let Value::Object(id) = self.value.value else {
+            return None;
+        };
+        self.vm.heap.get(id).ok()
+    }
+
     pub fn own_keys(&self) -> Vec<InspectKey> {
         let Value::Object(id) = self.value.value else {
             return Vec::new();

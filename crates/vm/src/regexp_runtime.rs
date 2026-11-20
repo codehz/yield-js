@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use crate::error::VmError;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;
-use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags};
+use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
@@ -1187,13 +1187,7 @@ impl Vm {
         let encoded = encoded
             .map(Cow::Borrowed)
             .unwrap_or_else(|| encode_input(&input, flags));
-        let units = encoded.as_ref();
-        let matched = if flags.unicode {
-            compiled.find_from_utf16(units, start).next()
-        } else {
-            compiled.find_from_ucs2(units, start).next()
-        }
-        .filter(|matched| !flags.sticky || matched.start() == start);
+        let matched = find_match(compiled, flags, &encoded, start);
         let groups = matched.as_ref().map(|matched| {
             let named = matched.named_groups().collect::<Vec<_>>();
             (0..=matched.captures.len())
