@@ -697,14 +697,13 @@ impl Vm {
         let Invocation::Value(Value::Object(splitter)) = created else {
             return Ok(created);
         };
-        let splitter_value = Value::Object(splitter);
         let size = string.unit_len();
         let mut parts = Vec::new();
         if limit == 0 {
             return self.array_result(parts);
         }
         if size == 0 {
-            match self.regexp_exec(host, &splitter_value, splitter, string.clone())? {
+            match self.regexp_exec(host, &Value::Object(splitter), splitter, string.clone())? {
                 Invocation::Value(Value::Null) => parts.push(Value::String(string)),
                 Invocation::Value(_) => {}
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -718,7 +717,8 @@ impl Vm {
             if let Err(error) = self.regexp_set_last_index(host, splitter, cursor as f64)? {
                 return Ok(Invocation::Thrown(error));
             }
-            let result = self.regexp_exec(host, &splitter_value, splitter, string.clone())?;
+            let result =
+                self.regexp_exec(host, &Value::Object(splitter), splitter, string.clone())?;
             let Invocation::Value(result) = result else {
                 return Ok(result);
             };
@@ -1136,14 +1136,12 @@ impl Vm {
         let Object::RegExp { compiled, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
         };
-        let matched = {
-            let encoded = encode_input(&input, flags);
-            let units = encoded.as_ref();
-            if flags.unicode {
-                compiled.find_from_utf16(units, start).next()
-            } else {
-                compiled.find_from_ucs2(units, start).next()
-            }
+        let encoded = encode_input(&input, flags);
+        let units = encoded.as_ref();
+        let matched = if flags.unicode {
+            compiled.find_from_utf16(units, start).next()
+        } else {
+            compiled.find_from_ucs2(units, start).next()
         }
         .filter(|matched| !flags.sticky || matched.start() == start);
         let groups = matched.as_ref().map(|matched| {

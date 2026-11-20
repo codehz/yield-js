@@ -791,6 +791,9 @@ impl Vm {
             } else {
                 last
             };
+            if cursor > text.unit_len() {
+                break;
+            }
             let Some(next) = find_from(text, &search, cursor) else {
                 break;
             };
