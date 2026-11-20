@@ -89,6 +89,14 @@ impl JsString {
         matches!(self.0, StringStorage::Empty | StringStorage::Latin1(_))
     }
 
+    pub(crate) fn latin1_bytes(&self) -> Option<&[u8]> {
+        match &self.0 {
+            StringStorage::Empty => Some(&[]),
+            StringStorage::Latin1(bytes) => Some(bytes),
+            StringStorage::Wide(_) => None,
+        }
+    }
+
     pub(crate) fn from_latin1(bytes: Vec<u8>) -> Self {
         if bytes.is_empty() {
             Self::new()

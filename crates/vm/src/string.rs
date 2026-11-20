@@ -1019,6 +1019,13 @@ fn find_from(text: &JsString, needle: &JsString, start: usize) -> Option<usize> 
     if needle.is_empty() {
         return Some(start);
     }
+    if let (Some(text), Some(needle)) = (text.latin1_bytes(), needle.latin1_bytes()) {
+        return text
+            .get(start..)?
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map(|position| start + position);
+    }
     let last = text.unit_len().checked_sub(needle.unit_len())?;
     (start..=last).find(|&position| matches_at(text, needle, position))
 }
@@ -1039,6 +1046,16 @@ fn find_last(text: &JsString, needle: &JsString, start: f64) -> f64 {
     let Some(last) = end.checked_sub(needle_length) else {
         return -1.0;
     };
+    if let (Some(text), Some(needle)) = (text.latin1_bytes(), needle.latin1_bytes()) {
+        return text
+            .get(..last + needle.len())
+            .and_then(|text| {
+                text.windows(needle.len())
+                    .rposition(|window| window == needle)
+            })
+            .map(|position| position as f64)
+            .unwrap_or(-1.0);
+    }
     (0..=last)
         .rev()
         .find(|&position| matches_at(text, needle, position))
