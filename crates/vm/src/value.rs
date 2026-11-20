@@ -155,7 +155,13 @@ impl JsString {
     }
 
     pub fn to_utf8(&self) -> Result<String, std::string::FromUtf16Error> {
-        String::from_utf16(&self.to_utf16())
+        match &self.0 {
+            StringStorage::Empty => Ok(String::new()),
+            StringStorage::Latin1(bytes) => {
+                Ok(bytes.iter().map(|&byte| char::from(byte)).collect())
+            }
+            StringStorage::Wide(units) => String::from_utf16(units),
+        }
     }
 
     /// The length in bytes of the equivalent WTF-8 encoding.
