@@ -51,7 +51,9 @@
 
 ### VM 内建与可观察语义
 
-- 支持普通对象和原型链、属性描述符、getter/setter、字符串与 Symbol 属性键、标准枚举顺序、稀疏数组、严格模式赋值失败。实现 `Object` 的创建、原型/描述符查询、`defineProperty`/`defineProperties`、枚举、`assign`、`is`、冻结及冻结检查，以及函数的 `call` / `apply` / `bind`。当前这三个方法以脚本函数的虚拟属性提供，不是 `Function.prototype` 的自有方法；函数元数据与绑定构造的实现范围见 [`implemented.md`](implemented.md)。
+- 支持普通对象和原型链、属性描述符、getter/setter、字符串与 Symbol 属性键、标准枚举顺序、稀疏数组、严格模式赋值失败。实现 `Object` 的创建、原型/描述符查询、`defineProperty`/`defineProperties`、枚举、`assign`、`is`、冻结及冻结检查。
+- 函数的 `call` / `apply` / `bind` 当前以脚本函数的虚拟属性提供，不是 `Function.prototype` 的自有方法；函数元数据与绑定构造的实现范围见 [`implemented.md`](implemented.md)。
+- 函数转字符串按设计返回固定的通用文本（`function () { [native code] }`），不保留、也不反编译源码：共享的 `Function.prototype` 上的 `toString`、以及以函数为接收者的字符串 hint 转换（如 `String(fn)`、模板与拼接）都走该文本。这是有意选择，不是缺口。
 - 支持 `Array`/`String` 的常用访问、转换、搜索、切片与迭代，以及 `Array.isArray/from`、`push/pop/shift/unshift/splice`、`map/filter/reduce/forEach/some/every/flat`；提供 `Number`、`Math`、`RegExp`、`JSON` 和标准 `Error` 类型。具体方法和正则用法以锁定构建和回归用例补齐，不以整个内建对象的存在宣称完整兼容。
 - `globalThis` 是字节码内建名单中的一个固定根对象（普通对象，原型为 `Object.prototype`），不是对任意宿主全局对象的代理。内建名单里的名字（`Math`、`JSON`、`Symbol` 等）以数据属性挂在该对象上；脚本可以通过 `globalThis` 显式访问它们，但裸名称不做属性查找，而是走静态解析。裸名称解析顺序为：局部绑定 → 显式宿主导入 → preload 导出 → 内建 → `undefined` 字面量；解析不到的名字在编译期报错（读取、赋值和除 `typeof` 外的引用都不可见），`typeof 未知名字` 折叠为 `"undefined"`。运行时动态添加到 `globalThis` 的属性不会反向进入编译期的裸名称解析。
 - preload 全局：`Vm::new` 执行 preload 初始化器后，把 preload 的显式导出安装为 `globalThis` 上的可枚举、不可配置、仅 getter 的活绑定——每个名字一个捕获 preload 模块环境的 getter 函数，读值时实时读取 preload 绑定槽，不是安装时复制的快照值。安装只发生在 VM 启动路径，快照恢复不重新安装，但恢复时会校验 `globalThis` 上这些 getter 的描述符与 preload 记录一致（名字、环境、函数身份），不一致拒绝整个 restore。preload 名字在静态解析中优先于内建；同名局部绑定仍遮蔽 preload 全局。
