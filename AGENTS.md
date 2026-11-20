@@ -62,7 +62,9 @@ Suspend/resume invariants (do not weaken these):
 | `crates/poc/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |
 - `docs/design.md`|Target design, Chinese. Not a status report|
 - `docs/gaps.md`|Current JS-subset implementation gap inventory (what is rejected/missing today, derived from code). Status report; refresh after behavior changes.|
-- `docs/implemented.md`|Derived inventory of what the current JS-subset does implement. Status report; refresh after behavior changes.|
+| `docs/implemented.md`|Derived inventory of what the current JS-subset does implement. Status report; refresh after behavior changes.|
+
+`README.md` stays at the overview level: pipeline, how to run, directory layout, and links to the status docs. It MUST NOT contain implementation details (slot/snapshot mechanics, format versions, specific opcodes or built-in lists, per-feature behavior notes) — those belong in `docs/implemented.md` / `docs/gaps.md`, and contract details in this file.
 
 There is no `scripts/` directory and no CI.
 
