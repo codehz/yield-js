@@ -256,7 +256,7 @@ impl Vm {
                     Ok(input) => input,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
-                return self.regexp_match(host, id, input, false);
+                return self.regexp_match(host, id, input);
             }
             RegExpMethod::Source => Value::String(escaped_source(source)),
             RegExpMethod::Global => Value::Bool(flags.global),
@@ -293,35 +293,36 @@ impl Vm {
             Ok(input) => input,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
+        match self.regexp_exec(host, receiver, id, input)? {
+            Invocation::Value(result) => Ok(Invocation::Value(Value::Bool(result != Value::Null))),
+            thrown @ Invocation::Thrown(_) => Ok(thrown),
+        }
+    }
+
+    fn regexp_exec(
+        &mut self,
+        host: &mut dyn Host,
+        receiver: &Value,
+        id: ObjectId,
+        input: String,
+    ) -> Result<Invocation, VmError> {
         let exec = match self.read_property(host, receiver, PropertyKeyRef::String("exec"))? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
         if self.is_callable(&exec) {
-            let Value::Object(exec_id) = exec else {
-                unreachable!("callable is an object");
-            };
-            // The built-in needs no materialized captures when called by test.
-            if matches!(self.heap.get(exec_id)?, Object::BuiltinStatic(function)
-                if function.name == "RegExp" && function.member.as_deref() == Some("exec"))
-                && matches!(self.heap.get(id)?, Object::RegExp { .. })
-            {
-                return self.regexp_match(host, id, input, true);
-            }
             return match self.invoke(host, &exec, vec![Value::String(input)], receiver)? {
-                Invocation::Value(Value::Null) => Ok(Invocation::Value(Value::Bool(false))),
-                Invocation::Value(Value::Object(_)) => Ok(Invocation::Value(Value::Bool(true))),
+                result @ (Invocation::Value(Value::Null | Value::Object(_))
+                | Invocation::Thrown(_)) => Ok(result),
                 Invocation::Value(_) => {
                     self.throw_type_error("RegExp exec must return an object or null")
                 }
-                thrown @ Invocation::Thrown(_) => Ok(thrown),
             };
         }
         if !matches!(self.heap.get(id)?, Object::RegExp { .. }) {
-            return self
-                .throw_type_error("RegExp test requires a RegExp receiver or callable exec");
+            return self.throw_type_error("RegExpExec requires a RegExp receiver or callable exec");
         }
-        self.regexp_match(host, id, input, true)
+        self.regexp_match(host, id, input)
     }
 
     fn regexp_match(
@@ -329,7 +330,6 @@ impl Vm {
         host: &mut dyn Host,
         id: ObjectId,
         input: String,
-        test: bool,
     ) -> Result<Invocation, VmError> {
         let Object::RegExp { flags, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
@@ -337,27 +337,20 @@ impl Vm {
         let flags = *flags;
         let stateful = flags.global || flags.sticky;
         let receiver = Value::Object(id);
-        let start = if stateful {
-            let key = PropertyKeyRef::String("lastIndex");
-            let last_index = match self.read_property(host, &receiver, key)? {
+        let last_index =
+            match self.read_property(host, &receiver, PropertyKeyRef::String("lastIndex"))? {
                 Invocation::Value(value) => value,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
-            match self.coerce_number(host, &last_index)? {
-                // A saturating cast is sufficient: indices past the input always fail.
-                Ok(number) => number as usize,
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            }
-        } else {
-            0
+        let last_index = match self.coerce_number(host, &last_index)? {
+            Ok(number) => number.clamp(0.0, 9_007_199_254_740_991.0) as usize,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
+        let start = if stateful { last_index } else { 0 };
         let encoded = encode_input(&input, flags);
         let Object::RegExp { compiled, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
         };
-        if test && !stateful {
-            return Ok(Invocation::Value(Value::Bool(compiled.is_match(&encoded))));
-        }
         // The encoder emits exactly one scalar per original UTF-16 code unit.
         let offsets = (!encoded.is_ascii()).then(|| {
             encoded
@@ -376,17 +369,11 @@ impl Vm {
                 .expect("match is at a scalar boundary"),
             None => byte,
         };
-        let captures = if test {
-            None
-        } else {
-            start_byte.and_then(|byte| compiled.captures_at(&encoded, byte))
-        };
-        let matched = if test {
-            start_byte.and_then(|byte| compiled.find_at(&encoded, byte))
-        } else {
-            captures.as_ref().and_then(|captures| captures.get(0))
-        }
-        .filter(|matched| !flags.sticky || start_byte == Some(matched.start()));
+        let captures = start_byte.and_then(|byte| compiled.captures_at(&encoded, byte));
+        let matched = captures
+            .as_ref()
+            .and_then(|captures| captures.get(0))
+            .filter(|matched| !flags.sticky || start_byte == Some(matched.start()));
 
         // Collect the ranges before releasing the immutable engine borrow for lastIndex.
         let groups = matched.and(captures.as_ref()).map(|captures| {
@@ -402,9 +389,7 @@ impl Vm {
                 .collect::<Vec<_>>()
         });
         if stateful {
-            let next = matched.map_or(0, |m| {
-                unit_offset(m.end()) + usize::from(m.start() == m.end())
-            });
+            let next = matched.map_or(0, |m| unit_offset(m.end()));
             let write = self.set_property(
                 host,
                 id,
@@ -416,9 +401,6 @@ impl Vm {
             if let Invocation::Thrown(_) = write {
                 return Ok(write);
             }
-        }
-        if test {
-            return Ok(Invocation::Value(Value::Bool(matched.is_some())));
         }
         let Some(matched) = matched else {
             return Ok(Invocation::Value(Value::Null));

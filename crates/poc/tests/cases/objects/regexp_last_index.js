@@ -15,7 +15,28 @@ export function run() {
 
   const empty = /a*/g;
   const zero = empty.exec("b");
-  if (zero[0] !== "" || zero.index !== 0 || empty.lastIndex !== 1) return false;
+  if (zero[0] !== "" || zero.index !== 0 || empty.lastIndex !== 0) return false;
+  if (empty.exec("b").index !== 0 || empty.lastIndex !== 0) return false;
+  if (!empty.test("b") || !empty.test("b") || empty.lastIndex !== 0) return false;
+
+  const frozen = /a/g;
+  Object.defineProperty(frozen, "lastIndex", { writable: false });
+  try {
+    frozen.exec("a");
+    return false;
+  } catch (error) {
+    if (!(error instanceof TypeError)) return false;
+  }
+
+  const sentinel = {};
+  const ordinary = /a/;
+  ordinary.lastIndex = { valueOf() { throw sentinel; } };
+  try {
+    ordinary.exec("a");
+    return false;
+  } catch (error) {
+    if (error !== sentinel) return false;
+  }
 
   const utf16 = /foo/g;
   if (utf16.exec("😀foo").index !== 2 || utf16.lastIndex !== 5) return false;
