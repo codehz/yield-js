@@ -174,6 +174,7 @@ impl Heap {
         };
         let class = function.class.as_ref().expect("validated class");
         let mut indices = class
+            .source
             .private
             .iter()
             .filter_map(|(&index, member)| {

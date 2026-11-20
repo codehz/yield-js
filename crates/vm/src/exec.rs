@@ -16,7 +16,7 @@ use crate::frame::Frame;
 use crate::heap::{
     Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
     NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property, ScriptClass,
-    TO_PRIMITIVE_SYMBOL, object_id,
+    ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -581,11 +581,13 @@ impl Vm {
                 function.prototype = Some(static_parent);
                 function.class = Some(ScriptClass {
                     prototype,
-                    derived,
-                    default_constructor,
-                    elements: Vec::new(),
-                    private_count,
-                    private: Default::default(),
+                    source: ScriptClassSource {
+                        derived,
+                        default_constructor,
+                        elements: Vec::new(),
+                        private_count,
+                        private: Default::default(),
+                    },
                 });
                 function.home = Some(prototype);
                 let name = self.function_metadata(class, "name")?;
@@ -1338,7 +1340,7 @@ impl Vm {
                 && let Some(class) = self.bindings.export_class(export)
             {
                 return Ok(Invocation::Value(Value::Object(
-                    self.class_prototypes[class],
+                    self.host_classes[class].prototype,
                 )));
             }
             if let Object::Proxy {
@@ -1940,7 +1942,9 @@ impl Vm {
                 ClassElement::Field {
                     is_static: false, ..
                 } => class.prototype,
-                ClassElement::PrivateField { index, .. } if !class.private[&index].is_static => {
+                ClassElement::PrivateField { index, .. }
+                    if !class.source.private[&index].is_static =>
+                {
                     class.prototype
                 }
                 _ => id,
@@ -1970,6 +1974,7 @@ impl Vm {
             .class
             .as_mut()
             .expect("validated class")
+            .source
             .elements
             .push(element);
         Ok(())
@@ -1988,7 +1993,7 @@ impl Vm {
             .function(class)
             .and_then(|f| f.class.as_ref())
             .ok_or_else(|| VmError::InvalidState("initialization requires a class".into()))?;
-        let element_count = record.elements.len();
+        let element_count = record.source.elements.len();
         if !self
             .heap
             .install_private_methods(class, receiver, is_static)
@@ -2003,6 +2008,7 @@ impl Vm {
                 .function(class)
                 .and_then(|f| f.class.as_ref())
                 .expect("class record")
+                .source
                 .elements[index];
             let (key, private, closure) = match element {
                 ClassElement::Field {
@@ -2011,7 +2017,8 @@ impl Vm {
                     is_static: field_static,
                 } if *field_static == is_static => (Some(key.clone()), None, *initializer),
                 ClassElement::PrivateField { index, initializer }
-                    if self.private_class(class, *index)?.private[index].is_static == is_static =>
+                    if self.private_class(class, *index)?.source.private[index].is_static
+                        == is_static =>
                 {
                     (None, Some(*index), *initializer)
                 }

@@ -125,7 +125,7 @@ impl Vm {
                 self.invoke(host, &target, args, &bound_this)
             }
             Some(Dispatch::Native { target, .. }) => match target {
-                CallableTarget::Host(target) => self.call_host(host, target, args, receiver, false),
+                CallableTarget::Host(target) => self.call_host(host, target, args, receiver, None),
                 CallableTarget::Intrinsic(id) => (id.definition().call)(self, host, args, receiver),
             },
             None => self.throw_type_error("value is not a function"),
@@ -189,9 +189,9 @@ impl Vm {
         };
         if let Value::Object(class) = *callee
             && let Some(record) = self.heap.function(class).and_then(|f| f.class.as_ref())
-            && record.derived
+            && record.source.derived
         {
-            let default = record.default_constructor;
+            let default = record.source.default_constructor;
             let Constructor::Script { func_id, env } = constructor else {
                 unreachable!()
             };
@@ -268,9 +268,13 @@ impl Vm {
                     result => Ok(result),
                 }
             }
-            Constructor::Native(CallableTarget::Host(target)) => {
-                self.call_host(host, target, args, &Value::Undefined, true)
-            }
+            Constructor::Native(CallableTarget::Host(target)) => self.call_host(
+                host,
+                target,
+                args,
+                &Value::Undefined,
+                Some(crate::vm::HostConstruction { prototype }),
+            ),
             Constructor::Native(CallableTarget::Intrinsic(id)) => {
                 (id.definition().construct.expect("classified constructor"))(
                     self, host, args, prototype,

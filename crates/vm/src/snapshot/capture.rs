@@ -45,8 +45,8 @@ impl Vm {
         for operation in self.operations.values() {
             tracer.mark_object(operation.promise)?;
         }
-        for prototype in &self.class_prototypes {
-            tracer.mark_object(*prototype)?;
+        for class in &self.host_classes {
+            tracer.mark_object(class.prototype)?;
         }
         for state in self.module_states.iter().flatten() {
             for slot in &state.slots {
@@ -102,7 +102,7 @@ impl Vm {
         for (class, tag) in self.bindings.classes() {
             snapshot
                 .class_prototypes
-                .insert(tag.to_owned(), self.class_prototypes[class]);
+                .insert(tag.to_owned(), self.host_classes[class].prototype);
         }
         snapshot.script_env = self.script_env;
         for id in &tracer.objects {
@@ -317,13 +317,8 @@ impl Vm {
             )));
         }
         validate_native_targets(&bindings, &heap)?;
-        let class_prototypes = load_class_prototypes(&bindings, &heap, &snapshot.class_prototypes)?;
-        let host_instances = load_host_instances(
-            &bindings,
-            &heap,
-            &class_prototypes,
-            &snapshot.host_instances,
-        )?;
+        let host_classes = load_host_classes(&bindings, &heap, &snapshot.class_prototypes)?;
+        let host_instances = load_host_instances(&bindings, &heap, &snapshot.host_instances)?;
         let module_states = load_module_states(&bindings, &heap, &snapshot.module_states)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         for continuation in continuations.values() {
@@ -340,7 +335,7 @@ impl Vm {
                 heap,
                 continuations,
                 operations,
-                class_prototypes,
+                host_classes,
                 host_instances,
                 module_states,
                 globals: snapshot.globals,
@@ -772,9 +767,10 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
             .and_then(|f| f.class.as_ref())
             .ok_or_else(invalid)?;
         let member = class
+            .source
             .private
             .get(&record.index)
-            .filter(|_| record.index < class.private_count)
+            .filter(|_| record.index < class.source.private_count)
             .ok_or_else(invalid)?;
         if (member.is_static && record.brand != record.receiver)
             || matches!(member.kind, PrivateMemberKind::Field)
@@ -811,7 +807,7 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             && env.bindings.range(DERIVED_THIS..).next().is_some()
         {
             let valid_class = matches!(env.bindings.get(&DERIVED_CLASS), Some(Value::Object(class))
-                if heap.function(*class).and_then(|f| f.class.as_ref()).is_some_and(|c| c.derived && !c.default_constructor));
+                if heap.function(*class).and_then(|f| f.class.as_ref()).is_some_and(|c| c.source.derived && !c.source.default_constructor));
             let valid_target = matches!(env.bindings.get(&DERIVED_TARGET), Some(Value::Object(target))
                 if heap.get(*target).is_ok_and(crate::builtin::is_callable_object));
             let valid_this = match env.bindings.get(&DERIVED_THIS) {
@@ -865,7 +861,7 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             }
             if let Some(class) = &function.class {
                 let mut fields = BTreeSet::new();
-                for (&index, member) in &class.private {
+                for (&index, member) in &class.source.private {
                     let home = Some(if member.is_static {
                         id
                     } else {
@@ -895,13 +891,13 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                                     .all(|target| valid_closure(target, true))
                         }
                     };
-                    if index >= class.private_count || !valid {
+                    if index >= class.source.private_count || !valid {
                         return Err(VmError::InvalidSnapshot(format!(
                             "class {id} has an invalid private declaration {index}"
                         )));
                     }
                 }
-                for element in &class.elements {
+                for element in &class.source.elements {
                     if let crate::heap::ClassElement::PrivateField { index, .. } = element
                         && !fields.remove(index)
                     {
@@ -1221,11 +1217,11 @@ fn validate_native_import_objects(
     Ok(())
 }
 
-fn load_class_prototypes(
+fn load_host_classes(
     bindings: &Bindings,
     heap: &Heap,
     records: &BTreeMap<String, ObjectId>,
-) -> Result<Vec<ObjectId>, VmError> {
+) -> Result<Vec<crate::heap::HostClassRecord>, VmError> {
     if records.len() != bindings.classes_len() {
         return Err(VmError::InvalidSnapshot(format!(
             "class prototype count mismatch: snapshot {}, bindings {}",
@@ -1233,7 +1229,7 @@ fn load_class_prototypes(
             bindings.classes_len()
         )));
     }
-    let mut prototypes = vec![0; bindings.classes_len()];
+    let mut classes = Vec::with_capacity(bindings.classes_len());
     for (class, tag) in bindings.classes() {
         let id = *records
             .get(tag)
@@ -1251,15 +1247,17 @@ fn load_class_prototypes(
                 )));
             }
         }
-        prototypes[class] = id;
+        classes.push(crate::heap::HostClassRecord {
+            prototype: id,
+            source: class,
+        });
     }
-    Ok(prototypes)
+    Ok(classes)
 }
 
 fn load_host_instances(
     bindings: &Bindings,
     heap: &Heap,
-    class_prototypes: &[ObjectId],
     records: &[HostInstanceRecord],
 ) -> Result<BTreeMap<ObjectId, HostInstance>, VmError> {
     let mut instances = BTreeMap::new();
@@ -1320,12 +1318,6 @@ fn load_host_instances(
                 require_value_objects(heap, std::iter::once(value))?;
             }
             slots.push(slot);
-        }
-        if heap.prototype_of(record.object)? != Some(class_prototypes[class]) {
-            return Err(VmError::InvalidSnapshot(format!(
-                "host instance {} does not use the {} prototype",
-                record.object, record.class
-            )));
         }
         let payload = match bindings.class_payload_schema(class) {
             Some(schema) => {

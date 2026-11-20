@@ -7,6 +7,7 @@ use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
+use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
 use crate::runtime::{
@@ -72,11 +73,16 @@ pub struct PendingOperationInfo {
 }
 
 /// State assembled by restore before publication.
+#[derive(Clone, Copy)]
+pub(crate) struct HostConstruction {
+    pub(crate) prototype: Option<ObjectId>,
+}
+
 pub(crate) struct RestoredState {
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
-    pub(crate) class_prototypes: Vec<ObjectId>,
+    pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
     pub(crate) globals: BTreeMap<JsString, Value>,
@@ -98,7 +104,7 @@ pub struct Vm {
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) imports: Vec<ImportModule>,
     /// Class tag id to the VM-owned prototype object.
-    pub(crate) class_prototypes: Vec<ObjectId>,
+    pub(crate) host_classes: Vec<HostClassRecord>,
     /// Hidden slots and payloads keyed by the ordinary object that owns them.
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     /// Per-module state aligned with the sorted module declaration table.
@@ -146,7 +152,7 @@ impl Vm {
             recovered_operations: BTreeSet::new(),
             microtasks: VecDeque::new(),
             globals: BTreeMap::new(),
-            class_prototypes: Vec::new(),
+            host_classes: Vec::new(),
             host_instances: BTreeMap::new(),
             module_states,
             epoch: next_epoch(),
@@ -188,7 +194,10 @@ impl Vm {
     fn install_classes(&mut self, bindings: &Bindings) -> Result<(), VmError> {
         for (class, _) in bindings.classes() {
             let prototype = self.heap.alloc_plain_with(None);
-            self.class_prototypes.push(prototype);
+            self.host_classes.push(HostClassRecord {
+                prototype,
+                source: class,
+            });
             for method in 0..bindings.method_count(class) {
                 let target = NativeTarget::Method(crate::binding::MethodId {
                     class: class as u32,
@@ -241,8 +250,8 @@ impl Vm {
         for (class, _) in bindings.classes() {
             if let Some(parent) = bindings.class_parent(class) {
                 self.heap.set_prototype(
-                    self.class_prototypes[class],
-                    Some(self.class_prototypes[parent]),
+                    self.host_classes[class].prototype,
+                    Some(self.host_classes[parent].prototype),
                 )?;
             }
         }
@@ -275,7 +284,7 @@ impl Vm {
         target: NativeTarget,
         args: Vec<Value>,
         receiver: &Value,
-        construct: bool,
+        construction: Option<HostConstruction>,
     ) -> Result<Invocation, VmError> {
         let bindings = host.bindings();
         let declaration = match target {
@@ -324,12 +333,19 @@ impl Vm {
             },
         };
         let call = declaration.0;
-        if construct && !declaration.1 {
+        if construction.is_some() && !declaration.1 {
             return Err(VmError::Host(format!(
                 "host function {} is not a constructor",
                 declaration.2
             )));
         }
+        let allocation_prototype =
+            match (target, construction.and_then(|context| context.prototype)) {
+                (NativeTarget::Export(export), Some(prototype)) => bindings
+                    .export_class(export)
+                    .map(|class| (class, prototype)),
+                _ => None,
+            };
         let mut next_args = args;
         let mut pending: Option<(GuestResume, Invocation)> = None;
         loop {
@@ -345,7 +361,8 @@ impl Vm {
                 call: call_id,
                 args: next_args.into_iter().map(wrap).collect(),
                 this: wrap(receiver.clone()),
-                construct: construct && pending.is_none(),
+                construct: construction.is_some() && pending.is_none(),
+                allocation_prototype,
             };
             let step = match pending.take() {
                 Some((resume, outcome)) => {
@@ -1041,7 +1058,7 @@ impl Vm {
             mut heap,
             continuations,
             operations,
-            class_prototypes,
+            host_classes,
             host_instances,
             module_states,
             globals,
@@ -1075,7 +1092,7 @@ impl Vm {
             microtasks: VecDeque::new(),
             globals,
             imports: Vec::new(),
-            class_prototypes,
+            host_classes,
             host_instances,
             module_states,
             epoch: next_epoch(),

@@ -494,7 +494,7 @@ impl Object {
                 }
                 if let Some(class) = &function.class {
                     out.push(OwnedEdge::Object(class.prototype));
-                    for element in &class.elements {
+                    for element in &class.source.elements {
                         if let Some(closure) = element.closure() {
                             out.push(OwnedEdge::Object(closure));
                         }
@@ -506,7 +506,7 @@ impl Object {
                             out.push(OwnedEdge::Symbol(*symbol));
                         }
                     }
-                    for member in class.private.values() {
+                    for member in class.source.private.values() {
                         use super::types::PrivateMemberKind;
                         match member.kind {
                             PrivateMemberKind::Field => {}

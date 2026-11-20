@@ -220,6 +220,7 @@ pub struct CallCx<'a> {
     pub(crate) args: Vec<JsValue>,
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
+    pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
 }
 
 impl<'a> CallCx<'a> {
@@ -442,9 +443,13 @@ impl<'a> CallCx<'a> {
             .bindings
             .class_by_tag(T::TAG)
             .ok_or_else(|| JsError::Fault(self.fault(format!("unregistered class {}", T::TAG))))?;
-        let prototype = *self.vm.class_prototypes.get(class).ok_or_else(|| {
+        let record = self.vm.host_classes.get(class).ok_or_else(|| {
             JsError::Fault(self.fault(format!("class {} has no prototype", T::TAG)))
         })?;
+        let prototype = self
+            .allocation_prototype
+            .filter(|(target, _)| *target == record.source)
+            .map_or(record.prototype, |(_, prototype)| prototype);
         let payload = Box::new(payload);
         if self.bindings.class_payload_schema(class).is_none()
             && !self

@@ -21,7 +21,7 @@ impl Vm {
         self.heap
             .function(brand)
             .and_then(|f| f.class.as_ref())
-            .filter(|record| index < record.private_count)
+            .filter(|record| index < record.source.private_count)
             .ok_or_else(|| VmError::InvalidState("invalid private class reference".into()))
     }
 
@@ -56,6 +56,7 @@ impl Vm {
         let class = self.private_class(brand, index)?;
         let home = if is_static { brand } else { class.prototype };
         let previous = class
+            .source
             .private
             .get(&index)
             .map(|member| (member.is_static, member.kind));
@@ -103,10 +104,11 @@ impl Vm {
         };
         let class = function.class.as_mut().expect("validated class");
         class
+            .source
             .private
             .insert(index, PrivateMember { is_static, kind });
         if definition == PrivateDefinition::Field {
-            class.elements.push(ClassElement::PrivateField {
+            class.source.elements.push(ClassElement::PrivateField {
                 index,
                 initializer: closure,
             });
@@ -136,7 +138,7 @@ impl Vm {
         if let PrivateElement::Field(value) = element {
             return Ok(Invocation::Value(value.clone()));
         }
-        match class.private[&index].kind {
+        match class.source.private[&index].kind {
             PrivateMemberKind::Method(method) => Ok(Invocation::Value(Value::Object(method))),
             PrivateMemberKind::Accessor { get: Some(get), .. } => {
                 self.invoke(host, &Value::Object(get), Vec::new(), receiver)
@@ -155,6 +157,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let kind = self
             .private_class(brand, index)?
+            .source
             .private
             .get(&index)
             .map(|member| member.kind);

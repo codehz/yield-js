@@ -618,8 +618,16 @@ pub struct FunctionObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ScriptClass {
+pub(crate) struct ClassRecord<S> {
     pub prototype: ObjectId,
+    pub source: S,
+}
+
+pub(crate) type ScriptClass = ClassRecord<ScriptClassSource>;
+pub(crate) type HostClassRecord = ClassRecord<usize>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ScriptClassSource {
     pub derived: bool,
     pub default_constructor: bool,
     pub elements: Vec<ClassElement>,

@@ -812,10 +812,29 @@ mod inherit_fixture {
         }
     }
 
-    #[host_class(tag = "Base", methods)]
+    #[host_class(tag = "Base", methods, schema = 1, encode = Base::encode_payload, decode = Base::decode_payload)]
     struct Base {
+        payload_value: u8,
         #[js_slot]
         base: JsValue,
+        #[js_slot]
+        sidecar: JsValue,
+    }
+
+    impl Base {
+        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+            out.push(self.payload_value);
+            Ok(())
+        }
+
+        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
+            let [payload_value] = input else {
+                return Err(CodecError::new("invalid Base payload"));
+            };
+            Ok(Self {
+                payload_value: *payload_value,
+            })
+        }
     }
 
     #[methods(Base)]
@@ -823,6 +842,18 @@ mod inherit_fixture {
         #[method(name = "read")]
         fn read(cx: &mut CallCx<'_>, this: This<Base>) -> JsResult<JsValue> {
             this.base(cx)
+        }
+
+        #[method(name = "readPayload")]
+        fn read_payload(cx: &mut CallCx<'_>, this: This<Base>) -> JsResult<JsValue> {
+            Ok(JsValue::number(f64::from(
+                this.instance().payload(cx)?.payload_value,
+            )))
+        }
+
+        #[method(name = "sidecar")]
+        fn sidecar(cx: &mut CallCx<'_>, this: This<Base>) -> JsResult<JsValue> {
+            this.sidecar(cx)
         }
     }
 
@@ -859,8 +890,12 @@ mod inherit_fixture {
 
         #[constructor(name = "Base", class = Base)]
         fn base(cx: &mut CallCx<'_>) -> JsResult<Instance<Base>> {
-            let base = cx.alloc(Base)?;
+            let sidecar = cx.alloc(Derived)?;
+            sidecar.set_value(cx, JsValue::number(2.0))?;
+            let base = cx.alloc(Base { payload_value: 9 })?;
             base.set_base(cx, JsValue::number(1.0))?;
+            let sidecar = sidecar.value(cx);
+            base.set_sidecar(cx, sidecar)?;
             Ok(base)
         }
 
@@ -920,6 +955,87 @@ export async function run() {
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot derived instance");
+    drop(vm);
+
+    let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    vm.start_recovered_operations(&mut host)
+        .expect("start recovered operation");
+    let token = host.tokens["inherit-wait"];
+    vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
+        .expect("complete wait");
+    vm.run_until_idle(&mut host).expect("drain");
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Bool(true))
+    );
+}
+
+#[test]
+fn script_subclass_of_host_class_survives_restore() {
+    let bindings = inherit_fixture::bindings();
+    let source = r#"
+import { assert, Base, Derived, wait } from "inherit";
+
+export async function run() {
+  class Script extends Base {
+    #count = 3;
+    increment() { this.#count += 1; }
+    count() { return this.#count; }
+  }
+
+  const instance = new Script();
+  instance.increment();
+  const sidecar = instance.sidecar();
+  const direct = new Base();
+  const forged = Object.create(Script.prototype);
+  class Replacing extends Base {
+    constructor() { super(); return direct; }
+  }
+  const replacement = new Replacing();
+
+  function check() {
+    assert(Object.getPrototypeOf(instance) === Script.prototype);
+    assert(Object.getPrototypeOf(Script.prototype) === Base.prototype);
+    assert(instance instanceof Script);
+    assert(instance instanceof Base);
+    assert(instance.read() === 1);
+    assert(instance.readPayload() === 9);
+    assert(instance.count() === 4);
+
+    // The host constructor also allocates a different host class in the same call.
+    assert(instance.sidecar() === sidecar);
+    assert(Object.getPrototypeOf(sidecar) === Derived.prototype);
+    assert(sidecar instanceof Derived);
+    assert(!(sidecar instanceof Script));
+    assert(sidecar.value() === 2);
+    assert(Object.getPrototypeOf(direct) === Base.prototype);
+    assert(!(direct instanceof Script));
+    assert(direct.read() === 1);
+    assert(replacement === direct);
+    assert(!(replacement instanceof Replacing));
+
+    assert(forged instanceof Base);
+    assert(forged instanceof Script);
+    let error;
+    try { forged.read(); } catch (caught) { error = caught; }
+    assert(error instanceof TypeError);
+  }
+
+  check();
+  await wait();
+  check();
+  return true;
+}
+"#;
+    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let mut host = StrategyHost::new(bindings);
+    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let result = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host).expect("suspend");
+    assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&result))
+        .expect("snapshot script subclass");
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
