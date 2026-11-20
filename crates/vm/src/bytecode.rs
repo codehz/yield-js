@@ -14,7 +14,7 @@ use crate::value::{BindingId, JsString};
 
 pub const BYTECODE_VERSION: u32 = 29;
 
-pub use crate::builtins::BUILTINS;
+pub use crate::builtin::BUILTINS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

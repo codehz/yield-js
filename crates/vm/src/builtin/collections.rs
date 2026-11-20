@@ -1,7 +1,7 @@
 //! Strong and weak collections. Strong collection tombstones keep live cursor positions stable.
 
-use crate::builtin_globals::Owner;
-use crate::builtins::{RootKind, RootSpec};
+use crate::builtin::globals::Owner;
+use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{
     Attributes, CollectionIteration, CollectionKind, DescriptorUpdate, ITERATOR_SYMBOL, Object,

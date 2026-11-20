@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`、`JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
+> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`；`binding/call.rs` 提供 `JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
 
 ## 1. 目标与范围
 

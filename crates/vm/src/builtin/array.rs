@@ -1,8 +1,8 @@
 //! Array builtins use ordinary property operations for observable reads and writes.
 //! New results define own data properties, bypassing inherited setters.
 
-use crate::builtin_globals::Owner;
-use crate::builtins::{RootKind, RootSpec};
+use crate::builtin::globals::Owner;
+use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object};
 use crate::host::Host;

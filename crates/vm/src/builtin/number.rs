@@ -1,7 +1,7 @@
 //! Number constructors, static functions, and prototype methods.
 
-use crate::builtin_globals::Owner;
-use crate::builtins::{
+use crate::builtin::globals::Owner;
+use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, RootKind, RootSpec,
 };
 use crate::error::VmError;

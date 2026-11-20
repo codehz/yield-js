@@ -145,7 +145,7 @@ fn table() -> &'static Table {
             definitions: Vec::new(),
             ids: BTreeMap::new(),
         };
-        for def in crate::builtin_globals::intrinsic_groups().flatten() {
+        for def in crate::builtin::globals::intrinsic_groups().flatten() {
             let id =
                 IntrinsicId(u32::try_from(table.definitions.len()).expect("intrinsic ID overflow"));
             let IntrinsicKey {

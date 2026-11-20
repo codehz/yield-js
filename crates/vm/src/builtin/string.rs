@@ -1,8 +1,9 @@
 //! UTF-16 string operations.
 
 use crate::JsString;
-use crate::builtin_globals::Owner;
-use crate::builtins::{
+use crate::builtin::globals::Owner;
+use crate::builtin::regexp_runtime::RegExpMethod;
+use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_RANGEERROR_PROTOTYPE,
     ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind,
     RootSpec,
@@ -14,7 +15,6 @@ use crate::heap::{
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::regexp_runtime::RegExpMethod;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;

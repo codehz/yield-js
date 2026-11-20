@@ -1,658 +1,6 @@
-//! VM builtins: promises, microtasks, and object model methods.
-//!
-//! Script-visible `Error` and `TypeError` are objects, including VM-generated
-//! TypeErrors. The `AggregateError` rejection from `Promise.any` is a string.
-//!
-//! `queueMicrotask` enqueues a VM microtask. A throw from its callback has no
-//! result promise and is delivered through `Host::report_error`. Unhandled
-//! promise rejections are not tracked.
+use super::*;
 
-use crate::JsString;
-use crate::error::VmError;
-use crate::heap::BoxedPrimitive;
-use crate::heap::{
-    Attributes, BoundObject, CombineKind, CombineState, DescriptorUpdate, ITERATOR_SYMBOL,
-    IntegrityLevel, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, PlainObject, PromiseCallback,
-    PromiseState, Property, REPLACE_SYMBOL, ReactionJob, Resolution, SEARCH_SYMBOL, SPECIES_SYMBOL,
-    SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
-};
-use crate::host::Host;
-use crate::intrinsic::{CallableTarget, IntrinsicDef, IntrinsicKey, Slot};
-use crate::ops;
-use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::string::utf16_len;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
-use crate::vm::Vm;
-
-pub use crate::builtin_globals::BUILTINS;
-use crate::builtin_globals::Owner;
-pub(crate) use crate::builtin_roots::{BuiltinRoots, RootKind, RootSpec};
-
-const OBJECT_PARENT: Option<&str> = Some("object.prototype");
-const FUNCTION_PARENT: Option<&str> = Some("function.prototype");
-
-fn define_builtin_data(
-    vm: &mut Vm,
-    target: ObjectId,
-    key: impl Into<PropertyKey>,
-    value: Value,
-    attrs: Attributes,
-) {
-    vm.heap
-        .define_data(target, key, value, attrs)
-        .expect("builtin data property");
-}
-
-fn link_constructor(vm: &mut Vm, constructor: ObjectId, prototype: ObjectId) {
-    define_builtin_data(
-        vm,
-        constructor,
-        "prototype",
-        Value::Object(prototype),
-        Attributes::FIXED,
-    );
-    define_builtin_data(
-        vm,
-        prototype,
-        "constructor",
-        Value::Object(constructor),
-        Attributes::METHOD,
-    );
-}
-
-fn install_getter(vm: &mut Vm, target: ObjectId, key: PropertyKey, intrinsic: IntrinsicKey) {
-    let getter = vm.alloc_intrinsic(intrinsic);
-    assert!(
-        vm.heap
-            .apply_descriptor(
-                target,
-                key,
-                DescriptorUpdate {
-                    get: Some(Some(getter)),
-                    configurable: Some(true),
-                    ..DescriptorUpdate::default()
-                }
-            )
-            .expect("builtin getter")
-    );
-}
-
-pub(super) mod queue_family {
-    use super::*;
-    const NAME: &str = "queueMicrotask";
-    const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
-    pub(crate) const OWNER: Owner = Owner::new(
-        NAME,
-        &[RootSpec::new(NAME, RootKind::Native(KEY), FUNCTION_PARENT)],
-        &[&[IntrinsicDef::call(KEY, |vm, _, args, _| {
-            vm.queue_microtask(args)
-        })]],
-        None,
-    );
-}
-
-#[yield_binding_macros::builtin_global(name = "Boolean", root = "boolean", kind = "constructor")]
-pub(super) mod boolean_family {
-    use super::*;
-    const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
-    const PROTOTYPE: &str = "boolean.prototype";
-    pub(crate) const OWNER: Owner = Owner::new(
-        ROOT,
-        &[
-            RootSpec::new(ROOT, RootKind::Native(KEY), FUNCTION_PARENT).fixed(PROTOTYPE),
-            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-        ],
-        &[
-            &[IntrinsicDef::constructor(
-                KEY,
-                |_, _, args, _| {
-                    Ok(Invocation::Value(Value::Bool(
-                        args.first().is_some_and(Value::truthy),
-                    )))
-                },
-                |vm, _, args, prototype| {
-                    let result = vm.construct_object(&[Value::Bool(
-                        args.first().is_some_and(Value::truthy),
-                    )])?;
-                    vm.with_result_prototype(result, prototype)
-                },
-            )],
-            INTRINSICS,
-        ],
-        Some(install),
-    );
-
-    fn install(vm: &mut Vm, _: &Value) {
-        let constructor = vm.builtins.get(ROOT);
-        let prototype = vm.builtins.get(PROTOTYPE);
-        link_constructor(vm, constructor, prototype);
-        install_members(vm, constructor, prototype);
-    }
-
-    fn boolean_value(
-        vm: &mut Vm,
-        receiver: &Value,
-        stringify: bool,
-    ) -> Result<Invocation, VmError> {
-        let value = match receiver {
-            Value::Bool(value) => *value,
-            Value::Object(id) => match vm.heap.get(*id)? {
-                Object::Boxed {
-                    primitive: BoxedPrimitive::Bool(value),
-                    ..
-                } => *value,
-                _ => return vm.throw_type_error("incompatible Boolean receiver"),
-            },
-            _ => return vm.throw_type_error("incompatible Boolean receiver"),
-        };
-        Ok(Invocation::Value(if stringify {
-            Value::String(value.to_string().into())
-        } else {
-            Value::Bool(value)
-        }))
-    }
-
-    prototype_calls! {
-        valueOf => |vm, _, _, receiver| boolean_value(vm, receiver, false);
-        toString => |vm, _, _, receiver| boolean_value(vm, receiver, true);
-    }
-}
-
-pub(super) mod symbol_family {
-    use super::*;
-    pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Symbol", Slot::Global, "");
-    const DESCRIPTION: IntrinsicKey =
-        IntrinsicKey::new("Symbol", Slot::PrototypeGetter, "description");
-    const ROOT: &str = "symbol";
-    const PROTOTYPE: &str = "symbol.prototype";
-
-    macro_rules! symbol_methods {
-        ($($slot:ident $name:literal => $call:expr),* $(,)?) => {
-            const METHODS: &[IntrinsicDef] = &[$(IntrinsicDef::call(IntrinsicKey::new("Symbol", Slot::$slot, $name), $call)),*];
-        };
-    }
-
-    symbol_methods! {
-        Prototype "valueOf" => |vm, _, _, receiver| vm.symbol_method(receiver, "valueOf"),
-        Prototype "toString" => |vm, _, _, receiver| vm.symbol_method(receiver, "toString"),
-        Static "for" => |vm, host, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args),
-        Static "keyFor" => |vm, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args),
-    }
-
-    pub(crate) const OWNER: Owner = Owner::new(
-        ROOT,
-        &[
-            RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT).fixed(PROTOTYPE),
-            RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
-        ],
-        &[
-            &[
-                IntrinsicDef::call(CONSTRUCTOR, |vm, host, args, _| {
-                    vm.symbol_constructor(host, args)
-                }),
-                IntrinsicDef::call(DESCRIPTION, |vm, _, _, receiver| {
-                    vm.symbol_method(receiver, "get description")
-                }),
-            ],
-            METHODS,
-        ],
-        Some(install),
-    );
-
-    fn install(vm: &mut Vm, _: &Value) {
-        let constructor = vm.builtins.get(ROOT);
-        let prototype = vm.builtins.get(PROTOTYPE);
-        link_constructor(vm, constructor, prototype);
-        for def in METHODS {
-            let target = if def.key.slot == Slot::Static {
-                constructor
-            } else {
-                prototype
-            };
-            let method = vm.alloc_intrinsic(def.key);
-            define_builtin_data(
-                vm,
-                target,
-                def.key.member,
-                Value::Object(method),
-                Attributes::METHOD,
-            );
-        }
-        install_getter(
-            vm,
-            prototype,
-            PropertyKey::String("description".into()),
-            DESCRIPTION,
-        );
-        for (name, id) in [
-            ("iterator", ITERATOR_SYMBOL),
-            ("toPrimitive", TO_PRIMITIVE_SYMBOL),
-            ("species", SPECIES_SYMBOL),
-            ("match", MATCH_SYMBOL),
-            ("matchAll", MATCH_ALL_SYMBOL),
-            ("replace", REPLACE_SYMBOL),
-            ("search", SEARCH_SYMBOL),
-            ("split", SPLIT_SYMBOL),
-        ] {
-            define_builtin_data(vm, constructor, name, Value::Symbol(id), Attributes::FIXED);
-        }
-    }
-}
-
-pub(super) mod error_family {
-    use super::*;
-
-    macro_rules! error_class {
-        ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal) => {
-            pub(crate) const $owner: Owner = {
-                const PROTOTYPE: &str = concat!($root, ".prototype");
-                const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
-                Owner::new(
-                    $root,
-                    &[
-                        RootSpec::new($root, RootKind::Native(KEY), FUNCTION_PARENT)
-                            .fixed(PROTOTYPE)
-                            .backlink(Some(Attributes::METHOD)),
-                        RootSpec::new(PROTOTYPE, RootKind::Plain, $parent)
-                            .with_fixed_parent(!$base),
-                    ],
-                    &[&[IntrinsicDef::constructor(
-                        KEY,
-                        |vm, host, args, _| vm.construct_error(host, $name, PROTOTYPE, args),
-                        |vm, host, args, prototype| {
-                            let result = vm.construct_error(host, $name, PROTOTYPE, args)?;
-                            vm.with_result_prototype(result, prototype)
-                        },
-                    )]],
-                    Some(|vm, _| {
-                        let prototype = vm.builtins.get(PROTOTYPE);
-                        let constructor = vm.builtins.get($root);
-                        define_builtin_data(
-                            vm,
-                            prototype,
-                            "name",
-                            Value::String($name.into()),
-                            Attributes::METHOD,
-                        );
-                        if $base {
-                            define_builtin_data(
-                                vm,
-                                prototype,
-                                "message",
-                                Value::String(JsString::default()),
-                                Attributes::METHOD,
-                            );
-                        }
-                        link_constructor(vm, constructor, prototype);
-                    }),
-                )
-            };
-        };
-    }
-
-    error_class!(ERROR, "Error", "error", OBJECT_PARENT, true);
-    error_class!(
-        TYPE_ERROR,
-        "TypeError",
-        "typeerror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        RANGE_ERROR,
-        "RangeError",
-        "rangeerror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        REFERENCE_ERROR,
-        "ReferenceError",
-        "referenceerror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        SYNTAX_ERROR,
-        "SyntaxError",
-        "syntaxerror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        EVAL_ERROR,
-        "EvalError",
-        "evalerror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        URI_ERROR,
-        "URIError",
-        "urierror",
-        Some("error.prototype"),
-        false
-    );
-    error_class!(
-        AGGREGATE_ERROR,
-        "AggregateError",
-        "aggregateerror",
-        Some("error.prototype"),
-        false
-    );
-}
-
-pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
-pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
-pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
-pub(crate) const ROOT_RANGEERROR_PROTOTYPE: &str = "rangeerror.prototype";
-pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
-pub(crate) const ROOT_PROXY: &str = "proxy";
-pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
-pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
-
-#[yield_binding_macros::builtin_global(name = "Reflect", root = "reflect")]
-pub(crate) mod reflect_namespace {
-    use super::{Host, Invocation, PropertyKey, Value, Vm, VmError};
-
-    #[function(name = "ownKeys")]
-    fn own_keys(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(id)) = args.first() else {
-            return vm.throw_type_error("Reflect.ownKeys requires an object");
-        };
-        let keys = match vm.own_keys(host, *id, false)? {
-            Ok(keys) => keys,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let keys = keys
-            .into_iter()
-            .map(|key| match key {
-                PropertyKey::String(key) => Value::String(key),
-                PropertyKey::Symbol(id) => Value::Symbol(id),
-            })
-            .collect();
-        Ok(Invocation::Value(Value::Object(vm.heap.alloc_array(keys))))
-    }
-
-    #[function(name = "deleteProperty")]
-    fn delete_property(
-        vm: &mut Vm,
-        host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        let Some(target @ Value::Object(_)) = args.first() else {
-            return vm.throw_type_error("Reflect.deleteProperty requires an object");
-        };
-        vm.delete_property(host, target, args.get(1).unwrap_or(&Value::Undefined))
-    }
-
-    #[function(name = "defineProperty")]
-    fn define_property(
-        vm: &mut Vm,
-        host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.define_property_builtin(host, args, true)
-    }
-
-    #[function(name = "preventExtensions")]
-    fn prevent_extensions(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.prevent_extensions_builtin_impl(args, true)
-    }
-
-    #[function(name = "isExtensible")]
-    fn is_extensible(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.is_extensible_builtin_impl(args, true)
-    }
-
-    #[function(name = "getPrototypeOf")]
-    fn get_prototype_of(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.get_prototype_of(args, true)
-    }
-
-    #[function(name = "setPrototypeOf")]
-    fn set_prototype_of(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.set_prototype_of(args, true)
-    }
-
-    #[function(name = "get")]
-    fn get(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
-            return vm.throw_type_error("Reflect.get requires an object");
-        };
-        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
-            Ok(key) => key,
-            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-        };
-        vm.read_property_with_receiver(
-            host,
-            *target,
-            args.get(2).unwrap_or(&args[0]),
-            key.borrowed(),
-        )
-    }
-
-    #[function(name = "set")]
-    fn set(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
-            return vm.throw_type_error("Reflect.set requires an object");
-        };
-        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
-            Ok(key) => key,
-            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-        };
-        let value = args.get(2).cloned().unwrap_or(Value::Undefined);
-        let receiver = args.get(3).unwrap_or(&args[0]);
-        vm.set_property(host, *target, receiver, key, value, false)
-    }
-
-    #[function(name = "has")]
-    fn has(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
-            return vm.throw_type_error("Reflect.has requires an object");
-        };
-        let key = match vm.coerce_property_key(host, args.get(1).unwrap_or(&Value::Undefined))? {
-            Ok(key) => key,
-            Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-        };
-        vm.has_property_key(host, *target, key.borrowed())
-    }
-
-    #[function(name = "getOwnPropertyDescriptor")]
-    fn get_own_property_descriptor(
-        vm: &mut Vm,
-        host: &mut dyn Host,
-        args: &[Value],
-    ) -> Result<Invocation, VmError> {
-        vm.get_own_property_descriptor(host, args)
-    }
-
-    #[function(name = "apply")]
-    fn apply(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        vm.reflect_call(host, args, false)
-    }
-
-    #[function(name = "construct")]
-    fn construct(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        vm.reflect_call(host, args, true)
-    }
-}
-
-#[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
-pub(crate) mod object_members {
-    use super::*;
-
-    const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
-    pub(crate) const ROOTS: &[RootSpec] = &[
-        RootSpec::new("object.prototype", RootKind::Plain, None).fixed_parent(),
-        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
-            .fixed("object.prototype"),
-    ];
-    pub(crate) const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-        CONSTRUCTOR,
-        |vm, _, args, _| vm.construct_object(&args),
-        |vm, _, args, prototype| match prototype {
-            Some(prototype) => Ok(Invocation::Value(Value::Object(
-                vm.heap.alloc_plain_with(Some(prototype)),
-            ))),
-            None => vm.construct_object(&args),
-        },
-    )];
-
-    pub(crate) fn install(vm: &mut Vm, _: &Value) {
-        let constructor = vm.builtins.get(ROOT);
-        let prototype = vm.builtins.get("object.prototype");
-        link_constructor(vm, constructor, prototype);
-        install_members(vm, constructor, prototype);
-    }
-
-    static_calls! {
-        assign => |vm, host, args, _| vm.object_assign(host, &args);
-        is => |_, _, args, _| Ok(Invocation::Value(Value::Bool(ops::same_value(
-            args.first().unwrap_or(&Value::Undefined), args.get(1).unwrap_or(&Value::Undefined),
-        ))));
-        keys => |vm, host, args, _| vm.object_keys(host, &args);
-        create => |vm, host, args, _| vm.object_create(host, &args);
-        getPrototypeOf => |vm, _, args, _| vm.get_prototype_of(&args, false);
-        setPrototypeOf => |vm, _, args, _| vm.set_prototype_of(&args, false);
-        getOwnPropertyDescriptor => |vm, host, args, _| vm.get_own_property_descriptor(host, &args);
-        getOwnPropertyDescriptors => |vm, host, args, _| vm.get_own_property_descriptors(host, &args);
-        defineProperty => |vm, host, args, _| vm.define_property_builtin(host, &args, false);
-        defineProperties => |vm, host, args, _| {
-            let Some(Value::Object(target)) = args.first() else {
-                return vm.throw_type_error("Object.defineProperties requires an object target");
-            };
-            vm.define_properties(host, *target, args.get(1))
-        };
-        preventExtensions => |vm, _, args, _| vm.prevent_extensions_builtin_impl(&args, false);
-        isExtensible => |vm, _, args, _| vm.is_extensible_builtin_impl(&args, false);
-        seal => |vm, host, args, _| vm.set_integrity(host, &args, IntegrityLevel::Sealed);
-        isSealed => |vm, host, args, _| vm.test_integrity(host, &args, IntegrityLevel::Sealed);
-        freeze => |vm, host, args, _| vm.set_integrity(host, &args, IntegrityLevel::Frozen);
-        isFrozen => |vm, host, args, _| vm.test_integrity(host, &args, IntegrityLevel::Frozen);
-    }
-
-    prototype_calls! {
-        hasOwnProperty => |vm, host, args, receiver| {
-            let id = match *receiver {
-                Value::Object(id) if vm.heap.is_environment(id) == Some(false) => id,
-                _ => return vm.throw_type_error("incompatible Object.prototype receiver"),
-            };
-            let key = match vm.coerce_property_key(host, args.first().unwrap_or(&Value::Undefined))? {
-                Ok(key) => key,
-                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-            };
-            match vm.own_descriptor(host, id, key.borrowed())? {
-                Ok(descriptor) => Ok(Invocation::Value(Value::Bool(descriptor.is_some()))),
-                Err(error) => Ok(Invocation::Thrown(error)),
-            }
-        };
-        valueOf => |vm, _, _, receiver| match *receiver {
-            Value::Object(id) if vm.heap.is_environment(id) == Some(false) => {
-                Ok(Invocation::Value(Value::Object(id)))
-            }
-            _ => vm.throw_type_error("incompatible Object.prototype receiver"),
-        };
-        toString => |vm, _, _, receiver| match receiver {
-            Value::Object(id) if vm.heap.is_environment(*id) == Some(true) => {
-                vm.throw_type_error("incompatible Object.prototype receiver")
-            }
-            Value::Object(id) => Ok(Invocation::Value(Value::String(
-                format!("[object {}]", vm.object_tag(*id)?).into(),
-            ))),
-            _ => Ok(Invocation::Value(Value::String("[object Undefined]".into()))),
-        };
-    }
-}
-
-#[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
-pub(crate) mod promise_members {
-    use super::*;
-
-    const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
-    const SPECIES: IntrinsicKey = IntrinsicKey::new(NAME, Slot::StaticSymbolGetter, "species");
-    pub(crate) const THEN: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Prototype, "then");
-    pub(crate) const ROOTS: &[RootSpec] = &[
-        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
-            .fixed("promise.prototype"),
-        RootSpec::new("promise.prototype", RootKind::Plain, OBJECT_PARENT),
-    ];
-    pub(crate) const GLOBAL: &[IntrinsicDef] = &[
-        IntrinsicDef::constructor(
-            CONSTRUCTOR,
-            |vm, _, _, _| vm.throw_type_error("Promise constructor requires new"),
-            |vm, host, args, prototype| vm.construct_promise(host, args, prototype),
-        ),
-        IntrinsicDef::call(SPECIES, |_, _, _, receiver| {
-            Ok(Invocation::Value(receiver.clone()))
-        }),
-    ];
-
-    pub(crate) fn install(vm: &mut Vm, _: &Value) {
-        let constructor = vm.builtins.get(ROOT);
-        let prototype = vm.builtins.get("promise.prototype");
-        install_getter(
-            vm,
-            constructor,
-            PropertyKey::Symbol(SPECIES_SYMBOL),
-            SPECIES,
-        );
-        install_members(vm, constructor, prototype);
-        define_builtin_data(
-            vm,
-            prototype,
-            "constructor",
-            Value::Object(constructor),
-            Attributes::METHOD,
-        );
-        define_builtin_data(
-            vm,
-            constructor,
-            "prototype",
-            Value::Object(prototype),
-            Attributes::FIXED,
-        );
-    }
-
-    static_calls! {
-        resolve | reject | all | allSettled | race | any as key => |vm, host, args, receiver| {
-            if !matches!(receiver, Value::Object(id) if *id == vm.builtins.get(ROOT)) {
-                return vm.throw_type_error("incompatible Promise receiver");
-            }
-            vm.call_promise_static(host, receiver, key, args)
-        };
-    }
-
-    prototype_calls! {
-        then | catch | finally as key => |vm, host, args, receiver| {
-            let Value::Object(id) = receiver else {
-                return vm.throw_type_error("incompatible Promise receiver");
-            };
-            if vm.heap.get(*id)?.as_promise().is_none() {
-                return vm.throw_type_error("incompatible Promise receiver");
-            }
-            vm.call_promise_method(host, *id, key, args)
-        };
-    }
-}
-
-enum Dispatch<'a> {
+pub(crate) enum Dispatch<'a> {
     Script {
         func_id: u32,
         env: ObjectId,
@@ -666,7 +14,7 @@ enum Dispatch<'a> {
     },
 }
 
-enum Constructor {
+pub(crate) enum Constructor {
     Script { func_id: u32, env: ObjectId },
     Native(CallableTarget),
 }
@@ -750,7 +98,10 @@ impl Vm {
         }
     }
 
-    fn constructor(&self, dispatch: Option<Dispatch<'_>>) -> Result<Option<Constructor>, VmError> {
+    pub(crate) fn constructor(
+        &self,
+        dispatch: Option<Dispatch<'_>>,
+    ) -> Result<Option<Constructor>, VmError> {
         Ok(match dispatch {
             Some(Dispatch::Script { func_id, env })
                 if func_id != self.build.script
@@ -766,7 +117,7 @@ impl Vm {
         })
     }
 
-    fn is_constructor(&self, value: &Value) -> Result<bool, VmError> {
+    pub(crate) fn is_constructor(&self, value: &Value) -> Result<bool, VmError> {
         let dispatch = match self.classify(value)? {
             Some(Dispatch::Bound(bound)) => self.classify(&Value::Object(bound.target))?,
             dispatch => dispatch,
@@ -838,7 +189,7 @@ impl Vm {
         }
     }
 
-    fn reflect_call(
+    pub(crate) fn reflect_call(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -904,7 +255,7 @@ impl Vm {
         Ok(Ok(values))
     }
 
-    fn classify(&self, value: &Value) -> Result<Option<Dispatch<'_>>, VmError> {
+    pub(crate) fn classify(&self, value: &Value) -> Result<Option<Dispatch<'_>>, VmError> {
         let Value::Object(id) = value else {
             return Ok(None);
         };
@@ -948,7 +299,7 @@ impl Vm {
         }
     }
 
-    fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
+    pub(crate) fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
         Ok(match self.heap.get(self.heap.proxy_target(id)?)? {
             Object::Boxed { primitive, .. } => match primitive {
                 BoxedPrimitive::String(_) => "String",
@@ -1207,7 +558,7 @@ impl Vm {
         }
     }
 
-    fn object_create(
+    pub(crate) fn object_create(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1226,7 +577,7 @@ impl Vm {
         }
     }
 
-    fn prevent_extensions_builtin_impl(
+    pub(crate) fn prevent_extensions_builtin_impl(
         &mut self,
         args: &[Value],
         reflect: bool,
@@ -1245,7 +596,7 @@ impl Vm {
         }))
     }
 
-    fn is_extensible_builtin_impl(
+    pub(crate) fn is_extensible_builtin_impl(
         &mut self,
         args: &[Value],
         reflect: bool,
@@ -1260,7 +611,11 @@ impl Vm {
         Ok(Invocation::Value(Value::Bool(extensible)))
     }
 
-    fn get_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
+    pub(crate) fn get_prototype_of(
+        &mut self,
+        args: &[Value],
+        reflect: bool,
+    ) -> Result<Invocation, VmError> {
         let Some(Value::Object(target)) = args.first() else {
             if !reflect
                 && let Some(prototype) = args
@@ -1283,7 +638,11 @@ impl Vm {
         ))
     }
 
-    fn set_prototype_of(&mut self, args: &[Value], reflect: bool) -> Result<Invocation, VmError> {
+    pub(crate) fn set_prototype_of(
+        &mut self,
+        args: &[Value],
+        reflect: bool,
+    ) -> Result<Invocation, VmError> {
         let target = args.first().unwrap_or(&Value::Undefined);
         if reflect && !matches!(target, Value::Object(_)) {
             return self.throw_type_error("Reflect.setPrototypeOf requires an object target");
@@ -1312,7 +671,7 @@ impl Vm {
         }
     }
 
-    fn set_integrity(
+    pub(crate) fn set_integrity(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1357,7 +716,7 @@ impl Vm {
         Ok(Invocation::Value(target.clone()))
     }
 
-    fn test_integrity(
+    pub(crate) fn test_integrity(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1395,7 +754,11 @@ impl Vm {
         result(true)
     }
 
-    fn object_keys(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+    pub(crate) fn object_keys(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
         let keys = match args.first() {
             None | Some(Value::Undefined | Value::Null) => {
                 return self.throw_type_error("Object.keys requires a non-nullish value");
@@ -1414,7 +777,7 @@ impl Vm {
         )))
     }
 
-    fn get_own_property_descriptor(
+    pub(crate) fn get_own_property_descriptor(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1436,7 +799,7 @@ impl Vm {
         }
     }
 
-    fn descriptor_object(
+    pub(crate) fn descriptor_object(
         &mut self,
         property: Property,
         attributes: Attributes,
@@ -1468,7 +831,7 @@ impl Vm {
         Ok(result)
     }
 
-    fn get_own_property_descriptors(
+    pub(crate) fn get_own_property_descriptors(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1495,7 +858,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(result)))
     }
 
-    fn define_property_builtin(
+    pub(crate) fn define_property_builtin(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1527,7 +890,7 @@ impl Vm {
         }
         self.apply_property_update(host, *target, key, update)
     }
-    fn object_assign(
+    pub(crate) fn object_assign(
         &mut self,
         host: &mut dyn Host,
         args: &[Value],
@@ -1565,7 +928,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(target)))
     }
 
-    fn define_properties(
+    pub(crate) fn define_properties(
         &mut self,
         host: &mut dyn Host,
         target: ObjectId,
@@ -1679,7 +1042,7 @@ impl Vm {
         Ok(Ok(update))
     }
 
-    fn apply_property_update(
+    pub(crate) fn apply_property_update(
         &mut self,
         host: &mut dyn Host,
         target: ObjectId,
@@ -1726,7 +1089,7 @@ impl Vm {
         Ok(Ok(self.heap.apply_descriptor(target, key, update)?))
     }
 
-    fn construct_error(
+    pub(crate) fn construct_error(
         &mut self,
         host: &mut dyn Host,
         name: &str,
@@ -1789,7 +1152,7 @@ impl Vm {
             .define_data(id, "stack", Value::String(stack), Attributes::METHOD)?;
         Ok(Value::Object(id))
     }
-    fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
+    pub(crate) fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
         let error = self.alloc_error(
             self.builtins.get("aggregateerror.prototype"),
             "AggregateError",
@@ -1804,7 +1167,7 @@ impl Vm {
         Ok(Value::Object(id))
     }
 
-    fn construct_promise(
+    pub(crate) fn construct_promise(
         &mut self,
         host: &mut dyn Host,
         args: Vec<Value>,
@@ -1832,7 +1195,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(promise)))
     }
 
-    fn symbol_static(
+    pub(crate) fn symbol_static(
         &mut self,
         receiver: &Value,
         call: impl FnOnce(&mut Self, Vec<Value>) -> Result<Invocation, VmError>,
@@ -1844,7 +1207,11 @@ impl Vm {
         call(self, args)
     }
 
-    fn symbol_method(&mut self, receiver: &Value, method: &str) -> Result<Invocation, VmError> {
+    pub(crate) fn symbol_method(
+        &mut self,
+        receiver: &Value,
+        method: &str,
+    ) -> Result<Invocation, VmError> {
         let id = match receiver {
             Value::Symbol(id) => *id,
             Value::Object(id) => match self.heap.get(*id)? {
@@ -1873,7 +1240,7 @@ impl Vm {
     }
 
     /// `Symbol(desc)`: every call produces a fresh identity.
-    fn symbol_constructor(
+    pub(crate) fn symbol_constructor(
         &mut self,
         host: &mut dyn Host,
         args: Vec<Value>,
@@ -1889,7 +1256,11 @@ impl Vm {
         Ok(Invocation::Value(Value::Symbol(id)))
     }
 
-    fn symbol_for(&mut self, host: &mut dyn Host, args: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn symbol_for(
+        &mut self,
+        host: &mut dyn Host,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let key = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
@@ -1898,7 +1269,7 @@ impl Vm {
         Ok(Invocation::Value(Value::Symbol(id)))
     }
 
-    fn symbol_key_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn symbol_key_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let Some(Value::Symbol(id)) = args.first() else {
             return self.throw_type_error("Symbol.keyFor requires a Symbol");
         };
@@ -1913,7 +1284,7 @@ impl Vm {
         }))
     }
 
-    fn queue_microtask(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn queue_microtask(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
         let function = args.first().cloned().unwrap_or(Value::Undefined);
         if !self.is_callable(&function) {
             return self.throw_type_error("queueMicrotask argument is not a function");
@@ -1933,7 +1304,7 @@ impl Vm {
                 if native.target() == CallableTarget::Intrinsic(*THEN)))
     }
 
-    fn call_promise_static(
+    pub(crate) fn call_promise_static(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -1966,7 +1337,7 @@ impl Vm {
         }
     }
 
-    fn call_promise_method(
+    pub(crate) fn call_promise_method(
         &mut self,
         host: &mut dyn Host,
         receiver: ObjectId,
@@ -2025,7 +1396,7 @@ impl Vm {
         }
     }
 
-    fn invoke_promise_then(
+    pub(crate) fn invoke_promise_then(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -2037,7 +1408,7 @@ impl Vm {
         }
     }
 
-    fn promise_species(
+    pub(crate) fn promise_species(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -2061,7 +1432,7 @@ impl Vm {
         }
     }
 
-    fn new_promise_capability(
+    pub(crate) fn new_promise_capability(
         &mut self,
         host: &mut dyn Host,
         species: &Value,
@@ -2096,14 +1467,14 @@ impl Vm {
         Ok(Err(self.type_error("invalid Promise species capability")?))
     }
 
-    fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
+    pub(crate) fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
         Value::Object(self.heap.alloc(Object::PromiseCallback {
             object: PlainObject::new(self.heap.function_prototype),
             callback,
         }))
     }
 
-    fn call_promise_callback(
+    pub(crate) fn call_promise_callback(
         &mut self,
         host: &mut dyn Host,
         id: ObjectId,
@@ -2153,7 +1524,7 @@ impl Vm {
         }
     }
 
-    fn promise_resolve_with(
+    pub(crate) fn promise_resolve_with(
         &mut self,
         host: &mut dyn Host,
         species: &Value,
@@ -2178,11 +1549,11 @@ impl Vm {
         }
     }
 
-    fn handler_arg(&self, value: Option<&Value>) -> Option<Value> {
+    pub(crate) fn handler_arg(&self, value: Option<&Value>) -> Option<Value> {
         value.filter(|value| self.is_callable(value)).cloned()
     }
 
-    fn combine(
+    pub(crate) fn combine(
         &mut self,
         host: &mut dyn Host,
         receiver: &Value,
@@ -2291,7 +1662,7 @@ impl Vm {
         self.alloc_resolution_pair(promise, false, true)
     }
 
-    fn alloc_resolution_pair(
+    pub(crate) fn alloc_resolution_pair(
         &mut self,
         promise: ObjectId,
         direct: bool,
@@ -2364,7 +1735,7 @@ impl Vm {
         }
     }
 
-    fn resolution_called(&self, id: ObjectId) -> Result<bool, VmError> {
+    pub(crate) fn resolution_called(&self, id: ObjectId) -> Result<bool, VmError> {
         match self.heap.get(id)? {
             Object::Resolution(resolution) => Ok(resolution.called),
             _ => Err(VmError::InvalidState(format!(
@@ -2373,7 +1744,7 @@ impl Vm {
         }
     }
 
-    fn mark_resolution_called(&mut self, id: ObjectId) -> Result<(), VmError> {
+    pub(crate) fn mark_resolution_called(&mut self, id: ObjectId) -> Result<(), VmError> {
         if let Object::Resolution(resolution) = self.heap.get_mut(id)? {
             resolution.called = true;
         }
@@ -2520,7 +1891,7 @@ impl Vm {
         Ok(())
     }
 
-    fn settlement_record(
+    pub(crate) fn settlement_record(
         &mut self,
         status: &str,
         payload: (&str, Value),

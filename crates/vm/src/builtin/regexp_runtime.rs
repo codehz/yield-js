@@ -1,8 +1,8 @@
 //! RegExp objects and matching over JavaScript UTF-16 code units.
 use std::borrow::Cow;
 
-use crate::builtin_globals::Owner;
-use crate::builtins::{RootKind, RootSpec};
+use crate::builtin::globals::Owner;
+use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;

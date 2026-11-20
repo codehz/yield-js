@@ -88,7 +88,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 
 - Edition 2024. Module docs (`//!`) state invariants; match that voice when adding a module. Code comments are English. README and `docs/design.md` are Chinese.
 - Small public surface. Crate internals are `pub(crate)`. New opcodes go in `yield_vm::bytecode::Instr`, then `compiler/src/instr.rs` (uses/defs/throws/rewrite) and the lowerer. CFG and slot allocation must not match on instruction shape.
-- Incompatible bytecode changes bump `BYTECODE_VERSION` (`crates/vm/src/bytecode.rs`). Snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION` (`crates/vm/src/snapshot.rs`). Do not bump them together unless both contracts changed. `Build::finalize` sets `build_id` from `compute_id`; content changes already reject old snapshots.
+- Incompatible bytecode changes bump `BYTECODE_VERSION` (`crates/vm/src/bytecode.rs`). Snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION` (`crates/vm/src/snapshot/record.rs`). Do not bump them together unless both contracts changed. `Build::finalize` sets `build_id` from `compute_id`; content changes already reject old snapshots.
 - Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingOperation`, `Host`, `HostFault`, `UnknownOperation`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host binding functions return `JsResult` (`JsError::Throw` / `JsError::Fault`); host scheduling failures use `HostFault`. `Host::report_error` receives a `JsValue`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
@@ -103,9 +103,9 @@ Where to edit:
 | Syntax subset | `compiler/src/lower` (worklist, not recursive borrow), `frontend.rs`; reject with `unsupported()` |
 | Liveness / which slots survive await | `analyze.rs`, `allocate.rs` |
 | New opcode | `vm/src/bytecode.rs`, `vm/src/exec.rs` (and `ops.rs` if it is a value op), `compiler/src/instr.rs`, lowerer |
-| New heap kind | `vm/src/heap.rs` `write_edges`; snapshot reachability uses that list only |
-| Snapshot or restore checks | `vm/src/snapshot.rs`; add a rejection test in `poc/tests/e2e.rs` |
-| Host protocol | `vm/src/host.rs`, `vm/src/binding.rs`; implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
+| New heap kind | `vm/src/heap/object.rs` `write_edges` (included into `heap/mod.rs`); snapshot reachability uses that list only |
+| Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `poc/tests/e2e.rs` |
+| Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
 
 Easy to break:
@@ -124,7 +124,7 @@ Easy to break:
 - `crates/vm/src/lib.rs` — re-exports: `Build`, `Vm`, `Host`, `Snapshot`, `Value`, `VmError`
 - `crates/vm/src/bytecode.rs` — `Instr`, `ResumeEntry`, `ExceptionHandler`, `Build::validate`
 - `crates/vm/src/vm.rs` — `get_export`, `start`, `run_until_idle`, `complete_operation`
-- `crates/vm/src/snapshot.rs` — `Vm::snapshot`, `Vm::restore`, JSON codec
+- `crates/vm/src/snapshot/` — `Vm::snapshot`, `Vm::restore`, JSON codec
 - `crates/poc/src/case.rs` — `// @` directive runner
 - `crates/poc/build.rs` — generates `OUT_DIR/cases.rs`
 - `crates/poc/src/main.rs` — the only binary; embedded design-doc example

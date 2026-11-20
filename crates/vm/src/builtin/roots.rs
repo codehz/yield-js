@@ -71,7 +71,7 @@ impl BuiltinRoots {
     }
 
     pub fn load(roots: &BTreeMap<String, ObjectId>, heap: &Heap) -> Result<Self, VmError> {
-        let specs = || crate::builtin_globals::root_groups().flatten();
+        let specs = || crate::builtin::globals::root_groups().flatten();
         let expected = specs().count();
         if roots.len() != expected {
             return Err(VmError::InvalidSnapshot(format!(
@@ -158,7 +158,7 @@ impl BuiltinRoots {
 
 impl Vm {
     pub(crate) fn allocate_builtin_roots(&mut self) {
-        let specs = || crate::builtin_globals::root_groups().flatten();
+        let specs = || crate::builtin::globals::root_groups().flatten();
         for spec in specs() {
             let id = match spec.kind {
                 RootKind::Plain => self.heap.alloc_plain_with(None),

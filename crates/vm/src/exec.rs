@@ -4,8 +4,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use crate::builtin_roots::{RootKind, RootSpec};
-use crate::builtins::is_callable_object;
+use crate::builtin::is_callable_object;
+use crate::builtin::roots::{RootKind, RootSpec};
+use crate::builtin::string::utf16_unit_string;
 use crate::bytecode::{
     BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
     UnaryOp,
@@ -21,7 +22,6 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
-use crate::string::utf16_unit_string;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 

@@ -56,30 +56,21 @@
 
 extern crate self as yield_vm;
 
-mod array;
 pub mod binding;
-mod builtin_globals;
-mod builtin_roots;
-mod builtins;
+mod builtin;
+use builtin as builtins;
 pub mod bytecode;
-mod collections;
 pub mod error;
 mod exec;
 mod frame;
 pub mod heap;
 pub mod host;
 mod intrinsic;
-mod json;
-mod math;
-mod number;
 mod ops;
-mod proxy;
 mod regexp;
-mod regexp_runtime;
 mod resolve;
 mod runtime;
 pub mod snapshot;
-mod string;
 pub mod value;
 mod vm;
 

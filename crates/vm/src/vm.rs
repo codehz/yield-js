@@ -3,7 +3,7 @@ use crate::binding::{
     Bindings, CallCx, ExportDecl, ExportId, GuestOutcome, GuestResume, HostStep, JsError, JsValue,
     NativeTarget,
 };
-use crate::builtins::BuiltinRoots;
+use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -149,7 +149,7 @@ impl Vm {
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
-            random_state: crate::math::RANDOM_SEED,
+            random_state: crate::builtin::math::RANDOM_SEED,
             script_env: None,
         }
     }
@@ -1024,7 +1024,7 @@ impl Vm {
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             builtins,
-            random_state: crate::math::RANDOM_SEED,
+            random_state: crate::builtin::math::RANDOM_SEED,
             script_env,
         }
     }

@@ -1,8 +1,8 @@
 //! Proxy internal methods. Traps may mutate the target, so invariants are
 //! checked against descriptors obtained after calling the trap.
 
-use crate::builtin_globals::Owner;
-use crate::builtins::{ROOT_FUNCTION_PROTOTYPE, ROOT_PROXY, RootKind, RootSpec};
+use crate::builtin::globals::Owner;
+use crate::builtin::{ROOT_FUNCTION_PROTOTYPE, ROOT_PROXY, RootKind, RootSpec};
 use crate::error::VmError;
 use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, PlainObject, Property};
 use crate::host::Host;
