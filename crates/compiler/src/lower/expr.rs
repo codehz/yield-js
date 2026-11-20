@@ -6,8 +6,8 @@ use oxc::span::GetSpan;
 use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
+use yield_vm::{BindingId, JsString};
 
 use super::{FunctionSource, Lowerer, THIS_BINDING};
 use crate::emit::Reg;
@@ -38,14 +38,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_constant(Constant::Number(literal.value))
             }
             Expression::StringLiteral(literal) => {
-                let value = literal.value.as_str().ok_or_else(|| {
-                    unsupported(
-                        self.source_text(),
-                        literal.span,
-                        "string with a lone surrogate",
-                    )
-                })?;
-                self.emit_constant(Constant::String(value.to_owned()))
+                let text = self.string_literal_text(literal)?;
+                self.emit_constant(Constant::String(text))
             }
             Expression::RegExpLiteral(literal) => {
                 let source = literal.regex.pattern.text.as_str();
@@ -60,7 +54,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 let dst = self.alloc_reg()?;
                 self.emit(Instr::NewRegExp {
                     dst: self.slot(dst),
-                    source: source.to_owned(),
+                    source: source.into(),
                     flags,
                 });
                 Ok(dst)
@@ -189,34 +183,45 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             )
         })?;
         let first_text = self.template_element_text(first)?;
-        let mut acc = self.emit_constant(Constant::String(first_text.to_owned()))?;
+        let mut acc = self.emit_constant(Constant::String(first_text))?;
         for (index, expression) in template.expressions.iter().enumerate() {
             let value = self.compile_expression(expression)?;
             let value = self.emit_to_string(value)?;
             acc = self.emit_string_add(acc, value)?;
-            // empty so the accumulator stays a plain value.
+            // Skip empty text chunks; the accumulator is already a string.
             let tail = &template.quasis[index + 1];
             let tail_text = self.template_element_text(tail)?;
             if !tail_text.is_empty() {
-                let text = self.emit_constant(Constant::String(tail_text.to_owned()))?;
+                let text = self.emit_constant(Constant::String(tail_text))?;
                 acc = self.emit_string_add(acc, text)?;
             }
         }
         Ok(acc)
     }
 
-    /// `cooked` is the only accepted text source: no slicing the raw source,
-    /// no re-decoding of escapes.
     fn template_element_text(
         &self,
         element: &'ast TemplateElement<'ast>,
-    ) -> Result<&'ast str, CompileError> {
-        element
-            .value
-            .cooked
-            .as_ref()
-            .and_then(|cooked| cooked.as_str())
-            .ok_or_else(|| unsupported(self.source_text(), element.span, "invalid template escape"))
+    ) -> Result<JsString, CompileError> {
+        let span = element.span;
+        // Oxc's quasi span excludes the backticks and interpolation delimiters.
+        if element.value.cooked.is_some()
+            && let Some(text) = decode_string_body(span.source_text(self.source_text()), true)
+        {
+            return Ok(text);
+        }
+        Err(unsupported(
+            self.source_text(),
+            span,
+            "invalid template escape",
+        ))
+    }
+
+    fn string_literal_text(&self, literal: &StringLiteral<'_>) -> Result<JsString, CompileError> {
+        let span = literal.span;
+        let quoted = span.source_text(self.source_text());
+        decode_string_body(&quoted[1..quoted.len() - 1], false)
+            .ok_or_else(|| unsupported(self.source_text(), span, "invalid string escape"))
     }
 
     fn emit_to_string(&mut self, src: Reg) -> Result<Reg, CompileError> {
@@ -253,15 +258,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             })?;
             let value = self.compile_expression(expression)?;
             self.emit_to_property_key(value, None)
-        } else if let Some(name) = key.static_name() {
-            let name = name.into_cow_str().ok_or_else(|| {
-                unsupported(
-                    self.source_text(),
-                    key.span(),
-                    "property key with a lone surrogate",
-                )
-            })?;
-            self.emit_constant(Constant::String(name.into_owned()))
+        } else if let PropertyKey::StringLiteral(literal) = key {
+            let text = self.string_literal_text(literal)?;
+            self.emit_constant(Constant::String(text))
+        } else if let Some(name) = key.static_name().and_then(|name| name.into_cow_str()) {
+            self.emit_constant(Constant::String(name.as_ref().into()))
         } else {
             Err(unsupported(
                 self.source_text(),
@@ -457,7 +458,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.check_tdz(binding, name, identifier.span)?;
             }
             if let Some(folded) = self.session.names().typeof_fold(&self.env, name) {
-                return self.emit_constant(Constant::String(folded.to_owned()));
+                return self.emit_constant(Constant::String(folded.into()));
             }
         }
         let src = self.compile_expression(&expression.argument)?;
@@ -639,7 +640,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
         let key = match member {
             MemberExpression::StaticMemberExpression(member) => {
-                self.emit_constant(Constant::String(member.property.name.as_str().to_owned()))?
+                self.emit_constant(Constant::String(member.property.name.as_str().into()))?
             }
             MemberExpression::ComputedMemberExpression(member) => {
                 self.compile_expression(&member.expression)?
@@ -1096,7 +1097,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         let object = self.compile_expression(&member.object)?;
-        let key = self.emit_constant(Constant::String(member.property.name.as_str().to_owned()))?;
+        let key = self.emit_constant(Constant::String(member.property.name.as_str().into()))?;
         Ok((object, key))
     }
 
@@ -1293,4 +1294,70 @@ fn binary_assignment_operator(op: AssignmentOperator) -> BinaryOp {
         AssignmentOperator::BitwiseXOR => BinaryOp::BitXor,
         AssignmentOperator::BitwiseAnd => BinaryOp::BitAnd,
     }
+}
+
+/// Decode the body of an Oxc-validated string or template token. Unicode
+/// escape values go directly to UTF-16 so surrogate code units survive.
+fn decode_string_body(body: &str, template: bool) -> Option<JsString> {
+    if !body.contains('\\') && (!template || !body.contains('\r')) {
+        return Some(body.into());
+    }
+
+    let mut units = Vec::new();
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' if template => {
+                let _ = chars.next_if_eq(&'\n');
+                units.push(b'\n'.into());
+            }
+            '\\' => {
+                let value = match chars.next()? {
+                    '\r' => {
+                        let _ = chars.next_if_eq(&'\n');
+                        continue;
+                    }
+                    '\n' | '\u{2028}' | '\u{2029}' => continue,
+                    'b' => 0x08,
+                    'f' => 0x0c,
+                    'n' => 0x0a,
+                    'r' => 0x0d,
+                    't' => 0x09,
+                    'v' => 0x0b,
+                    '0' if !chars.peek().is_some_and(char::is_ascii_digit) => 0,
+                    '0'..='9' => return None, // Legacy escapes are invalid in modules.
+                    'u' if chars.next_if_eq(&'{').is_some() => {
+                        let mut value = chars.next()?.to_digit(16)?;
+                        loop {
+                            let digit = chars.next()?;
+                            if digit == '}' {
+                                break;
+                            }
+                            value = value * 16 + digit.to_digit(16)?;
+                            if value > 0x10ffff {
+                                return None;
+                            }
+                        }
+                        value
+                    }
+                    escape @ ('x' | 'u') => {
+                        let count = if escape == 'x' { 2 } else { 4 };
+                        (0..count).try_fold(0, |value, _| {
+                            Some(value * 16 + chars.next()?.to_digit(16)?)
+                        })?
+                    }
+                    ch => ch as u32,
+                };
+                if value <= 0xffff {
+                    units.push(value as u16);
+                } else {
+                    let pair = value - 0x10000;
+                    units.push(0xd800 | (pair >> 10) as u16);
+                    units.push(0xdc00 | (pair & 0x3ff) as u16);
+                }
+            }
+            ch => units.extend_from_slice(ch.encode_utf16(&mut [0; 2])),
+        }
+    }
+    Some(JsString::from_units(units))
 }

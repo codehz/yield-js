@@ -12,9 +12,11 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use crate::JsString;
 use crate::error::VmError;
-use crate::ops::{array_index, canonical_index};
+use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
+use crate::string::{utf16_len, utf16_unit, utf16_unit_string};
 use crate::value::{
     BindingId, ContinuationId, NativeKey, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
 };
@@ -27,6 +29,16 @@ pub(crate) const TO_PRIMITIVE_SYMBOL: SymbolId = 1;
 pub(crate) const TO_PRIMITIVE_DESCRIPTION: &str = "Symbol.toPrimitive";
 pub(crate) const SPECIES_SYMBOL: SymbolId = 2;
 pub(crate) const SPECIES_DESCRIPTION: &str = "Symbol.species";
+pub(crate) const MATCH_SYMBOL: SymbolId = 3;
+pub(crate) const MATCH_DESCRIPTION: &str = "Symbol.match";
+pub(crate) const MATCH_ALL_SYMBOL: SymbolId = 4;
+pub(crate) const MATCH_ALL_DESCRIPTION: &str = "Symbol.matchAll";
+pub(crate) const REPLACE_SYMBOL: SymbolId = 5;
+pub(crate) const REPLACE_DESCRIPTION: &str = "Symbol.replace";
+pub(crate) const SEARCH_SYMBOL: SymbolId = 6;
+pub(crate) const SEARCH_DESCRIPTION: &str = "Symbol.search";
+pub(crate) const SPLIT_SYMBOL: SymbolId = 7;
+pub(crate) const SPLIT_DESCRIPTION: &str = "Symbol.split";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,7 +105,8 @@ pub struct PromiseObject {
     pub locked: bool,
     /// Promise whose settlement this one is adopting, when `locked`.
     pub adopting: Option<ObjectId>,
-    pub props: PropertyTable<String, Property>,
+    #[serde(with = "property_pairs")]
+    pub props: PropertyTable<JsString, Property>,
     /// Symbol-keyed own properties, kept beside the string table.
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Promise instances share one identity.
@@ -111,11 +124,11 @@ pub struct NativeObject {
 pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
 
 type PropertyTables<'a> = (
-    &'a PropertyTable<String, Property>,
+    &'a PropertyTable<JsString, Property>,
     &'a PropertyTable<SymbolId, Property>,
 );
 type PropertyTablesMut<'a> = (
-    &'a mut PropertyTable<String, Property>,
+    &'a mut PropertyTable<JsString, Property>,
     &'a mut PropertyTable<SymbolId, Property>,
 );
 
@@ -124,6 +137,27 @@ struct OrderedProperty<V> {
     ordinal: usize,
     value: V,
     attributes: Attributes,
+}
+
+mod property_pairs {
+    use super::*;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        table: &PropertyTable<JsString, Property>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        crate::snapshot::ordered_pairs::serialize(&table.0, serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PropertyTable<JsString, Property>, D::Error> {
+        crate::snapshot::ordered_pairs::deserialize(deserializer).map(PropertyTable)
+    }
+}
+
+fn array_index(key: PropertyKeyRef<'_>) -> Option<usize> {
+    canonical_index_key(key).filter(|&index| index < u32::MAX as usize)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,7 +283,7 @@ impl<K: Ord, V> PropertyTable<K, V> {
 
 fn collect_own_keys<'a, V>(
     keys: &mut Vec<((u8, usize), PropertyKeyRef<'a>)>,
-    props: &'a PropertyTable<String, V>,
+    props: &'a PropertyTable<JsString, V>,
     symbols: &'a PropertyTable<SymbolId, V>,
     enumerable_strings_only: bool,
 ) {
@@ -262,11 +296,12 @@ fn collect_own_keys<'a, V>(
             .iter()
             .filter(|(_, property)| !enumerable_strings_only || property.attributes.enumerable)
             .map(|(key, property)| {
+                let key = PropertyKeyRef::JsString(key.as_units());
                 let order = match array_index(key) {
                     Some(index) => (0, index),
                     None => (2, property.ordinal),
                 };
-                (order, PropertyKeyRef::String(key))
+                (order, key)
             }),
     );
     if !enumerable_strings_only {
@@ -398,7 +433,7 @@ impl DescriptorUpdate {
                         )
                     }
                     (OwnProperty::StringIndex(unit), Value::String(text)) => {
-                        text.encode_utf16().eq([unit])
+                        text.as_units() == [unit]
                     }
                     _ => false,
                 })
@@ -413,20 +448,12 @@ pub(crate) enum OwnProperty<'a> {
 }
 
 impl OwnProperty<'_> {
-    pub(crate) fn has_unrepresentable_value(&self) -> bool {
-        matches!(self, Self::StringIndex(unit) if is_surrogate(*unit))
-    }
-
     pub(crate) fn into_owned(self) -> Property {
         match self {
             Self::Stored(property, _) => property.clone(),
             Self::ArrayLength(length, _) => Property::Data(Value::Number(length as f64)),
             Self::StringLength(length) => Property::Data(Value::Number(length as f64)),
-            Self::StringIndex(unit) => Property::Data(Value::String(
-                char::from_u32(u32::from(unit))
-                    .expect("caller checked that the UTF-16 unit is representable")
-                    .to_string(),
-            )),
+            Self::StringIndex(unit) => Property::Data(Value::String(utf16_unit_string(unit))),
         }
     }
 
@@ -455,7 +482,8 @@ impl OwnProperty<'_> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlainObject {
-    pub props: PropertyTable<String, Property>,
+    #[serde(with = "property_pairs")]
+    pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype.
     pub prototype: Option<ObjectId>,
@@ -479,7 +507,8 @@ pub struct ArrayObject {
     pub(crate) length: usize,
     pub(crate) length_writable: bool,
     /// Own properties other than `length` and canonical indices.
-    pub props: PropertyTable<String, Property>,
+    #[serde(with = "property_pairs")]
+    pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
     extensible: bool,
@@ -557,7 +586,8 @@ impl ArrayObject {
 pub struct FunctionObject {
     pub func_id: u32,
     pub env: ObjectId,
-    pub props: PropertyTable<String, Property>,
+    #[serde(with = "property_pairs")]
+    pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     /// Internal prototype. Not the constructable `.prototype` property.
     pub prototype: Option<ObjectId>,
@@ -580,7 +610,8 @@ pub struct EnvironmentObject {
 pub struct BuiltinStatic {
     pub name: String,
     pub member: Option<String>,
-    pub props: PropertyTable<String, Property>,
+    #[serde(with = "property_pairs")]
+    pub props: PropertyTable<JsString, Property>,
     pub symbol_props: PropertyTable<SymbolId, Property>,
     pub prototype: Option<ObjectId>,
     extensible: bool,
@@ -632,14 +663,10 @@ pub enum CollectionIteration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoxedPrimitive {
-    String(String),
+    String(JsString),
     Number(#[serde(with = "crate::value::number_serde")] f64),
     Bool(bool),
     Symbol(SymbolId),
-}
-
-fn is_surrogate(unit: u16) -> bool {
-    (0xd800..=0xdfff).contains(&unit)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -658,9 +685,9 @@ pub enum Object {
         deserialize_with = "deserialize_regexp"
     )]
     RegExp {
-        source: String,
+        source: JsString,
         flags: RegExpFlags,
-        compiled: regex::Regex,
+        compiled: regress::Regex,
         object: PlainObject,
     },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
@@ -696,16 +723,25 @@ pub enum Object {
     },
     StringIterator {
         object: PlainObject,
-        string: String,
-        /// UTF-8 byte offset, always on a code point boundary.
-        byte_offset: usize,
+        string: JsString,
+        /// UTF-16 code-unit offset, never inside a surrogate pair.
+        position: usize,
+    },
+    /// Cursor for `String.prototype.matchAll`. The regexp's `lastIndex` is the resume point.
+    RegExpStringIterator {
+        object: PlainObject,
+        regexp: ObjectId,
+        string: JsString,
+        global: bool,
+        full_unicode: bool,
+        done: bool,
     },
     /// Internal cursor: capture own keys per prototype, then recheck a key's
     /// descriptor immediately before visiting it. The cursor has no properties.
     ForInIterator {
         current: Option<ObjectId>,
-        pending: Option<VecDeque<String>>,
-        visited: BTreeSet<String>,
+        pending: Option<VecDeque<JsString>>,
+        visited: BTreeSet<JsString>,
         string_indices: Range<usize>,
     },
     Function(FunctionObject),
@@ -720,15 +756,15 @@ pub enum Object {
 }
 
 fn serialize_regexp<S: serde::Serializer>(
-    source: &str,
+    source: &JsString,
     flags: &RegExpFlags,
-    _: &regex::Regex,
+    _: &regress::Regex,
     object: &PlainObject,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     #[derive(Serialize)]
     struct Record<'a> {
-        source: &'a str,
+        source: &'a JsString,
         flags: String,
         object: &'a PlainObject,
     }
@@ -743,10 +779,10 @@ fn serialize_regexp<S: serde::Serializer>(
 
 fn deserialize_regexp<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> Result<(String, RegExpFlags, regex::Regex, PlainObject), D::Error> {
+) -> Result<(JsString, RegExpFlags, regress::Regex, PlainObject), D::Error> {
     #[derive(Deserialize)]
     struct Record {
-        source: String,
+        source: JsString,
         flags: String,
         object: PlainObject,
     }
@@ -867,14 +903,32 @@ impl PartialEq for Object {
                 StringIterator {
                     object: x,
                     string: a,
-                    byte_offset: n,
+                    position: n,
                 },
                 StringIterator {
                     object: y,
                     string: b,
-                    byte_offset: m,
+                    position: m,
                 },
             ) => x == y && a == b && n == m,
+            (
+                RegExpStringIterator {
+                    object: x,
+                    regexp: a,
+                    string: s,
+                    global: g,
+                    full_unicode: u,
+                    done: d,
+                },
+                RegExpStringIterator {
+                    object: y,
+                    regexp: b,
+                    string: t,
+                    global: h,
+                    full_unicode: v,
+                    done: e,
+                },
+            ) => x == y && a == b && s == t && g == h && u == v && d == e,
             (
                 ForInIterator {
                     current: a,
@@ -1012,6 +1066,7 @@ impl Object {
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
+            | Self::RegExpStringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => &mut o.extensible,
@@ -1035,6 +1090,7 @@ impl Object {
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
+            | Self::RegExpStringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => o.extensible,
@@ -1101,6 +1157,7 @@ impl Object {
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
+            | Self::RegExpStringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => (&o.props, &o.symbol_props),
@@ -1124,6 +1181,7 @@ impl Object {
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
+            | Self::RegExpStringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => (&mut o.props, &mut o.symbol_props),
@@ -1135,7 +1193,7 @@ impl Object {
         })
     }
 
-    fn boxed_string(&self) -> Option<&str> {
+    fn boxed_string(&self) -> Option<&JsString> {
         match self {
             Self::Boxed {
                 primitive: BoxedPrimitive::String(text),
@@ -1147,22 +1205,15 @@ impl Object {
 
     fn string_own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'static>> {
         let text = self.boxed_string()?;
-        let PropertyKeyRef::String(key) = key else {
-            return None;
-        };
-        if key == "length" {
-            return Some(OwnProperty::StringLength(text.encode_utf16().count()));
+        if key.is_str("length") {
+            return Some(OwnProperty::StringLength(utf16_len(text)));
         }
-        let index = canonical_index(key)?;
-        if index >= text.len() {
-            return None;
-        }
-        text.encode_utf16().nth(index).map(OwnProperty::StringIndex)
+        utf16_unit(text, canonical_index_key(key)?).map(OwnProperty::StringIndex)
     }
 
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
-        if let (Self::Array(array), PropertyKeyRef::String(key)) = (self, key) {
-            if key == "length" {
+        if let Self::Array(array) = self {
+            if key.is_str("length") {
                 return Some(OwnProperty::ArrayLength(
                     array.length,
                     array.length_writable,
@@ -1187,7 +1238,7 @@ impl Object {
         if let Some((props, symbols)) = self.tables() {
             collect_own_keys(&mut keys, props, symbols, enumerable_strings_only);
         }
-        let string_length = self.boxed_string().map(|text| text.encode_utf16().count());
+        let string_length = self.boxed_string().map(utf16_len);
         if string_length.is_some() && !enumerable_strings_only {
             keys.push(((1, 0), PropertyKeyRef::String("length")));
         }
@@ -1205,7 +1256,7 @@ impl Object {
                     .filter(move |(_, (_, attributes))| {
                         !enumerable_strings_only || attributes.enumerable
                     })
-                    .map(|(index, _)| PropertyKey::String(index.to_string()))
+                    .map(|(index, _)| PropertyKey::String(index.to_string().into()))
             })
             .chain(
                 array
@@ -1213,12 +1264,10 @@ impl Object {
                     .map(|_| "length".into()),
             )
             .chain(
-                (0..string_length.unwrap_or(0)).map(|index| PropertyKey::String(index.to_string())),
+                (0..string_length.unwrap_or(0))
+                    .map(|index| PropertyKey::String(index.to_string().into())),
             )
-            .chain(keys.into_iter().map(|(_, key)| match key {
-                PropertyKeyRef::String(key) => PropertyKey::String(key.to_owned()),
-                PropertyKeyRef::Symbol(id) => PropertyKey::Symbol(id),
-            }))
+            .chain(keys.into_iter().map(|(_, key)| key.to_owned()))
     }
 
     fn valid_property_tables(&self) -> bool {
@@ -1234,19 +1283,20 @@ impl Object {
                         .elements
                         .last_key_value()
                         .is_none_or(|(&index, _)| index < array.length)
-                    && array
-                        .props
-                        .0
-                        .keys()
-                        .all(|key| key != "length" && array_index(key).is_none())
+                    && array.props.0.keys().all(|key| {
+                        let key = PropertyKeyRef::JsString(key.as_units());
+                        !key.is_str("length") && array_index(key).is_none()
+                    })
             }
             Self::Boxed {
                 primitive: BoxedPrimitive::String(text),
                 object,
             } => {
-                let length = text.encode_utf16().count();
+                let length = utf16_len(text);
                 object.props.0.keys().all(|key| {
-                    key != "length" && canonical_index(key).is_none_or(|index| index >= length)
+                    let key = PropertyKeyRef::JsString(key.as_units());
+                    !key.is_str("length")
+                        && canonical_index_key(key).is_none_or(|index| index >= length)
                 })
             }
             _ => true,
@@ -1264,7 +1314,8 @@ impl Object {
             | Self::WeakMap { object: plain, .. }
             | Self::CollectionIterator { object: plain, .. }
             | Self::ArrayIterator { object: plain, .. }
-            | Self::StringIterator { object: plain, .. } => plain.prototype,
+            | Self::StringIterator { object: plain, .. }
+            | Self::RegExpStringIterator { object: plain, .. } => plain.prototype,
             Self::Array(array) => array.prototype,
             Self::Function(function) => function.prototype,
             Self::Promise(promise) => promise.prototype,
@@ -1288,6 +1339,7 @@ impl Object {
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
+            | Self::RegExpStringIterator { object: o, .. }
             | Self::Bound(BoundObject { object: o, .. })
             | Self::PromiseCallback { object: o, .. }
             | Self::Resolution(Resolution { object: o, .. }) => &mut o.prototype,
@@ -1365,6 +1417,7 @@ impl Object {
             | Self::BuiltinStatic(_)
             | Self::WeakMap { .. }
             | Self::StringIterator { .. } => {}
+            Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
             Self::Map { entries, .. } => {
                 for (key, value) in entries.iter().flatten() {
                     push_value(out, key);
@@ -1485,10 +1538,10 @@ pub(crate) struct Heap {
     objects: BTreeMap<ObjectId, Object>,
     next_id: ObjectId,
     /// Symbol descriptions. Missing entry and absent description are distinct.
-    pub(crate) symbols: BTreeMap<SymbolId, Option<String>>,
+    pub(crate) symbols: BTreeMap<SymbolId, Option<JsString>>,
     /// `Symbol.for` registry. Keys are registry strings; ordinary symbols are
     /// never interned by description.
-    pub(crate) symbol_registry: BTreeMap<String, SymbolId>,
+    pub(crate) symbol_registry: BTreeMap<JsString, SymbolId>,
     next_symbol_id: SymbolId,
     pub(crate) combines: BTreeMap<ObjectId, CombineState>,
     /// Uncalled [`Resolution`] objects. Capture rejects any id in this set that
@@ -1508,15 +1561,17 @@ impl Heap {
             objects: BTreeMap::new(),
             next_id: 1,
             symbols: BTreeMap::from([
-                (ITERATOR_SYMBOL, Some(ITERATOR_DESCRIPTION.to_owned())),
-                (
-                    TO_PRIMITIVE_SYMBOL,
-                    Some(TO_PRIMITIVE_DESCRIPTION.to_owned()),
-                ),
-                (SPECIES_SYMBOL, Some(SPECIES_DESCRIPTION.to_owned())),
+                (ITERATOR_SYMBOL, Some(ITERATOR_DESCRIPTION.into())),
+                (TO_PRIMITIVE_SYMBOL, Some(TO_PRIMITIVE_DESCRIPTION.into())),
+                (SPECIES_SYMBOL, Some(SPECIES_DESCRIPTION.into())),
+                (MATCH_SYMBOL, Some(MATCH_DESCRIPTION.into())),
+                (MATCH_ALL_SYMBOL, Some(MATCH_ALL_DESCRIPTION.into())),
+                (REPLACE_SYMBOL, Some(REPLACE_DESCRIPTION.into())),
+                (SEARCH_SYMBOL, Some(SEARCH_DESCRIPTION.into())),
+                (SPLIT_SYMBOL, Some(SPLIT_DESCRIPTION.into())),
             ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: 3,
+            next_symbol_id: 8,
             combines: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
@@ -1539,7 +1594,7 @@ impl Heap {
     /// A fresh `Symbol(desc)`. `None` and an empty string stay distinct.
     pub(crate) fn alloc_symbol(
         &mut self,
-        description: Option<String>,
+        description: Option<JsString>,
     ) -> Result<SymbolId, VmError> {
         let id = self.next_symbol_id;
         self.next_symbol_id = self
@@ -1551,7 +1606,7 @@ impl Heap {
     }
 
     /// `Symbol.for(key)`: interns by registry key only.
-    pub(crate) fn intern_symbol(&mut self, key: String) -> Result<SymbolId, VmError> {
+    pub(crate) fn intern_symbol(&mut self, key: JsString) -> Result<SymbolId, VmError> {
         if let Some(id) = self.symbol_registry.get(&key) {
             return Ok(*id);
         }
@@ -1568,8 +1623,8 @@ impl Heap {
     /// snapshot first when any entry is inconsistent.
     pub(crate) fn restore_symbols(
         &mut self,
-        symbols: BTreeMap<SymbolId, Option<String>>,
-        registry: BTreeMap<String, SymbolId>,
+        symbols: BTreeMap<SymbolId, Option<JsString>>,
+        registry: BTreeMap<JsString, SymbolId>,
         next_symbol_id: SymbolId,
     ) {
         self.symbols = symbols;
@@ -1630,7 +1685,7 @@ impl Heap {
             _ => self.object_prototype,
         };
         let string_length = match source {
-            Value::String(string) => string.encode_utf16().count(),
+            Value::String(string) => utf16_len(string),
             _ => 0,
         };
         self.alloc(Object::ForInIterator {
@@ -1847,11 +1902,11 @@ impl Heap {
         key: PropertyKeyRef<'_>,
     ) -> Result<bool, VmError> {
         let object = self.get_mut(id)?;
-        if let (Object::Array(array), PropertyKeyRef::String(name)) = (&mut *object, key) {
-            if name == "length" {
+        if let Object::Array(array) = &mut *object {
+            if key.is_str("length") {
                 return Ok(false);
             }
-            if let Some(index) = array_index(name) {
+            if let Some(index) = array_index(key) {
                 if let Entry::Occupied(entry) = array.elements.entry(index) {
                     if !entry.get().1.configurable {
                         return Ok(false);
@@ -1869,7 +1924,10 @@ impl Heap {
             return Ok(true);
         };
         Ok(match key {
-            PropertyKeyRef::String(key) => props.remove_configurable(key),
+            PropertyKeyRef::String(key) => {
+                props.remove_configurable(JsString::from(key).as_units())
+            }
+            PropertyKeyRef::JsString(key) => props.remove_configurable(key),
             PropertyKeyRef::Symbol(id) => symbols.remove_configurable(&id),
         })
     }
@@ -1881,7 +1939,7 @@ impl Heap {
         key: &str,
         value: Value,
     ) -> Result<(), VmError> {
-        self.set_own(id, PropertyKey::String(key.to_owned()), value)
+        self.set_own(id, key.into(), value)
     }
 
     pub(crate) fn define_data(
@@ -1914,9 +1972,9 @@ impl Heap {
         if object.tables().is_none() {
             return Ok(false);
         }
-        if let (Object::Array(array), Some(name)) = (object, key.as_string())
+        if let Object::Array(array) = object
             && !array.length_writable
-            && array_index(name).is_some_and(|index| index >= array.length)
+            && array_index(key.borrowed()).is_some_and(|index| index >= array.length)
         {
             return Ok(false);
         }
@@ -1929,7 +1987,7 @@ impl Heap {
         let Some((property, attrs)) = update.complete(object.is_extensible(), current) else {
             return Ok(false);
         };
-        if key.as_string() == Some("length")
+        if key.borrowed().is_str("length")
             && let Object::Array(array) = self.get_mut(id)?
         {
             let Property::Data(Value::Number(length)) = property else {
@@ -1955,8 +2013,8 @@ impl Heap {
                 "object {id} has a fixed virtual string property"
             )));
         }
-        if let (Object::Array(array), PropertyKeyRef::String(name)) = (&mut *object, key.borrowed())
-            && let Some(index) = array_index(name)
+        if let Object::Array(array) = &mut *object
+            && let Some(index) = array_index(key.borrowed())
         {
             let entry = array
                 .elements
@@ -1989,7 +2047,8 @@ impl Heap {
             | Object::WeakMap { object: plain, .. }
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
-            | Object::StringIterator { object: plain, .. } => plain,
+            | Object::StringIterator { object: plain, .. }
+            | Object::RegExpStringIterator { object: plain, .. } => plain,
             _ => {
                 return Err(VmError::InvalidState(
                     "property definition requires a plain object".to_owned(),
@@ -2085,18 +2144,19 @@ impl Heap {
 }
 
 fn lookup_tables<'m, V>(
-    props: &'m PropertyTable<String, V>,
+    props: &'m PropertyTable<JsString, V>,
     symbol_props: &'m PropertyTable<SymbolId, V>,
     key: PropertyKeyRef<'_>,
 ) -> Option<&'m OrderedProperty<V>> {
     match key {
-        PropertyKeyRef::String(key) => props.entry(key),
+        PropertyKeyRef::String(key) => props.entry(JsString::from(key).as_units()),
+        PropertyKeyRef::JsString(key) => props.entry(key),
         PropertyKeyRef::Symbol(id) => symbol_props.entry(&id),
     }
 }
 
 fn insert_table<V>(
-    props: &mut PropertyTable<String, V>,
+    props: &mut PropertyTable<JsString, V>,
     symbol_props: &mut PropertyTable<SymbolId, V>,
     key: PropertyKey,
     attributes: Option<Attributes>,

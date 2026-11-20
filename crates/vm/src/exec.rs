@@ -19,7 +19,8 @@ use crate::host::{Host, HostReply};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::string::{utf16_len, utf16_unit, utf16_unit_string};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 /// What one instruction did. `Throw` has not been caught yet.
@@ -656,7 +657,7 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         value: &Value,
-    ) -> Result<Result<String, Value>, VmError> {
+    ) -> Result<Result<JsString, Value>, VmError> {
         let value = match self.coerce_primitive(host, value, Hint::String)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
@@ -724,7 +725,7 @@ impl Vm {
                 let result = self.invoke(
                     host,
                     &method,
-                    vec![Value::String(hint.as_str().to_owned())],
+                    vec![Value::String(hint.as_str().into())],
                     value,
                 )?;
                 return match result {
@@ -782,7 +783,7 @@ impl Vm {
         }
         match key {
             Value::String(key) => {
-                return self.read_property(host, object, PropertyKeyRef::String(key));
+                return self.read_property(host, object, PropertyKeyRef::JsString(key.as_units()));
             }
             Value::Symbol(id) => {
                 return self.read_property(host, object, PropertyKeyRef::Symbol(*id));
@@ -811,23 +812,16 @@ impl Vm {
                 PropertyKeyRef::Symbol(ITERATOR_SYMBOL) => {
                     return self.read_property(host, object, key);
                 }
-                PropertyKeyRef::String("length") => {
-                    let length = text.encode_utf16().count();
-                    return Ok(Invocation::Value(Value::Number(length as f64)));
+                _ if key.is_str("length") => {
+                    return Ok(Invocation::Value(Value::Number(utf16_len(text) as f64)));
                 }
-                PropertyKeyRef::String(key) => {
+                _ => {
                     if let Some(unit) =
-                        ops::canonical_index(key).and_then(|index| text.encode_utf16().nth(index))
+                        ops::canonical_index_key(key).and_then(|index| utf16_unit(text, index))
                     {
-                        let Some(ch) = char::from_u32(u32::from(unit)) else {
-                            return self.throw_type_error(
-                                "string index cannot represent a lone surrogate",
-                            );
-                        };
-                        return Ok(Invocation::Value(Value::String(ch.to_string())));
+                        return Ok(Invocation::Value(Value::String(utf16_unit_string(unit))));
                     }
                 }
-                _ => {}
             },
             _ => {}
         }
@@ -850,21 +844,14 @@ impl Vm {
                     key,
                 );
             }
-            if let PropertyKeyRef::String("length") = key {
-                return Ok(Invocation::Value(Value::Number(
-                    text.encode_utf16().count() as f64,
-                )));
+            if key.is_str("length") {
+                return Ok(Invocation::Value(Value::Number(utf16_len(text) as f64)));
             }
-            if let PropertyKeyRef::String(name) = key
-                && let Some(index) = ops::canonical_index(name)
-            {
-                let Some(unit) = text.encode_utf16().nth(index) else {
-                    return Ok(Invocation::Value(Value::Undefined));
-                };
-                let Some(ch) = char::from_u32(u32::from(unit)) else {
-                    return self.throw_type_error("string index cannot represent a lone surrogate");
-                };
-                return Ok(Invocation::Value(Value::String(ch.to_string())));
+            if let Some(index) = ops::canonical_index_key(key) {
+                let value = utf16_unit(text, index).map_or(Value::Undefined, |unit| {
+                    Value::String(utf16_unit_string(unit))
+                });
+                return Ok(Invocation::Value(value));
             }
             return self.read_property_with_receiver(
                 host,
@@ -899,26 +886,19 @@ impl Vm {
                 return self.proxy_get(host, target, handler, key, receiver);
             }
             if self.has_own_function_metadata(id, key)? {
-                let PropertyKeyRef::String(name) = key else {
-                    unreachable!()
-                };
+                let name = if key.is_str("name") { "name" } else { "length" };
                 return Ok(Invocation::Value(self.function_metadata(id, name)?));
             }
             if let Some(property) = object.own_property(key) {
-                if property.has_unrepresentable_value() {
-                    return self.throw_type_error("string index cannot represent a lone surrogate");
-                }
                 return self.read_property_value(host, receiver, property.into_owned());
             }
             current = object.prototype();
         }
-        match key {
-            PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key) => {
-                let method = self.heap.alloc_builtin("Function", Some(key));
-                Ok(Invocation::Value(Value::Object(method)))
-            }
-            _ => Ok(Invocation::Value(Value::Undefined)),
+        if let Some(name) = self.virtual_function_method(target, key) {
+            let method = self.heap.alloc_builtin("Function", Some(name));
+            return Ok(Invocation::Value(Value::Object(method)));
         }
+        Ok(Invocation::Value(Value::Undefined))
     }
 
     pub(crate) fn read_array_index(
@@ -1043,7 +1023,7 @@ impl Vm {
             current = object.prototype();
         }
         Ok(Invocation::Value(Value::Bool(
-            matches!(key, PropertyKeyRef::String(key) if self.has_virtual_function_method(target, key)),
+            self.virtual_function_method(target, key).is_some(),
         )))
     }
 
@@ -1058,7 +1038,7 @@ impl Vm {
         }
         let coerced;
         let key = match key {
-            Value::String(key) => PropertyKeyRef::String(key),
+            Value::String(key) => PropertyKeyRef::JsString(key.as_units()),
             Value::Symbol(id) => PropertyKeyRef::Symbol(*id),
             _ => {
                 coerced = match self.coerce_property_key(host, key)? {
@@ -1079,11 +1059,9 @@ impl Vm {
             (Value::Object(id), key) if self.has_own_function_metadata(*id, key)? => false,
             (Value::Object(id), key) => self.heap.delete_own(*id, key)?,
             // ToObject on a string would expose fixed UTF-16 indices and length.
-            (Value::String(string), PropertyKeyRef::String(key)) => {
-                key != "length"
-                    && !ops::canonical_index(key).is_some_and(|index| {
-                        index < string.len() && string.encode_utf16().nth(index).is_some()
-                    })
+            (Value::String(string), key) => {
+                !key.is_str("length")
+                    && !ops::canonical_index_key(key).is_some_and(|index| index < utf16_len(string))
             }
             _ => true,
         };
@@ -1095,7 +1073,7 @@ impl Vm {
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<bool, VmError> {
-        Ok(matches!(key, PropertyKeyRef::String("name" | "length"))
+        Ok((key.is_str("name") || key.is_str("length"))
             && (id == self.builtins.function_prototype || is_callable_object(self.heap.get(id)?)))
     }
 
@@ -1117,21 +1095,38 @@ impl Vm {
                 (name, function.length)
             }
             Object::BuiltinStatic(function) => {
-                (function.member.as_deref().unwrap_or(&function.name), 0)
+                let member = function.member.as_deref();
+                let length = match (function.name.as_str(), member) {
+                    ("RegExp", None) => 2,
+                    ("RegExp", Some("exec" | "test" | "escape")) => 1,
+                    _ => 0,
+                };
+                (member.unwrap_or(&function.name), length)
             }
             _ => ("", 0), // The shared prototype and Promise resolving functions.
         };
         Ok(if key == "name" {
-            Value::String([prefix, name].concat())
+            Value::String([prefix, name].concat().into())
         } else {
             let bound_args = u16::try_from(bound_args).unwrap_or(u16::MAX);
             Value::Number(f64::from(length.saturating_sub(bound_args)))
         })
     }
 
-    fn has_virtual_function_method(&self, id: ObjectId, key: &str) -> bool {
-        matches!(key, "call" | "apply" | "bind") && self.heap.function(id).is_some()
-            || key == "call" && matches!(self.heap.get(id), Ok(Object::BuiltinStatic(_)))
+    fn virtual_function_method(
+        &self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> Option<&'static str> {
+        if self.heap.function(id).is_some() {
+            ["call", "apply", "bind"]
+                .into_iter()
+                .find(|name| key.is_str(name))
+        } else if key.is_str("call") && matches!(self.heap.get(id), Ok(Object::BuiltinStatic(_))) {
+            Some("call")
+        } else {
+            None
+        }
     }
 
     fn write_member(
@@ -1260,7 +1255,7 @@ impl Vm {
             }
         }
         if let Object::Array(array) = object {
-            if key.as_string() == Some("length") {
+            if key.borrowed().is_str("length") {
                 let update = DescriptorUpdate {
                     value: Some(value),
                     ..DescriptorUpdate::default()
@@ -1272,10 +1267,8 @@ impl Vm {
                 };
             }
             if !array.length_writable
-                && key
-                    .as_string()
-                    .and_then(ops::array_index)
-                    .is_some_and(|index| index >= array.length)
+                && ops::canonical_index_key(key.borrowed())
+                    .is_some_and(|index| index < u32::MAX as usize && index >= array.length)
             {
                 return reject(self, "Cannot extend array with read only length");
             }
@@ -1318,19 +1311,15 @@ impl Vm {
                 }
             }
             Value::String(text) => {
-                for (index, unit) in text.encode_utf16().enumerate() {
+                for (index, &unit) in text.as_units().iter().enumerate() {
                     let key = index.to_string();
                     if excluded.contains(&PropertyKeyRef::String(&key)) {
                         continue;
                     }
-                    let Some(ch) = char::from_u32(u32::from(unit)) else {
-                        return self
-                            .throw_type_error("object spread cannot represent a lone surrogate");
-                    };
                     self.heap.define_property(
                         target,
-                        PropertyKey::String(key),
-                        Property::Data(Value::String(ch.to_string())),
+                        PropertyKey::String(key.into()),
+                        Property::Data(Value::String(utf16_unit_string(unit))),
                     )?;
                 }
             }
@@ -1491,7 +1480,7 @@ impl Vm {
 
     fn unary(&self, operator: UnaryOp, value: Value) -> Value {
         if matches!(operator, UnaryOp::TypeOf) && self.is_callable(&value) {
-            return Value::String("function".to_owned());
+            return Value::String("function".into());
         }
         unary_op(operator, value)
     }
@@ -1524,7 +1513,7 @@ impl Vm {
 
 fn converted_property_key(value: &Value) -> Result<PropertyKeyRef<'_>, VmError> {
     match value {
-        Value::String(key) => Ok(PropertyKeyRef::String(key)),
+        Value::String(key) => Ok(PropertyKeyRef::JsString(key.as_units())),
         Value::Symbol(id) => Ok(PropertyKeyRef::Symbol(*id)),
         _ => Err(VmError::InvalidState(
             "destructuring requires an already converted property key".to_owned(),

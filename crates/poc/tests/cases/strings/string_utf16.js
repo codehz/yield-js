@@ -11,12 +11,11 @@ export function run() {
   if (!value.startsWith("😀", 1) || value.startsWith("😀") || !value.endsWith("😀", 3) || value.endsWith("z")) return false;
   if (value.slice(-5, -3) !== "😀" || value.slice(3, 1) !== "" || value.substring(3, 1) !== "😀") return false;
   if (value.substring(-2, 1) !== "é") return false;
-  let errors = 0;
-  try { value[1]; } catch (error) { if (error.name === "TypeError") errors++; }
-  try { value.charAt(1); } catch (error) { if (error.name === "TypeError") errors++; }
-  try { value.at(-1); } catch (error) { if (error.name === "TypeError") errors++; }
-  try { value.slice(0, 2); } catch (error) { if (error.name === "TypeError") errors++; }
-  try { value.substring(1, 2); } catch (error) { if (error.name === "TypeError") errors++; }
-  try { value.split(""); } catch (error) { if (error.name === "TypeError") errors++; }
-  return errors === 6;
+  const high = "\uD83D";
+  const low = "\uDE00";
+  const units = value.split("");
+  return value[1] === high && value[6] === undefined &&
+    value.charAt(1) === high && value.at(-1) === low &&
+    value.slice(0, 2) === "é" + high && value.substring(1, 2) === high &&
+    units.length === 6 && units[1] === high && units[2] === low && units.join("") === value;
 }

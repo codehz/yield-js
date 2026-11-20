@@ -127,7 +127,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     let (key, destination, init) = match property {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => (
                             self.emit_constant(Constant::String(
-                                property.binding.name.as_str().to_owned(),
+                                property.binding.name.as_str().into(),
                             ))?,
                             Destination::AssignmentBinding(
                                 self.assignment_binding(&property.binding)?,

@@ -26,9 +26,9 @@ cargo run -p yield-poc
 
 宿主只能按公开名读取或调用显式导出的活绑定。示例用 `export async function run` 公开入口；仅声明 `function run` 不会公开它。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
 
-`new Proxy(target, handler)` 支持普通对象和数组上的六种属性 trap，可用于成员访问、`Reflect`、对象复制及枚举。快照格式为 **32**，保存代理、目标、handler 及其闭包的身份，不执行 trap；旧格式不迁移。范围和限制见下方状态文档。
+`new Proxy(target, handler)` 支持普通对象和数组上的六种属性 trap，可用于成员访问、`Reflect`、对象复制及枚举。快照格式为 **34**，保存代理身份及任意 UTF-16 字符串，不执行 trap；旧格式不迁移。范围和限制见下方状态文档。
 
-支持正则字面量和 `RegExp` 全局对象的 `exec` / `test`，标志限 `g` / `i` / `m` / `s` / `y`；不支持的模式会报错，尚不支持 `String.prototype` 的正则用法。快照保留正则对象和 `lastIndex`。
+支持正则字面量和 `RegExp` 全局对象，匹配后端为固定版本的 ECMAScript 语法实现，覆盖捕获、反向引用、断言、Unicode 属性与命名组。`String.prototype` 的 `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split` 通过 `Symbol.*` 协议分派；`matchAll` 迭代器可跨 `await` 快照恢复。快照保留正则对象、`lastIndex` 与迭代游标。
 
 ## 目录
 

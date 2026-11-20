@@ -3,9 +3,9 @@
 use super::support::{Suspended, baseline_at_first_await, json_round_trip, values_beyond};
 use yield_poc::number;
 use yield_vm::heap::Property;
-use yield_vm::{Completion, HostValue, Object, PromiseState, Value};
+use yield_vm::{Completion, HostValue, JsString, Object, PromiseState, Value};
 
-fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<String> {
+fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<JsString> {
     snapshot
         .objects
         .iter()
@@ -13,7 +13,7 @@ fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<String> {
             let Object::Plain(plain) = &record.object else {
                 return None;
             };
-            match plain.props.get("tag") {
+            match plain.props.get(&JsString::from("tag")) {
                 Some(Property::Data(Value::String(tag))) => Some(tag.clone()),
                 _ => None,
             }
@@ -42,7 +42,7 @@ export async function run() {
     assert!(
         !plain_tags(&snapshot)
             .iter()
-            .any(|tag| tag == "discard-only"),
+            .any(|tag| tag == &JsString::from("discard-only")),
         "dead must not remain reachable through a call environment or saved slot"
     );
     assert!(!has_call_environment(&snapshot));
@@ -64,7 +64,7 @@ export async function run() {
     );
     assert!(snapshot.objects.iter().any(|record| {
         record.id == saved_objects[0]
-            && matches!(&record.object, Object::Plain(plain) if plain.props.get("n") == Some(&Property::Data(Value::Number(7.0))))
+            && matches!(&record.object, Object::Plain(plain) if plain.props.get(&JsString::from("n")) == Some(&Property::Data(Value::Number(7.0))))
     }));
 
     s.restore(snapshot).expect("restore");
@@ -88,7 +88,7 @@ export async function run() {
     assert!(
         !plain_tags(&snapshot)
             .iter()
-            .any(|tag| tag == "discard-only")
+            .any(|tag| tag == &JsString::from("discard-only"))
     );
     assert!(has_call_environment(&snapshot));
     assert!(snapshot.continuations[0].env.is_some());
@@ -113,7 +113,7 @@ export async function run() {
 "#;
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
-    assert!(plain_tags(&snapshot).iter().any(|tag| tag == "kept"));
+    assert!(plain_tags(&snapshot).contains(&JsString::from("kept")));
     s.restore(snapshot).expect("restore");
     s.complete(
         "wait:a",
@@ -125,7 +125,7 @@ export async function run() {
     );
 }
 
-fn symbol_descriptions(snapshot: &yield_vm::Snapshot) -> Vec<Option<String>> {
+fn symbol_descriptions(snapshot: &yield_vm::Snapshot) -> Vec<Option<JsString>> {
     snapshot.symbols.values().cloned().collect()
 }
 
@@ -146,13 +146,13 @@ export async function run() {
         snapshot
             .symbols
             .values()
-            .any(|description| description.as_deref() == Some("Symbol.iterator"))
+            .any(|description| description.as_ref() == Some(&JsString::from("Symbol.iterator")))
     );
     assert!(
         snapshot
             .symbols
             .values()
-            .any(|description| description.as_deref() == Some("key"))
+            .any(|description| description.as_ref() == Some(&JsString::from("key")))
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
@@ -175,17 +175,21 @@ export async function run() {
     assert!(
         !descriptions
             .iter()
-            .any(|description| description.as_deref() == Some("orphan")),
+            .any(|description| description.as_ref() == Some(&JsString::from("orphan"))),
         "a symbol with no reference must not reach the snapshot"
     );
     assert!(
         snapshot
             .symbols
             .values()
-            .any(|description| description.as_deref() == Some("registry-only")),
+            .any(|description| description.as_ref() == Some(&JsString::from("registry-only"))),
         "registered keys stay alive without script references"
     );
-    assert!(snapshot.symbol_registry.contains_key("registry-only"));
+    assert!(
+        snapshot
+            .symbol_registry
+            .contains_key(&JsString::from("registry-only"))
+    );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
     assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));

@@ -3,7 +3,7 @@
 use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
 use yield_poc::number;
 use yield_vm::heap::Property;
-use yield_vm::{Completion, HostValue, Object, PromiseState, Value, VmError};
+use yield_vm::{Completion, HostValue, JsString, Object, PromiseState, Value, VmError};
 
 #[test]
 fn accessor_only_closures_survive_restore_and_bad_descriptors_are_rejected() {
@@ -35,7 +35,7 @@ export async function run() {
             let Property::Accessor {
                 get: Some(get),
                 set: Some(set),
-            } = plain.props.get("x")?
+            } = plain.props.get(&JsString::from("x"))?
             else {
                 return None;
             };
@@ -55,7 +55,8 @@ export async function run() {
         let Object::Plain(plain) = &mut corrupt.objects[index].object else {
             unreachable!()
         };
-        *plain.props.get_mut("x").expect("accessor") = Property::Accessor { get, set };
+        *plain.props.get_mut(&JsString::from("x")).expect("accessor") =
+            Property::Accessor { get, set };
         let error = s.restore(corrupt).expect_err("bad descriptor");
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
@@ -185,7 +186,7 @@ export async function run() {
         .objects
         .iter()
         .find_map(|record| match &record.object {
-            Object::Plain(plain) => match plain.props.get("prototype") {
+            Object::Plain(plain) => match plain.props.get(&JsString::from("prototype")) {
                 Some(Property::Data(Value::Object(peer))) => Some((record.id, *peer)),
                 _ => None,
             },
@@ -381,12 +382,18 @@ export async function run() {
     let mut s = Suspended::start(source, vec![]);
     let snapshot = s.snapshot();
     let index = snapshot.objects.iter().position(|record| {
-        matches!(&record.object, Object::Plain(plain) if plain.props.get("z").is_some())
+        matches!(&record.object, Object::Plain(plain) if plain.props.get(&JsString::from("z")).is_some())
     }).expect("live object");
     for invalid_ordinal in [0, 2] {
         let mut corrupt = serde_json::to_value(&snapshot).expect("serialize snapshot");
-        corrupt["objects"][index]["object"]["plain"]["props"]["a"]["ordinal"] =
-            serde_json::json!(invalid_ordinal);
+        let props = corrupt["objects"][index]["object"]["plain"]["props"]
+            .as_array_mut()
+            .expect("property records");
+        let entry = props
+            .iter_mut()
+            .find(|entry| entry[0].as_str() == Some("a"))
+            .expect("property a");
+        entry[1]["ordinal"] = serde_json::json!(invalid_ordinal);
         let error = s
             .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
             .expect_err("invalid property ordinal");
@@ -394,6 +401,47 @@ export async function run() {
             matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
         );
     }
+}
+
+#[test]
+fn snapshot_deserialization_rejects_duplicate_property_records_and_invalid_units() {
+    let source = r#"
+export async function run() {
+  const obj = { "\uD800": 42 };
+  await wait("a");
+  return obj["\uD800"];
+}
+"#;
+    let s = Suspended::start(source, vec![]);
+    let snapshot = serde_json::to_value(s.snapshot()).expect("serialize snapshot");
+    let key = serde_json::json!({"utf16": [55296]});
+    let index = snapshot["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|record| {
+            record["object"]["plain"]["props"]
+                .as_array()
+                .is_some_and(|props| props.iter().any(|entry| entry[0] == key))
+        })
+        .expect("live lone-surrogate property");
+
+    let mut duplicate = snapshot.clone();
+    let props = duplicate["objects"][index]["object"]["plain"]["props"]
+        .as_array_mut()
+        .unwrap();
+    let record = props.iter().find(|entry| entry[0] == key).unwrap().clone();
+    props.push(record);
+    let error = serde_json::from_value::<yield_vm::Snapshot>(duplicate).unwrap_err();
+    assert!(error.to_string().contains("duplicate"), "{error}");
+
+    let mut invalid = snapshot;
+    let props = invalid["objects"][index]["object"]["plain"]["props"]
+        .as_array_mut()
+        .unwrap();
+    let record = props.iter_mut().find(|entry| entry[0] == key).unwrap();
+    record[0]["utf16"][0] = serde_json::json!(65536);
+    assert!(serde_json::from_value::<yield_vm::Snapshot>(invalid).is_err());
 }
 
 #[test]
@@ -406,8 +454,14 @@ fn restore_rejects_writable_object_prototype() {
         .position(|record| record.id == snapshot.roots["object"])
         .expect("Object constructor in snapshot");
     let mut corrupt = serde_json::to_value(snapshot).expect("serialize snapshot");
-    corrupt["objects"][index]["object"]["builtin_static"]["props"]["prototype"]["attributes"]["writable"] =
-        serde_json::json!(true);
+    let props = corrupt["objects"][index]["object"]["builtin_static"]["props"]
+        .as_array_mut()
+        .expect("property records");
+    let entry = props
+        .iter_mut()
+        .find(|entry| entry[0].as_str() == Some("prototype"))
+        .expect("prototype property");
+    entry[1]["attributes"]["writable"] = serde_json::json!(true);
     let error = s
         .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
         .expect_err("writable Object.prototype");

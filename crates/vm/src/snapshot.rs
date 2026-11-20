@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::JsString;
 use crate::builtins::{
     BuiltinRoots, ROOT_AGGREGATEERROR, ROOT_AGGREGATEERROR_PROTOTYPE, ROOT_ARRAY,
     ROOT_ARRAY_ITERATOR_PROTOTYPE, ROOT_ARRAY_PROTOTYPE, ROOT_ARRAY_VALUES, ROOT_BOOLEAN,
@@ -10,18 +11,20 @@ use crate::builtins::{
     ROOT_NUMBER, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT, ROOT_OBJECT_PROTOTYPE, ROOT_PROMISE,
     ROOT_PROMISE_PROTOTYPE, ROOT_PROXY, ROOT_QUEUE_MICROTASK, ROOT_RANGEERROR,
     ROOT_RANGEERROR_PROTOTYPE, ROOT_REFERENCEERROR, ROOT_REFERENCEERROR_PROTOTYPE, ROOT_REFLECT,
-    ROOT_REGEXP, ROOT_REGEXP_PROTOTYPE, ROOT_STRING, ROOT_STRING_ITERATOR,
-    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL, ROOT_SYMBOL_PROTOTYPE,
-    ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR, ROOT_TYPEERROR_PROTOTYPE,
-    ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP, ROOT_WEAK_MAP_PROTOTYPE,
-    is_callable_object,
+    ROOT_REGEXP, ROOT_REGEXP_ITERATOR_PROTOTYPE, ROOT_REGEXP_PROTOTYPE, ROOT_STRING,
+    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, ROOT_SYMBOL,
+    ROOT_SYMBOL_PROTOTYPE, ROOT_SYNTAXERROR, ROOT_SYNTAXERROR_PROTOTYPE, ROOT_TYPEERROR,
+    ROOT_TYPEERROR_PROTOTYPE, ROOT_URIERROR, ROOT_URIERROR_PROTOTYPE, ROOT_WEAK_MAP,
+    ROOT_WEAK_MAP_PROTOTYPE, is_callable_object,
 };
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
-    Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, Object,
-    OwnProperty, OwnedEdge, PromiseState, Property, ReactionJob, SPECIES_DESCRIPTION,
-    SPECIES_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    Attributes, CombineState, EnvRole, Heap, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL,
+    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, Object, OwnProperty,
+    OwnedEdge, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
+    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
 };
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::host::{Host, PendingOperationMeta};
@@ -30,8 +33,75 @@ use crate::runtime::{Continuation, PendingOperation};
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
-// Includes the RegExp builtin roots and object records.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 32;
+// JavaScript strings retain arbitrary UTF-16 code units; string maps use pairs.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 34;
+
+pub(crate) mod ordered_pairs {
+    use std::collections::BTreeMap;
+    use std::collections::btree_map::Entry;
+    use std::fmt;
+    use std::marker::PhantomData;
+
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(crate) fn serialize<K: Ord + Serialize, V: Serialize, S: Serializer>(
+        map: &BTreeMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map)
+    }
+
+    pub(crate) fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: Ord + Deserialize<'de>,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        struct Pairs<K, V>(PhantomData<(K, V)>);
+
+        impl<'de, K, V> Visitor<'de> for Pairs<K, V>
+        where
+            K: Ord + Deserialize<'de>,
+            V: Deserialize<'de>,
+        {
+            type Value = BTreeMap<K, V>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a sequence of key-value pairs")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut map = BTreeMap::new();
+                while let Some((key, value)) = sequence.next_element()? {
+                    match map.entry(key) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(value);
+                        }
+                        Entry::Occupied(_) => {
+                            return Err(A::Error::custom("duplicate key in ordered pairs"));
+                        }
+                    }
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_seq(Pairs(PhantomData))
+    }
+}
+
+fn valid_string_position(string: &JsString, position: usize) -> bool {
+    let units = string.as_units();
+    position <= units.len()
+        && (position == 0
+            || position == units.len()
+            || !(matches!(units[position - 1], 0xd800..=0xdbff)
+                && matches!(units[position], 0xdc00..=0xdfff)))
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectRecord {
@@ -73,15 +143,17 @@ pub struct Snapshot {
     pub objects: Vec<ObjectRecord>,
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
-    pub globals: BTreeMap<String, Value>,
+    #[serde(with = "ordered_pairs")]
+    pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
     pub script_env: Option<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
     pub random_state: u64,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
-    pub symbols: BTreeMap<SymbolId, Option<String>>,
+    pub symbols: BTreeMap<SymbolId, Option<JsString>>,
     /// `Symbol.for` registry entries kept alive by the snapshot.
-    pub symbol_registry: BTreeMap<String, SymbolId>,
+    #[serde(with = "ordered_pairs")]
+    pub symbol_registry: BTreeMap<JsString, SymbolId>,
     /// Allocation high-water mark, preserved so restored ids stay fresh.
     pub next_symbol_id: SymbolId,
 }
@@ -483,10 +555,21 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             ITERATOR_SYMBOL => Some(ITERATOR_DESCRIPTION),
             TO_PRIMITIVE_SYMBOL => Some(TO_PRIMITIVE_DESCRIPTION),
             SPECIES_SYMBOL => Some(SPECIES_DESCRIPTION),
+            MATCH_SYMBOL => Some(MATCH_DESCRIPTION),
+            MATCH_ALL_SYMBOL => Some(MATCH_ALL_DESCRIPTION),
+            REPLACE_SYMBOL => Some(REPLACE_DESCRIPTION),
+            SEARCH_SYMBOL => Some(SEARCH_DESCRIPTION),
+            SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
-            && description.as_deref() != Some(expected)
+            && !description.as_ref().is_some_and(|description| {
+                description
+                    .as_units()
+                    .iter()
+                    .copied()
+                    .eq(expected.encode_utf16())
+            })
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "reserved symbol {id} has an invalid description"
@@ -497,8 +580,24 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
         (ITERATOR_SYMBOL, ITERATOR_DESCRIPTION),
         (TO_PRIMITIVE_SYMBOL, TO_PRIMITIVE_DESCRIPTION),
         (SPECIES_SYMBOL, SPECIES_DESCRIPTION),
+        (MATCH_SYMBOL, MATCH_DESCRIPTION),
+        (MATCH_ALL_SYMBOL, MATCH_ALL_DESCRIPTION),
+        (REPLACE_SYMBOL, REPLACE_DESCRIPTION),
+        (SEARCH_SYMBOL, SEARCH_DESCRIPTION),
+        (SPLIT_SYMBOL, SPLIT_DESCRIPTION),
     ] {
-        if snapshot.symbols.get(&id).and_then(Option::as_deref) != Some(description) {
+        if !snapshot
+            .symbols
+            .get(&id)
+            .and_then(Option::as_ref)
+            .is_some_and(|actual| {
+                actual
+                    .as_units()
+                    .iter()
+                    .copied()
+                    .eq(description.encode_utf16())
+            })
+        {
             return Err(VmError::InvalidSnapshot(format!(
                 "snapshot is missing reserved symbol {description}"
             )));
@@ -510,6 +609,11 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             ITERATOR_SYMBOL => Some(ITERATOR_DESCRIPTION),
             TO_PRIMITIVE_SYMBOL => Some(TO_PRIMITIVE_DESCRIPTION),
             SPECIES_SYMBOL => Some(SPECIES_DESCRIPTION),
+            MATCH_SYMBOL => Some(MATCH_DESCRIPTION),
+            MATCH_ALL_SYMBOL => Some(MATCH_ALL_DESCRIPTION),
+            REPLACE_SYMBOL => Some(REPLACE_DESCRIPTION),
+            SEARCH_SYMBOL => Some(SEARCH_DESCRIPTION),
+            SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(
@@ -656,6 +760,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
     require_fixed_prototype(heap, symbol, symbol_prototype, "Symbol")?;
     let array_iterator_prototype = plain_root(ROOT_ARRAY_ITERATOR_PROTOTYPE)?;
     let string_iterator_prototype = plain_root(ROOT_STRING_ITERATOR_PROTOTYPE)?;
+    let regexp_iterator_prototype = plain_root(ROOT_REGEXP_ITERATOR_PROTOTYPE)?;
     let string_iterator = required_root(roots, ROOT_STRING_ITERATOR)?;
     if !matches!(heap.get(string_iterator), Ok(Object::BuiltinStatic(f)) if f.name == "String" && f.member.as_deref() == Some("iterator"))
     {
@@ -742,6 +847,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         (ROOT_ARRAY_PROTOTYPE, array_prototype),
         (ROOT_ARRAY_ITERATOR_PROTOTYPE, array_iterator_prototype),
         (ROOT_STRING_ITERATOR_PROTOTYPE, string_iterator_prototype),
+        (ROOT_REGEXP_ITERATOR_PROTOTYPE, regexp_iterator_prototype),
         (ROOT_FUNCTION_PROTOTYPE, function_prototype),
     ] {
         if !prototypes.insert(id) {
@@ -789,6 +895,7 @@ fn load_roots(heap: &Heap, roots: &BTreeMap<String, ObjectId>) -> Result<Builtin
         array_iterator_prototype,
         string_iterator,
         string_iterator_prototype,
+        regexp_iterator_prototype,
         function_prototype,
         error_prototype,
         typeerror_prototype,
@@ -956,14 +1063,19 @@ fn check_heap_edges(build: &Build, heap: &Heap, host: &dyn Host) -> Result<(), V
             )));
         }
         if let Object::StringIterator {
-            string,
-            byte_offset,
-            ..
+            string, position, ..
         } = heap.get(id)?
-            && !string.is_char_boundary(*byte_offset)
+            && !valid_string_position(string, *position)
         {
             return Err(VmError::InvalidSnapshot(format!(
-                "string iterator {id} has an invalid byte offset"
+                "string iterator {id} has an invalid UTF-16 position"
+            )));
+        }
+        if let Object::RegExpStringIterator { regexp, .. } = heap.get(id)?
+            && heap.get(*regexp).is_err()
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "RegExp string iterator {id} references missing regexp {regexp}"
             )));
         }
         if let regexp @ Object::RegExp { .. } = heap.get(id)?

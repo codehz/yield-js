@@ -296,7 +296,7 @@ impl ArrayAccess<'_> {
             self.host,
             self.id,
             &Value::Object(self.id),
-            PropertyKey::String(key),
+            PropertyKey::String(key.into()),
             value,
             true,
         ))
@@ -317,7 +317,7 @@ impl ArrayAccess<'_> {
     fn define(&mut self, id: ObjectId, index: usize, value: Value) -> Result<(), VmError> {
         self.vm.heap.define_data(
             id,
-            PropertyKey::String(index.to_string()),
+            PropertyKey::String(index.to_string().into()),
             value,
             Attributes::ORDINARY,
         )

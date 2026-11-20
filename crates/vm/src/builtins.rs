@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::JsString;
 use crate::bytecode::BUILTINS;
 use crate::collections::{CollectionMethod, WeakMapMethod};
 use crate::error::VmError;
@@ -16,16 +17,17 @@ use crate::heap::BoxedPrimitive;
 use crate::heap::CollectionKind;
 use crate::heap::{
     Attributes, BoundObject, BuiltinStatic, CombineKind, CombineState, DescriptorUpdate,
-    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseCallback, PromiseState, Property,
-    ReactionJob, Resolution, SPECIES_SYMBOL, TO_PRIMITIVE_SYMBOL,
+    ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, PlainObject,
+    PromiseCallback, PromiseState, Property, REPLACE_SYMBOL, ReactionJob, Resolution,
+    SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
 };
 use crate::host::Host;
 use crate::math::MATH_METHODS;
 use crate::number::{NUMBER_METHODS, NUMBER_STATICS};
 use crate::ops;
-use crate::regexp_runtime::{REGEXP_METHODS, RegExpMethod};
+use crate::regexp_runtime::{REGEXP_METHODS, REGEXP_STATICS, REGEXP_SYMBOL_METHODS, RegExpMethod};
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::string::{StringMethod, StringStatic};
+use crate::string::{StringMethod, StringStatic, utf16_len, utf16_unit};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
@@ -50,6 +52,7 @@ pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 pub(crate) const ROOT_ARRAY_ITERATOR_PROTOTYPE: &str = "arrayIterator.prototype";
 pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
 pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
+pub(crate) const ROOT_REGEXP_ITERATOR_PROTOTYPE: &str = "regexpIterator.prototype";
 pub(crate) const ROOT_ERROR_PROTOTYPE: &str = "error.prototype";
 pub(crate) const ROOT_TYPEERROR_PROTOTYPE: &str = "typeerror.prototype";
 pub(crate) const ROOT_ERROR: &str = "error";
@@ -98,6 +101,7 @@ pub(crate) struct BuiltinRoots {
     pub array_iterator_prototype: ObjectId,
     pub string_iterator: ObjectId,
     pub string_iterator_prototype: ObjectId,
+    pub regexp_iterator_prototype: ObjectId,
     pub error_prototype: ObjectId,
     pub typeerror_prototype: ObjectId,
     pub error: ObjectId,
@@ -174,6 +178,10 @@ impl BuiltinRoots {
             (
                 ROOT_STRING_ITERATOR_PROTOTYPE.to_owned(),
                 self.string_iterator_prototype,
+            ),
+            (
+                ROOT_REGEXP_ITERATOR_PROTOTYPE.to_owned(),
+                self.regexp_iterator_prototype,
             ),
             (ROOT_ERROR_PROTOTYPE.to_owned(), self.error_prototype),
             (
@@ -255,6 +263,7 @@ pub(crate) enum BuiltinCall {
     MathMethod(String),
     StringIterator,
     StringIteratorNext,
+    RegExpStringIteratorNext,
     ArrayJoin,
     ArrayToString,
     IteratorIdentity,
@@ -332,6 +341,10 @@ const STRING_METHODS: &[(&str, StringMethod)] = &[
     ("padStart", StringMethod::PadStart),
     ("padEnd", StringMethod::PadEnd),
     ("replace", StringMethod::Replace),
+    ("replaceAll", StringMethod::ReplaceAll),
+    ("matchAll", StringMethod::MatchAll),
+    ("match", StringMethod::Match),
+    ("search", StringMethod::Search),
     ("toString", StringMethod::ToString),
     ("valueOf", StringMethod::ValueOf),
 ];
@@ -509,6 +522,7 @@ impl Vm {
         let array_values = self.heap.alloc_builtin("Array", Some("values"));
         let values = Value::Object(array_values);
         let string_iterator_prototype = self.heap.alloc_plain();
+        let regexp_iterator_prototype = self.heap.alloc_plain();
         let string_iterator = self.heap.alloc_builtin("String", Some("iterator"));
         let string_prototype = self.heap.alloc_plain();
         let string = self.init_string_constructor(string_prototype, string_iterator);
@@ -539,6 +553,7 @@ impl Vm {
         for (prototype, kind) in [
             (array_iterator_prototype, "ArrayIterator"),
             (string_iterator_prototype, "StringIterator"),
+            (regexp_iterator_prototype, "RegExpStringIterator"),
         ] {
             let next = Value::Object(self.heap.alloc_builtin(kind, Some("next")));
             self.heap
@@ -625,7 +640,7 @@ impl Vm {
                 .define_data(
                     prototype,
                     "name",
-                    Value::String(name.to_owned()),
+                    Value::String(name.into()),
                     Attributes::METHOD,
                 )
                 .expect("Error prototype stores name");
@@ -634,7 +649,7 @@ impl Vm {
                     .define_data(
                         prototype,
                         "message",
-                        Value::String(String::new()),
+                        Value::String(JsString::default()),
                         Attributes::METHOD,
                     )
                     .expect("Error.prototype stores message");
@@ -673,7 +688,7 @@ impl Vm {
             self.heap
                 .apply_descriptor(
                     symbol_prototype,
-                    PropertyKey::String("description".to_owned()),
+                    PropertyKey::String("description".into()),
                     DescriptorUpdate {
                         get: Some(Some(description)),
                         configurable: Some(true),
@@ -712,6 +727,17 @@ impl Vm {
                 Attributes::FIXED,
             )
             .expect("Symbol constructor stores the species symbol");
+        for (name, symbol_id) in [
+            ("match", MATCH_SYMBOL),
+            ("matchAll", MATCH_ALL_SYMBOL),
+            ("replace", REPLACE_SYMBOL),
+            ("search", SEARCH_SYMBOL),
+            ("split", SPLIT_SYMBOL),
+        ] {
+            self.heap
+                .define_data(symbol, name, Value::Symbol(symbol_id), Attributes::FIXED)
+                .expect("Symbol constructor stores regex protocol symbols");
+        }
         let reflect = self.heap.alloc_plain();
         for name in [
             "ownKeys",
@@ -772,6 +798,7 @@ impl Vm {
             array_iterator_prototype,
             string_iterator,
             string_iterator_prototype,
+            regexp_iterator_prototype,
             error_prototype,
             typeerror_prototype,
             error,
@@ -1223,12 +1250,11 @@ impl Vm {
                     Value::Object(id) if self.heap.is_environment(*id) == Some(true) => {
                         self.throw_type_error("incompatible Object.prototype receiver")
                     }
-                    Value::Object(id) => Ok(Invocation::Value(Value::String(format!(
-                        "[object {}]",
-                        self.object_tag(*id)?
-                    )))),
+                    Value::Object(id) => Ok(Invocation::Value(Value::String(
+                        format!("[object {}]", self.object_tag(*id)?).into(),
+                    ))),
                     _ => Ok(Invocation::Value(Value::String(
-                        "[object Undefined]".to_owned(),
+                        "[object Undefined]".into(),
                     ))),
                 },
                 _ => Err(VmError::InvalidState(format!(
@@ -1274,7 +1300,7 @@ impl Vm {
                     _ => return self.throw_type_error("incompatible Boolean receiver"),
                 };
                 Ok(Invocation::Value(if stringify {
-                    Value::String(value.to_string())
+                    Value::String(value.to_string().into())
                 } else {
                     Value::Bool(value)
                 }))
@@ -1286,6 +1312,9 @@ impl Vm {
             BuiltinCall::MathMethod(method) => self.call_math_method(host, &method, &args),
             BuiltinCall::StringIterator => self.string_iterator(host, receiver),
             BuiltinCall::StringIteratorNext => self.string_iterator_next(receiver),
+            BuiltinCall::RegExpStringIteratorNext => {
+                self.regexp_string_iterator_next(host, receiver)
+            }
             BuiltinCall::ArrayJoin => self.array_join(host, receiver, &args),
             BuiltinCall::ArrayToString => self.array_to_string(host, receiver),
             BuiltinCall::JsonStatic(method) => self.call_json(host, &method, &args),
@@ -1409,7 +1438,9 @@ impl Vm {
                 Value::Object(id) => self.object_tag(*id)?,
                 _ => "Object",
             };
-            Ok(Invocation::Value(Value::String(format!("[object {tag}]"))))
+            Ok(Invocation::Value(Value::String(
+                format!("[object {tag}]").into(),
+            )))
         }
     }
 
@@ -1450,7 +1481,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let separator = match args.first() {
-            None | Some(Value::Undefined) => ",".to_owned(),
+            None | Some(Value::Undefined) => ",".into(),
             Some(value) => match self.coerce_string(host, value)? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
@@ -1458,13 +1489,13 @@ impl Vm {
         };
         let array = matches!(self.heap.get(*id)?, Object::Array(_));
         if array && self.active_array_joins.contains(id) {
-            return Ok(Invocation::Value(Value::String(String::new())));
+            return Ok(Invocation::Value(Value::String(JsString::default())));
         }
         if array {
             self.active_array_joins.insert(*id);
         }
         let result = (|| {
-            let mut output = String::new();
+            let mut output = JsString::default();
             for index in 0..length {
                 if index > 0 {
                     output.push_str(&separator);
@@ -1499,7 +1530,7 @@ impl Vm {
         for (index, value) in args.iter().enumerate() {
             self.heap.define_data(
                 id,
-                PropertyKey::String(index.to_string()),
+                PropertyKey::String(index.to_string().into()),
                 value.clone(),
                 Attributes::ORDINARY,
             )?;
@@ -1610,15 +1641,14 @@ impl Vm {
         if matches!(receiver, Value::Null | Value::Undefined) {
             return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
         }
-        let string = match self.string_value(host, receiver)? {
-            Invocation::Value(Value::String(string)) => string,
-            Invocation::Value(_) => unreachable!(),
-            thrown => return Ok(thrown),
+        let string = match self.coerce_string(host, receiver)? {
+            Ok(string) => string,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let iterator = self.heap.alloc(Object::StringIterator {
             object: PlainObject::new(Some(self.builtins.string_iterator_prototype)),
             string,
-            byte_offset: 0,
+            position: 0,
         });
         Ok(Invocation::Value(Value::Object(iterator)))
     }
@@ -1629,22 +1659,29 @@ impl Vm {
             return self.throw_type_error(invalid_receiver);
         };
         let Object::StringIterator {
-            string,
-            byte_offset,
-            ..
+            string, position, ..
         } = self.heap.get_mut(id)?
         else {
             return self.throw_type_error(invalid_receiver);
         };
-        let Some(code_point) = string[*byte_offset..].chars().next() else {
+        let Some(first) = utf16_unit(string, *position) else {
             return self.iterator_result(Value::Undefined, true);
         };
-        *byte_offset += code_point.len_utf8();
-        if *byte_offset == string.len() {
-            *string = String::new();
-            *byte_offset = 0;
+        let width = if (0xd800..=0xdbff).contains(&first)
+            && matches!(utf16_unit(string, *position + 1), Some(0xdc00..=0xdfff))
+        {
+            2
+        } else {
+            1
+        };
+        let end = *position + width;
+        let value = JsString::from(&string.as_units()[*position..end]);
+        *position = end;
+        if end == utf16_len(string) {
+            *string = JsString::default();
+            *position = 0;
         }
-        self.iterator_result(Value::String(code_point.to_string()), false)
+        self.iterator_result(Value::String(value), false)
     }
 
     pub(crate) fn iterator_result(
@@ -1669,7 +1706,7 @@ impl Vm {
         if name == "toString" {
             return if self.is_callable(receiver) {
                 Ok(Invocation::Value(Value::String(
-                    "function () { [native code] }".to_owned(),
+                    "function () { [native code] }".into(),
                 )))
             } else {
                 self.throw_type_error("incompatible Function.prototype.toString receiver")
@@ -1719,7 +1756,7 @@ impl Vm {
         self.alloc_error(
             self.builtins.typeerror_prototype,
             "TypeError",
-            Some(message.to_owned()),
+            Some(message.into()),
         )
     }
 
@@ -1730,7 +1767,7 @@ impl Vm {
         self.alloc_error(
             self.builtins.rangeerror_prototype,
             "RangeError",
-            Some(message.to_owned()),
+            Some(message.into()),
         )
     }
 
@@ -1961,8 +1998,8 @@ impl Vm {
                 Ok(keys) => keys.into_iter().map(Value::String).collect(),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             },
-            Some(Value::String(text)) => (0..text.encode_utf16().count())
-                .map(|index| Value::String(index.to_string()))
+            Some(Value::String(text)) => (0..utf16_len(text))
+                .map(|index| Value::String(index.to_string().into()))
                 .collect(),
             _ => Vec::new(),
         };
@@ -2261,7 +2298,7 @@ impl Vm {
         if self.has_own_function_metadata(target, key.borrowed())? {
             return Ok(Ok(false));
         }
-        if key.as_string() == Some("length")
+        if key.borrowed().is_str("length")
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value
         {
@@ -2344,11 +2381,12 @@ impl Vm {
         &mut self,
         prototype: ObjectId,
         name: &str,
-        message: Option<String>,
+        message: Option<JsString>,
     ) -> Result<Value, VmError> {
         let id = self.heap.alloc_plain_with(Some(prototype));
-        let stack = format!("{name}: {}", message.as_deref().unwrap_or_default());
+        let mut stack = JsString::from(format!("{name}: "));
         if let Some(message) = message {
+            stack.push_str(&message);
             self.heap
                 .define_data(id, "message", Value::String(message), Attributes::METHOD)?;
         }
@@ -2360,7 +2398,7 @@ impl Vm {
         let error = self.alloc_error(
             self.builtins.aggregateerror_prototype,
             "AggregateError",
-            Some("All promises were rejected".to_owned()),
+            Some("All promises were rejected".into()),
         )?;
         let Value::Object(id) = error else {
             unreachable!()
@@ -2423,13 +2461,18 @@ impl Vm {
             },
             _ => return self.throw_type_error("incompatible Symbol receiver"),
         };
-        let description = self.heap.symbols.get(&id).and_then(Option::as_deref);
+        let description = self.heap.symbols.get(&id).and_then(Option::as_ref);
         Ok(Invocation::Value(match method {
             "valueOf" => Value::Symbol(id),
-            "toString" => Value::String(format!("Symbol({})", description.unwrap_or_default())),
-            "get description" => {
-                description.map_or(Value::Undefined, |text| Value::String(text.to_owned()))
+            "toString" => {
+                let mut text = JsString::from("Symbol(");
+                if let Some(description) = description {
+                    text.push_str(description);
+                }
+                text.push(')');
+                Value::String(text)
             }
+            "get description" => description.cloned().map_or(Value::Undefined, Value::String),
             _ => unreachable!("unknown Symbol method"),
         }))
     }
@@ -3086,7 +3129,7 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let id = self.heap.alloc_plain();
         self.heap
-            .set_own_string(id, "status", Value::String(status.to_owned()))?;
+            .set_own_string(id, "status", Value::String(status.into()))?;
         self.heap.set_own_string(id, payload.0, payload.1)?;
         Ok(Value::Object(id))
     }
@@ -3221,7 +3264,19 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
         ("RegExp", Some(name)) => REGEXP_METHODS
             .iter()
             .find(|(key, _)| *key == name)
-            .map(|(_, method)| BuiltinCall::RegExpMethod(*method)),
+            .map(|(_, method)| BuiltinCall::RegExpMethod(*method))
+            .or_else(|| {
+                REGEXP_STATICS
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, method)| BuiltinCall::RegExpMethod(*method))
+            })
+            .or_else(|| {
+                REGEXP_SYMBOL_METHODS
+                    .iter()
+                    .find(|(_, key, _)| *key == name)
+                    .map(|(_, _, method)| BuiltinCall::RegExpMethod(*method))
+            }),
         ("String", None) => Some(BuiltinCall::StringConstructor),
         ("String", Some("iterator")) => Some(BuiltinCall::StringIterator),
         ("String", Some(name)) => STRING_METHODS
@@ -3235,6 +3290,7 @@ fn static_call(function: &BuiltinStatic) -> Option<BuiltinCall> {
                     .map(|(_, method)| BuiltinCall::StringStatic(*method))
             }),
         ("StringIterator", Some("next")) => Some(BuiltinCall::StringIteratorNext),
+        ("RegExpStringIterator", Some("next")) => Some(BuiltinCall::RegExpStringIteratorNext),
         ("Iterator", Some("identity")) => Some(BuiltinCall::IteratorIdentity),
         ("Reflect", Some("apply")) => Some(BuiltinCall::ReflectApply),
         ("Reflect", Some("construct")) => Some(BuiltinCall::ReflectConstruct),

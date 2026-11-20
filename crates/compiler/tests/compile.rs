@@ -671,6 +671,35 @@ fn rejects_unsupported_module_syntax() {
 }
 
 #[test]
+fn emits_utf16_for_string_literals_templates_and_property_keys() {
+    use yield_vm::bytecode::Constant;
+
+    let build = compile(
+        concat!(
+            r#"function run(x) { return { '\uD800': '\u{1F600}\uD801', ['\uD802']: `\uD803"#,
+            "\r\n",
+            r#"${x}\u{DC00}` }; }"#,
+        ),
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    for expected in [
+        &[0xd800][..],
+        &[0xd83d, 0xde00, 0xd801],
+        &[0xd802],
+        &[0xd803, 0x000a],
+        &[0xdc00],
+    ] {
+        assert!(
+            build.constants.iter().any(|constant| {
+                matches!(constant, Constant::String(value) if value.as_units() == expected)
+            }),
+            "missing UTF-16 constant {expected:x?}"
+        );
+    }
+}
+
+#[test]
 fn regexp_literal_lowers_without_reading_the_constructor_binding() {
     let function = compile_run(r"function run(RegExp) { return /a\/b/ig; }");
     assert!(function.code.iter().any(|instruction| matches!(
@@ -684,18 +713,18 @@ fn regexp_literal_lowers_without_reading_the_constructor_binding() {
 }
 
 #[test]
-fn rejects_unsupported_regexp_literals_at_the_literal_span() {
+fn accepts_ecmascript_regexp_features_and_locates_invalid_literals() {
     for literal in [r"/(a)\1/", "/(?=a)a/", "/a/d"] {
-        let source = format!("\n  {literal};");
-        let error = compile(&source, &CompileOptions::default()).unwrap_err();
-        assert_eq!((error.line(), error.column()), (2, 3), "{error}");
-        assert!(
-            error
-                .message()
-                .starts_with("unsupported syntax: RegExp literal:"),
-            "{error}"
-        );
+        compile(&format!("{literal};"), &CompileOptions::default()).unwrap();
     }
+    let error = compile("\n  /(/;", &CompileOptions::default()).unwrap_err();
+    assert_eq!((error.line(), error.column()), (2, 3), "{error}");
+    assert!(
+        error
+            .message()
+            .starts_with("unsupported syntax: RegExp literal:"),
+        "{error}"
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@ use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, Property};
 use crate::host::Host;
 use crate::ops;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 macro_rules! unwrap_script {
@@ -270,15 +270,19 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         id: ObjectId,
-    ) -> Result<Result<Vec<String>, Value>, VmError> {
+    ) -> Result<Result<Vec<JsString>, Value>, VmError> {
         let ordinary = !matches!(self.heap.get(id)?, Object::Proxy { .. });
         let keys = unwrap_script!(self.own_keys(host, id, ordinary));
         let mut names = Vec::new();
         for key in keys {
             if let PropertyKey::String(key) = key
                 && (ordinary
-                    || unwrap_script!(self.own_descriptor(host, id, PropertyKeyRef::String(&key)))
-                        .is_some_and(|(_, attrs)| attrs.enumerable))
+                    || unwrap_script!(self.own_descriptor(
+                        host,
+                        id,
+                        PropertyKeyRef::JsString(key.as_units())
+                    ))
+                    .is_some_and(|(_, attrs)| attrs.enumerable))
             {
                 names.push(key);
             }
@@ -297,14 +301,6 @@ impl Vm {
         } = *self.heap.get(id)?
         else {
             let property = self.heap.get(id)?.own_property(key);
-            if property
-                .as_ref()
-                .is_some_and(crate::heap::OwnProperty::has_unrepresentable_value)
-            {
-                return Ok(Err(
-                    self.type_error("string index cannot represent a lone surrogate")?
-                ));
-            }
             return Ok(Ok(property.map(|property| {
                 let attrs = property.attributes();
                 (property.into_owned(), attrs)
@@ -384,7 +380,7 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         iterator: ObjectId,
-    ) -> Result<Result<Option<String>, Value>, VmError> {
+    ) -> Result<Result<Option<JsString>, Value>, VmError> {
         loop {
             let Object::ForInIterator {
                 current,
@@ -396,7 +392,7 @@ impl Vm {
                 return Err(VmError::InvalidState("expected a for-in cursor".into()));
             };
             if let Some(index) = string_indices.next() {
-                return Ok(Ok(Some(index.to_string())));
+                return Ok(Ok(Some(index.to_string().into())));
             }
             let Some(id) = *current else {
                 return Ok(Ok(None));
@@ -404,14 +400,16 @@ impl Vm {
             if let Some(keys) = pending {
                 if let Some(key) = keys.pop_front() {
                     if visited.contains(&key)
-                        || ops::canonical_index(&key)
+                        || ops::canonical_index_key(PropertyKeyRef::JsString(key.as_units()))
                             .is_some_and(|index| index < string_indices.end)
                     {
                         continue;
                     }
-                    let Some((_, attrs)) =
-                        unwrap_script!(self.own_descriptor(host, id, PropertyKeyRef::String(&key)))
-                    else {
+                    let Some((_, attrs)) = unwrap_script!(self.own_descriptor(
+                        host,
+                        id,
+                        PropertyKeyRef::JsString(key.as_units())
+                    )) else {
                         continue;
                     };
                     let Object::ForInIterator { visited, .. } = self.heap.get_mut(iterator)? else {
@@ -454,7 +452,8 @@ impl Vm {
 
 fn key_value(key: PropertyKeyRef<'_>) -> Value {
     match key {
-        PropertyKeyRef::String(key) => Value::String(key.to_owned()),
+        PropertyKeyRef::String(key) => Value::String(key.into()),
+        PropertyKeyRef::JsString(key) => Value::String(key.into()),
         PropertyKeyRef::Symbol(key) => Value::Symbol(key),
     }
 }

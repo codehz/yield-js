@@ -10,9 +10,9 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::value::BindingId;
+use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 27;
+pub const BYTECODE_VERSION: u32 = 28;
 
 /// VM-provided global names, in builtin-index order.
 /// `0` is `Promise` (constructor and static methods). `1` is `queueMicrotask`.
@@ -105,7 +105,7 @@ pub enum Constant {
     Null,
     Bool(bool),
     Number(f64),
-    String(String),
+    String(JsString),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,7 +229,7 @@ pub enum Instr {
     /// Allocates a fresh literal using the intrinsic RegExp prototype.
     NewRegExp {
         dst: Slot,
-        source: String,
+        source: JsString,
         flags: String,
     },
     /// Copies enumerable own properties from source onto target.
@@ -860,9 +860,9 @@ impl Build {
                 Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
                 Instr::NewRegExp { dst, source, flags } => {
                     check_slot(*dst, "NewRegExp.dst")?;
-                    crate::validate_regexp(source, flags).map_err(|message| {
-                        format!("{location}: invalid NewRegExp at pc {pc}: {message}")
-                    })?;
+                    crate::regexp::validate_regexp_units(source.as_units(), flags).map_err(
+                        |message| format!("{location}: invalid NewRegExp at pc {pc}: {message}"),
+                    )?;
                 }
                 Instr::CopyDataProperties { target, source } => {
                     check_slot(*target, "CopyDataProperties.target")?;

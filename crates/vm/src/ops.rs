@@ -2,7 +2,7 @@
 
 use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
-use crate::value::Value;
+use crate::value::{JsString, PropertyKeyRef, Value};
 
 pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
     matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
@@ -37,7 +37,9 @@ pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Va
         BinaryOp::Add => match (&lhs, &rhs) {
             (Value::String(_), _) | (_, Value::String(_)) => {
                 check_no_symbol(SYMBOL_TO_STRING, &[&lhs, &rhs])?;
-                Value::String(to_js_string(&lhs) + &to_js_string(&rhs))
+                let mut text = to_js_string(&lhs);
+                text.push_str(&to_js_string(&rhs));
+                Value::String(text)
             }
             (lhs, rhs) => {
                 check_no_symbol(SYMBOL_TO_NUMBER, &[lhs, rhs])?;
@@ -105,13 +107,9 @@ pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
         UnaryOp::Pos => Value::Number(to_number_lossy(&value)),
         UnaryOp::Not => Value::Bool(!value.truthy()),
         UnaryOp::BitNot => Value::Number((!to_int32_lossy(&value)) as f64),
-        UnaryOp::TypeOf => Value::String(value.type_of().to_owned()),
+        UnaryOp::TypeOf => Value::String(value.type_of().into()),
         UnaryOp::Void => Value::Undefined,
     }
-}
-
-pub(crate) fn array_index(key: &str) -> Option<usize> {
-    canonical_index(key).filter(|&index| index < u32::MAX as usize)
 }
 
 pub(crate) fn canonical_index(key: &str) -> Option<usize> {
@@ -122,6 +120,22 @@ pub(crate) fn canonical_index(key: &str) -> Option<usize> {
         return None;
     }
     key.parse().ok()
+}
+
+pub(crate) fn canonical_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
+    let units = match key {
+        PropertyKeyRef::String(text) => return canonical_index(text),
+        PropertyKeyRef::JsString(units) => units,
+        PropertyKeyRef::Symbol(_) => return None,
+    };
+    match units {
+        [48] => Some(0),
+        [49..=57, ..] => units.iter().try_fold(0usize, |n, &unit| {
+            (48..=57).contains(&unit).then_some(())?;
+            n.checked_mul(10)?.checked_add(usize::from(unit - 48))
+        }),
+        _ => None,
+    }
 }
 
 fn relational(
@@ -179,7 +193,10 @@ pub(crate) fn to_number(value: &Value) -> Result<f64, VmError> {
         Value::Null => Ok(0.0),
         Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
         Value::Number(value) => Ok(*value),
-        Value::String(value) => parse_js_number(value),
+        Value::String(value) => match value.to_utf8() {
+            Ok(text) => parse_js_number(&text),
+            Err(_) => Ok(f64::NAN),
+        },
         Value::Symbol(_) => Err(VmError::InvalidState(
             "numeric conversion of a Symbol is not implemented in this PoC".to_owned(),
         )),
@@ -268,26 +285,18 @@ fn to_uint32(value: &Value) -> Result<u32, VmError> {
     Ok(to_int32(value)? as u32)
 }
 
-pub(crate) fn to_js_string(value: &Value) -> String {
+pub(crate) fn to_js_string(value: &Value) -> JsString {
     match value {
-        Value::Undefined => "undefined".to_owned(),
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => {
-            if value.is_nan() {
-                "NaN".to_owned()
-            } else if *value == f64::INFINITY {
-                "Infinity".to_owned()
-            } else if *value == f64::NEG_INFINITY {
-                "-Infinity".to_owned()
-            } else if *value == 0.0 {
-                "0".to_owned()
-            } else {
-                value.to_string()
-            }
-        }
+        Value::Undefined => "undefined".into(),
+        Value::Null => "null".into(),
+        Value::Bool(value) => if *value { "true" } else { "false" }.into(),
+        Value::Number(value) if value.is_nan() => "NaN".into(),
+        Value::Number(value) if *value == f64::INFINITY => "Infinity".into(),
+        Value::Number(value) if *value == f64::NEG_INFINITY => "-Infinity".into(),
+        Value::Number(value) if *value == 0.0 => "0".into(),
+        Value::Number(value) => value.to_string().into(),
         Value::String(value) => value.clone(),
-        Value::Symbol(_) => "Symbol()".to_owned(),
-        Value::Object(_) => "[object Object]".to_owned(),
+        Value::Symbol(_) => "Symbol()".into(),
+        Value::Object(_) => "[object Object]".into(),
     }
 }

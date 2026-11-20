@@ -1,10 +1,15 @@
-//! UTF-16 string operations. String results containing a lone surrogate are rejected.
+//! UTF-16 string operations.
 
+use crate::JsString;
 use crate::error::VmError;
-use crate::heap::{BoxedPrimitive, Object};
+use crate::heap::{
+    BoxedPrimitive, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, REPLACE_SYMBOL, SEARCH_SYMBOL,
+    SPLIT_SYMBOL,
+};
 use crate::host::Host;
+use crate::regexp_runtime::RegExpMethod;
 use crate::runtime::Invocation;
-use crate::value::Value;
+use crate::value::{PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = 16 * 1024 * 1024;
@@ -33,6 +38,10 @@ pub(crate) enum StringMethod {
     PadStart,
     PadEnd,
     Replace,
+    ReplaceAll,
+    MatchAll,
+    Match,
+    Search,
     ToString,
     ValueOf,
 }
@@ -51,7 +60,7 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let Some(value) = args.first() else {
-            return Ok(Invocation::Value(Value::String(String::new())));
+            return Ok(Invocation::Value(Value::String(JsString::default())));
         };
         self.string_value(host, value)
     }
@@ -68,6 +77,18 @@ impl Vm {
         }
         if matches!(receiver, Value::Undefined | Value::Null) {
             return self.throw_type_error("String method requires a non-null receiver");
+        }
+        if matches!(
+            method,
+            StringMethod::Match
+                | StringMethod::MatchAll
+                | StringMethod::Search
+                | StringMethod::Replace
+                | StringMethod::ReplaceAll
+                | StringMethod::Split
+        ) && let Some(result) = self.string_pattern_method(host, method, receiver, args)?
+        {
+            return Ok(result);
         }
         let text = match self.coerce_string(host, receiver)? {
             Ok(text) => text,
@@ -96,7 +117,12 @@ impl Vm {
             StringMethod::PadStart => self.string_pad(&text, host, args, true),
             StringMethod::PadEnd => self.string_pad(&text, host, args, false),
             StringMethod::Replace => self.string_replace(&text, host, args),
-            StringMethod::ToString | StringMethod::ValueOf => unreachable!("handled above"),
+            StringMethod::ReplaceAll => self.string_replace_all(&text, host, args),
+            StringMethod::Match
+            | StringMethod::MatchAll
+            | StringMethod::Search
+            | StringMethod::ToString
+            | StringMethod::ValueOf => unreachable!("handled before ToString"),
         }
     }
 
@@ -133,77 +159,74 @@ impl Vm {
 
     fn char_at(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let Some(index) = self.relative_index(host, index, utf16_len(text), false)? else {
-            return Ok(Invocation::Value(Value::String(String::new())));
+        let unit = match self.relative_index(host, index, utf16_len(text), false)? {
+            Ok(index) => index.and_then(|index| utf16_unit(text, index)),
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(match unit_at(text, index) {
-            Some(unit) => match string_from_unit(unit) {
-                Some(value) => Invocation::Value(Value::String(value)),
-                None => {
-                    return self.throw_type_error("string index cannot represent a lone surrogate");
-                }
-            },
-            None => Invocation::Value(Value::String(String::new())),
-        })
+        Ok(Invocation::Value(Value::String(
+            unit.map(utf16_unit_string).unwrap_or_default(),
+        )))
     }
 
     fn char_code_at(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let Some(index) = self.relative_index(host, index, utf16_len(text), false)? else {
-            return Ok(Invocation::Value(Value::Number(f64::NAN)));
+        let index = match self.relative_index(host, index, utf16_len(text), false)? {
+            Ok(index) => index,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(Invocation::Value(match unit_at(text, index) {
-            Some(unit) => Value::Number(f64::from(unit)),
-            None => Value::Number(f64::NAN),
-        }))
+        let code = index.and_then(|index| utf16_unit(text, index));
+        Ok(Invocation::Value(Value::Number(
+            code.map_or(f64::NAN, f64::from),
+        )))
     }
 
     fn code_point_at(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let Some(index) = self.relative_index(host, index, utf16_len(text), false)? else {
-            return Ok(Invocation::Value(Value::Undefined));
+        let index = match self.relative_index(host, index, utf16_len(text), false)? {
+            Ok(index) => index,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(Invocation::Value(match code_point_at(text, index) {
-            Some(point) => Value::Number(f64::from(point)),
-            None => Value::Undefined,
-        }))
+        Ok(Invocation::Value(
+            match index.and_then(|index| code_point_at(text, index)) {
+                Some(point) => Value::Number(f64::from(point)),
+                None => Value::Undefined,
+            },
+        ))
     }
 
     fn string_at(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let Some(index) = self.relative_index(host, index, utf16_len(text), true)? else {
-            return Ok(Invocation::Value(Value::Undefined));
+        let index = match self.relative_index(host, index, utf16_len(text), true)? {
+            Ok(index) => index,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(match unit_at(text, index) {
-            Some(unit) => match string_from_unit(unit) {
-                Some(value) => Invocation::Value(Value::String(value)),
-                None => {
-                    return self.throw_type_error("string index cannot represent a lone surrogate");
-                }
+        Ok(Invocation::Value(
+            match index.and_then(|index| utf16_unit(text, index)) {
+                Some(unit) => Value::String(utf16_unit_string(unit)),
+                None => Value::Undefined,
             },
-            None => Invocation::Value(Value::Undefined),
-        })
+        ))
     }
 
     fn index_of(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
         last: bool,
@@ -233,7 +256,7 @@ impl Vm {
 
     fn string_includes(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -252,7 +275,7 @@ impl Vm {
 
     fn string_affix(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
         start: bool,
@@ -275,49 +298,56 @@ impl Vm {
                 _ => length,
             }
         };
-        let offset = if start {
-            match self.clamp_index(host, arg(args, 1), length)? {
+        let units = text.as_units();
+        let matched = if start {
+            let offset = match self.clamp_index(host, arg(args, 1), length)? {
                 Ok(offset) => offset,
                 Err(error) => return Ok(Invocation::Thrown(error)),
-            }
+            };
+            units[offset..].starts_with(search.as_units())
         } else {
-            end.saturating_sub(utf16_len(&search))
-        };
-        let matched = if start {
-            slice_units(text, offset, offset.saturating_add(utf16_len(&search)))
-                .is_some_and(|slice| slice == search)
-        } else {
-            slice_units(text, offset, end).is_some_and(|slice| slice == search)
+            units[..end].ends_with(search.as_units())
         };
         Ok(Invocation::Value(Value::Bool(matched)))
     }
 
     fn string_slice(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let length = utf16_len(text);
-        let start = self
-            .relative_index(host, arg(args, 0), length, true)?
-            .unwrap_or_default();
+        let length = utf16_len(text) as f64;
+        let clamp = |index: f64| {
+            (if index < 0.0 {
+                (length + index).max(0.0)
+            } else {
+                index.min(length)
+            }) as usize
+        };
+        let start = match self.integer_index(host, arg(args, 0), false)? {
+            Ok(start) => clamp(start),
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         let end = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                self.relative_index(host, value, length, true)?.unwrap_or(0)
+                match self.integer_index(host, value, false)? {
+                    Ok(end) => clamp(end),
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
             }
-            _ => length,
+            _ => length as usize,
         };
-        let end = end.max(start);
-        match slice_units(text, start, end) {
-            Some(slice) => Ok(Invocation::Value(Value::String(slice))),
-            None => self.throw_type_error("string slice cannot represent a lone surrogate"),
-        }
+        Ok(Invocation::Value(Value::String(slice_units(
+            text,
+            start,
+            end.max(start),
+        ))))
     }
 
     fn string_substring(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -340,15 +370,14 @@ impl Vm {
         } else {
             (end, start)
         };
-        match slice_units(text, start, end) {
-            Some(slice) => Ok(Invocation::Value(Value::String(slice))),
-            None => self.throw_type_error("string substring cannot represent a lone surrogate"),
-        }
+        Ok(Invocation::Value(Value::String(slice_units(
+            text, start, end,
+        ))))
     }
 
     fn string_split(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -373,42 +402,22 @@ impl Vm {
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 if separator.is_empty() {
-                    for (index, unit) in text.encode_utf16().enumerate() {
-                        if index == limit {
-                            break;
-                        }
-                        let Some(part) = string_from_unit(unit) else {
-                            return self.throw_type_error(
-                                "string split cannot represent a lone surrogate",
-                            );
-                        };
-                        parts.push(Value::String(part));
-                    }
+                    parts.extend(
+                        text.as_units()
+                            .iter()
+                            .copied()
+                            .take(limit)
+                            .map(|unit| Value::String(utf16_unit_string(unit))),
+                    );
                 } else {
                     let mut cursor = 0;
                     while parts.len() < limit {
-                        match find_from(text, &separator, cursor) {
-                            Some(found) if found >= cursor => {
-                                let Some(part) = slice_units(text, cursor, found) else {
-                                    return self.throw_type_error(
-                                        "string split cannot represent a lone surrogate",
-                                    );
-                                };
-                                parts.push(Value::String(part));
-                                cursor = found + utf16_len(&separator);
-                                if cursor > utf16_len(text) {
-                                    break;
-                                }
-                            }
-                            _ => {
-                                let Some(part) = slice_units(text, cursor, utf16_len(text)) else {
-                                    return self.throw_type_error(
-                                        "string split cannot represent a lone surrogate",
-                                    );
-                                };
-                                parts.push(Value::String(part));
-                                break;
-                            }
+                        if let Some(found) = find_from(text, &separator, cursor) {
+                            parts.push(Value::String(slice_units(text, cursor, found)));
+                            cursor = found + utf16_len(&separator);
+                        } else {
+                            parts.push(Value::String(slice_units(text, cursor, utf16_len(text))));
+                            break;
                         }
                     }
                 }
@@ -419,15 +428,17 @@ impl Vm {
 
     fn string_concat(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let mut out = text.to_owned();
+        let mut length = text.len();
         for arg in args {
             match self.coerce_string(host, arg)? {
                 Ok(part) => {
-                    if out.len().saturating_add(part.len()) > MAX_LENGTH {
+                    length = length.saturating_add(part.len()) - pair_savings(&out, &part);
+                    if length > MAX_LENGTH {
                         return self.range_error("Invalid string length");
                     }
                     out.push_str(&part);
@@ -440,7 +451,7 @@ impl Vm {
 
     fn string_repeat(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         count: &Value,
     ) -> Result<Invocation, VmError> {
@@ -452,22 +463,28 @@ impl Vm {
             return self.range_error("Invalid count value");
         }
         let count = count as usize;
-        if text.len().saturating_mul(count) > MAX_LENGTH {
+        if count == 0 || text.is_empty() {
+            return Ok(Invocation::Value(Value::String(JsString::default())));
+        }
+        let first = text.len();
+        let extra = first - pair_savings(text, text);
+        if first.saturating_add(extra.saturating_mul(count - 1)) > MAX_LENGTH {
             return self.range_error("Invalid string length");
         }
-        Ok(Invocation::Value(Value::String(text.repeat(count))))
+        Ok(Invocation::Value(Value::String(JsString::from_units(
+            text.as_units().repeat(count),
+        ))))
     }
 
     fn string_pad(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
         start: bool,
     ) -> Result<Invocation, VmError> {
         let target = match self.integer_index(host, arg(args, 0), false)? {
-            Ok(target) if target.is_finite() && target >= 0.0 => target as usize,
-            Ok(_) => return self.range_error("Invalid string length"),
+            Ok(target) => target.max(0.0) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let fill = match args.get(1) {
@@ -477,44 +494,40 @@ impl Vm {
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
             }
-            _ => " ".to_owned(),
+            _ => " ".into(),
         };
         let length = utf16_len(text);
         if target <= length || fill.is_empty() {
             return Ok(Invocation::Value(Value::String(text.to_owned())));
         }
         let pad_len = target - length;
-        if pad_len > MAX_LENGTH {
+        if target > MAX_LENGTH {
             return self.range_error("Invalid string length");
         }
-        let units: Vec<u16> = fill.encode_utf16().collect();
-        let mut filler = Vec::new();
-        while filler.len() < pad_len {
-            filler.extend_from_slice(&units);
+        let fill = fill.as_units();
+        let text = text.as_units();
+        let (copies, tail) = (pad_len / fill.len(), pad_len % fill.len());
+        let mut out = Vec::with_capacity(target);
+        if !start {
+            out.extend_from_slice(text);
         }
-        filler.truncate(pad_len);
-        let filler = string_from_units(&filler)
-            .ok_or_else(|| VmError::InvalidState("padding produced a lone surrogate".to_owned()));
-        let filler = match filler {
-            Ok(filler) => filler,
-            Err(_) => {
-                return self.throw_type_error("string padding cannot represent a lone surrogate");
-            }
-        };
-        let mut out = String::new();
+        for _ in 0..copies {
+            out.extend_from_slice(fill);
+        }
+        out.extend_from_slice(&fill[..tail]);
         if start {
-            out.push_str(&filler);
-            out.push_str(text);
-        } else {
-            out.push_str(text);
-            out.push_str(&filler);
+            out.extend_from_slice(text);
+        }
+        let out = JsString::from_units(out);
+        if out.len() > MAX_LENGTH {
+            return self.range_error("Invalid string length");
         }
         Ok(Invocation::Value(Value::String(out)))
     }
 
     fn string_replace(
         &mut self,
-        text: &str,
+        text: &JsString,
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -525,8 +538,8 @@ impl Vm {
         let Some(position) = find_from(text, &search, 0) else {
             return Ok(Invocation::Value(Value::String(text.to_owned())));
         };
-        let matched = slice_units(text, position, position + utf16_len(&search))
-            .ok_or_else(|| VmError::InvalidState("matched string is not UTF-8".to_owned()))?;
+        let matched = search;
+        let end = position + utf16_len(&matched);
         let replacement = match args.get(1) {
             Some(value) if self.is_callable(value) => {
                 match self.invoke(
@@ -547,18 +560,190 @@ impl Vm {
                 }
             }
             Some(value) => match self.coerce_string(host, value)? {
-                Ok(pattern) => substitute(&pattern, text, &matched, position)?,
+                Ok(pattern) => substitute(&pattern, text, &matched, position),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             },
-            None => "undefined".to_owned(),
+            None => "undefined".into(),
         };
-        let prefix = slice_units(text, 0, position)
-            .ok_or_else(|| VmError::InvalidState("replace prefix is not UTF-8".to_owned()))?;
-        let suffix = slice_units(text, position + utf16_len(&search), utf16_len(text))
-            .ok_or_else(|| VmError::InvalidState("replace suffix is not UTF-8".to_owned()))?;
-        Ok(Invocation::Value(Value::String(format!(
-            "{prefix}{replacement}{suffix}"
-        ))))
+        let mut out = slice_units(text, 0, position);
+        out.push_str(&replacement);
+        out.push_str(&slice_units(text, end, utf16_len(text)));
+        Ok(Invocation::Value(Value::String(out)))
+    }
+
+    /// Runs the `String.prototype` protocol lookup. `None` means the caller
+    /// must fall back to the plain string algorithm.
+    fn string_pattern_method(
+        &mut self,
+        host: &mut dyn Host,
+        method: StringMethod,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Option<Invocation>, VmError> {
+        let search = args.first().cloned().unwrap_or(Value::Undefined);
+        let (symbol, requires_global, builtin) = match method {
+            StringMethod::Match => (MATCH_SYMBOL, false, Some(RegExpMethod::Match)),
+            StringMethod::MatchAll => (MATCH_ALL_SYMBOL, true, Some(RegExpMethod::MatchAll)),
+            StringMethod::Search => (SEARCH_SYMBOL, false, Some(RegExpMethod::Search)),
+            StringMethod::Replace => (REPLACE_SYMBOL, false, None),
+            StringMethod::ReplaceAll => (REPLACE_SYMBOL, true, None),
+            StringMethod::Split => (SPLIT_SYMBOL, false, None),
+            _ => return Ok(None),
+        };
+        if requires_global {
+            match self.is_regexp(host, &search)? {
+                Ok(true) => {
+                    let flags =
+                        match self.read_property(host, &search, PropertyKeyRef::String("flags"))? {
+                            Invocation::Value(value) => value,
+                            Invocation::Thrown(error) => {
+                                return Ok(Some(Invocation::Thrown(error)));
+                            }
+                        };
+                    let flags = match self.coerce_string(host, &flags)? {
+                        Ok(flags) => flags,
+                        Err(error) => return Ok(Some(Invocation::Thrown(error))),
+                    };
+                    if !flags.as_units().contains(&u16::from(b'g')) {
+                        return Ok(Some(self.throw_type_error(
+                            "String.prototype method requires a global RegExp argument",
+                        )?));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => return Ok(Some(Invocation::Thrown(error))),
+            }
+        }
+        let protocol = if matches!(search, Value::Undefined | Value::Null) {
+            Value::Undefined
+        } else {
+            match self.get_method(host, &search, symbol)? {
+                Ok(method) => method,
+                Err(error) => return Ok(Some(Invocation::Thrown(error))),
+            }
+        };
+        if !matches!(protocol, Value::Undefined) {
+            let this = receiver.clone();
+            let call_args = match method {
+                StringMethod::Replace | StringMethod::ReplaceAll => {
+                    vec![this, args.get(1).cloned().unwrap_or(Value::Undefined)]
+                }
+                StringMethod::Split => vec![this, args.get(1).cloned().unwrap_or(Value::Undefined)],
+                _ => vec![this],
+            };
+            return Ok(Some(self.invoke(host, &protocol, call_args, &search)?));
+        }
+        let Some(builtin) = builtin else {
+            return Ok(None);
+        };
+        let flags = if matches!(method, StringMethod::MatchAll) {
+            Value::String("g".into())
+        } else {
+            Value::Undefined
+        };
+        let created = self.construct_regexp(host, &[search.clone(), flags], None, false)?;
+        let Invocation::Value(Value::Object(id)) = created else {
+            return Ok(Some(created));
+        };
+        Ok(Some(self.call_regexp_method(
+            host,
+            builtin,
+            &Value::Object(id),
+            std::slice::from_ref(receiver),
+        )?))
+    }
+
+    fn get_method(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+        symbol: SymbolId,
+    ) -> Result<Result<Value, Value>, VmError> {
+        match self.read_property(host, value, PropertyKeyRef::Symbol(symbol))? {
+            Invocation::Value(Value::Undefined | Value::Null) => Ok(Ok(Value::Undefined)),
+            Invocation::Value(method) => Ok(Ok(method)),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
+    }
+
+    fn is_regexp(
+        &mut self,
+        host: &mut dyn Host,
+        value: &Value,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let Value::Object(id) = *value else {
+            return Ok(Ok(false));
+        };
+        let matcher = match self.read_property(host, value, PropertyKeyRef::Symbol(MATCH_SYMBOL))? {
+            Invocation::Value(matcher) => matcher,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        if !matches!(matcher, Value::Undefined) {
+            return Ok(Ok(true));
+        }
+        Ok(Ok(matches!(self.heap.get(id)?, Object::RegExp { .. })))
+    }
+
+    fn string_replace_all(
+        &mut self,
+        text: &JsString,
+        host: &mut dyn Host,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let search = match self.coerce_string(host, arg(args, 0))? {
+            Ok(search) => search,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let replacement_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let functional = self.is_callable(&replacement_arg);
+        let pattern = if functional {
+            JsString::default()
+        } else {
+            match self.coerce_string(host, &replacement_arg)? {
+                Ok(pattern) => pattern,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        };
+        let length = utf16_len(text);
+        let search_length = utf16_len(&search);
+        let mut out = Vec::new();
+        let mut last = 0usize;
+        let mut cursor = 0usize;
+        while cursor <= length {
+            let Some(position) = find_from(text, &search, cursor) else {
+                break;
+            };
+            out.extend_from_slice(&text.as_units()[last..position]);
+            let replacement = if functional {
+                match self.invoke(
+                    host,
+                    &replacement_arg,
+                    vec![
+                        Value::String(search.clone()),
+                        Value::Number(position as f64),
+                        Value::String(text.clone()),
+                    ],
+                    &Value::Undefined,
+                )? {
+                    Invocation::Value(value) => match self.coerce_string(host, &value)? {
+                        Ok(value) => value,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    },
+                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                }
+            } else {
+                substitute(&pattern, text, &search, position)
+            };
+            out.extend_from_slice(replacement.as_units());
+            last = position + search_length;
+            cursor = if search_length == 0 {
+                position.saturating_add(1)
+            } else {
+                last
+            };
+        }
+        out.extend_from_slice(&text.as_units()[last.min(length)..]);
+        Ok(Invocation::Value(Value::String(JsString::from_units(out))))
     }
 
     fn string_from_char_code(
@@ -574,10 +759,9 @@ impl Vm {
             };
             units.push(crate::ops::number_to_uint32(number) as u16);
         }
-        match string_from_units(&units) {
-            Some(text) => Ok(Invocation::Value(Value::String(text))),
-            None => self.throw_type_error("fromCharCode cannot represent a lone surrogate"),
-        }
+        Ok(Invocation::Value(Value::String(JsString::from_units(
+            units,
+        ))))
     }
 
     fn string_from_code_point(
@@ -585,7 +769,7 @@ impl Vm {
         host: &mut dyn Host,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let mut out = String::new();
+        let mut out = Vec::with_capacity(args.len());
         for arg in args {
             let number = match self.coerce_number(host, arg)? {
                 Ok(number) => number,
@@ -594,17 +778,23 @@ impl Vm {
             if !(0.0..=0x10_ffff as f64).contains(&number) || number.fract() != 0.0 {
                 return self.range_error("Invalid code point");
             }
-            let Some(ch) = char::from_u32(number as u32) else {
-                return self.throw_type_error("fromCodePoint cannot represent a lone surrogate");
-            };
-            out.push(ch);
+            let point = number as u32;
+            if point <= 0xffff {
+                out.push(point as u16);
+            } else {
+                let offset = point - 0x10000;
+                out.extend([
+                    0xd800 + (offset >> 10) as u16,
+                    0xdc00 + (offset & 0x3ff) as u16,
+                ]);
+            }
         }
-        Ok(Invocation::Value(Value::String(out)))
+        Ok(Invocation::Value(Value::String(JsString::from_units(out))))
     }
 
     fn string_raw(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
         let template = arg(args, 0);
-        let raw = match self.read_member(host, template, &Value::String("raw".to_owned()))? {
+        let raw = match self.read_member(host, template, &Value::String("raw".into()))? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
@@ -612,19 +802,18 @@ impl Vm {
             return self.throw_type_error("String.raw requires a raw array");
         };
         let raw_object = Value::Object(raw_id);
-        let length =
-            match self.read_member(host, &raw_object, &Value::String("length".to_owned()))? {
-                Invocation::Value(value) => value,
-                thrown @ Invocation::Thrown(_) => return Ok(thrown),
-            };
+        let length = match self.read_member(host, &raw_object, &Value::String("length".into()))? {
+            Invocation::Value(value) => value,
+            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        };
         let length = match self.coerce_number(host, &length)? {
             Ok(length) => crate::ops::number_to_uint32(length) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let mut out = String::new();
+        let mut out = JsString::default();
         let mut segment_index = 0;
         while segment_index < length {
-            let key = Value::String(segment_index.to_string());
+            let key = Value::String(segment_index.to_string().into());
             let segment = match self.read_member(host, &raw_object, &key)? {
                 Invocation::Value(value) => value,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -652,28 +841,24 @@ impl Vm {
         value: &Value,
         length: usize,
         relative: bool,
-    ) -> Result<Option<usize>, VmError> {
+    ) -> Result<Result<Option<usize>, Value>, VmError> {
         let number = match self.integer_index(host, value, false)? {
             Ok(number) => number,
-            Err(thrown) => return Err(VmError::Thrown(thrown)),
+            Err(thrown) => return Ok(Err(thrown)),
         };
         if !number.is_finite() {
-            return Ok(if number.is_sign_negative() {
-                Some(0)
-            } else {
-                None
-            });
+            return Ok(Ok(None));
         }
         let index = if relative && number < 0.0 {
             number + length as f64
         } else {
             number
         };
-        Ok(if index < 0.0 || index >= length as f64 {
+        Ok(Ok(if index < 0.0 || index >= length as f64 {
             None
         } else {
             Some(index as usize)
-        })
+        }))
     }
 
     fn integer_index(
@@ -687,9 +872,7 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         Ok(Ok(if number.is_nan() {
-            0.0
-        } else if infinity && number == f64::INFINITY {
-            f64::INFINITY
+            if infinity { f64::INFINITY } else { 0.0 }
         } else {
             number.trunc()
         }))
@@ -707,7 +890,7 @@ impl Vm {
         }
     }
 
-    fn array_result(&mut self, elements: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn array_result(&mut self, elements: Vec<Value>) -> Result<Invocation, VmError> {
         Ok(Invocation::Value(Value::Object(
             self.heap.alloc_array(elements),
         )))
@@ -721,7 +904,7 @@ impl Vm {
         self.alloc_error(
             self.builtins.rangeerror_prototype,
             "RangeError",
-            Some(message.to_owned()),
+            Some(message.into()),
         )
     }
 }
@@ -730,19 +913,32 @@ fn arg(args: &[Value], index: usize) -> &Value {
     args.get(index).unwrap_or(&Value::Undefined)
 }
 
-fn utf16_len(text: &str) -> usize {
-    text.encode_utf16().count()
+pub(crate) fn utf16_len(text: &JsString) -> usize {
+    text.unit_len()
 }
 
-fn unit_at(text: &str, index: usize) -> Option<u16> {
-    text.encode_utf16().nth(index)
+pub(crate) fn utf16_unit(text: &JsString, index: usize) -> Option<u16> {
+    text.as_units().get(index).copied()
 }
 
-fn code_point_at(text: &str, index: usize) -> Option<u32> {
-    let mut units = text.encode_utf16().skip(index);
-    let first = u32::from(units.next()?);
+pub(crate) fn utf16_unit_string(unit: u16) -> JsString {
+    JsString::from_units(vec![unit])
+}
+
+fn pair_savings(left: &JsString, right: &JsString) -> usize {
+    if matches!(left.as_units().last().copied(), Some(0xd800..=0xdbff))
+        && matches!(right.as_units().first().copied(), Some(0xdc00..=0xdfff))
+    {
+        2 // Three WTF-8 bytes per lone surrogate, four for the joined pair.
+    } else {
+        0
+    }
+}
+
+fn code_point_at(text: &JsString, index: usize) -> Option<u32> {
+    let first = u32::from(utf16_unit(text, index)?);
     if (0xD800..=0xDBFF).contains(&first)
-        && let Some(second) = units.next().map(u32::from)
+        && let Some(second) = utf16_unit(text, index + 1).map(u32::from)
         && (0xDC00..=0xDFFF).contains(&second)
     {
         return Some(0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00));
@@ -750,57 +946,37 @@ fn code_point_at(text: &str, index: usize) -> Option<u32> {
     Some(first)
 }
 
-fn string_from_unit(unit: u16) -> Option<String> {
-    char::from_u32(u32::from(unit)).map(|ch| ch.to_string())
+fn slice_units(text: &JsString, start: usize, end: usize) -> JsString {
+    JsString::from(&text.as_units()[start..end])
 }
 
-fn string_from_units(units: &[u16]) -> Option<String> {
-    char::decode_utf16(units.iter().copied())
-        .collect::<Result<String, _>>()
-        .ok()
-}
-
-fn slice_units(text: &str, start: usize, end: usize) -> Option<String> {
-    if start > end {
-        return Some(String::new());
+fn find_from(text: &JsString, needle: &JsString, start: usize) -> Option<usize> {
+    let text = text.as_units();
+    let needle = needle.as_units();
+    let start = start.min(text.len());
+    if needle.is_empty() {
+        return Some(start);
     }
-    let units: Vec<u16> = text.encode_utf16().skip(start).take(end - start).collect();
-    string_from_units(&units)
-}
-
-fn find_from(text: &str, needle: &str, start: usize) -> Option<usize> {
-    if utf16_len(needle) == 0 {
-        return Some(start.min(utf16_len(text)));
-    }
-    let text: Vec<u16> = text.encode_utf16().collect();
-    let needle: Vec<u16> = needle.encode_utf16().collect();
-    text[start.min(text.len())..]
+    text[start..]
         .windows(needle.len())
         .position(|window| window == needle)
-        .map(|position| start.min(text.len()) + position)
+        .map(|position| start + position)
 }
 
-fn find_first(text: &str, needle: &str, start: f64, length: usize) -> f64 {
-    if start > length as f64 {
-        return -1.0;
-    }
-    find_from(text, needle, start.max(0.0) as usize)
+fn find_first(text: &JsString, needle: &JsString, start: f64, length: usize) -> f64 {
+    find_from(text, needle, start.clamp(0.0, length as f64) as usize)
         .map(|position| position as f64)
         .unwrap_or(-1.0)
 }
 
-fn find_last(text: &str, needle: &str, start: f64) -> f64 {
-    let text: Vec<u16> = text.encode_utf16().collect();
-    let needle: Vec<u16> = needle.encode_utf16().collect();
-    let end = if start.is_infinite() {
-        text.len()
-    } else {
-        (start.max(0.0) as usize)
-            .saturating_add(needle.len())
-            .min(text.len())
-    };
+fn find_last(text: &JsString, needle: &JsString, start: f64) -> f64 {
+    let text = text.as_units();
+    let needle = needle.as_units();
+    let end = (start as usize)
+        .saturating_add(needle.len())
+        .min(text.len());
     if needle.is_empty() {
-        return end.min(text.len()) as f64;
+        return end as f64;
     }
     text[..end]
         .windows(needle.len())
@@ -809,26 +985,57 @@ fn find_last(text: &str, needle: &str, start: f64) -> f64 {
         .unwrap_or(-1.0)
 }
 
-fn string_case(text: &str, upper: bool) -> Result<Invocation, VmError> {
-    let converted = if upper {
-        text.to_uppercase()
-    } else {
-        text.to_lowercase()
+fn string_case(text: &JsString, upper: bool) -> Result<Invocation, VmError> {
+    // Case whole scalar runs so context-sensitive mappings (e.g. final sigma)
+    // still see their neighbors. Lone surrogates delimit runs and survive unchanged.
+    let mut run = String::new();
+    let mut out = Vec::with_capacity(utf16_len(text));
+    let convert = |run: &str| {
+        if upper {
+            run.to_uppercase()
+        } else {
+            run.to_lowercase()
+        }
     };
-    Ok(Invocation::Value(Value::String(converted)))
+    for item in char::decode_utf16(text.as_units().iter().copied()) {
+        match item {
+            Ok(ch) => run.push(ch),
+            Err(surrogate) => {
+                if !run.is_empty() {
+                    out.extend(convert(&run).encode_utf16());
+                    run.clear();
+                }
+                out.push(surrogate.unpaired_surrogate());
+            }
+        }
+    }
+    if !run.is_empty() {
+        out.extend(convert(&run).encode_utf16());
+    }
+    Ok(Invocation::Value(Value::String(JsString::from_units(out))))
 }
 
-fn string_trim(text: &str, start: bool, end: bool) -> Result<Invocation, VmError> {
-    let mut chars = text.chars();
-    let out = if start && end {
-        text.trim_matches(is_trim_whitespace).to_owned()
-    } else if start {
-        text.trim_start_matches(is_trim_whitespace).to_owned()
+fn string_trim(text: &JsString, start: bool, end: bool) -> Result<Invocation, VmError> {
+    let units = text.as_units();
+    let whitespace = |unit: &u16| char::from_u32(u32::from(*unit)).is_some_and(is_trim_whitespace);
+    let first = if start {
+        units.iter().take_while(|unit| whitespace(unit)).count()
     } else {
-        text.trim_end_matches(is_trim_whitespace).to_owned()
+        0
     };
-    let _ = chars.next();
-    Ok(Invocation::Value(Value::String(out)))
+    let last = if end {
+        units.len()
+            - units[first..]
+                .iter()
+                .rev()
+                .take_while(|unit| whitespace(unit))
+                .count()
+    } else {
+        units.len()
+    };
+    Ok(Invocation::Value(Value::String(slice_units(
+        text, first, last,
+    ))))
 }
 
 fn is_trim_whitespace(ch: char) -> bool {
@@ -848,34 +1055,30 @@ fn is_trim_whitespace(ch: char) -> bool {
 }
 
 fn substitute(
-    pattern: &str,
-    text: &str,
-    matched: &str,
+    pattern: &JsString,
+    text: &JsString,
+    matched: &JsString,
     position: usize,
-) -> Result<String, VmError> {
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] != '$' || index + 1 == chars.len() {
-            out.push(chars[index]);
-            index += 1;
+) -> JsString {
+    let mut units = pattern.as_units().iter().copied().peekable();
+    let mut out = Vec::new();
+    let text = text.as_units();
+    while let Some(unit) = units.next() {
+        if unit != u16::from(b'$') {
+            out.push(unit);
             continue;
         }
-        match chars[index + 1] {
-            '$' => out.push('$'),
-            '&' => out.push_str(matched),
-            '`' => out.push_str(&slice_units(text, 0, position).unwrap_or_default()),
-            '\'' => out.push_str(
-                &slice_units(text, position + utf16_len(matched), utf16_len(text))
-                    .unwrap_or_default(),
-            ),
+        match units.peek().copied() {
+            Some(0x24) => out.push(unit),
+            Some(0x26) => out.extend_from_slice(matched.as_units()),
+            Some(0x60) => out.extend_from_slice(&text[..position]),
+            Some(0x27) => out.extend_from_slice(&text[position + utf16_len(matched)..]),
             _ => {
-                out.push('$');
-                out.push(chars[index + 1]);
+                out.push(unit);
+                continue;
             }
         }
-        index += 2;
+        units.next();
     }
-    Ok(out)
+    JsString::from_units(out)
 }

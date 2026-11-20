@@ -1,13 +1,10 @@
 //! JSON parsing and serialization for the VM's JSON builtin.
-//!
-//! Strings are UTF-8, so escaped lone UTF-16 surrogates are rejected as a
-//! catchable `SyntaxError` rather than stored.
 
 use crate::error::VmError;
-use crate::heap::{Attributes, Object};
+use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 const MAX_DEPTH: usize = 256;
@@ -17,13 +14,13 @@ enum JsonValue {
     Null,
     Bool(bool),
     Number(f64),
-    String(String),
+    String(JsString),
     Array(Vec<JsonValue>),
-    Object(Vec<(String, JsonValue)>),
+    Object(Vec<(JsString, JsonValue)>),
 }
 
 struct Parser<'a> {
-    text: &'a str,
+    text: &'a [u16],
     pos: usize,
 }
 
@@ -31,7 +28,7 @@ impl Parser<'_> {
     fn ws(&mut self) {
         while let Some(ch) = self.peek() {
             if matches!(ch, ' ' | '\t' | '\r' | '\n') {
-                self.pos += ch.len_utf8();
+                self.pos += ch.len_utf16();
             } else {
                 break;
             }
@@ -39,12 +36,14 @@ impl Parser<'_> {
     }
 
     fn peek(&self) -> Option<char> {
-        self.text.get(self.pos..)?.chars().next()
+        self.text
+            .get(self.pos)
+            .and_then(|&unit| char::from_u32(u32::from(unit)))
     }
 
     fn take(&mut self, expected: char) -> bool {
         if self.peek() == Some(expected) {
-            self.pos += expected.len_utf8();
+            self.pos += expected.len_utf16();
             true
         } else {
             false
@@ -69,67 +68,65 @@ impl Parser<'_> {
     }
 
     fn literal(&mut self, literal: &str) -> bool {
-        if self.text[self.pos..].starts_with(literal) {
-            self.pos += literal.len();
+        let units = literal.encode_utf16().collect::<Vec<_>>();
+        if self
+            .text
+            .get(self.pos..)
+            .is_some_and(|rest| rest.starts_with(&units))
+        {
+            self.pos += units.len();
             true
         } else {
             false
         }
     }
 
-    fn string(&mut self) -> Result<String, String> {
+    fn string(&mut self) -> Result<JsString, String> {
         if !self.take('"') {
             return Err("invalid JSON string".into());
         }
-        let mut result = String::new();
+        let mut result = Vec::new();
         loop {
-            let ch = self.peek().ok_or("unterminated JSON string")?;
-            self.pos += ch.len_utf8();
-            match ch {
-                '"' => return Ok(result),
-                '\\' => {
-                    let escaped = self.peek().ok_or("unterminated JSON escape")?;
-                    self.pos += escaped.len_utf8();
-                    match escaped {
-                        '"' | '\\' | '/' => result.push(escaped),
-                        'b' => result.push('\u{0008}'),
-                        'f' => result.push('\u{000c}'),
-                        'n' => result.push('\n'),
-                        'r' => result.push('\r'),
-                        't' => result.push('\t'),
-                        'u' => {
-                            let first = self.hex4()?;
-                            let scalar = if (0xd800..=0xdbff).contains(&first) {
-                                if !self.take('\\') || !self.take('u') {
-                                    return Err("lone surrogate escape".into());
-                                }
-                                let second = self.hex4()?;
-                                if !(0xdc00..=0xdfff).contains(&second) {
-                                    return Err("invalid surrogate pair".into());
-                                }
-                                0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)
-                            } else if (0xdc00..=0xdfff).contains(&first) {
-                                return Err("lone surrogate escape".into());
-                            } else {
-                                first
-                            };
-                            result.push(char::from_u32(scalar).ok_or("invalid Unicode escape")?);
-                        }
-                        _ => return Err("invalid JSON escape".into()),
-                    }
-                }
-                ch if ch <= '\u{001f}' => return Err("unescaped control character".into()),
-                ch => result.push(ch),
+            let unit = *self.text.get(self.pos).ok_or("unterminated JSON string")?;
+            self.pos += 1;
+            if unit == u16::from(b'"') {
+                return Ok(JsString::from_units(result));
+            }
+            if unit == u16::from(b'\\') {
+                let escaped_unit = *self
+                    .text
+                    .get(self.pos)
+                    .ok_or("invalid or unterminated JSON escape")?;
+                let escaped =
+                    char::from_u32(u32::from(escaped_unit)).ok_or("invalid JSON escape")?;
+                self.pos += 1;
+                result.push(match escaped {
+                    '"' | '\\' | '/' => escaped as u16,
+                    'b' => 0x08,
+                    'f' => 0x0c,
+                    'n' => u16::from(b'\n'),
+                    'r' => u16::from(b'\r'),
+                    't' => u16::from(b'\t'),
+                    'u' => self.hex4()?,
+                    _ => return Err("invalid JSON escape".into()),
+                });
+            } else if unit <= 0x1f {
+                return Err("unescaped control character".into());
+            } else {
+                result.push(unit);
             }
         }
     }
 
-    fn hex4(&mut self) -> Result<u32, String> {
+    fn hex4(&mut self) -> Result<u16, String> {
         let mut value = 0;
         for _ in 0..4 {
-            let ch = self.peek().ok_or("short Unicode escape")?;
-            self.pos += ch.len_utf8();
-            value = value * 16 + ch.to_digit(16).ok_or("invalid Unicode escape")?;
+            let unit = *self.text.get(self.pos).ok_or("short Unicode escape")?;
+            self.pos += 1;
+            value = value * 16
+                + char::from_u32(u32::from(unit))
+                    .and_then(|ch| ch.to_digit(16))
+                    .ok_or("invalid Unicode escape")? as u16;
         }
         Ok(value)
     }
@@ -172,6 +169,9 @@ impl Parser<'_> {
             }
         }
         let number = self.text[start..self.pos]
+            .iter()
+            .map(|&unit| char::from(unit as u8))
+            .collect::<String>()
             .parse::<f64>()
             .map_err(|_| "invalid JSON number")?;
         if !number.is_finite() {
@@ -235,30 +235,41 @@ impl Parser<'_> {
     }
 }
 
-fn quote(text: &str, out: &mut String) {
-    out.push('"');
-    for ch in text.chars() {
+fn quote(text: &JsString, out: &mut Vec<u16>) {
+    out.push(u16::from(b'"'));
+    for ch in char::decode_utf16(text.as_units().iter().copied()) {
         match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{0008}' => out.push_str("\\b"),
-            '\u{000c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            ch if ch <= '\u{001f}' => out.push_str(&format!("\\u{:04x}", ch as u32)),
-            ch => out.push(ch),
+            Ok('"') => out.extend("\\\"".encode_utf16()),
+            Ok('\\') => out.extend("\\\\".encode_utf16()),
+            Ok('\u{0008}') => out.extend("\\b".encode_utf16()),
+            Ok('\u{000c}') => out.extend("\\f".encode_utf16()),
+            Ok('\n') => out.extend("\\n".encode_utf16()),
+            Ok('\r') => out.extend("\\r".encode_utf16()),
+            Ok('\t') => out.extend("\\t".encode_utf16()),
+            Ok(ch) if ch <= '\u{001f}' => unicode_escape(ch as u16, out),
+            Err(error) => unicode_escape(error.unpaired_surrogate(), out),
+            Ok(ch) => out.extend_from_slice(ch.encode_utf16(&mut [0; 2])),
         }
     }
-    out.push('"');
+    out.push(u16::from(b'"'));
 }
 
-fn encode(value: &JsonValue, out: &mut String, gap: &str, indent: &str) {
+fn unicode_escape(unit: u16, out: &mut Vec<u16>) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.extend("\\u".encode_utf16());
+    for shift in [12, 8, 4, 0] {
+        out.push(u16::from(HEX[((unit >> shift) & 0xf) as usize]));
+    }
+}
+
+fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &[u16], indent: usize) {
     match value {
-        JsonValue::Null => out.push_str("null"),
-        JsonValue::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-        JsonValue::Number(value) if *value == 0.0 => out.push('0'),
-        JsonValue::Number(value) => out.push_str(&value.to_string()),
+        JsonValue::Null => out.extend("null".encode_utf16()),
+        JsonValue::Bool(value) => {
+            out.extend((if *value { "true" } else { "false" }).encode_utf16())
+        }
+        JsonValue::Number(value) if *value == 0.0 => out.push(u16::from(b'0')),
+        JsonValue::Number(value) => out.extend(value.to_string().encode_utf16()),
         JsonValue::String(value) => quote(value, out),
         JsonValue::Array(values) => {
             encode_list(out, gap, indent, true, values.len(), |out, next| {
@@ -273,9 +284,9 @@ fn encode(value: &JsonValue, out: &mut String, gap: &str, indent: &str) {
                 for (index, (key, value)) in values.iter().enumerate() {
                     separate(out, gap, next, index);
                     quote(key, out);
-                    out.push(':');
+                    out.push(u16::from(b':'));
                     if !gap.is_empty() {
-                        out.push(' ');
+                        out.push(u16::from(b' '));
                     }
                     encode(value, out, gap, next);
                 }
@@ -284,41 +295,41 @@ fn encode(value: &JsonValue, out: &mut String, gap: &str, indent: &str) {
     }
 }
 
-fn separate(out: &mut String, gap: &str, indent: &str, index: usize) {
+fn separate(out: &mut Vec<u16>, gap: &[u16], indent: usize, index: usize) {
     if index > 0 {
-        out.push(',');
+        out.push(u16::from(b','));
     }
+    newline(out, gap, indent);
+}
+
+fn newline(out: &mut Vec<u16>, gap: &[u16], indent: usize) {
     if !gap.is_empty() {
-        out.push('\n');
-        out.push_str(indent);
+        out.push(u16::from(b'\n'));
+        for _ in 0..indent {
+            out.extend_from_slice(gap);
+        }
     }
 }
 
 fn encode_list(
-    out: &mut String,
-    gap: &str,
-    indent: &str,
+    out: &mut Vec<u16>,
+    gap: &[u16],
+    indent: usize,
     array: bool,
     len: usize,
-    body: impl FnOnce(&mut String, &str),
+    body: impl FnOnce(&mut Vec<u16>, usize),
 ) {
-    out.push(if array { '[' } else { '{' });
-    if len == 0 {
-        out.push(if array { ']' } else { '}' });
-        return;
+    out.push(u16::from(if array { b'[' } else { b'{' }));
+    if len != 0 {
+        body(out, indent + 1);
+        newline(out, gap, indent);
     }
-    let next = format!("{indent}{gap}");
-    body(out, &next);
-    if !gap.is_empty() {
-        out.push('\n');
-        out.push_str(indent);
-    }
-    out.push(if array { ']' } else { '}' });
+    out.push(u16::from(if array { b']' } else { b'}' }));
 }
 
 struct Serialize<'a> {
     replacer: Option<&'a Value>,
-    properties: Option<&'a [String]>,
+    properties: Option<&'a [JsString]>,
     stack: Vec<ObjectId>,
     path: String,
 }
@@ -345,12 +356,12 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let mut parser = Parser {
-            text: &text,
+            text: text.as_units(),
             pos: 0,
         };
         let parsed = parser.value(0).and_then(|value| {
             parser.ws();
-            if parser.pos != text.len() {
+            if parser.pos != text.unit_len() {
                 Err("trailing JSON text".into())
             } else {
                 Ok(value)
@@ -363,7 +374,7 @@ impl Vm {
                 let error = self.alloc_error(
                     self.builtins.syntaxerror_prototype,
                     "SyntaxError",
-                    Some(message),
+                    Some(message.into()),
                 )?;
                 return Ok(Invocation::Thrown(error));
             }
@@ -372,10 +383,15 @@ impl Vm {
             return Ok(Invocation::Value(value));
         };
         let holder = self.heap.alloc_plain();
-        self.heap
-            .define_data(holder, "", value, Attributes::ORDINARY)?;
-        match self.revive(host, reviver, holder, "")? {
-            Ok(()) => self.read_data(holder, ""),
+        self.heap.define_data(
+            holder,
+            PropertyKey::String(JsString::new()),
+            value,
+            Attributes::ORDINARY,
+        )?;
+        let root = JsString::new();
+        match self.revive(host, reviver, holder, &root)? {
+            Ok(()) => self.read_data(holder, &root),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
@@ -402,20 +418,26 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let holder = self.heap.alloc_plain();
-        self.heap
-            .define_data(holder, "", value, Attributes::ORDINARY)?;
+        self.heap.define_data(
+            holder,
+            PropertyKey::String(JsString::new()),
+            value,
+            Attributes::ORDINARY,
+        )?;
         let mut state = Serialize {
             replacer: function,
             properties: listed.as_deref(),
             stack: Vec::new(),
             path: "$".to_owned(),
         };
-        match self.serialize_property(host, &mut state, holder, "")? {
+        match self.serialize_property(host, &mut state, holder, &JsString::new())? {
             Ok(None) => Ok(Invocation::Value(Value::Undefined)),
             Ok(Some(tree)) => {
-                let mut output = String::new();
-                encode(&tree, &mut output, &gap, "");
-                Ok(Invocation::Value(Value::String(output)))
+                let mut output = Vec::new();
+                encode(&tree, &mut output, gap.as_units(), 0);
+                Ok(Invocation::Value(Value::String(JsString::from_units(
+                    output,
+                ))))
             }
             Err(error) => Ok(Invocation::Thrown(error)),
         }
@@ -425,27 +447,36 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         space: &Value,
-    ) -> Result<Result<String, Value>, VmError> {
+    ) -> Result<Result<JsString, Value>, VmError> {
         let space = match space {
+            Value::Object(id)
+                if matches!(
+                    self.heap.get(*id)?,
+                    Object::Boxed {
+                        primitive: BoxedPrimitive::String(_),
+                        ..
+                    }
+                ) =>
+            {
+                match self.coerce_string(host, space)? {
+                    Ok(text) => Value::String(text),
+                    Err(error) => return Ok(Err(error)),
+                }
+            }
             Value::Object(_) => match self.coerce_number(host, space)? {
                 Ok(number) => Value::Number(number),
                 Err(error) => return Ok(Err(error)),
             },
             other => other.clone(),
         };
-        // Objects with valueOf are numbers; a string object is not boxed here.
-        let space = if matches!(space, Value::Object(_)) {
-            match self.coerce_string(host, &space)? {
-                Ok(text) => Value::String(text),
-                Err(error) => return Ok(Err(error)),
-            }
-        } else {
-            space
-        };
         Ok(Ok(match space {
-            Value::Number(number) => " ".repeat(number.trunc().clamp(0.0, 10.0) as usize),
-            Value::String(text) => text.chars().take(10).collect(),
-            _ => String::new(),
+            Value::Number(number) => JsString::from_units(vec![
+                u16::from(b' ');
+                number.trunc().clamp(0.0, 10.0)
+                    as usize
+            ]),
+            Value::String(text) => text.as_units()[..text.unit_len().min(10)].into(),
+            _ => JsString::new(),
         }))
     }
 
@@ -453,18 +484,18 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         id: ObjectId,
-    ) -> Result<Result<Vec<String>, Value>, VmError> {
+    ) -> Result<Result<Vec<JsString>, Value>, VmError> {
         let length = match self.heap.get(id)? {
             Object::Array(array) => array.length,
             _ => 0,
         };
         let mut keys = Vec::new();
         for index in 0..length {
-            let name = index.to_string();
+            let name = JsString::from(index.to_string());
             let item = match self.read_property(
                 host,
                 &Value::Object(id),
-                PropertyKeyRef::String(&name),
+                PropertyKeyRef::JsString(name.as_units()),
             )? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
@@ -486,16 +517,19 @@ impl Vm {
         host: &mut dyn Host,
         state: &mut Serialize<'_>,
         holder: ObjectId,
-        key: &str,
+        key: &JsString,
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
         if state.stack.len() > MAX_DEPTH {
             return self.type_error("Maximum JSON nesting exceeded").map(Err);
         }
-        let mut value =
-            match self.read_property(host, &Value::Object(holder), PropertyKeyRef::String(key))? {
-                Invocation::Value(value) => value,
-                Invocation::Thrown(error) => return Ok(Err(error)),
-            };
+        let mut value = match self.read_property(
+            host,
+            &Value::Object(holder),
+            PropertyKeyRef::JsString(key.as_units()),
+        )? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
         if let Value::Object(id) = &value {
             let receiver = Value::Object(*id);
             let method =
@@ -507,7 +541,7 @@ impl Vm {
                 value = match self.invoke(
                     host,
                     &method,
-                    vec![Value::String(key.to_owned())],
+                    vec![Value::String(key.clone())],
                     &receiver,
                 )? {
                     Invocation::Value(value) => value,
@@ -519,7 +553,7 @@ impl Vm {
             value = match self.invoke(
                 host,
                 &replacer,
-                vec![Value::String(key.to_owned()), value],
+                vec![Value::String(key.clone()), value],
                 &Value::Object(holder),
             )? {
                 Invocation::Value(value) => value,
@@ -598,7 +632,7 @@ impl Vm {
         let saved = state.path.clone();
         for index in 0..length {
             state.path = format!("{saved}[{index}]");
-            let key = index.to_string();
+            let key = JsString::from(index.to_string());
             let owned = PropertyKey::String(key.clone());
             if !is_proxy && !self.heap.has_own(id, &owned)? {
                 values.push(JsonValue::Null);
@@ -636,7 +670,10 @@ impl Vm {
         let mut values = Vec::new();
         let saved = state.path.clone();
         for key in keys {
-            state.path = format!("{saved}.{key}");
+            state.path = format!(
+                "{saved}.{}",
+                key.to_utf8().unwrap_or_else(|_| "<surrogate>".into())
+            );
             match self.serialize_property(host, state, id, &key)? {
                 Ok(Some(value)) => values.push((key, value)),
                 Ok(None) => {}
@@ -665,18 +702,17 @@ impl Vm {
         host: &mut dyn Host,
         reviver: &Value,
         holder: ObjectId,
-        key: &str,
+        key: &JsString,
     ) -> Result<Result<(), Value>, VmError> {
-        if self.heap.object_count() > MAX_DEPTH.saturating_mul(8) && key.is_empty() {
-            // Depth is checked while walking, not by object count.
-        }
         let initial = match self.read_data(holder, key)? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
         if let Value::Object(id) = initial {
             let nested = match self.heap.get(id)? {
-                Object::Array(array) => (0..array.length).map(|index| index.to_string()).collect(),
+                Object::Array(array) => (0..array.length)
+                    .map(|index| JsString::from(index.to_string()))
+                    .collect(),
                 _ => self
                     .heap
                     .get(id)?
@@ -703,29 +739,27 @@ impl Vm {
         let replaced = match self.invoke(
             host,
             reviver,
-            vec![Value::String(key.to_owned()), value],
+            vec![Value::String(key.clone()), value],
             &Value::Object(holder),
         )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
         if matches!(replaced, Value::Undefined) {
-            self.heap.delete_own(holder, PropertyKeyRef::String(key))?;
+            self.heap
+                .delete_own(holder, PropertyKeyRef::JsString(key.as_units()))?;
         } else {
             self.heap
-                .set_own(holder, PropertyKey::String(key.to_owned()), replaced)?;
+                .set_own(holder, PropertyKey::String(key.clone()), replaced)?;
         }
         Ok(Ok(()))
     }
 
-    fn read_data(&mut self, id: ObjectId, key: &str) -> Result<Invocation, VmError> {
-        let property = self.heap.get(id)?.own_property(PropertyKeyRef::String(key));
-        if property
-            .as_ref()
-            .is_some_and(crate::heap::OwnProperty::has_unrepresentable_value)
-        {
-            return self.throw_type_error("string index cannot represent a lone surrogate");
-        }
+    fn read_data(&self, id: ObjectId, key: &JsString) -> Result<Invocation, VmError> {
+        let property = self
+            .heap
+            .get(id)?
+            .own_property(PropertyKeyRef::JsString(key.as_units()));
         let property = property.map(crate::heap::OwnProperty::into_owned);
         Ok(Invocation::Value(match property {
             Some(crate::heap::Property::Data(value)) => value,
@@ -745,7 +779,7 @@ impl Vm {
                     let value = self.materialize_json(value)?;
                     self.heap.define_data(
                         id,
-                        PropertyKey::String(index.to_string()),
+                        PropertyKey::String(index.to_string().into()),
                         value,
                         Attributes::ORDINARY,
                     )?;

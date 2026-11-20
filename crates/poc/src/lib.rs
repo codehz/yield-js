@@ -47,7 +47,9 @@ impl Host for TestHost {
             "seed" => Ok(HostReply::Value(HostValue::Number(10.0))),
             "wait" => {
                 let label = match args {
-                    [HostValue::String(label)] => label.clone(),
+                    [HostValue::String(label)] => label
+                        .to_utf8()
+                        .map_err(|_| "wait label must be valid UTF-16".to_owned())?,
                     _ => return Err("wait expects one string".to_owned()),
                 };
                 let id = format!("wait:{label}");
@@ -62,7 +64,9 @@ impl Host for TestHost {
             }
             "bind" => {
                 let id = match args {
-                    [HostValue::String(id)] => id.clone(),
+                    [HostValue::String(id)] => id
+                        .to_utf8()
+                        .map_err(|_| "bind id must be valid UTF-16".to_owned())?,
                     _ => return Err("bind expects one string".to_owned()),
                 };
                 let key = NativeKey {

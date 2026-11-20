@@ -5,7 +5,21 @@ use yield_poc::{TestHost, build};
 use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
-use yield_vm::{Object, Value, Vm, VmError};
+use yield_vm::{Host, HostReply, HostValue, JsString, Object, Value, Vm, VmError};
+
+#[test]
+fn host_identifiers_require_well_formed_utf16() {
+    let mut host = yield_poc::TestHost::default();
+    let lone = HostValue::String(JsString::from_units(vec![0xD800]));
+    assert!(host.call("inspect", std::slice::from_ref(&lone)).is_ok());
+    for import in ["wait", "bind"] {
+        assert!(host.call(import, std::slice::from_ref(&lone)).is_err());
+    }
+    let pair = HostValue::String("😀".into());
+    assert!(
+        matches!(host.call("wait", &[pair]), Ok(HostReply::Operation { operation_id }) if operation_id == "wait:😀")
+    );
+}
 
 #[test]
 fn missing_bindings_and_mismatched_builds_are_rejected_before_execution() {
@@ -243,7 +257,9 @@ fn live_symbol_id(snapshot: &yield_vm::Snapshot) -> yield_vm::value::SymbolId {
     *snapshot
         .symbols
         .iter()
-        .find_map(|(id, description)| (description.as_deref() == Some("key")).then_some(id))
+        .find_map(|(id, description)| {
+            (description.as_ref() == Some(&JsString::from("key"))).then_some(id)
+        })
         .expect("live symbol record")
 }
 
@@ -264,7 +280,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .symbols
         .iter()
         .find_map(|(id, description)| {
-            (description.as_deref() == Some("Symbol.iterator")).then_some(id)
+            (description.as_ref() == Some(&JsString::from("Symbol.iterator"))).then_some(id)
         })
         .expect("iterator symbol");
     iterator_registry
@@ -280,7 +296,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .symbols
         .iter()
         .find_map(|(id, description)| {
-            (description.as_deref() == Some("Symbol.toPrimitive")).then_some(id)
+            (description.as_ref() == Some(&JsString::from("Symbol.toPrimitive"))).then_some(id)
         })
         .expect("well-known conversion symbol");
     missing_to_primitive.symbols.remove(&to_primitive);
@@ -296,7 +312,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .symbols
         .iter()
         .find_map(|(id, description)| {
-            (description.as_deref() == Some("Symbol.species")).then_some(*id)
+            (description.as_ref() == Some(&JsString::from("Symbol.species"))).then_some(*id)
         })
         .expect("well-known species symbol");
     missing_species.symbols.remove(&species);
@@ -313,11 +329,6 @@ fn symbol_snapshot_tampering_is_rejected() {
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("next symbol id"))
     );
-
-    let mut old_format = snapshot;
-    old_format.format_version = 7;
-    let error = s.restore(old_format).expect_err("format version 7");
-    assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("format")));
 }
 
 #[test]
@@ -411,16 +422,54 @@ fn string_iterator_snapshot_rejects_invalid_offsets() {
         .iter()
         .position(|record| matches!(record.object, Object::StringIterator { .. }))
         .expect("live string iterator");
-    for offset in [1, usize::MAX] {
+    for offset in [2, usize::MAX] {
         let mut invalid = snapshot.clone();
-        let Object::StringIterator { byte_offset, .. } = &mut invalid.objects[iterator].object
-        else {
+        let Object::StringIterator { position, .. } = &mut invalid.objects[iterator].object else {
             unreachable!();
         };
-        *byte_offset = offset;
+        *position = offset;
         let error = s.restore(invalid).expect_err("invalid string cursor");
         assert!(
-            matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid byte offset"))
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid UTF-16 position"))
+        );
+    }
+}
+
+#[test]
+fn host_value_serde_preserves_utf16_units() {
+    for (units, payload) in [
+        (vec![0xD83D, 0xDE00], serde_json::json!("😀")),
+        (
+            vec![0xD800, 0xFFFD, 0xDC00],
+            serde_json::json!({"utf16": [55296, 65533, 56320]}),
+        ),
+    ] {
+        let value = HostValue::String(JsString::from_units(units.clone()));
+        let json = serde_json::to_value(&value).expect("serialize host value");
+        assert_eq!(json, serde_json::json!({"string": payload}));
+        let HostValue::String(decoded) =
+            serde_json::from_value(json).expect("deserialize host value")
+        else {
+            panic!("expected host string");
+        };
+        assert_eq!(decoded.as_units(), units.as_slice());
+    }
+    for invalid in [-1, 65536] {
+        let json = serde_json::json!({"string": {"utf16": [invalid]}});
+        assert!(serde_json::from_value::<HostValue>(json).is_err());
+    }
+}
+
+#[test]
+fn restore_rejects_previous_snapshot_format_version() {
+    let mut s = Suspended::start(RUN, vec![]);
+    let snapshot = s.snapshot();
+    for version in [7, 32] {
+        let mut previous = snapshot.clone();
+        previous.format_version = version;
+        let error = s.restore(previous).expect_err("previous snapshot format");
+        assert!(
+            matches!(error, VmError::InvalidSnapshot(message) if message.contains("unsupported snapshot format"))
         );
     }
 }

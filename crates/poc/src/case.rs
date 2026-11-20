@@ -1,5 +1,5 @@
 use yield_compiler::compile;
-use yield_vm::{Completion, HostValue, PromiseState, Snapshot, Value, Vm};
+use yield_vm::{Completion, HostValue, JsString, PromiseState, Snapshot, Value, Vm};
 
 use crate::{TestHost, compile_options};
 
@@ -8,6 +8,8 @@ use crate::{TestHost, compile_options};
 /// The header is the leading run of blank lines and `// @` directives. The
 /// whole source, header included, is compiled unchanged so diagnostics keep
 /// the file's line numbers.
+/// String payloads accept JSON strings or `{ "utf16": [...] }`; host operation
+/// IDs in directives must still be JSON strings.
 pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let mut steps = parse_header(source).map_err(|error| prefix_file(name, &error))?;
     let args = match steps.first() {
@@ -106,7 +108,7 @@ enum Expected {
     Null,
     Bool(bool),
     Number(f64),
-    String(String),
+    String(JsString),
 }
 
 fn parse_header(source: &str) -> Result<Vec<Step>, String> {
@@ -236,7 +238,7 @@ fn require_args<'a>(line: usize, directive: &str, args: &'a str) -> Result<&'a s
 fn parse_args(line: usize, args: &str) -> Result<Vec<HostValue>, String> {
     let items = parse_array(line, "@args", args)?;
     items
-        .iter()
+        .into_iter()
         .map(|item| host_scalar(line, "@args", item))
         .collect()
 }
@@ -267,16 +269,21 @@ fn parse_completion(
             items.len()
         ));
     }
-    let id = match &items[0] {
-        serde_json::Value::String(id) => id.clone(),
+    let mut items = items.into_iter();
+    let id = match items.next().expect("checked directive arity") {
+        serde_json::Value::String(id) => id,
         other => {
             return Err(format!(
                 "{line}: {directive}: operation id must be a string, found {}",
-                json_kind(other)
+                json_kind(&other)
             ));
         }
     };
-    let value = host_scalar(line, directive, &items[1])?;
+    let value = host_scalar(
+        line,
+        directive,
+        items.next().expect("checked directive arity"),
+    )?;
     Ok((id, value))
 }
 
@@ -303,6 +310,7 @@ fn parse_uncaught(line: usize, args: &str) -> Result<Vec<Expected>, String> {
         // Normalize whole bare undefined items without changing quoted strings.
         let mut quoted = false;
         let mut escaped = false;
+        let mut depth = 0;
         let items = items.split(|ch| {
             if escaped {
                 escaped = false;
@@ -310,8 +318,13 @@ fn parse_uncaught(line: usize, args: &str) -> Result<Vec<Expected>, String> {
                 escaped = true;
             } else if ch == '"' {
                 quoted = !quoted;
-            } else if !quoted && ch == ',' {
-                return true;
+            } else if !quoted {
+                match ch {
+                    '{' | '[' => depth += 1,
+                    '}' | ']' => depth -= 1,
+                    ',' if depth == 0 => return true,
+                    _ => {}
+                }
             }
             false
         });
@@ -334,7 +347,7 @@ fn parse_uncaught(line: usize, args: &str) -> Result<Vec<Expected>, String> {
     };
     let mut undefined = undefined.into_iter().peekable();
     parse_array(line, DIRECTIVE, args)?
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(index, value)| {
             if undefined.next_if_eq(&index).is_some() {
@@ -353,13 +366,13 @@ fn parse_expected(line: usize, directive: &str, args: &str) -> Result<Expected, 
     }
     let value: serde_json::Value = serde_json::from_str(args)
         .map_err(|error| format!("{line}: {directive}: invalid argument: {error}"))?;
-    json_scalar(line, directive, &value)
+    json_scalar(line, directive, value)
 }
 
 fn host_scalar(
     line: usize,
     directive: &str,
-    value: &serde_json::Value,
+    value: serde_json::Value,
 ) -> Result<HostValue, String> {
     Ok(match json_scalar(line, directive, value)? {
         Expected::Undefined => HostValue::Undefined,
@@ -370,14 +383,10 @@ fn host_scalar(
     })
 }
 
-fn json_scalar(
-    line: usize,
-    directive: &str,
-    value: &serde_json::Value,
-) -> Result<Expected, String> {
+fn json_scalar(line: usize, directive: &str, value: serde_json::Value) -> Result<Expected, String> {
     match value {
         serde_json::Value::Null => Ok(Expected::Null),
-        serde_json::Value::Bool(value) => Ok(Expected::Bool(*value)),
+        serde_json::Value::Bool(value) => Ok(Expected::Bool(value)),
         serde_json::Value::Number(value) => {
             let number = value
                 .as_f64()
@@ -387,10 +396,15 @@ fn json_scalar(
                 })?;
             Ok(Expected::Number(number))
         }
-        serde_json::Value::String(value) => Ok(Expected::String(value.clone())),
+        serde_json::Value::String(value) => Ok(Expected::String(JsString::from(value))),
         serde_json::Value::Array(_) => Err(format!(
             "{line}: {directive}: nested arrays are not allowed"
         )),
+        serde_json::Value::Object(fields) if fields.contains_key("utf16") => {
+            serde_json::from_value(serde_json::Value::Object(fields))
+                .map(Expected::String)
+                .map_err(|error| format!("{line}: {directive}: invalid UTF-16 string: {error}"))
+        }
         serde_json::Value::Object(_) => {
             Err(format!("{line}: {directive}: objects are not allowed"))
         }

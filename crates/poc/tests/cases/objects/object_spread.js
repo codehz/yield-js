@@ -34,12 +34,8 @@ export function run() {
   } catch (e) {
     error = e;
   }
-  let surrogate;
-  try {
-    const fail = { ..."😀" };
-  } catch (e) {
-    surrogate = e.name === "TypeError";
-  }
+  const astral = { ..."😀" };
+  const surrogate = astral[0] === "\uD83D" && astral[1] === "\uDE00" && !(2 in astral);
   return order + "|" + result.a + "|" + (!("b" in result) && !("c" in result)) + "|" +
     (!("added" in result) && !("inherited" in result) && !("hidden" in result)) + "|" +
     (!(0 in result) && result[1] === 1 && result[2] === 20 && !("length" in result)) + "|" +

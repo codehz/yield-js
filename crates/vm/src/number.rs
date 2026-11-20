@@ -97,7 +97,11 @@ impl Vm {
                     Ok(text) => text,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
-                let text = text.trim_start_matches(ops::is_js_whitespace);
+                // A lone surrogate ends a numeric prefix; it need not invalidate digits before it.
+                let prefix: String = char::decode_utf16(text.as_units().iter().copied())
+                    .map_while(Result::ok)
+                    .collect();
+                let text = prefix.trim_start_matches(ops::is_js_whitespace);
                 let number = if method == "parseFloat" {
                     parse_float(text)
                 } else {
@@ -188,12 +192,12 @@ impl Vm {
         let n = if number == 0.0 { 0.0 } else { number };
         string(match method {
             "toString" if digits == 10 => decimal(),
-            "toString" => integer_radix(n, digits as u32),
-            "toFixed" if n.abs() >= 1e21 => exponent_string(format!("{n:e}")),
-            "toFixed" => format!("{n:.digits$}"),
-            "toExponential" if omitted => exponent_string(format!("{n:e}")),
-            "toExponential" => exponent_string(format!("{n:.digits$e}")),
-            "toPrecision" => precision_string(n, digits),
+            "toString" => integer_radix(n, digits as u32).into(),
+            "toFixed" if n.abs() >= 1e21 => exponent_string(format!("{n:e}")).into(),
+            "toFixed" => format!("{n:.digits$}").into(),
+            "toExponential" if omitted => exponent_string(format!("{n:e}")).into(),
+            "toExponential" => exponent_string(format!("{n:.digits$e}")).into(),
+            "toPrecision" => precision_string(n, digits).into(),
             _ => unreachable!("registered Number method"),
         })
     }

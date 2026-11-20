@@ -48,9 +48,7 @@ Symbol 的身份、`Symbol.for` / `keyFor` / `iterator`，以及 Symbol 参与�
 | 原型与描述符 | `Object.getPrototypeOf` 对四种非空原始值返回对应共享原型，但这不意味着所有 `Object` / `Reflect` API 都会隐式装箱；例如 `Reflect.getPrototypeOf` 仍要求对象。宿主原生句柄固定不可扩展，不开放属性定义。 |
 | 未声明名字 | `globalThis` 提供内建全局属性，可用 `typeof globalThis.MessageChannel` 等方式探测功能。未声明的裸名字仍不能读取或赋值（编译错误，不是运行时 `ReferenceError`）；`typeof` 对这类名字折叠为 `"undefined"` |
 
-VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分、填充或从码元/码点构造字符串时，若结果包含单独的代理码元，会抛出可捕获的 `TypeError`。字符串的对象展开也有这个限制。
-
-对象解构读取字符串索引和 rest 复制字符串时也受此限制。`for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
+`for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。运算符仍走已有的对象转原始值流程（例如按 hint 调用 `valueOf` / `toString`），不会直接取出包装对象中的原始值；严格相等也不会拆箱。
 
 名称策略里有一处有意偏差，先不要当疏漏改掉：`typeof` 对被局部遮蔽的 import 或顶层函数仍报 `"function"`（`names.rs`）。这和 design 里「未声明全局的 `typeof` 保持标准语义」不是同一条；未声明且不是 import/顶层函数的名字已经折叠为 `"undefined"`。
 
@@ -66,12 +64,12 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 | `Reflect` | `get`、`set`、`has`、`getOwnPropertyDescriptor`、`ownKeys`、`deleteProperty`、`defineProperty`、`preventExtensions`、`isExtensible`、`getPrototypeOf` / `setPrototypeOf`、`apply`、`construct`（包括绑定了可构造目标的函数） | `construct` 沿用 VM 的构造器限制 |
 | `Function` | 可通过函数的内部原型获取共享的 `Function.prototype`；`toString`、虚拟的 `call` / `apply` / `bind` 及 `name` / `length` | 没有 `Function` 全局或动态函数构造；共享原型不可调用，元数据偏差见第 3 节 |
 | `Array` | 构造与函数调用、`isArray` / `from` / `of`、稀疏索引和常用修改、切片、搜索、转换、回调与迭代方法 | 缺 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries`。新增原型方法仅接受数组接收者；借用 `join` 时接收者须是对象；不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
-| `String` | 函数调用与包装构造、`fromCharCode` / `fromCodePoint` / `raw`、UTF-16 长度与索引、常用搜索、切片、转换、填充、替换和共享原型上的 `[Symbol.iterator]` | 不支持单独的代理码元或正则匹配；可直接调用 `String.raw`，但编译器仍拒绝标签模板语法 |
+| `String` | 函数调用与包装构造、`fromCharCode` / `fromCodePoint` / `raw`、UTF-16 长度与索引、常用搜索、切片、转换、填充、替换和共享原型上的 `[Symbol.iterator]`；`match` / `matchAll` / `replace` / `replaceAll` / `search` / `split` 通过正则协议分派 | `matchAll` 与 `split` 克隆匹配器时忽略 `Symbol.species` 与自定义构造器；可直接调用 `String.raw`，但编译器仍拒绝标签模板语法 |
 | 错误构造器 | `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError` 均可调用或构造；`AggregateError` 同步收集可迭代 `errors` | 原型上缺 `toString`；`stack` 是简化文本，不解析或格式化为标准多行形式 |
 | `Number` | 函数调用与包装构造、非强制转换的数值判断、数值常量、`parseInt` / `parseFloat`、共享原型上的数值提取和格式化方法 | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置；指数格式和舍入偏差见第 1 节 |
 | `Math` | 数学常量、数值方法及可快照恢复的 `random` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
-| `JSON` | `parse` / `stringify`：普通对象与数组、可枚举自有字符串键、`toJSON`、replacer、`space`、循环检测 | 不支持 `BigInt`；单独代理码元不能表示为 VM 字符串，解析或序列化时抛可捕获异常 |
-| `RegExp` | 字面量、调用和构造、`exec` / `test` / `toString`、`source` / `flags` / `global` / `ignoreCase` / `multiline` / `dotAll` / `unicode` / `sticky`、`lastIndex` 与快照恢复。模式支持 UTF-16 码元字面量、字符类及范围、`.`、锚点、ASCII 单词边界、常用字符转义、交替、分组（含 ASCII 名称的命名捕获）、贪婪和惰性量词；直接匹配空串不推进 `lastIndex` | 仅支持 `g` / `i` / `m` / `s` / `y`；拒绝反向引用、环视、Unicode 属性转义、内联修饰符及其他未实现转义。不支持对断言、可空项或包含内部捕获的组应用量词，`i` 不支持非 ASCII 字面码元及范围端点，`m` 的锚点不与显式换行码元或包含它们的范围组合。`exec` 无法表示单独代理码元时抛 `TypeError`。不支持 `String.prototype.match` / `matchAll` / `replace` / `replaceAll` / `search` / `split` 的正则用法 |
+| `JSON` | `parse` / `stringify`：普通对象与数组、可枚举自有字符串键、`toJSON`、replacer、`space`、循环检测 | 不支持 `BigInt` |
+| `RegExp` | 字面量、调用和构造、`exec` / `test` / `toString`、模式和标志访问器、`lastIndex`、`d` indices 与 `RegExp.escape`；`Symbol.match` / `Symbol.matchAll` / `Symbol.replace` / `Symbol.search` / `Symbol.split` 协议，`matchAll` 迭代器可快照恢复。固定 ECMAScript 语法后端支持反向引用、前后行断言、Unicode 属性、v 集合、内联 `ims` 和命名组；匹配与捕获按码元范围返回任意 UTF-16 字符串 | `matchAll` 与 `split` 通过内建 `RegExp` 构造克隆匹配器，忽略 `Symbol.species` 与自定义构造器；不支持 Annex B 历史语法 |
 | `Map` / `Set` | 支持插入顺序、实时迭代及快照恢复 | — |
 | `WeakMap` | 对象身份键、`get` / `has` / `set` / `delete`，快照按 ephemeron 可达性保留条目 | 不支持原始值键（包括非注册 Symbol）；所有四种方法收到原始值键均抛出 `TypeError`。弱键筛选只在生成快照时发生，不是运行期 GC |
 | `Proxy` | `new Proxy` 支持普通对象、数组或原始值包装对象目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，包括目标不变量及快照恢复 | 不可直接调用；不支持撤销、代理函数或构造器、其他 traps，也不保证所有需要内部槽的内建方法都能以代理为接收者 |
@@ -81,7 +79,7 @@ VM 字符串只能存储有效 UTF-8：按 UTF-16 码元读取、切片、拆分
 
 1. **隐式装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **代理仅覆盖六种 trap。** 支持的属性操作及边界见上表和已实现清单，不等同于完整 ECMAScript Proxy。
-3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；`WeakMap` 条目由快照的 ephemeron 追踪单独处理。`RegExp` 的编译结果不进入快照，而由保存的模式与标志重建。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；`WeakMap` 条目由快照的 ephemeron 追踪单独处理。`RegExp` 的编译结果不进入快照，而由保存的模式与标志重建；`matchAll` 的 `RegExpStringIterator` 只保存匹配器对象、输入和游标状态。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 
 ## 6. 依赖关系（现状组织，非承诺）
 

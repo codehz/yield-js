@@ -1,3 +1,4 @@
+use crate::JsString;
 use crate::builtins::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
@@ -15,7 +16,7 @@ pub struct Vm {
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<String, PendingOperation>,
     pub(crate) microtasks: VecDeque<Microtask>,
-    pub(crate) globals: BTreeMap<String, Value>,
+    pub(crate) globals: BTreeMap<JsString, Value>,
     next_continuation_id: ContinuationId,
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
@@ -430,7 +431,7 @@ impl Vm {
         mut heap: Heap,
         continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
         operations: BTreeMap<String, PendingOperation>,
-        globals: BTreeMap<String, Value>,
+        globals: BTreeMap<JsString, Value>,
         builtins: BuiltinRoots,
         script_env: Option<ObjectId>,
     ) -> Self {

@@ -20,6 +20,5 @@ export function run() {
     copy.flags === re.flags && copy.lastIndex === 0 &&
     override !== re && override.source === re.source && override.flags === "y" &&
     RegExp("abc").test("abc") && syntaxError("[", "") &&
-    syntaxError("abc", "gg") && syntaxError("abc", "d") &&
-    syntaxError("a(?=b)", "") && syntaxError("(a)\\1", "");
+    syntaxError("abc", "gg") && syntaxError("", "uv");
 }

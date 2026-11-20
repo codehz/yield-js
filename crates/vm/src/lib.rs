@@ -34,5 +34,5 @@ pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host, HostReply, PendingOperationMeta};
 pub use regexp::{RegExpFlags, validate_regexp};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
-pub use value::{BindingId, ContinuationId, HostValue, NativeKey, ObjectId, Value};
+pub use value::{BindingId, ContinuationId, HostValue, JsString, NativeKey, ObjectId, Value};
 pub use vm::Vm;
