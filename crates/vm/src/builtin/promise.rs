@@ -58,13 +58,7 @@ pub(crate) mod members {
 
     prototype_calls! {
         then: 2 | catch: 1 | finally: 1 as key => |vm, host, roots, args, receiver| {
-            let ValueRef::Object(id) = receiver.view() else {
-                return vm.throw_type_error("incompatible Promise receiver");
-            };
-            if vm.heap.get(id)?.as_promise().is_none() {
-                return vm.throw_type_error("incompatible Promise receiver");
-            }
-            vm.call_promise_method(host, roots, id, key, args)
+            vm.call_promise_method(host, roots, receiver, key, args)
         };
     }
 }

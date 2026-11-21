@@ -1906,24 +1906,29 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
-        receiver: ObjectId,
+        receiver: &Value,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        let this = Value::object(receiver);
         let roots = &roots.with(&receiver);
         match name {
             "catch" => self.invoke_promise_then(
                 host,
                 roots,
-                &this,
+                receiver,
                 vec![
                     Value::UNDEFINED,
                     args.into_iter().next().unwrap_or(Value::UNDEFINED),
                 ],
             ),
             "then" | "finally" => {
-                let species = match self.promise_species(host, &roots.with(&args), &this)? {
+                let ValueRef::Object(id) = receiver.view() else {
+                    return self.throw_type_error("incompatible Promise receiver");
+                };
+                if name == "then" && self.heap.get(id)?.as_promise().is_none() {
+                    return self.throw_type_error("incompatible Promise receiver");
+                }
+                let species = match self.promise_species(host, &roots.with(&args), receiver)? {
                     Invocation::Value(value) => value,
                     thrown => return Ok(thrown),
                 };
@@ -1943,7 +1948,7 @@ impl Vm {
                     } else {
                         vec![handler.clone(), handler]
                     };
-                    return self.invoke_promise_then(host, roots, &this, handlers);
+                    return self.invoke_promise_then(host, roots, receiver, handlers);
                 }
                 let (result, resolve, reject) =
                     match self.new_promise_capability(host, &roots.with(&args), &species)? {
@@ -1951,7 +1956,7 @@ impl Vm {
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     };
                 self.react(
-                    receiver,
+                    id,
                     ReactionJob::Script {
                         resolve,
                         reject,
