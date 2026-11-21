@@ -82,8 +82,19 @@ impl Vm {
             )?;
         }
         if generator {
-            // Instances inherit from this fresh object, which inherits the
-            // shared generator prototype that owns next/return/throw.
+            // Generator functions inherit the matching
+            // %GeneratorFunction.prototype%, whose own `.prototype` is the
+            // shared instance prototype. Instances then inherit a fresh
+            // `.prototype` object chained to the same shared prototype.
+            let function_prototype = if async_generator {
+                self.builtins.get("asyncGeneratorFunction.prototype")
+            } else {
+                self.builtins.get("generatorFunction.prototype")
+            };
+            let Object::Function(function) = self.heap.get_mut(id)? else {
+                unreachable!()
+            };
+            function.prototype = Some(function_prototype);
             let shared = if async_generator {
                 self.heap.async_generator_prototype
             } else {
@@ -1196,6 +1207,56 @@ impl Vm {
         )))
     }
 
+    /// `Object.getOwnPropertyNames` / `Object.getOwnPropertySymbols`.
+    ///
+    /// [[OwnPropertyKeys]] order is preserved, so proxy traps run once and the
+    /// filter keeps string keys ahead of symbol keys. Primitive strings expose
+    /// their UTF-16 index keys and `length`; other primitives have none.
+    pub(crate) fn object_own_property_keys(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+        symbols: bool,
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let mut values = Vec::new();
+        match args.first().map(Value::view) {
+            None | Some(ValueRef::Undefined | ValueRef::Null) => {
+                return self.throw_type_error(if symbols {
+                    "Object.getOwnPropertySymbols requires a non-nullish value"
+                } else {
+                    "Object.getOwnPropertyNames requires a non-nullish value"
+                });
+            }
+            Some(ValueRef::Object(id)) => {
+                let keys = match self.own_keys(host, roots, id, false)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                for key in keys {
+                    match key {
+                        PropertyKey::String(name) if !symbols => values.push(Value::string(name)),
+                        PropertyKey::Symbol(symbol) if symbols => {
+                            values.push(Value::symbol(symbol))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some(ValueRef::String(text)) if !symbols => {
+                for index in 0..utf16_len(text) {
+                    values.push(Value::string(index.to_string().into()));
+                }
+                values.push(Value::string("length".into()));
+            }
+            Some(_) => {}
+        }
+        Ok(Invocation::Value(Value::object(
+            self.heap.alloc_array(values),
+        )))
+    }
+
     pub(crate) fn object_values_or_entries(
         &mut self,
         host: &mut dyn Host,
@@ -1872,13 +1933,12 @@ impl Vm {
 
     pub(crate) fn symbol_static(
         &mut self,
-        receiver: &Value,
+        _receiver: &Value,
         call: impl FnOnce(&mut Self, Vec<Value>) -> Result<Invocation, VmError>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
-        if !matches!(receiver.view(), ValueRef::Object(id) if id == self.builtins.get("symbol")) {
-            return self.throw_type_error("incompatible Symbol receiver");
-        }
+        // `Symbol.for` and `Symbol.keyFor` do not read `this`, so an extracted
+        // method reference is callable in real engines and in this VM.
         call(self, args)
     }
 

@@ -46,6 +46,8 @@ pub(crate) mod members {
             args.first().unwrap_or(&Value::UNDEFINED), args.get(1).unwrap_or(&Value::UNDEFINED),
         ))));
         keys: 1 => |vm, host, roots, args, _| vm.object_keys(host, roots, &args);
+        getOwnPropertyNames: 1 => |vm, host, roots, args, _| vm.object_own_property_keys(host, roots, &args, false);
+        getOwnPropertySymbols: 1 => |vm, host, roots, args, _| vm.object_own_property_keys(host, roots, &args, true);
         values: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, false);
         entries: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
         fromEntries: 1 => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);

@@ -20,11 +20,17 @@ const RETURN: IntrinsicKey = IntrinsicKey::new("Generator", Slot::Prototype, "re
 const THROW: IntrinsicKey = IntrinsicKey::new("Generator", Slot::Prototype, "throw");
 const ITERABLE: IntrinsicKey = IntrinsicKey::new("Generator", Slot::PrototypeSymbol, "iterator");
 
-pub(crate) const ROOTS: &[RootSpec] = &[RootSpec::new(
-    ROOT,
-    RootKind::Plain,
-    Some("object.prototype"),
-)];
+pub(crate) const ROOTS: &[RootSpec] = &[
+    RootSpec::new(ROOT, RootKind::Plain, Some("object.prototype")),
+    // %GeneratorFunction.prototype%: the internal prototype of generator
+    // functions. Its `.prototype` is the shared instance prototype above.
+    RootSpec::new(
+        "generatorFunction.prototype",
+        RootKind::Plain,
+        Some("function.prototype"),
+    )
+    .fixed(ROOT),
+];
 
 pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::call(NEXT, 1, |vm, host, roots, args, receiver| {
@@ -47,6 +53,14 @@ pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
 impl Vm {
     pub(crate) fn install_generator_methods(&mut self) {
         let prototype = self.builtins.get(ROOT);
+        let function_prototype = self.builtins.get("generatorFunction.prototype");
+        super::define_builtin_data(
+            self,
+            function_prototype,
+            "prototype",
+            Value::object(prototype),
+            Attributes::FIXED,
+        );
         for key in [NEXT, RETURN, THROW] {
             let method = self.alloc_intrinsic(key);
             super::define_builtin_data(
