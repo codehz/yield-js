@@ -12,6 +12,14 @@ pub(super) fn compile_main(
     compile("main.js", None, &resolver, options)
 }
 
+/// Compiler options read from a host declaration file, as a host would build them.
+pub(super) fn declared(dts: &str) -> CompileOptions {
+    CompileOptions::from_dts(dts).expect("host declarations parse")
+}
+
+/// Declaration of the shared `TestHost` modules (`test`, `console`).
+pub(super) const TEST_DECLARATIONS: &str = include_str!("../../test.d.ts");
+
 pub(super) fn compile_preloaded(
     source: &str,
     preload: &str,

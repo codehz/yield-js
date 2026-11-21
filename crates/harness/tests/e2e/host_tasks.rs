@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use super::support::compile_main;
-use yield_compiler::CompileOptions;
+use super::support::{compile_main, declared};
 use yield_harness::{LabelService, Wait};
 use yield_vm::binding::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
@@ -133,9 +132,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         }
         export function clear() { cancel(handle); }
     "#,
-        &CompileOptions {
-            imports: [("task".into(), ["spawn".into(), "cancel".into()].into())].into(),
-        },
+        &declared(include_str!("../dts/task.d.ts")),
     )
     .unwrap();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
@@ -438,19 +435,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         export function immediate(mode) { return early(mode); }
         export function clear() { cancel(handle); }
     "#,
-        &CompileOptions {
-            imports: [(
-                "branch".into(),
-                [
-                    "choose".into(),
-                    "spawn".into(),
-                    "cancel".into(),
-                    "early".into(),
-                ]
-                .into(),
-            )]
-            .into(),
-        },
+        &declared(include_str!("../dts/branch.d.ts")),
     )
     .unwrap();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
@@ -544,17 +529,13 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
 }
 
 fn branch_build(source: &str, imports: &[&str]) -> yield_vm::Build {
-    compile_main(
-        source,
-        &CompileOptions {
-            imports: [(
-                "branch".into(),
-                imports.iter().copied().map(Into::into).collect(),
-            )]
-            .into(),
-        },
-    )
-    .unwrap()
+    let mut options = declared(include_str!("../dts/branch.d.ts"));
+    options
+        .imports
+        .get_mut("branch")
+        .expect("branch declarations")
+        .retain(|name| imports.contains(&name.as_str()));
+    compile_main(source, &options).unwrap()
 }
 
 #[test]

@@ -4,8 +4,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::support::compile_main;
-use yield_compiler::CompileOptions;
+use super::support::{compile_main, declared};
 use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
 use yield_vm::{
@@ -16,10 +15,6 @@ use yield_vm::{
 
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
-
-fn options(dts: &str) -> CompileOptions {
-    CompileOptions::from_dts(dts).expect("declarations parse")
-}
 
 struct StrategyHost {
     bindings: Arc<Bindings>,
@@ -169,7 +164,7 @@ export async function run() {
 "#;
     let labels = Arc::new(LabelService::default());
     let bindings = strategy_fixture::bindings(&labels);
-    let build = compile_main(source, &options(include_str!("../dts/ops.d.ts"))).expect("compile");
+    let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -337,7 +332,8 @@ export function run() {
   return unstash();
 }
 "#;
-    let build = compile_main(source, &options(include_str!("../dts/stale.d.ts"))).expect("compile");
+    let build =
+        compile_main(source, &declared(include_str!("../dts/stale.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -474,7 +470,7 @@ mod guest_call_fixture {
         }
         .expect("guest bindings");
         let build =
-            compile_main(source, &options(include_str!("../dts/guest.d.ts"))).expect("compile");
+            compile_main(source, &declared(include_str!("../dts/guest.d.ts"))).expect("compile");
         let mut host = StrategyHost::new(bindings);
         let mut vm = Vm::new(build, &mut host).expect("create VM");
         let result = vm.start(&mut host, "run", vec![]);
@@ -664,7 +660,7 @@ export async function run() {
     let labels = Arc::new(LabelService::default());
     let bindings = counter_fixture::bindings(&labels);
     let build =
-        compile_main(source, &options(include_str!("../dts/counter-test.d.ts"))).expect("compile");
+        compile_main(source, &declared(include_str!("../dts/counter-test.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -755,7 +751,7 @@ export function run() {
   return point.x();
 }
 "#;
-    let build = compile_main(source, &options(include_str!("../dts/geom.d.ts"))).expect("compile");
+    let build = compile_main(source, &declared(include_str!("../dts/geom.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
@@ -804,7 +800,8 @@ export function run() {
   return make();
 }
 "#;
-    let build = compile_main(source, &options(include_str!("../dts/loose.d.ts"))).expect("compile");
+    let build =
+        compile_main(source, &declared(include_str!("../dts/loose.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -1004,7 +1001,7 @@ export async function run() {
 }
 "#;
     let build =
-        compile_main(source, &options(include_str!("../dts/inherit.d.ts"))).expect("compile");
+        compile_main(source, &declared(include_str!("../dts/inherit.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -1086,7 +1083,7 @@ export async function run() {
 }
 "#;
     let build =
-        compile_main(source, &options(include_str!("../dts/inherit.d.ts"))).expect("compile");
+        compile_main(source, &declared(include_str!("../dts/inherit.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -1177,7 +1174,7 @@ export function run() {
 }
 "#;
     let build =
-        compile_main(source, &options(include_str!("../dts/subset.d.ts"))).expect("compile");
+        compile_main(source, &declared(include_str!("../dts/subset.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(

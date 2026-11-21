@@ -2,9 +2,7 @@
 //!
 //! Environment globals absent from the VM are supplied by the preload module.
 //! This probes compilation only, not runtime behavior.
-use std::collections::{BTreeMap, BTreeSet};
-
-use super::support::{compile_main, compile_preloaded};
+use super::support::{TEST_DECLARATIONS, compile_main, compile_preloaded, declared};
 use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_harness::TestHost;
 use yield_vm::Vm;
@@ -16,17 +14,8 @@ const PRELOAD: &str = "import * as console from 'console'; export { console }; e
 
 #[test]
 fn real_react_19_bundle_compiles_with_environment_polyfills() {
-    compile_preloaded(
-        REACT_19_BUNDLE,
-        PRELOAD,
-        &CompileOptions {
-            imports: BTreeMap::from([(
-                "console".to_owned(),
-                BTreeSet::from(["debug", "error", "info", "log", "warn"].map(str::to_owned)),
-            )]),
-        },
-    )
-    .unwrap_or_else(|error| panic!("React 19 compile diagnostic changed: {error}"));
+    compile_preloaded(REACT_19_BUNDLE, PRELOAD, &declared(TEST_DECLARATIONS))
+        .unwrap_or_else(|error| panic!("React 19 compile diagnostic changed: {error}"));
 }
 
 #[test]
@@ -48,20 +37,12 @@ fn react_reconciler_custom_renderer_attempts_headless_host_execution() {
         ("renderer.mjs", CUSTOM_RENDERER),
     ])
     .expect("valid React probe module paths");
-    let options = CompileOptions {
-        imports: BTreeMap::from([
-            (
-                "console".to_owned(),
-                BTreeSet::from(["debug", "error", "info", "log", "warn"].map(str::to_owned)),
-            ),
-            (
-                "test".to_owned(),
-                BTreeSet::from(["clearTimeout", "inspect", "setTimeout"].map(str::to_owned)),
-            ),
-            ("console".to_owned(), BTreeSet::from(["error".to_owned()])),
-        ]),
-    };
-    match compile("main.js", Some("preload.js"), &resolver, &options) {
+    match compile(
+        "main.js",
+        Some("preload.js"),
+        &resolver,
+        &declared(TEST_DECLARATIONS),
+    ) {
         Ok(build) => {
             let mut host = TestHost::default();
             let mut vm = Vm::new(build, &mut host).expect("headless host bindings");

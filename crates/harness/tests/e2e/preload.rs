@@ -1,6 +1,6 @@
 //! Preload initialization and the live bindings rooted by its getters.
 
-use super::support::{compile_preloaded, json_round_trip};
+use super::support::{TEST_DECLARATIONS, compile_preloaded, declared, json_round_trip};
 use yield_compiler::CompileOptions;
 use yield_harness::TestHost;
 use yield_vm::heap::Property;
@@ -108,13 +108,7 @@ export const shadow = 90;
 "#;
 
 fn options() -> CompileOptions {
-    CompileOptions {
-        imports: [(
-            "test".into(),
-            ["seed".into(), "inspect".into(), "wait".into()].into(),
-        )]
-        .into(),
-    }
+    declared(TEST_DECLARATIONS)
 }
 
 #[test]

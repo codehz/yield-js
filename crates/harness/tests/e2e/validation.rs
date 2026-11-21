@@ -706,12 +706,12 @@ fn script_startup_validates_before_calling_the_host() {
         Err(VmError::InvalidBuild(_))
     ));
 
-    let options = yield_compiler::CompileOptions {
-        imports: std::collections::BTreeMap::from([(
-            "test".to_owned(),
-            std::collections::BTreeSet::from(["inspect".to_owned(), "missing".to_owned()]),
-        )]),
-    };
+    let mut options = super::support::declared(super::support::TEST_DECLARATIONS);
+    options
+        .imports
+        .get_mut("test")
+        .expect("test declarations")
+        .insert("missing".to_owned());
     let missing = compile_main("import { missing } from 'test';", &options).unwrap();
     let error = Vm::new(missing, &mut host).expect_err("missing module export is rejected eagerly");
     assert!(

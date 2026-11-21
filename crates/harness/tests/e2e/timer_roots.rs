@@ -192,9 +192,8 @@ mod repeat_timer {
 
 #[test]
 fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
-    use super::support::compile_main;
+    use super::support::{compile_main, declared};
     use std::sync::Arc;
-    use yield_compiler::CompileOptions;
     use yield_harness::{FakeClock, Timer};
     use yield_vm::{Bindings, Host};
 
@@ -228,13 +227,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
             });
         }
     "#,
-        &CompileOptions {
-            imports: [(
-                "repeat_timer".into(),
-                ["start".into(), "clearTimeout".into()].into(),
-            )]
-            .into(),
-        },
+        &declared(include_str!("../dts/repeat_timer.d.ts")),
     )
     .unwrap();
     let mut vm = Vm::new(program, &mut host).unwrap();

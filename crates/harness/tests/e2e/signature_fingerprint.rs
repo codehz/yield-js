@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::super::support::compile_main;
-use super::{StrategyHost, options};
+use super::super::support::{compile_main, declared};
+use super::StrategyHost;
 use yield_harness::{LabelService, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
@@ -133,7 +133,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
           return probe(42);
         }
         "#,
-        &options(include_str!("../dts/auxiliary-contract.d.ts")),
+        &declared(include_str!("../dts/auxiliary-contract.d.ts")),
     )
     .expect("compile");
     let mut host = StrategyHost::new(bindings);

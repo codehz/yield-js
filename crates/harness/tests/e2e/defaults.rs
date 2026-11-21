@@ -1,21 +1,11 @@
 //! Default exports: statement-position values, live aliases, and preload names.
 
-use super::support::{compile_main, compile_preloaded, json_round_trip};
-use std::collections::{BTreeMap, BTreeSet};
+use super::support::{
+    TEST_DECLARATIONS, compile_main, compile_preloaded, declared, json_round_trip,
+};
 use yield_compiler::CompileOptions;
 use yield_harness::TestHost;
 use yield_vm::{Value, Vm, VmError};
-
-fn options(imports: &[(&str, &[&str])]) -> CompileOptions {
-    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (module, names) in imports {
-        map.insert(
-            (*module).to_owned(),
-            names.iter().map(|name| (*name).to_owned()).collect(),
-        );
-    }
-    CompileOptions { imports: map }
-}
 
 fn vm_of(source: &str, options: &CompileOptions) -> Vm {
     let build = compile_main(source, options).unwrap();
@@ -74,7 +64,7 @@ fn hoisted_default_function_initializes_earlier_exports() {
 fn default_export_of_a_host_import_is_callable() {
     let mut vm = vm_of(
         "import { seed as x } from 'test'; export { x as default };",
-        &options(&[("test", &["seed"])]),
+        &declared(TEST_DECLARATIONS),
     );
     assert_eq!(
         vm.start(&mut TestHost::default(), "default", vec![])

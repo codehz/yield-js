@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use super::support::{compile_main, json_round_trip};
-use yield_compiler::CompileOptions;
+use super::support::{compile_main, declared, json_round_trip};
 use yield_harness::{FakeClock, TestHost, Timer, build};
 use yield_vm::binding::{CallCx, NativeTarget};
 use yield_vm::snapshot::DeliveryTarget;
@@ -318,13 +317,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         export let calls = 0;
         export function run() { schedule(() => { calls += 1; }, 42); }
         "#,
-        &CompileOptions {
-            imports: [(
-                "contract".into(),
-                ["schedule".into(), "other".into()].into(),
-            )]
-            .into(),
-        },
+        &declared(include_str!("../dts/contract.d.ts")),
     )
     .unwrap();
     let mut vm = Vm::new(build.clone(), &mut source).unwrap();

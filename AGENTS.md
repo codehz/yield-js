@@ -153,7 +153,7 @@ Four layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[s
 3. `crates/harness/tests/cases/*.js` — generated tests. `build.rs` requires a non-empty dir of `*.js` whose stems match `[a-z][a-z0-9_]*`. Test function is `case_<stem>`.
 4. `crates/host-dts/src/lib.rs` unit tests plus `crates/binding-macros/tests/host_dts_fixture.rs`, which builds a throwaway consumer crate and runs `cargo check` against it to prove declared-but-missing exports fail at macro expansion.
 
-Host declaration fixtures: `crates/harness/test.d.ts` and `crates/harness/demo.d.ts` for the real hosts, `crates/harness/tests/dts/<modules>.d.ts` for e2e hosts (sorted module names joined by `-`), `crates/binding-macros/tests/dts/` for macro tests.
+Host declaration fixtures: `crates/harness/test.d.ts` and `crates/harness/demo.d.ts` for the real hosts, `crates/harness/tests/dts/<modules>.d.ts` for e2e hosts (sorted module names joined by `-`; fixtures that link only `TestHost` reuse `harness/test.d.ts` through `support::TEST_DECLARATIONS`), `crates/binding-macros/tests/dts/` for macro tests.
 
 Case contract (`yield_harness::run_case`):
 
