@@ -1,0 +1,47 @@
+# 测试与用例契约
+
+> 实现范围见 [`implemented.md`](implemented.md)，缺口见 [`gaps.md`](gaps.md)；内部契约与改动落点见 [`internals.md`](internals.md)。
+
+全部测试经 `cargo test` 运行。四层结构：
+
+1. `crates/compiler/tests/compile.rs` — 双 `await` 示例的字节码形状与不支持语法的位置。
+2. `crates/harness/tests/e2e.rs` 与 `crates/harness/tests/e2e/` 模块 — 快照身份、加载器拒绝、跨 `await` 的 `finally`、可达性、生成器恢复表、GC 等。用 `matches!` 断言 `VmError`。
+3. `crates/harness/tests/cases/` — 由 `build.rs` 生成测试的语义 `.js` 用例（见下）。
+4. `crates/host-dts/src/lib.rs` 单元测试，以及 `crates/binding-macros/tests/host_dts_fixture.rs`：它构建一个一次性消费 crate 并运行 `cargo check`，证明“已声明但未实现”的导出在宏展开期失败。
+
+没有 insta，没有覆盖率门槛，禁止 `#[ignore]` / `#[should_panic]`，禁止在 `vm` 或 `compiler` 源码内加单元测试模块——VM 一律经 `yield-harness` 测试。
+
+需要堆身份、槽表或拒绝恢复的断言写进 `e2e.rs`；可观察的 JS 行为写 `.js` 用例，不要新增 Rust harness。
+
+## 用例契约（`yield_harness::run_case`）
+
+- 文件头是前导空行与 `// @` 指令。整份文件（含头部）一起编译，因此诊断保留文件行号。
+- 正文必须显式导出一个可调用绑定，公开名为 `run`；运行器总是启动 `"run"`。未导出的 `run` 报 `unknown export "run"`。
+- `@args` 是 JSON 数组，只能作为第一条指令。
+- `@pending ["wait:a"]` 断言当前 pending operation 集合；`@restore` 做 JSON 往返再 `Vm::restore`；`@fulfill ["wait:a", 2]`、`@reject ["wait:a", "boom"]` 交付完成。
+- `@advance <u64>` 按十进制毫秒推进测试时钟，并在每个到期 timer 之后排空工作。负数、小数、`+1`、超出 `u64` 或超出 ECMAScript Date 范围的推进都带位置报错。
+- 最后一条指令必须是 `@returns`、`@fulfilled`、`@rejected` 或 `@uncaught`。标量仅限 number、bool、string、`null`、`undefined`。`@uncaught` 接收数组，按顺序精确比对报告给宿主的错误列表。
+- 用例从 `test` 显式导入宿主导出。`gc()` 同步回收且不排空微任务；`setTimeout` 返回可取消的任务句柄，`clearTimeout` 取消它，`sleep` 返回原生 Promise。
+
+```js
+// @pending ["wait:a"]
+// @restore
+// @fulfill ["wait:a", 2]
+// @fulfilled 2
+
+export async function run() {
+  return await wait("a");
+}
+```
+
+## 用例目录
+
+新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`。不要在 `tests/cases/` 顶层新增用例。
+
+`build.rs` 递归遍历目录，文件名用 `snake_case.js`；stem 与类别名都必须匹配 `[a-z][a-z0-9_]*`；生成的测试名为 `case_<category>_<stem>`（顶层为 `case_<stem>`）。每个目录都登记 `cargo:rerun-if-changed`，目录为空或缺失会 panic。指令解析器自身的失败用例放在 `crates/harness/tests/cases.rs`，夹具源码在 `crates/harness/tests/failing_cases/`。
+
+## 宿主声明夹具
+
+- 真实宿主：`crates/harness/test.d.ts`、`crates/harness/demo.d.ts`。
+- e2e 夹具：`crates/harness/tests/dts/<modules>.d.ts`，模块名排序后用 `-` 连接；只链接 `TestHost` 的夹具经 `support::TEST_DECLARATIONS` 复用 `harness/test.d.ts`。
+- 宏测试：`crates/binding-macros/tests/dts/`。

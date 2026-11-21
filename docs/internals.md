@@ -1,0 +1,116 @@
+# 内部契约与改动指引
+
+> 本文记录**现状**契约与索引：crate 流水线、公共入口、挂起/恢复与快照不变量、改动落点、易错点、代码约定细节。目标设计见 [`design.md`](design.md)，当前覆盖面见 [`implemented.md`](implemented.md)，缺口见 [`gaps.md`](gaps.md)，宿主绑定见 [`host-bindings.md`](host-bindings.md)，测试契约见 [`testing.md`](testing.md)。
+
+## 1. 架构与数据流
+
+crate 依赖单向：
+
+```text
+yield-harness  →  yield-compiler  →  yield-vm
+                       ↓
+                  yield-host-dts   ←  yield-binding-macros  (expansion only)
+```
+
+`yield-vm` 持有字节码契约，永不导入编译器。Oxc AST 只存在于 `yield-compiler`（仅 `frontend` 与 `lower`）和 `yield-host-dts` 内部；后者对外只暴露普通名字表与字节跨度。编译器公开面上唯一的 Oxc 类型是 `CompileError` 上的 `oxc::span::Span`。
+
+```text
+源码根与同步解析器（严格 ES 模块）
+  → frontend     解析可达模块，解析 import/export 目标
+  → lower        绑定、异常、await  →  LoweredFunction
+  → bindings     确定哪些 id 跨函数共享
+  → promote      不共享的绑定变为逻辑寄存器
+  → analyze      CFG live-in，包含两条恢复边与处理器边
+  → allocate     跨 await 的值分配持久槽，其余分配瞬时槽
+  → Build        版本化字节码；build_id = 执行相关字段的摘要
+  → Vm           校验、运行、宿主操作、快照 / 恢复
+```
+
+公共入口：
+
+- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。
+- `Vm::new(build, &mut host)` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
+- `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
+- `Vm::start(host, "run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量，随后宿主自行调用 `Vm::run_until_idle(host)`。
+- `Vm::snapshot(&[roots])` 仅在微任务队列为空时可用。
+- `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
+- `Vm::restore(snapshot, same_build, host)` 在执行前重绑声明与 operation。
+- `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
+
+## 2. 挂起、恢复与快照不变量（不得弱化）
+
+- 操作数是显式槽。`Instr::Await` / `Instr::Yield` 不持久化任何隐式状态。
+- `ResumeEntry` 是 `{ fulfill_pc, fulfill_dst, reject_pc, reject_dst, saved_slots }`。续体按 `resume_id` 索引，不按运行期 PC。
+- `saved_slots` 是两个恢复入口各自 live-in 先减去该入口结果寄存器后的并集。结果槽在恢复时写入，不保存。持久槽不在不同活值之间复用。瞬时槽在挂起时丢弃。
+- 生成器经 `GeneratorEntry { next_pc, next_dst, throw_pc, throw_dst, return_pc, saved_slots }` 恢复，由 `Instr::Yield::generator` 索引。先分别减去每个入口自己的注入寄存器，再取三者 live-in 的并集；先取并集再减会丢掉另一入口需要的值。`return_pc` 没有结果槽：它以 `Instr::LoadGeneratorReturn` 开始，因此待完成的 payload 位于重建帧中，绝不进入 VM 全局状态。异步生成器自身的 `await` 使用普通 `ResumeEntry` 表和 `ContinuationTarget::Generator` 续体；两张表独立校验。
+- `Instr::GeneratorStart` 在形参初始化后结束生成器调用：把 `Function::generator_start.saved_slots` 与本次调用环境捕获进新生成器对象并返回，正文不执行。只有启动捕获与三个 yield 入口由外部注入；普通控制流不得进入 `throw_pc`、`return_pc` 或 `body_pc`。
+- 生成器对象是普通对象加一份暂停帧（`func_id`、状态、环境、按入口顺序排列的值）。异步生成器的记录另有 FIFO 请求队列；同步生成器的记录不含队列。`Executor` 状态从不进快照：捕获时写记录，恢复时拒绝。同步生成器重入恢复抛脚本 `TypeError`；异步生成器则改为追加请求。生成器只经 `Symbol.iterator` 消费，异步生成器只经 `Symbol.asyncIterator` 消费；不要在 `for...of` 中特判两者。
+- 异步生成器调用不分配结果 Promise：`GeneratorStart` 返回生成器对象。每次 `next` / `throw` / `return` 创建请求 Promise、入队，并一次一步驱动队列。队首是进行中的请求；`yield` 以 `done: false` 兑现它，正文返回或落底以 `done: true` 兑现，未捕获脚本异常使生成器完成并拒绝它。正文中的 `await` 记录唯一续体、把生成器标为 `Awaiting`、保留队首请求，并恢复同一正文——绝不新建请求。已完成的生成器以 `{value: undefined, done: true}` 结算 `next`，拒绝 `throw`，并通过持久化的 `ReactionJob::GeneratorClose` 同化 `return` 参数后报告 `done: true`；后续请求永不越过队首。
+- `undefined` 是真实值。帧槽中的 `None` 表示未初始化，而不是 `undefined`。
+- 被其他函数读写的绑定、以及导出绑定，留在堆环境中。其余绑定是帧槽。既不共享绑定也不创建闭包的调用不分配环境。
+- `finally` 是显式完成状态（种类 + payload），不是原生异常栈。`finally` 内的嵌套 `await` 必须保留该待完成状态。
+- 准备成功后，`Await` 总是经微任务队列恢复，即使是已 settled 的 promise。抛错的 `constructor` getter 直接转入脚本异常处理器，不挂起。
+- 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
+- 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
+
+宿主绑定函数是同步的，不得重入 VM。声明不可变且共享；VM 拥有原型、实例、槽、payload、模块状态与 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
+
+## 3. 改动位置
+
+| 改动 | 落点 |
+| --- | --- |
+| 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
+| 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
+| 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
+| 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
+| 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
+| 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
+| 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
+| 可观察的 JS 行为 | 一个 `.js` 用例，不是新的 Rust harness |
+| ArrayBuffer / DataView / TypedArray 成员 | `vm/src/builtin/binary/`（`buffer.rs`、`view.rs`、`typed.rs`、`element.rs`、`codec.rs`）；异形索引查找在 `vm/src/heap/binary.rs` |
+
+## 4. 易错点
+
+- 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
+- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器；`slot.kind` 在 `FrameLayout` 重映射前没有意义。`promote` 保证一条指令换一条指令，因此跳转、恢复与处理器 PC 保持有效。
+- `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
+- `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。不要存一个可伪造的标志。任一初始化函数需要环境时，整个模块使用一份环境。
+- 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
+- ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。
+
+## 5. 关键文件
+
+目录职责：
+
+- `crates/vm/src` — 字节码契约、加载校验、解释器、堆与对象表、Promise/微任务、宿主协议、快照
+- `crates/compiler/src` — Oxc 前端、降低、活性分析、槽分配
+- `crates/host-dts/src` — 宿主 `.d.ts` 清单：每个字符串模块块下的直接值导出，以及带位置的拒绝
+- `crates/binding-macros/src` — 类型化宏；`host_bindings!` 读取 `dts` 并在展开期校验声明名
+- `crates/compiler/src/lower` — 唯一的函数体 walker：`stmt`、`expr`、`control`、`pattern`
+- `crates/harness/src` — `TestHost`、指令用例运行器、演示二进制
+- `crates/harness/tests/e2e.rs` 与 `crates/harness/tests/e2e/` — 手写的快照/恢复、加载器与 GC 测试
+- `crates/harness/tests/cases` — 语义 `.js` 夹具；每个生成一个 `#[test]`
+
+关键文件：
+- `Cargo.toml` — workspace 成员与锁定依赖（`oxc = "=0.159.0"`，启用 `ast_visit`）
+- `crates/compiler/src/lib.rs` — 流水线与 `compile`
+- `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
+- `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
+- `crates/vm/src/bytecode.rs` — `Instr`、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`
+- `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
+- `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec
+- `crates/vm/src/gc.rs` — tracing GC 的根与可达性遍历；堆边统一由 `Heap::write_edges` 提供
+- `crates/harness/src/case.rs` — `// @` 指令运行器
+- `crates/harness/build.rs` — 生成 `OUT_DIR/cases.rs`
+- `crates/harness/src/main.rs` — 唯一二进制；内嵌设计文档示例
+
+## 6. 代码约定细节
+
+- 新增 opcode：先加到 `yield_vm::bytecode::Instr`，再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。CFG 与槽分配不得按指令形状匹配。
+- 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）。两者都变才同时升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。
+- 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
+- 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。
+- `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ，循环迭代也不获得新绑定。
+- 名字解析（`compiler/src/names.rs`）：本地绑定、静态导入（源码与宿主）、合格的 preload 全局，最后是内建。裸 preload 名在 preload 子图之外经 `globalThis` 读取只读 getter。
+- 宿主模块使用排序的 `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` 清单。`CompileOptions::from_dts` 从宿主 `.d.ts` 读出它；`host_bindings! { dts: "path" }`（路径相对调用方 `Cargo.toml`）在宏展开时重新解析同一文件，把每个声明的 `module:export` 与生成的 `__YIELD_NAMES` 表比对。声明了但 `#[host_module]` 未实现的名字在编译期报 `missing host export: module:export`；多出的实现允许存在，且不进入命名空间导出。Harness 声明是 `crates/harness/test.d.ts` 与 `crates/harness/demo.d.ts`；e2e 夹具在 `crates/harness/tests/dts/`，按排序后的模块组合命名。
+- `TestHost` 要点：导出名单以 `crates/harness/test.d.ts` 为准；`seed()` 返回 `10`；`wait(label)` 启动 `Wait` operation（显示标签 `wait:{label}`，默认恢复策略 `Resume`）；`bind(label)` 分配带 payload `label` 与 `label()` 方法的 `Node` 实例；`expect(actual)` 分配带槽 `actual` 的 `Matcher` 实例；`inspect` / `setLabel` 返回 `undefined`。用 `host.labels().set_reject_restore_operation(true)` 注入恢复失败；通过编辑 record 破坏快照 payload。
