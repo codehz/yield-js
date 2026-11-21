@@ -1,6 +1,6 @@
 //! Shared fixtures and lifecycle helpers for snapshot tests.
 
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
 
 pub(super) const RUN: &str = r#"

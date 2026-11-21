@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{StrategyHost, options};
-use yield_poc::{LabelService, Wait};
+use yield_harness::{LabelService, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
     Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,

@@ -1,6 +1,6 @@
 //! Timer delivery roots across GC, snapshots, and queued callbacks.
 
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{Completion, JsValue, Object, Snapshot, Value, Vm};
 
@@ -166,7 +166,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
 
 #[yield_vm::host_module(name = "repeat_timer")]
 mod repeat_timer {
-    use yield_poc::Timer;
+    use yield_harness::Timer;
     use yield_vm::binding::CallCx;
     use yield_vm::{JsResult, JsValue};
 
@@ -192,7 +192,7 @@ mod repeat_timer {
 fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     use std::sync::Arc;
     use yield_compiler::{CompileOptions, compile};
-    use yield_poc::{FakeClock, Timer};
+    use yield_harness::{FakeClock, Timer};
     use yield_vm::{Bindings, Host};
 
     struct RepeatHost(Arc<Bindings>);

@@ -1,6 +1,6 @@
 //! Synchronous execution checks do not require a suspension harness.
 
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::{JsValue, Value, Vm, VmError};
 
 #[test]

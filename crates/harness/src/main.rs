@@ -3,7 +3,7 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::compile;
-use yield_poc::{LabelRegistration, LabelService};
+use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, JsResult, JsValue, OperationDriver, OperationToken,
 };

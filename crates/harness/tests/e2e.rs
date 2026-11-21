@@ -3,7 +3,7 @@ mod suite;
 
 #[test]
 fn restore_rejects_a_missing_boxed_symbol_payload() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::heap::BoxedPrimitive;
     use yield_vm::{Object, Vm, VmError};
 
@@ -47,7 +47,7 @@ export async function run() {
 fn build_round_trips_special_numbers() {
     use yield_vm::{Build, bytecode::Constant};
 
-    let mut build = yield_poc::build("export function run() { return 0; }");
+    let mut build = yield_harness::build("export function run() { return 0; }");
     let start = build.constants.len();
     let numbers = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0];
     build.constants.extend(numbers.map(Constant::Number));
@@ -76,7 +76,7 @@ fn build_round_trips_special_numbers() {
 
 #[test]
 fn non_finite_operation_completions_survive_restore() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm};
 
     let build = build(
@@ -127,7 +127,7 @@ export async function run() {
 
 #[test]
 fn restore_rejects_changed_has_instance_description() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Vm, VmError};
 
     let build = build("export function run() { return 0; }");
@@ -145,7 +145,7 @@ fn restore_rejects_changed_has_instance_description() {
 
 #[test]
 fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};
 
     let build = build(
@@ -188,7 +188,7 @@ fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
 
 #[test]
 fn gc_traces_weak_map_values_only_for_live_keys() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};
 
     let build = build(
@@ -238,7 +238,7 @@ export function read() { return second.get(first.get(key1)).answer; }
 
 #[test]
 fn gc_closes_symbol_ephemerons_without_retaining_weak_keys() {
-    use yield_poc::{TestHost, build, number};
+    use yield_harness::{TestHost, build, number};
     use yield_vm::heap::WeakKey;
     use yield_vm::{Object, Value, Vm, VmError};
 
@@ -321,7 +321,7 @@ export function take(i) { const value = stash[i]; delete stash[i]; return value;
 
 #[test]
 fn restore_rejects_missing_and_registered_symbol_keys_in_weak_collections() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::heap::WeakKey;
     use yield_vm::{Object, Value, Vm, VmError};
 
@@ -393,7 +393,7 @@ fn weak_key_json_preserves_tags_and_rejects_noncanonical_ids() {
 
 #[test]
 fn gc_roots_registered_symbols_and_reclaims_unrooted_ordinary_symbols() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};
 
     let build = build(
@@ -432,7 +432,7 @@ export function registered() { return Symbol.for("registry"); }
 
 #[test]
 fn gc_preserves_suspended_closures_and_host_instances() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Completion, JsValue, PromiseState, Value, Vm};
 
     let build = build(
@@ -480,7 +480,7 @@ export async function run() {
 
 #[test]
 fn gc_active_preserves_only_registered_external_roots() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};
 
     let build = build(
@@ -509,7 +509,7 @@ fn gc_active_preserves_only_registered_external_roots() {
 
 #[test]
 fn gc_active_rejects_a_missing_root_without_sweeping() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};
 
     let build = build(
@@ -537,7 +537,7 @@ fn gc_active_rejects_a_missing_root_without_sweeping() {
 
 #[test]
 fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{PromiseState, Value, Vm, VmError};
 
     let build = build("export async function run() { return await 42; }");
@@ -561,7 +561,7 @@ fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
 
 #[test]
 fn gc_discards_unreachable_uncalled_resolvers() {
-    use yield_poc::{TestHost, build};
+    use yield_harness::{TestHost, build};
     use yield_vm::{PromiseState, Value, Vm, VmError};
 
     let build = build(

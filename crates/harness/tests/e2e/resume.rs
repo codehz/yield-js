@@ -4,7 +4,7 @@ use super::support::{
     RUN, Suspended, baseline_at_first_await, baseline_at_second_await, count_delta,
     json_round_trip, values_beyond,
 };
-use yield_poc::number;
+use yield_harness::number;
 use yield_vm::{Completion, JsValue, PromiseState, Value};
 
 #[test]

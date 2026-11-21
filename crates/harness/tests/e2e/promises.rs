@@ -1,7 +1,7 @@
 //! Promise reactions and combination state survive suspension and restore.
 
 use super::support::{RUN, Suspended, baseline_at_first_await, count_delta};
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::{Completion, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]

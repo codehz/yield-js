@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use yield_compiler::{CompileOptions, compile};
-use yield_poc::{LabelService, Wait};
+use yield_harness::{LabelService, Wait};
 use yield_vm::binding::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::{
@@ -386,7 +386,7 @@ mod branch {
     }
 
     fn hit(cx: &CallCx<'_>, name: &str) {
-        cx.service::<Arc<yield_poc::Counters>>("counters")
+        cx.service::<Arc<yield_harness::Counters>>("counters")
             .unwrap()
             .hit(name);
     }
@@ -413,7 +413,7 @@ mod branch {
 #[test]
 fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let labels = Arc::new(LabelService::default());
-    let counters = Arc::new(yield_poc::Counters::default());
+    let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],
@@ -518,9 +518,9 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(counters.count("tail"), 1);
 }
 
-fn branch_host() -> (TaskHost, Arc<yield_poc::Counters>) {
+fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     let labels = Arc::new(LabelService::default());
-    let counters = Arc::new(yield_poc::Counters::default());
+    let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],

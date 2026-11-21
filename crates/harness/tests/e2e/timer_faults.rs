@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::support::json_round_trip;
 use yield_compiler::{CompileOptions, compile};
-use yield_poc::{FakeClock, TestHost, Timer, build};
+use yield_harness::{FakeClock, TestHost, Timer, build};
 use yield_vm::binding::{CallCx, NativeTarget};
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{

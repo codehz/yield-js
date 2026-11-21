@@ -1,7 +1,7 @@
 //! Snapshot restore preserves reachable objects, descriptors, and identity.
 
 use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
-use yield_poc::number;
+use yield_harness::number;
 use yield_vm::heap::{Property, WeakKey};
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
 

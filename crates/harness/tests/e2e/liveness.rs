@@ -1,7 +1,7 @@
 //! Snapshots retain live values across suspension edges and omit dead objects.
 
 use super::support::{Suspended, baseline_at_first_await, json_round_trip, values_beyond};
-use yield_poc::number;
+use yield_harness::number;
 use yield_vm::heap::Property;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value};
 

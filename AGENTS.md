@@ -9,7 +9,7 @@ Resumable mini JavaScript VM. A strict-mode JS subset compiles to explicit-slot 
 Workspace crates, one direction of dependency:
 
 ```text
-yield-poc  →  yield-compiler  →  yield-vm
+yield-harness  →  yield-compiler  →  yield-vm
 ```
 
 `yield-vm` owns the bytecode contract and never imports the compiler. Oxc AST stays inside `yield-compiler` (`frontend` and `lower` only). The only Oxc type on the public compiler surface is `oxc::span::Span` on `CompileError`.
@@ -59,9 +59,9 @@ Host binding functions are synchronous and must not re-enter the VM. Declaration
 | `crates/vm/src` | Bytecode contract, loader checks, interpreter, heap/object table, Promise/microtasks, host protocol, snapshot |
 | `crates/compiler/src` | Oxc frontend, lowering, liveness, slot allocation |
 | `crates/compiler/src/lower` | Only body walker: `stmt`, `expr`, `control`, `pattern` |
-| `crates/poc/src` | `TestHost`, directive case runner, demo binary |
-| `crates/poc/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
-| `crates/poc/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |
+| `crates/harness/src` | `TestHost`, directive case runner, demo binary |
+| `crates/harness/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
+| `crates/harness/tests/cases` | Semantic `.js` fixtures; one generated `#[test]` each |
 - `docs/design.md`|Target design, Chinese. Not a status report|
 - `docs/gaps.md`|Current JS-subset implementation gap inventory (what is rejected/missing today, derived from code). Status report; refresh after behavior changes.|
 | `docs/implemented.md`|Derived inventory of what the current JS-subset does implement. Status report; refresh after behavior changes.|
@@ -74,17 +74,17 @@ There is no `scripts/` directory and no CI.
 
 ```sh
 cargo test --workspace
-cargo run -p yield-poc          # hardcoded two-await demo; expects 15; no CLI flags
+cargo run -p yield-harness          # hardcoded two-await demo; expects 15; no CLI flags
 cargo test -p yield-compiler --test compile
-cargo test -p yield-poc --test e2e
-cargo test -p yield-poc --test cases
-cargo test -p yield-poc case_fulfilled_await_resumes_after_restore
+cargo test -p yield-harness --test e2e
+cargo test -p yield-harness --test cases
+cargo test -p yield-harness case_fulfilled_await_resumes_after_restore
 cargo build --release
 cargo fmt --check
 cargo clippy --workspace --all-targets
 ```
 
-Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory names). The demo binary has no arguments.
+Package names are `yield-vm`, `yield-compiler`, `yield-harness` (not the directory names). The demo binary has no arguments.
 
 ## Code Conventions & Common Patterns
 
@@ -95,7 +95,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
 - Name policy (`compiler/src/names.rs`): local/module bindings, static host imports, preload globals, then builtins. Host imports are indexed first-class values; preload names read getter-only properties through the fixed `globalThis` root. Preserve legacy `typeof` shadowing folds outside the preload export list.
-- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `poc/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
+- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `harness/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
 - `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Inject recovery failure with `host.labels().set_reject_restore_operation(true)`; corrupt snapshot payloads by editing the record.
 
 Where to edit:
@@ -106,8 +106,8 @@ Where to edit:
 | Liveness / which slots survive await | `analyze.rs`, `allocate.rs` |
 | New opcode | `vm/src/bytecode.rs`, `vm/src/exec.rs` (and `ops.rs` if it is a value op), `compiler/src/instr.rs`, lowerer |
 | New heap kind | `vm/src/heap/object.rs` `write_edges`; GC and snapshot capture share the tracer in `vm/src/gc.rs` |
-| Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `poc/tests/e2e.rs` |
-| Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
+| Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `harness/tests/e2e.rs` |
+| Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `harness/src/lib.rs`, `harness/src/main.rs` |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
 
 Easy to break:
@@ -127,9 +127,9 @@ Easy to break:
 - `crates/vm/src/bytecode.rs` — `Instr`, `ResumeEntry`, `ExceptionHandler`, `Build::validate`
 - `crates/vm/src/vm.rs` — `get_export`, `start`, `run_until_idle`, `complete_operation`
 - `crates/vm/src/snapshot/` — `Vm::snapshot`, `Vm::restore`, JSON codec
-- `crates/poc/src/case.rs` — `// @` directive runner
-- `crates/poc/build.rs` — generates `OUT_DIR/cases.rs`
-- `crates/poc/src/main.rs` — the only binary; embedded design-doc example
+- `crates/harness/src/case.rs` — `// @` directive runner
+- `crates/harness/build.rs` — generates `OUT_DIR/cases.rs`
+- `crates/harness/src/main.rs` — the only binary; embedded design-doc example
 
 ## Runtime/Tooling Preferences
 
@@ -141,13 +141,13 @@ Easy to break:
 
 ## Testing & QA
 
-Three layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[should_panic]`, no unit-test modules inside `vm` or `compiler` sources. The VM is tested through `yield-poc`.
+Three layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[should_panic]`, no unit-test modules inside `vm` or `compiler` sources. The VM is tested through `yield-harness`.
 
 1. `crates/compiler/tests/compile.rs` — bytecode shape of the two-await example and unsupported-syntax location.
-2. `crates/poc/tests/e2e.rs` — snapshot identity, loader rejection, finally-across-await, reachability. Assert `VmError` with `matches!`.
-3. `crates/poc/tests/cases/*.js` — generated tests. `build.rs` requires a non-empty dir of `*.js` whose stems match `[a-z][a-z0-9_]*`. Test function is `case_<stem>`.
+2. `crates/harness/tests/e2e.rs` — snapshot identity, loader rejection, finally-across-await, reachability. Assert `VmError` with `matches!`.
+3. `crates/harness/tests/cases/*.js` — generated tests. `build.rs` requires a non-empty dir of `*.js` whose stems match `[a-z][a-z0-9_]*`. Test function is `case_<stem>`.
 
-Case contract (`yield_poc::run_case`):
+Case contract (`yield_harness::run_case`):
 
 - Leading blank lines and `// @` directives are the header. The whole file, header included, is compiled so diagnostics keep file line numbers.
 - Body must explicitly export a callable binding under the public name `run`. The runner always starts `"run"`.
@@ -170,7 +170,7 @@ export async function run() {
 }
 ```
 
-Add a behavior case by dropping `snake_case.js` into a category subdirectory of `crates/poc/tests/cases/` (`arrays`, `async`, `closures`, `coercion`, `collections`, `const`, `control`, `descriptors`, `destructuring`, `errors`, `finally`, `functions`, `gc`, `host`, `json`, `loops`, `math`, `numbers`, `objects`, `optional_chain`, `promise`, `prototypes`, `proxy`, `reflect`, `regexp`, `strings`, `switch`, `symbols`). Do not add cases at the top level of `tests/cases/`; keep every fixture in the matching category. `build.rs` walks the directory recursively; the generated test is `case_<category>_<stem>`. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
+Add a behavior case by dropping `snake_case.js` into a category subdirectory of `crates/harness/tests/cases/` (`arrays`, `async`, `closures`, `coercion`, `collections`, `const`, `control`, `descriptors`, `destructuring`, `errors`, `finally`, `functions`, `gc`, `host`, `json`, `loops`, `math`, `numbers`, `objects`, `optional_chain`, `promise`, `prototypes`, `proxy`, `reflect`, `regexp`, `strings`, `switch`, `symbols`). Do not add cases at the top level of `tests/cases/`; keep every fixture in the matching category. `build.rs` walks the directory recursively; the generated test is `case_<category>_<stem>`. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
 
 ## Commit Workflow
 

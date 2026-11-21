@@ -15,10 +15,10 @@
 
 ```sh
 cargo test --workspace
-cargo run -p yield-poc
+cargo run -p yield-harness
 ```
 
-`yield-poc` 编译并执行设计文档中的双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。宿主只通过显式导出的绑定（`export async function run`）进入脚本；宿主模块、类、原型、实例槽、payload、模块状态和 operation 都由 VM 持有，恢复只需要同一 Build、同一绑定声明和同一快照。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
+`yield-harness` 编译并执行设计文档中的双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。宿主只通过显式导出的绑定（`export async function run`）进入脚本；宿主模块、类、原型、实例槽、payload、模块状态和 operation 都由 VM 持有，恢复只需要同一 Build、同一绑定声明和同一快照。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
 
 ## 目录
 
@@ -26,7 +26,7 @@ cargo run -p yield-poc
 | --- | --- |
 | `crates/vm` | 字节码契约、加载校验、对象表/环境/闭包、Promise、微任务、async 续体、宿主协议、快照恢复 |
 | `crates/compiler` | Oxc 解析、严格模式子集、词法绑定、异常降低、CFG 活性分析、槽分配 |
-| `crates/poc` | 端到端测试、`tests/cases` 语义用例与可运行示例 |
+| `crates/harness` | 端到端测试、`tests/cases` 语义用例与可运行示例 |
 
 ## 状态文档
 

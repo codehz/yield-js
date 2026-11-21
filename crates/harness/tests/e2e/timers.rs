@@ -1,6 +1,6 @@
 //! Timer behavior across independent platform clocks and VM generations.
 
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
 
@@ -173,7 +173,7 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
 
 #[yield_vm::host_module(name = "chain")]
 mod chain {
-    use yield_poc::Timer;
+    use yield_harness::Timer;
     use yield_vm::binding::CallCx;
     use yield_vm::{JsResult, JsValue};
 
@@ -220,9 +220,9 @@ impl yield_vm::Host for ChainHost {
 fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     use std::sync::Arc;
     use yield_compiler::{CompileOptions, compile};
-    use yield_poc::Timer;
+    use yield_harness::Timer;
 
-    let clock = Arc::new(yield_poc::FakeClock::default());
+    let clock = Arc::new(yield_harness::FakeClock::default());
     let bindings = yield_vm::host_bindings! {
         modules: [chain], classes: [], states: [], operations: [Timer],
         services: [("clock", 1, Arc::clone(&clock))],

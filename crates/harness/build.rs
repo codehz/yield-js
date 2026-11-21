@@ -87,7 +87,7 @@ fn main() {
             category => format!("case_{category}_{stem}"),
         };
         generated.push_str(&format!(
-            "#[test]\nfn {function}() {{\n    let source = include_str!({path_literal});\n    if let Err(error) = yield_poc::run_case(\"{name}\", source) {{\n        panic!(\"{{error}}\");\n    }}\n}}\n\n"
+            "#[test]\nfn {function}() {{\n    let source = include_str!({path_literal});\n    if let Err(error) = yield_harness::run_case(\"{name}\", source) {{\n        panic!(\"{{error}}\");\n    }}\n}}\n\n"
         ));
     }
 

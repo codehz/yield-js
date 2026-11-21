@@ -1,7 +1,7 @@
 //! The loader and snapshot APIs reject invalid inputs and state.
 
 use super::support::{RUN, Suspended, count_delta, json_round_trip};
-use yield_poc::{TestHost, build};
+use yield_harness::{TestHost, build};
 use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;

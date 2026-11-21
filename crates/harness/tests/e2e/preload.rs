@@ -2,7 +2,7 @@
 
 use super::support::json_round_trip;
 use yield_compiler::{CompileOptions, compile_with_preload};
-use yield_poc::TestHost;
+use yield_harness::TestHost;
 use yield_vm::heap::Property;
 use yield_vm::{JsString, Object, Value, Vm, VmError};
 
@@ -109,7 +109,7 @@ fn preload_globals_are_live_and_read_only() {
     assert!(vm.get_export("bump").is_err());
     assert!(vm.start(&mut host, "bump", vec![]).is_err());
     assert_eq!(
-        vm.start(&mut host, "run", vec![yield_poc::number(2.0)])
+        vm.start(&mut host, "run", vec![yield_harness::number(2.0)])
             .unwrap(),
         Value::Number(2.0)
     );
@@ -122,7 +122,7 @@ fn preload_globals_are_live_and_read_only() {
     ));
     let mut vm = Vm::restore(snapshot, build, &mut host).unwrap();
     assert_eq!(
-        vm.start(&mut host, "run", vec![yield_poc::number(3.0)])
+        vm.start(&mut host, "run", vec![yield_harness::number(3.0)])
             .unwrap(),
         Value::Number(3.0)
     );

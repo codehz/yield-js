@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::CompileOptions;
-use yield_poc::{LabelRegistration, LabelService};
+use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
 use yield_vm::{
     Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
@@ -230,8 +230,8 @@ export async function run() {
   return 1;
 }
 "#;
-    let build = yield_poc::build(source);
-    let mut host = yield_poc::TestHost::default();
+    let build = yield_harness::build(source);
+    let mut host = yield_harness::TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
@@ -269,8 +269,8 @@ export async function run() {
   return cycle;
 }
 "#;
-    let build = yield_poc::build(source);
-    let mut host = yield_poc::TestHost::default();
+    let build = yield_harness::build(source);
+    let mut host = yield_harness::TestHost::default();
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
@@ -579,7 +579,7 @@ fn async_guest_calls_catch_throw_and_preserve_object_identity() {
 
 mod counter_fixture {
     use super::*;
-    use yield_poc::Wait;
+    use yield_harness::Wait;
 
     #[host_state(module = "counter", schema = 1, init = CounterState::new, encode = CounterState::encode_payload, decode = CounterState::decode_payload)]
     struct CounterState {
@@ -825,8 +825,8 @@ export async function run() {
   return node;
 }
 "#;
-    let build = yield_poc::build(source);
-    let mut host = yield_poc::TestHost::default();
+    let build = yield_harness::build(source);
+    let mut host = yield_harness::TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
@@ -1119,8 +1119,8 @@ export function run() {
   return false;
 }
 "#;
-    let build = yield_poc::build(source);
-    let mut host = yield_poc::TestHost::default();
+    let build = yield_harness::build(source);
+    let mut host = yield_harness::TestHost::default();
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
         vm.start(&mut host, "run", vec![]).expect("start"),
