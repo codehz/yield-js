@@ -10,7 +10,10 @@ use yield_vm::Vm;
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
 const REACT_RECONCILER: &str = include_str!("vendor/react-reconciler-0.31.0.mjs");
 const CUSTOM_RENDERER: &str = include_str!("vendor/react-renderer.mjs");
-const PRELOAD: &str = "import * as console from 'console'; export { console }; export function reportError(error) {} export const window = undefined; export const process = undefined;";
+// esm.sh inlines unenv's node:events polyfill, which reads Node's module-private
+// `kEvents` symbol without declaring it. Supplying it as an environment global
+// keeps the vendor bundle unchanged.
+const PRELOAD: &str = "import * as console from 'console'; export { console }; export function reportError(error) {} export const window = undefined; export const process = undefined; export const kEvents = Symbol('kEvents');";
 
 #[test]
 fn real_react_19_bundle_compiles_with_environment_polyfills() {
