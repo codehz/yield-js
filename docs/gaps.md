@@ -14,7 +14,7 @@
 
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
-- 顶层 `for await…of` 仍按 top-level await 在编译期拒绝；`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
+- `yield` / `yield*` 出现在非生成器函数中会被拒绝。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整
@@ -46,7 +46,7 @@
 ## 6. 首版范围之外（不是首版缺口）
 
 - 完整 ECMAScript TDZ、每轮循环独立绑定
-- 顶层 `await`、动态 `import()`、`eval`、`Function` 构造
+- 动态 `import()`、`eval`、`Function` 构造
 - 标签模板在编译期拒绝，报带行列的 `unsupported syntax: …`。
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`、`using` / `await using`：不在首版语法表
