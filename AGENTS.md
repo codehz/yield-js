@@ -36,7 +36,7 @@ Public entry points:
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::collect_garbage(roots)` explicitly sweeps unreachable heap state between calls, only with an empty microtask queue; `roots` is a slice of same-VM `Value`s the host still needs. It returns the number of heap objects removed and preserves live IDs.
 - `Vm::restore(snapshot, same_build, host)` rebinds declarations and operations before execution
-- Host async work starts with `CallCx::start_operation::<O>(state)` and `OperationDriver::start`; deliver with `Vm::complete_operation(token, completion)` using the current VM generation token. Registrations release their platform resources on drop. Publish the restored VM before calling `Vm::start_recovered_operations()`.
+- `CallCx::promise(op)` starts external work with a native Promise target. Linked background tasks use the same registration path and have independently cancellable numeric handles. Deliver through `Vm::complete_operation(token, completion)` using the current VM generation token. Registrations release platform resources on drop. Publish the restored VM before calling `Vm::start_recovered_operations()`.
 
 Suspend/resume invariants (do not weaken these):
 

@@ -569,7 +569,7 @@ mod test {
             .string(&arg)?
             .to_utf8()
             .map_err(|_| cx.type_error("wait requires a valid UTF-16 label"))?;
-        cx.start_operation(Wait { label })
+        cx.promise(Wait { label })
     }
 
     #[function(name = "pause")]
@@ -578,7 +578,7 @@ mod test {
             .string(&arg)?
             .to_utf8()
             .map_err(|_| cx.type_error("pause requires a valid UTF-16 label"))?;
-        cx.start_operation(Pause { label })
+        cx.promise(Pause { label })
     }
 
     #[function(name = "rejectAfterRestore")]
@@ -587,7 +587,7 @@ mod test {
             .string(&arg)?
             .to_utf8()
             .map_err(|_| cx.type_error("reject requires a valid UTF-16 label"))?;
-        cx.start_operation(Reject { label })
+        cx.promise(Reject { label })
     }
 
     #[function(name = "reissue")]
@@ -596,7 +596,7 @@ mod test {
             .string(&arg)?
             .to_utf8()
             .map_err(|_| cx.type_error("reissue requires a valid UTF-16 label"))?;
-        cx.start_operation(Reissue { label })
+        cx.promise(Reissue { label })
     }
 
     #[function(name = "bind")]

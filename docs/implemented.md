@@ -9,7 +9,7 @@
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。非零大小载荷必须声明 schema 与 codec，否则分配实例是 `HostFault`，避免恢复时静默丢失数据。带 `class` 的 `#[constructor]` 导出暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并；基类方法与访问器接受派生实例。payload 仍属于具体实例类。脚本类可继承宿主构造器：只对本次构造中与声明类匹配的宿主分配使用派生原型，不修改其他分配或构造器返回的替换对象。宿主接收者仍校验声明类标签；脚本私元素与宿主槽和 payload 独立，均可跨快照恢复。
 - `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec 使用 `DecodeCx` 访问平台服务；服务 ID 进入声明指纹，缺失或版本不符整体拒绝恢复。
-- 普通宿主函数和方法可返回 `HostStep::Call`，由 VM 在当前 `CallCx` 结束后同步执行脚本调用。恢复使用新的调用 ID、原始 `this` 和显式保存的参数；脚本异常传给恢复函数，VM 错误直接上传。绑定函数可用 `async fn -> JsResult<HostStep>` 表达多个 guest-call 段，宏将其转换为非捕获恢复函数与显式 `JsValue` 保存/恢复；这不是 Rust Future 或 JS Promise。旧调用创建的请求不能重复分派。
+- 宿主函数和方法用 `HostStep::Suspend` 交还受校验的请求；VM 在当前 `CallCx` 结束后同步执行 guest 调用或 GC。恢复使用新的调用 ID、原始 `this` 和显式保存的值。后台宿主任务还可等待外部 operation；其完成入队，不在投递调用中执行脚本。旧调用创建的请求不能重放。
 - 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy` / `toThrow`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
@@ -77,11 +77,11 @@
 - Promise 组合子接受同步可迭代值。每次调用先读取接收者的 `resolve` 一次，按输入顺序以同一接收者调用它，并调用每个返回值的 `then`。属性读取、调用与迭代错误拒绝结果 Promise。等待中的组合子可跨快照恢复；`Promise.any` 全拒绝时以真实 `AggregateError` 拒绝，`.errors` 按输入顺序保留拒绝原因。
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
-- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 先创建 Promise 和持久 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态，不取消运行中的登记。捕获时宿主必须保持外部逻辑时间和投递在同一切点。结算必须使用本代令牌；旧代、重复及未知令牌被拒绝。`Pause` 在恢复时以 `undefined` 兑现，`Reject` 以声明原因拒绝；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在恢复发布后调用 driver 重新登记，原 Promise 不变。登记失败拒绝原 Promise，不丢弃 VM；重复调用不重复登记。
+- `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
-- 快照与运行期 GC 共享只读追踪：从 pending operation、内建单例、类原型、模块状态槽、顶层脚本环境和宿主提供的值出发，沿堆边访问可达的 async 续体和闭包环境。保留的 well-known Symbol 和注册表项恒为 Symbol 根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
+- 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
 - 宿主可在 VM 调用之间、排空微任务后显式调用 `Vm::collect_garbage(&[roots])`。它原地回收不可达对象（包括环）及其旁表、宿主实例和续体，清除不可达普通 Symbol，只返回删除的堆对象数；不改变存活 ID，也不复用被回收的 ID。宿主每次须显式提供仍要使用但不由 VM 持有的本 VM `Value`；这不延长临时宿主绑定 `JsValue` 的有效期。GC 不执行微任务、脚本或宿主绑定回调，标记失败不清扫。与快照不同，GC 可丢弃不可达且未调用的决议能力。
 - 宿主绑定可选择通过 `CallCx::request_gc` 暴露同步 GC。VM 在当前 `CallCx` 结束后追踪活动帧、跨调用的 Rust 值、排队及正在派发的微任务和 `Host::gc_roots()`，随后回收并以删除的对象数恢复宿主绑定。活动收集不会排空或重排微任务，也不改变快照边界；追踪失败直接返回 VM 错误，不清扫或恢复宿主绑定。
 - CPS 宏支持顶层 `let outcome = cx.gc().await;`，和 `cx.call(...).await` 共用跨阶段值保存规则。测试宿主通过 `import { gc } from "test"` 提供同步收集，返回删除的对象数，不创建 Promise。

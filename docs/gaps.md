@@ -61,7 +61,7 @@
 1. **代理仅覆盖六种 trap**，不等同于完整 ECMAScript Proxy。
 2. **新的堆种类仍要改可达性**。常规强边由 `Heap::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由 GC 和快照共享的追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理，`WeakSet` 成员不参与标记。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 3. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
-4. **宿主回调只同步恢复。** `HostStep::Call` 不等待 Promise，不排空微任务，也不把 Rust 恢复函数写入快照。需要跨异步边界的宿主工作仍使用 operation。
+4. **宿主续体不能等待任意 Rust Future。** guest 调用与 GC 同步恢复；只有链接的外部 operation 等待点可写入快照。Rust 栈和函数指针不序列化。
 5. **GC 不会自动触发。** 宿主可在调用之间排空微任务后调用 `Vm::collect_garbage`，或选择用 `CallCx::request_gc` 向脚本暴露同步收集；后者通过 `Host::gc_roots()` 提供宿主保留的本 VM 值。没有默认的脚本 `gc` 全局函数。
 
 ## 6. 明确不做（不要当缺口实现）

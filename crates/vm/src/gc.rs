@@ -210,7 +210,12 @@ impl Vm {
             tracer.mark_object(import.namespace)?;
         }
         for operation in self.operations.values() {
-            tracer.mark_object(operation.promise)?;
+            if let crate::snapshot::DeliveryTarget::Promise(promise) = operation.target {
+                tracer.mark_object(promise)?;
+            }
+        }
+        for task in self.host_tasks.values() {
+            task.trace(&mut tracer)?;
         }
         for class in &self.host_classes {
             tracer.mark_object(class.prototype)?;

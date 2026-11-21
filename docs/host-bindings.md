@@ -208,7 +208,8 @@ impl CallCx {
     fn throw(&mut self, value: JsValue) -> JsError;        // 可捕获脚本异常
     fn fault(&mut self, message: &str) -> HostFault;       // 不可捕获，终止执行
     fn inspect(&self, value: JsValue) -> Inspect<'_>;      // 只读自有数据视图
-    fn start_operation<O: Operation>(&mut self, state: O::State) -> JsResult<JsValue>;
+    fn promise<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue>;
+    fn cancel_task(&mut self, handle: &JsValue) -> JsResult<()>;
 }
 ```
 
@@ -240,7 +241,7 @@ impl CallCx {
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
 - 异步结果只能通过 operation 交付，或在 VM 空闲后由宿主以新的任务轮次投递。原生 timer、网络回调、UI 事件都属于后者。
-- 绑定函数不得阻塞等待另一个 operation；需要等待时返回 Promise。
+- 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
 
 ## 7. 异步 operation
 
@@ -253,23 +254,23 @@ struct Wait {
 }
 ```
 
-每个 operation 类型声明：类型 ID、状态 schema 版本、状态 codec、恢复策略。状态不得包含 `JsValue`；需要 JS 引用（例如回调）时，让发起函数把回调写进某个实例槽，或把它作为参数传给 operation 记录中的槽字段。
+每个 operation 声明类型 ID、状态 schema、codec 和恢复策略。`OperationDriver` 从链接的 `Bindings` 获取服务，并用 `start` / `resume` 返回拥有平台登记的 `Live`。状态和 `Live` 均不得持有 guest 值；回调与其他活值由 VM 的后台任务保存。`Live` 的 `Drop` 释放登记，`checkpoint` 可为本次镜像编码替换状态。
 
 ### 7.2 启动与结算
 
-- `cx.start_operation::<Wait>(state)` 做三件事：分配 VM operation ID、创建 VM Promise、写入持久记录。返回给 JS 的是 Promise，不是 ID 字符串。
+- `cx.promise(state)` 创建原生 VM Promise 作为唯一交付终点；后台任务改用任务 ID 作为终点，既不创建 Promise，也不复制续体帧。两者共享同一 operation 登记路径。
 - 宿主把 operation 交给平台执行，但**不得**把「operation ID → 平台句柄」当作恢复权威。平台任务丢失后，恢复依据只有快照状态。
 - 结算接口携带 `(epoch, operation_id)` 能力令牌。VM 只接受当前代际、仍处于 pending 的记录；未知、已结算或来自旧 VM 的交付被拒绝，且不会产生第二次结算。
-- 同一 operation 的结算恰好一次；重复交付是宿主 bug，返回 `HostFault` 给宿主侧调用者，但不影响已经在跑的脚本。
+- 重复交付返回 `UnknownOperation`，不影响已经在跑的脚本；后台任务的 JS 句柄也不是 operation 令牌。
 
 ### 7.3 恢复策略
 
 | 策略 | 语义 | 典型用途 |
 | --- | --- | --- |
-| `Pause` | 恢复时以 `undefined` 兑现原 Promise，不重新登记工作 | 测试暂停点、仅用于挂起的 `wait` |
-| `Resume` | 从快照状态重新登记，未来交付时结算原 Promise | timer、UI 事件订阅、等待外部输入 |
-| `Reissue` | 从快照状态重新发起，结果交付原 Promise | 幂等查询、可重放请求 |
-| `Reject` | 恢复时用声明的错误值拒绝原 Promise | 不可重放的外部副作用 |
+| `Pause` | 恢复时以 `undefined` 兑现原目标，不重新登记工作 | 测试暂停点、仅用于挂起的 `wait` |
+| `Resume` | 从快照状态重新登记，未来交付时结算原目标 | timer、UI 事件订阅、等待外部输入 |
+| `Reissue` | 从快照状态重新发起，结果交付原目标 | 幂等查询、可重放请求 |
+| `Reject` | 恢复时用声明的错误值拒绝原目标 | 不可重放的外部副作用 |
 
 约束：
 
@@ -280,9 +281,9 @@ struct Wait {
 
 ### 7.4 时序与快照边界
 
-- 快照只能在微任务队列排空后创建；已有约束不变。
-- 快照记录 pending operation 的类型、状态、原 Promise 引用和代际之外的标识。恢复后 VM 使用新代际，旧宿主持有的交付令牌永久失效。
-- 恢复成功后，`Pause` 与 `Reject` 的结算进入微任务队列，按正常顺序执行；`Resume`/`Reissue` 保持 pending，由宿主在 `Vm::restore` 返回后调用 `Vm::start_recovered_operations` 重新登记。任何外部交付都在恢复完成之后。
+- 微任务队列必须排空，宿主还必须将外部逻辑时间和投递冻结在同一切点。capture 既不取消原登记，也不创建新登记。
+- 快照记录 pending operation 的类型、状态和 Promise 或任务终点；任务保存了 owner、外部恢复阶段、原接收者与活槽。恢复使用新代际，旧令牌失效。
+- 恢复成功后，`Pause` 与 `Reject` 结算 Promise 或排入任务续体；`Resume` / `Reissue` 保持 pending，由 `Vm::start_recovered_operations()` 在发布后重新登记。
 - 恢复不得重跑发起 operation 的函数，也不得重放该函数之前的副作用。
 
 ## 8. 快照
@@ -296,7 +297,9 @@ Snapshot {
     objects:   [ObjectRecord]                        // 含绑定实例
     module_states: [ { module, state } ]
     continuations: […]                               // 现有续体记录
-    operations: [ { type, schema, state, promise, strategy } ]
+    operations: [ { type, schema, state, target, strategy } ]
+    host_tasks: [ { id, owner, stage, receiver, saved, waiting_on } ]
+    next_host_task_id: u64
     globals / roots / imports / script_env / …
 }
 

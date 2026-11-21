@@ -180,7 +180,7 @@ mod demo {
         if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
             counters.hit("wait");
         }
-        cx.start_operation(Wait { label })
+        cx.promise(Wait { label })
     }
 }
 

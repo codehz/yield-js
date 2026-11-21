@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::JsString;
-use crate::binding::Recovery;
+use crate::binding::{NativeTarget, Recovery};
 use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Native callables persist stable intrinsic keys, not linked IDs.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 48;
+// Pending operations can target persisted host tasks as well as Promises.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 49;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -99,6 +99,13 @@ pub struct ContinuationRecord {
     pub values: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryTarget {
+    Promise(ObjectId),
+    Task(u64),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingOperationRecord {
     pub id: u64,
@@ -106,7 +113,17 @@ pub struct PendingOperationRecord {
     pub schema: u32,
     pub recovery: Recovery,
     pub state: Vec<u8>,
-    pub promise: ObjectId,
+    pub target: DeliveryTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostTaskRecord {
+    pub id: u64,
+    pub owner: NativeTarget,
+    pub stage: u32,
+    pub receiver: Value,
+    pub saved: Vec<Value>,
+    pub waiting_on: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +174,8 @@ pub struct Snapshot {
     pub(crate) private_elements: Vec<PrivateRecord>,
     pub continuations: Vec<ContinuationRecord>,
     pub operations: Vec<PendingOperationRecord>,
+    pub host_tasks: Vec<HostTaskRecord>,
+    pub next_host_task_id: u64,
     #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
@@ -189,6 +208,8 @@ impl Snapshot {
             private_elements: Vec::new(),
             continuations: Vec::new(),
             operations: Vec::new(),
+            host_tasks: Vec::new(),
+            next_host_task_id: 1,
             imports: Vec::new(),
             class_prototypes: BTreeMap::new(),
             host_instances: Vec::new(),

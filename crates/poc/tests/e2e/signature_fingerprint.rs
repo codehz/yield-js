@@ -39,7 +39,7 @@ mod original {
 
         #[function(name = "wait")]
         fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(Wait {
+            cx.promise(Wait {
                 label: "pending".into(),
             })
         }
@@ -80,7 +80,7 @@ macro_rules! independent_contract {
 
                 #[function(name = "wait")]
                 fn schedule(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-                    cx.start_operation(Wait { label: "pending".into() })
+                    cx.promise(Wait { label: "pending".into() })
                 }
 
                 #[function(name = "probe")]

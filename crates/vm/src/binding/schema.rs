@@ -100,8 +100,7 @@ pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<HostStep>;
 #[derive(Debug)]
 pub enum HostStep {
     Return(JsValue),
-    Call(GuestCall),
-    CollectGarbage(GcRequest),
+    Suspend(SuspendRequest),
 }
 
 /// A host effect's completion, rewrapped for the resume context.
@@ -112,83 +111,86 @@ pub enum GuestOutcome {
 }
 
 pub(crate) type GuestResume = fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>;
-type GuestCallParts = (Value, Value, Vec<Value>, Vec<Value>, GuestResume);
 
-/// An opaque request valid only as a result of the step that created it.
-#[derive(Debug)]
-pub struct GuestCall {
-    epoch: u32,
-    call: u64,
-    callee: Value,
-    receiver: Value,
-    args: Vec<Value>,
-    saved: Vec<Value>,
-    resume: GuestResume,
+/// One linked continuation entry and its portable saved-slot layout.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct CpsStage {
+    pub resume: GuestResume,
+    pub kind: CpsBoundary,
+    pub slots: &'static [u32],
+    pub receiver: Option<&'static str>,
 }
 
-impl GuestCall {
-    pub(crate) fn new(
-        epoch: u32,
-        call: u64,
+/// The effect whose completion enters a linked continuation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpsBoundary {
+    Call,
+    Gc,
+    External,
+    Spawn,
+}
+
+#[derive(Debug)]
+pub(crate) enum Action {
+    Call {
         callee: Value,
         receiver: Value,
         args: Vec<Value>,
+    },
+    Gc,
+    External {
+        decl: usize,
+        state: Vec<u8>,
+    },
+    /// Enter a new task immediately using its linked entry and saved slots.
+    Spawn,
+}
+
+#[derive(Debug)]
+pub(crate) enum Resume {
+    Inline(GuestResume),
+    Linked(u32),
+}
+
+/// An opaque request valid only as a result of the step that created it.
+#[derive(Debug)]
+pub struct SuspendRequest {
+    epoch: u32,
+    call: u64,
+    action: Action,
+    saved: Vec<Value>,
+    resume: Resume,
+}
+
+impl SuspendRequest {
+    pub(crate) fn new(
+        epoch: u32,
+        call: u64,
+        action: Action,
         saved: Vec<Value>,
-        resume: GuestResume,
+        resume: Resume,
     ) -> Self {
         Self {
             epoch,
             call,
-            callee,
-            receiver,
-            args,
+            action,
             saved,
             resume,
         }
     }
 
-    pub(crate) fn into_parts(self, cx: CallCx<'_>) -> Result<GuestCallParts, HostFault> {
+    pub(crate) fn into_parts(
+        self,
+        cx: CallCx<'_>,
+    ) -> Result<(Action, Vec<Value>, Resume), HostFault> {
         if self.epoch != cx.epoch || self.call != cx.call {
             return Err(HostFault::new(
-                "GuestCall used outside the call that produced it",
+                "SuspendRequest used outside the call that produced it",
             ));
         }
-        Ok((
-            self.callee,
-            self.receiver,
-            self.args,
-            self.saved,
-            self.resume,
-        ))
-    }
-}
-
-/// An opaque collection request valid only as a result of the step that created it.
-#[derive(Debug)]
-pub struct GcRequest {
-    epoch: u32,
-    call: u64,
-    saved: Vec<Value>,
-    resume: GuestResume,
-}
-
-impl GcRequest {
-    pub(crate) fn new(epoch: u32, call: u64, saved: Vec<Value>, resume: GuestResume) -> Self {
-        Self {
-            epoch,
-            call,
-            saved,
-            resume,
-        }
-    }
-
-    pub(crate) fn into_parts(self, cx: CallCx<'_>) -> Result<(Vec<Value>, GuestResume), HostFault> {
-        if self.epoch != cx.epoch || self.call != cx.call {
-            return Err(HostFault::new(
-                "GcRequest used outside the call that produced it",
-            ));
-        }
-        Ok((self.saved, self.resume))
+        Ok((self.action, self.saved, self.resume))
     }
 }
 
@@ -285,6 +287,7 @@ pub struct FunctionDecl {
     pub class: Option<&'static str>,
     pub call: HostCall,
     signature: CallSignature,
+    cps: Option<&'static [CpsStage]>,
 }
 
 #[derive(Clone)]
@@ -415,6 +418,7 @@ pub struct MethodDecl {
     pub arity: usize,
     pub call: HostCall,
     signature: CallSignature,
+    cps: Option<&'static [CpsStage]>,
 }
 
 #[derive(Clone)]
@@ -610,6 +614,7 @@ struct OperationDecl {
     rejection: &'static str,
     decode: fn(&[u8], &Bindings) -> Result<(), CodecError>,
     rust_type: TypeId,
+    start: ArmOperation,
     resume: ArmOperation,
 }
 
@@ -623,8 +628,8 @@ pub struct ModuleDecl {
 pub mod __macro_support {
     use super::{AccessorCall, UnlinkedBindings};
     pub use super::{
-        AccessorDecl, ArgKind, CallSignature, ExportDecl, MemberName, MethodDecl, ModuleDecl,
-        ReturnKind,
+        AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
+        MethodDecl, ModuleDecl, ReturnKind,
     };
     use super::{
         Bindings, ClassDecl, HostClass, HostModuleState, OperationDecl, OperationDriver, StateDecl,
@@ -706,6 +711,26 @@ pub mod __macro_support {
             class,
             call,
             signature,
+            cps: None,
+        })
+    }
+
+    pub fn function_cps(
+        name: &str,
+        constructable: bool,
+        class: Option<&'static str>,
+        call: HostCall,
+        signature: CallSignature,
+        stages: &'static [CpsStage],
+    ) -> ExportDecl {
+        ExportDecl::Function(FunctionDecl {
+            name: name.to_owned(),
+            arity: signature.args.len(),
+            constructable,
+            class,
+            call,
+            signature,
+            cps: Some(stages),
         })
     }
 
@@ -722,6 +747,22 @@ pub mod __macro_support {
             arity: signature.args.len(),
             call,
             signature,
+            cps: None,
+        }
+    }
+
+    pub const fn method_cps(
+        name: MemberName,
+        call: HostCall,
+        signature: CallSignature,
+        stages: &'static [CpsStage],
+    ) -> MethodDecl {
+        MethodDecl {
+            name,
+            arity: signature.args.len(),
+            call,
+            signature,
+            cps: Some(stages),
         }
     }
 
@@ -831,6 +872,17 @@ impl Bindings {
             .get(id.module as usize)?
             .exports
             .get(id.export as usize)
+    }
+
+    pub(crate) fn cps(&self, owner: NativeTarget) -> Option<&'static [CpsStage]> {
+        match owner {
+            NativeTarget::Export(id) => match self.export_decl(id)? {
+                ExportDecl::Function(function) if !function.constructable => function.cps,
+                _ => None,
+            },
+            NativeTarget::Method(id) => self.method(id)?.cps,
+            NativeTarget::Accessor { .. } => None,
+        }
     }
 
     pub fn export_class(&self, id: ExportId) -> Option<ClassId> {
@@ -955,6 +1007,25 @@ impl Bindings {
             )));
         }
         Ok(index)
+    }
+
+    pub(crate) fn operation_metadata(&self, decl: usize) -> (&str, u32, Recovery, &'static str) {
+        let operation = &self.inner.operations[decl];
+        (
+            &operation.name,
+            operation.schema,
+            operation.recovery,
+            operation.rejection,
+        )
+    }
+
+    pub(crate) fn start_encoded_operation(
+        &self,
+        decl: usize,
+        bytes: &[u8],
+        token: OperationToken,
+    ) -> Result<Box<dyn LiveRegistration>, HostFault> {
+        (self.inner.operations[decl].start)(bytes, token, self)
     }
 
     pub(crate) fn resume_operation(
@@ -1125,6 +1196,11 @@ impl OperationDecl {
             rejection: O::REJECTION,
             decode: |input, bindings| O::decode(input, bindings).map(|_| ()),
             rust_type: TypeId::of::<O>(),
+            start: |bytes, token, bindings| {
+                let state = O::decode(bytes, bindings).map_err(|error| HostFault(error.0))?;
+                let live = state.start(token, bindings)?;
+                Ok(Box::new(TypedRegistration::<O>(live)))
+            },
             resume: |bytes, token, bindings| {
                 let state = O::decode(bytes, bindings).map_err(|error| HostFault(error.0))?;
                 let live = state.resume(token, bindings)?;
@@ -1316,6 +1392,26 @@ fn hash_signature(hasher: &mut Sha256, direction: u8, signature: CallSignature) 
     }
 }
 
+fn hash_cps(hasher: &mut Sha256, stages: Option<&[CpsStage]>) {
+    let Some(stages) = stages else { return };
+    hash_line(hasher, format!("cps stages={}", stages.len()));
+    for stage in stages {
+        let kind = match stage.kind {
+            CpsBoundary::Call => "call",
+            CpsBoundary::Gc => "gc",
+            CpsBoundary::External => "external",
+            CpsBoundary::Spawn => "spawn",
+        };
+        hash_line(
+            hasher,
+            format!(
+                "cps-stage {kind} slots={:?} receiver={:?}",
+                stage.slots, stage.receiver
+            ),
+        );
+    }
+}
+
 fn fingerprint(
     modules: &[ModuleDecl],
     classes: &[ClassDecl],
@@ -1337,6 +1433,7 @@ fn fingerprint(
                         ),
                     );
                     hash_signature(&mut hasher, 0, function.signature);
+                    hash_cps(&mut hasher, function.cps);
                 }
                 ExportDecl::Constant(constant) => hash_line(
                     &mut hasher,
@@ -1366,6 +1463,7 @@ fn fingerprint(
                 format!("method {} arity={}", method.name, method.arity),
             );
             hash_signature(&mut hasher, 1, method.signature);
+            hash_cps(&mut hasher, method.cps);
         }
         for accessor in &class.accessors {
             hash_line(

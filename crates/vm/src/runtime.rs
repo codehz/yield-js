@@ -3,10 +3,11 @@
 
 use std::any::Any;
 
-use crate::binding::{ClassId, HostFault, LiveRegistration, Recovery};
+use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
 use crate::error::VmError;
 use crate::gc::{TraceRoots, Tracer};
 use crate::heap::{CombineKind, PromiseState};
+use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 
 #[derive(Debug, Clone)]
@@ -51,7 +52,7 @@ pub(crate) struct PendingOperation {
     pub(crate) recovery: Recovery,
     pub(crate) rejection: &'static str,
     pub(crate) state: Vec<u8>,
-    pub(crate) promise: ObjectId,
+    pub(crate) target: DeliveryTarget,
     pub(crate) declaration: usize,
     pub(crate) live: Option<Box<dyn LiveRegistration>>,
 }
@@ -74,9 +75,33 @@ impl std::fmt::Debug for PendingOperation {
             .field("name", &self.name)
             .field("schema", &self.schema)
             .field("recovery", &self.recovery)
-            .field("promise", &self.promise)
+            .field("target", &self.target)
             .field("armed", &self.live.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+pub(crate) const HOST_TASK_ID_LIMIT: u64 = 1 << 53;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostTaskState {
+    Waiting(u64),
+    Ready,
+    Running,
+}
+
+#[derive(Debug)]
+pub(crate) struct HostTask {
+    pub(crate) owner: NativeTarget,
+    pub(crate) stage: u32,
+    pub(crate) receiver: Value,
+    pub(crate) saved: Vec<Value>,
+    pub(crate) state: HostTaskState,
+}
+
+impl TraceRoots for HostTask {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        (&self.receiver, &self.saved).trace(tracer)
     }
 }
 
@@ -154,6 +179,10 @@ pub(crate) enum Microtask {
         continuation: ContinuationId,
         settlement: Settlement,
     },
+    ResumeHost {
+        task: u64,
+        settlement: Settlement,
+    },
     /// Run one `then` / `catch` handler, or pass the settlement through.
     CallHandler {
         handler: Option<Value>,
@@ -206,6 +235,7 @@ impl TraceRoots for Microtask {
                 tracer.mark_pending_continuation(*continuation)?;
                 settlement.trace(tracer)
             }
+            Self::ResumeHost { settlement, .. } => settlement.trace(tracer),
             Self::CallHandler {
                 handler,
                 argument,

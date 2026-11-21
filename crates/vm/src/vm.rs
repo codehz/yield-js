@@ -1,7 +1,8 @@
 use crate::JsString;
 use crate::binding::{
-    Bindings, CallCx, ExportDecl, ExportId, GuestOutcome, GuestResume, HostStep, JsError, JsValue,
-    NativeTarget,
+    Action, Bindings, CallCx, CpsBoundary, CpsStage, ExportDecl, ExportId, GuestOutcome,
+    GuestResume, HostCall, HostFault, HostStep, JsError, JsValue, LiveRegistration, NativeTarget,
+    OperationToken, Resume,
 };
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
@@ -12,8 +13,10 @@ use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
 use crate::runtime::{
-    ExecOutcome, HostInstance, Invocation, Microtask, PendingOperation, Settlement,
+    ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, Invocation, Microtask,
+    PendingOperation, Settlement,
 };
+use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -79,9 +82,24 @@ pub(crate) struct HostConstruction {
     pub(crate) prototype: Option<ObjectId>,
 }
 
+enum HostEntry {
+    Call(HostCall),
+    Resume(GuestResume, Invocation),
+}
+
+struct HostActivation<'a> {
+    bindings: &'a Bindings,
+    owner: NativeTarget,
+    receiver: &'a Value,
+    construction: Option<HostConstruction>,
+    task: Option<u64>,
+}
+
 pub(crate) struct RestoredState {
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
+    pub(crate) host_tasks: BTreeMap<u64, HostTask>,
+    pub(crate) next_host_task_id: u64,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
     pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
@@ -98,6 +116,8 @@ pub struct Vm {
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
+    pub(crate) host_tasks: BTreeMap<u64, HostTask>,
+    pub(crate) next_host_task_id: u64,
     /// Operations loaded by restore whose `Resume` / `Reissue` work has not
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
@@ -147,6 +167,8 @@ impl Vm {
             build,
             bindings,
             heap: Heap::new(),
+            host_tasks: BTreeMap::new(),
+            next_host_task_id: 1,
             continuations: BTreeMap::new(),
             imports: Vec::new(),
             operations: BTreeMap::new(),
@@ -341,75 +363,292 @@ impl Vm {
                 declaration.2
             )));
         }
-        let allocation_prototype =
-            match (target, construction.and_then(|context| context.prototype)) {
-                (NativeTarget::Export(export), Some(prototype)) => bindings
-                    .export_class(export)
-                    .map(|class| (class, prototype)),
-                _ => None,
-            };
+        self.run_host_steps(
+            host,
+            roots,
+            HostActivation {
+                bindings: &bindings,
+                owner: target,
+                receiver,
+                construction,
+                task: None,
+            },
+            HostEntry::Call(call),
+            args,
+        )?
+        .ok_or_else(|| VmError::InvalidState("ordinary host call suspended".to_owned()))
+    }
+
+    fn run_host_steps(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        activation: HostActivation<'_>,
+        mut entry: HostEntry,
+        mut args: Vec<Value>,
+    ) -> Result<Option<Invocation>, VmError> {
+        let HostActivation {
+            bindings,
+            owner,
+            receiver,
+            construction,
+            task,
+        } = activation;
         let prototype = construction.and_then(|context| context.prototype);
+        let allocation_prototype = match (owner, prototype) {
+            (NativeTarget::Export(export), Some(prototype)) => bindings
+                .export_class(export)
+                .map(|class| (class, prototype)),
+            _ => None,
+        };
         let context = (receiver, prototype);
         let roots = &roots.with(&context);
-        let mut next_args = args;
-        let mut pending: Option<(GuestResume, Invocation)> = None;
         loop {
+            if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
+                return Ok(None);
+            }
             let call_id = self.next_host_call;
             self.next_host_call = self.next_host_call.checked_add(1).unwrap_or(1);
             let epoch = self.epoch;
             let wrap = |value| JsValue::handle(value, epoch, call_id);
             let mut cx = CallCx {
                 vm: self,
-                bindings: &bindings,
+                bindings,
                 epoch,
                 call: call_id,
-                args: next_args.into_iter().map(wrap).collect(),
+                args: args.into_iter().map(wrap).collect(),
                 this: wrap(receiver.clone()),
-                construct: construction.is_some() && pending.is_none(),
+                construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
+                task,
             };
-            let step = match pending.take() {
-                Some((resume, outcome)) => {
+            let step = match entry {
+                HostEntry::Resume(resume, outcome) => {
                     let outcome = match outcome {
                         Invocation::Value(value) => GuestOutcome::Returned(wrap(value)),
                         Invocation::Thrown(value) => GuestOutcome::Thrown(wrap(value)),
                     };
                     resume(&mut cx, outcome)
                 }
-                None => call(&mut cx),
+                HostEntry::Call(call) => call(&mut cx),
             };
             let request = match step {
                 Ok(HostStep::Return(value)) => {
                     return cx
                         .into_value(value)
-                        .map(Invocation::Value)
+                        .map(|value| Some(Invocation::Value(value)))
                         .map_err(|error| VmError::Host(error.0));
                 }
                 Err(JsError::Throw(value)) => {
                     return cx
                         .into_value(value)
-                        .map(Invocation::Thrown)
+                        .map(|value| Some(Invocation::Thrown(value)))
                         .map_err(|error| VmError::Host(error.0));
                 }
                 Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
-                Ok(HostStep::Call(request)) => request,
-                Ok(HostStep::CollectGarbage(request)) => {
-                    let (saved, resume) = request
-                        .into_parts(cx)
-                        .map_err(|fault| VmError::HostFault(fault.0))?;
-                    let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
-                    pending = Some((resume, Invocation::Value(Value::Number(removed as f64))));
-                    next_args = saved;
-                    continue;
-                }
+                Ok(HostStep::Suspend(request)) => request,
             };
-            let (callee, guest_this, args, saved, resume) = request
+            let (action, saved, resume) = request
                 .into_parts(cx)
                 .map_err(|fault| VmError::HostFault(fault.0))?;
-            let outcome = self.invoke(host, &roots.with(&saved), &callee, args, &guest_this)?;
-            pending = Some((resume, outcome));
-            next_args = saved;
+            // A running task can cancel itself, including from a nested guest call.
+            if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
+                return Ok(None);
+            }
+            let boundary = match &action {
+                Action::Call { .. } => CpsBoundary::Call,
+                Action::Gc => CpsBoundary::Gc,
+                Action::External { .. } => CpsBoundary::External,
+                Action::Spawn => CpsBoundary::Spawn,
+            };
+            let (linked, resume) = match resume {
+                Resume::Linked(stage) => {
+                    let resume = Self::linked_stage(bindings, owner, stage, boundary, saved.len())?;
+                    (Some(stage), resume.resume)
+                }
+                Resume::Inline(resume)
+                    if matches!(boundary, CpsBoundary::Call | CpsBoundary::Gc) =>
+                {
+                    (None, resume)
+                }
+                Resume::Inline(_) => {
+                    return Err(VmError::HostFault(
+                        "background tasks require a linked stage".to_owned(),
+                    ));
+                }
+            };
+            let outcome = match action {
+                Action::Call {
+                    callee,
+                    receiver,
+                    args,
+                } => self.invoke(host, &roots.with(&saved), &callee, args, &receiver)?,
+                Action::Gc => {
+                    let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
+                    Invocation::Value(Value::Number(removed as f64))
+                }
+                Action::External { decl, state } => {
+                    let (Some(id), Some(stage)) = (task, linked) else {
+                        return Err(VmError::HostFault(
+                            "external await requires a background task".to_owned(),
+                        ));
+                    };
+                    let token = self
+                        .register_operation(
+                            decl,
+                            state,
+                            DeliveryTarget::Task(id),
+                            |token, bindings, bytes| {
+                                bindings.start_encoded_operation(decl, bytes, token)
+                            },
+                        )
+                        .map_err(|fault| VmError::HostFault(fault.0))?;
+                    let frame = self.host_tasks.get_mut(&id).expect("running task exists");
+                    frame.stage = stage;
+                    frame.receiver = receiver.clone();
+                    frame.saved = saved;
+                    frame.state = HostTaskState::Waiting(token.id);
+                    return Ok(None);
+                }
+                Action::Spawn => {
+                    let Some(stage) = linked.filter(|_| {
+                        task.is_none()
+                            && construction.is_none()
+                            && !matches!(owner, NativeTarget::Accessor { .. })
+                    }) else {
+                        return Err(VmError::HostFault(
+                            "spawn requires an ordinary host function or method".to_owned(),
+                        ));
+                    };
+                    let id = self.next_host_task_id;
+                    if id >= HOST_TASK_ID_LIMIT {
+                        return Err(VmError::HostFault(
+                            "host task id space exhausted".to_owned(),
+                        ));
+                    }
+                    self.next_host_task_id += 1;
+                    self.host_tasks.insert(
+                        id,
+                        HostTask {
+                            owner,
+                            stage,
+                            receiver: Value::Undefined,
+                            saved: Vec::new(),
+                            state: HostTaskState::Running,
+                        },
+                    );
+                    let result = self.run_host_steps(
+                        host,
+                        roots,
+                        HostActivation {
+                            bindings,
+                            owner,
+                            receiver,
+                            construction: None,
+                            task: Some(id),
+                        },
+                        HostEntry::Resume(resume, Invocation::Value(Value::Undefined)),
+                        saved,
+                    );
+                    let outcome = self.finish_host_task(id, result)?;
+                    return Ok(Some(match outcome {
+                        Some(Invocation::Thrown(error)) => Invocation::Thrown(error),
+                        _ => Invocation::Value(Value::Number(id as f64)),
+                    }));
+                }
+            };
+            entry = HostEntry::Resume(resume, outcome);
+            args = saved;
         }
+    }
+
+    fn linked_stage(
+        bindings: &Bindings,
+        owner: NativeTarget,
+        stage: u32,
+        boundary: CpsBoundary,
+        slot_count: usize,
+    ) -> Result<CpsStage, VmError> {
+        bindings
+            .cps(owner)
+            .and_then(|stages| stages.get(stage as usize))
+            .filter(|entry| entry.kind == boundary && entry.slots.len() == slot_count)
+            .copied()
+            .ok_or_else(|| {
+                VmError::HostFault(format!("invalid linked host stage {stage} for {owner:?}"))
+            })
+    }
+
+    fn finish_host_task(
+        &mut self,
+        id: u64,
+        result: Result<Option<Invocation>, VmError>,
+    ) -> Result<Option<Invocation>, VmError> {
+        let Some(frame) = self.host_tasks.get(&id) else {
+            // The current activation returned after canceling itself.
+            return result.map(|_| None);
+        };
+        if !matches!(frame.state, HostTaskState::Waiting(_)) || result.is_err() {
+            self.cancel_host_task(id);
+        }
+        result
+    }
+
+    pub(crate) fn cancel_host_task(&mut self, id: u64) {
+        if let Some(frame) = self.host_tasks.remove(&id)
+            && let HostTaskState::Waiting(operation) = frame.state
+        {
+            self.recovered_operations.remove(&operation);
+            self.operations.remove(&operation);
+        }
+    }
+
+    fn resume_host_task(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: u64,
+        settlement: &Settlement,
+    ) -> Result<(), VmError> {
+        let Some(frame) = self.host_tasks.get_mut(&id) else {
+            return Ok(()); // canceled after delivery
+        };
+        if frame.state != HostTaskState::Ready {
+            return Err(VmError::InvalidState(format!(
+                "host task {id} is not ready"
+            )));
+        }
+        frame.state = HostTaskState::Running;
+        let owner = frame.owner;
+        let stage = frame.stage;
+        let receiver = std::mem::replace(&mut frame.receiver, Value::Undefined);
+        let saved = std::mem::take(&mut frame.saved);
+        let bindings = self.bindings.clone();
+        let result =
+            Self::linked_stage(&bindings, owner, stage, CpsBoundary::External, saved.len())
+                .and_then(|entry| {
+                    let outcome = match settlement {
+                        Settlement::Fulfilled(value) => Invocation::Value(value.clone()),
+                        Settlement::Rejected(value) => Invocation::Thrown(value.clone()),
+                    };
+                    self.run_host_steps(
+                        host,
+                        roots,
+                        HostActivation {
+                            bindings: &bindings,
+                            owner,
+                            receiver: &receiver,
+                            construction: None,
+                            task: Some(id),
+                        },
+                        HostEntry::Resume(entry.resume, outcome),
+                        saved,
+                    )
+                });
+        if let Some(Invocation::Thrown(error)) = self.finish_host_task(id, result)? {
+            host.report_error(self.host_value(error));
+        }
+        Ok(())
     }
 
     fn import_export_value(
@@ -692,6 +931,12 @@ impl Vm {
                     self.continuations.remove(&continuation);
                     result?;
                 }
+                Microtask::ResumeHost {
+                    task,
+                    ref settlement,
+                } => {
+                    self.resume_host_task(host, roots, task, settlement)?;
+                }
                 Microtask::CallHandler {
                     ref handler,
                     ref argument,
@@ -736,6 +981,11 @@ impl Vm {
                 token.id()
             )));
         }
+        let std::collections::btree_map::Entry::Occupied(operation) =
+            self.operations.entry(token.id)
+        else {
+            return Err(VmError::UnknownOperation(token.id().to_string()));
+        };
         let (value, rejected) = match completion {
             Completion::Fulfilled(value) => (value, false),
             Completion::Rejected(value) => (value, true),
@@ -743,21 +993,40 @@ impl Vm {
         let value = value
             .into_constant()
             .map_err(|error| VmError::Host(error.0))?;
-        let operation = self
-            .operations
-            .get(&token.id)
-            .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
-        let promise = operation.promise;
-        self.operations
-            .remove(&token.id)
-            .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
-        self.recovered_operations.retain(|id| *id != token.id);
+        let operation = operation.remove();
+        let target = operation.target;
+        self.recovered_operations.remove(&token.id);
+        drop(operation);
         let settlement = if rejected {
             Settlement::Rejected(value)
         } else {
             Settlement::Fulfilled(value)
         };
-        self.settle(promise, settlement)
+        self.deliver_operation(target, settlement)
+    }
+
+    pub(crate) fn deliver_operation(
+        &mut self,
+        target: DeliveryTarget,
+        settlement: Settlement,
+    ) -> Result<(), VmError> {
+        match target {
+            DeliveryTarget::Promise(promise) => self.settle(promise, settlement),
+            DeliveryTarget::Task(task) => {
+                let frame = self.host_tasks.get_mut(&task).ok_or_else(|| {
+                    VmError::InvalidState(format!("operation targets missing host task {task}"))
+                })?;
+                if !matches!(frame.state, HostTaskState::Waiting(_)) {
+                    return Err(VmError::InvalidState(format!(
+                        "host task {task} is not waiting"
+                    )));
+                }
+                frame.state = HostTaskState::Ready;
+                self.microtasks
+                    .push_back(Microtask::ResumeHost { task, settlement });
+                Ok(())
+            }
+        }
     }
 
     pub fn pending_operations(&self) -> Vec<PendingOperationInfo> {
@@ -777,11 +1046,10 @@ impl Vm {
     }
 
     /// Rearms recovered `Resume` / `Reissue` operations after publication.
-    /// Each operation is registered at most once. A driver failure rejects
-    /// the original Promise without discarding the restored VM.
+    /// Each operation is registered at most once. A driver failure delivers
+    /// the declared rejection without discarding the restored VM.
     pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
-        let pending = std::mem::take(&mut self.recovered_operations);
-        for id in pending {
+        while let Some(id) = self.recovered_operations.pop_first() {
             let Some(operation) = self.operations.get_mut(&id) else {
                 continue;
             };
@@ -795,11 +1063,11 @@ impl Vm {
             {
                 operation.live = Some(live);
             } else {
-                let promise = operation.promise;
+                let target = operation.target;
                 let rejection = operation.rejection;
                 self.operations.remove(&id);
-                self.settle(
-                    promise,
+                self.deliver_operation(
+                    target,
                     Settlement::Rejected(Value::String(rejection.into())),
                 )?;
             }
@@ -807,34 +1075,51 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn alloc_operation<O: crate::binding::Operation>(
+    pub(crate) fn register_operation(
         &mut self,
-        declaration: usize,
+        decl: usize,
         state: Vec<u8>,
-        promise: ObjectId,
-    ) -> Result<crate::binding::OperationToken, crate::binding::HostFault> {
+        target: DeliveryTarget,
+        arm: impl FnOnce(
+            OperationToken,
+            &Bindings,
+            &[u8],
+        ) -> Result<Box<dyn LiveRegistration>, HostFault>,
+    ) -> Result<OperationToken, HostFault> {
         let id = self.next_operation_id;
         self.next_operation_id = self
             .next_operation_id
             .checked_add(1)
-            .ok_or_else(|| crate::binding::HostFault::new("operation id space exhausted"))?;
+            .ok_or_else(|| HostFault::new("operation id space exhausted"))?;
+        let token = OperationToken {
+            epoch: self.epoch,
+            id,
+        };
+        let (name, schema, recovery, rejection) = self.bindings.operation_metadata(decl);
         self.operations.insert(
             id,
             PendingOperation {
-                name: O::NAME.to_owned(),
-                schema: O::SCHEMA,
-                recovery: O::RECOVERY,
-                rejection: O::REJECTION,
+                name: name.to_owned(),
+                schema,
+                recovery,
+                rejection,
                 state,
-                promise,
-                declaration,
+                target,
+                declaration: decl,
                 live: None,
             },
         );
-        Ok(crate::binding::OperationToken {
-            epoch: self.epoch,
-            id,
-        })
+        let operation = self.operations.get_mut(&id).expect("operation inserted");
+        match arm(token, &self.bindings, &operation.state) {
+            Ok(live) => {
+                operation.live = Some(live);
+                Ok(token)
+            }
+            Err(fault) => {
+                self.operations.remove(&id);
+                Err(fault)
+            }
+        }
     }
 
     pub fn promise_state(&self, value: &Value) -> Result<PromiseState, VmError> {
@@ -1091,6 +1376,8 @@ impl Vm {
             mut heap,
             continuations,
             operations,
+            host_tasks,
+            next_host_task_id,
             host_classes,
             host_instances,
             module_states,
@@ -1121,6 +1408,8 @@ impl Vm {
             heap,
             continuations,
             operations,
+            host_tasks,
+            next_host_task_id,
             recovered_operations,
             microtasks: VecDeque::new(),
             globals,

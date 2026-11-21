@@ -220,6 +220,7 @@ pub struct CallCx<'a> {
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
+    pub(crate) task: Option<u64>,
 }
 
 impl<'a> CallCx<'a> {
@@ -255,20 +256,11 @@ impl<'a> CallCx<'a> {
         saved: Vec<JsValue>,
         resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
     ) -> JsResult<HostStep> {
-        Ok(HostStep::Call(GuestCall::new(
-            self.epoch,
-            self.call,
-            self.unpack(callee)?,
-            self.unpack(receiver)?,
-            args.into_iter()
-                .map(|value| self.unpack(value))
-                .collect::<JsResult<_>>()?,
-            saved
-                .into_iter()
-                .map(|value| self.unpack(value))
-                .collect::<JsResult<_>>()?,
-            resume,
-        )))
+        self.suspend(
+            self.call_action(callee, receiver, args)?,
+            saved,
+            Resume::Inline(resume),
+        )
     }
 
     /// Request synchronous collection after this context ends, without running
@@ -280,13 +272,99 @@ impl<'a> CallCx<'a> {
         saved: Vec<JsValue>,
         resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
     ) -> JsResult<HostStep> {
+        self.suspend(Action::Gc, saved, Resume::Inline(resume))
+    }
+
+    #[doc(hidden)]
+    pub fn __linked_call(
+        &self,
+        callee: JsValue,
+        receiver: JsValue,
+        args: Vec<JsValue>,
+        saved: Vec<JsValue>,
+        stage: u32,
+    ) -> JsResult<HostStep> {
+        self.suspend(
+            self.call_action(callee, receiver, args)?,
+            saved,
+            Resume::Linked(stage),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __linked_gc(&self, saved: Vec<JsValue>, stage: u32) -> JsResult<HostStep> {
+        self.suspend(Action::Gc, saved, Resume::Linked(stage))
+    }
+
+    #[doc(hidden)]
+    pub fn __linked_effect<O: OperationDriver>(
+        &self,
+        state: O,
+        saved: Vec<JsValue>,
+        stage: u32,
+    ) -> JsResult<HostStep> {
+        if self.task.is_none() {
+            return Err(JsError::Fault(HostFault::new(
+                "external await requires a host task",
+            )));
+        }
+        let (decl, state) = self.encode_operation(&state)?;
+        self.suspend(
+            Action::External { decl, state },
+            saved,
+            Resume::Linked(stage),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __spawn(&self, saved: Vec<JsValue>, stage: u32) -> JsResult<HostStep> {
+        self.suspend(Action::Spawn, saved, Resume::Linked(stage))
+    }
+
+    fn call_action(
+        &self,
+        callee: JsValue,
+        receiver: JsValue,
+        args: Vec<JsValue>,
+    ) -> JsResult<Action> {
+        Ok(Action::Call {
+            callee: self.unpack(callee)?,
+            receiver: self.unpack(receiver)?,
+            args: args
+                .into_iter()
+                .map(|value| self.unpack(value))
+                .collect::<JsResult<_>>()?,
+        })
+    }
+
+    fn suspend(&self, action: Action, saved: Vec<JsValue>, resume: Resume) -> JsResult<HostStep> {
         let saved = saved
             .into_iter()
             .map(|value| self.unpack(value))
             .collect::<JsResult<_>>()?;
-        Ok(HostStep::CollectGarbage(GcRequest::new(
-            self.epoch, self.call, saved, resume,
+        Ok(HostStep::Suspend(SuspendRequest::new(
+            self.epoch, self.call, action, saved, resume,
         )))
+    }
+
+    pub fn cancel_task(&mut self, handle: &JsValue) -> JsResult<()> {
+        self.check_value(handle)?;
+        if let Value::Number(id) = handle.value
+            && id > 0.0
+            && id < crate::runtime::HOST_TASK_ID_LIMIT as f64
+            && id.fract() == 0.0
+        {
+            self.vm.cancel_host_task(id as u64);
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn __outcome(&self, outcome: GuestOutcome) -> JsResult<JsValue> {
+        match outcome {
+            GuestOutcome::Returned(value) => Ok(value),
+            GuestOutcome::Thrown(value) => Err(self.throw(value)),
+        }
     }
 
     fn unpack(&self, value: JsValue) -> JsResult<Value> {
@@ -536,7 +614,7 @@ impl<'a> CallCx<'a> {
         })
     }
 
-    pub fn start_operation<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue> {
+    fn encode_operation<O: OperationDriver>(&self, state: &O) -> JsResult<(usize, Vec<u8>)> {
         let declaration = self
             .bindings
             .operation_index::<O>()
@@ -545,21 +623,24 @@ impl<'a> CallCx<'a> {
         state
             .encode(&mut bytes)
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
+        Ok((declaration, bytes))
+    }
+
+    pub fn promise<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue> {
+        let (declaration, bytes) = self.encode_operation(&state)?;
         let promise = self.vm.heap.alloc_promise();
-        let token = self
-            .vm
-            .alloc_operation::<O>(declaration, bytes, promise)
+        self.vm
+            .register_operation(
+                declaration,
+                bytes,
+                crate::snapshot::DeliveryTarget::Promise(promise),
+                |token, bindings, _| {
+                    Ok(Box::new(TypedRegistration::<O>(
+                        state.start(token, bindings)?,
+                    )))
+                },
+            )
             .map_err(JsError::Fault)?;
-        match state.start(token, self.bindings) {
-            Ok(live) => {
-                self.vm.operations.get_mut(&token.id).unwrap().live =
-                    Some(Box::new(TypedRegistration::<O>(live)))
-            }
-            Err(error) => {
-                self.vm.operations.remove(&token.id);
-                return Err(JsError::Fault(error));
-            }
-        }
         Ok(self.js_value(Value::Object(promise)))
     }
 

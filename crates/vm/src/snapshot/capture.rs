@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::binding::{Bindings, Recovery};
+use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget, Recovery};
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
@@ -17,7 +17,8 @@ use crate::heap::{
 use crate::host::Host;
 use crate::regexp::compile_pattern;
 use crate::runtime::{
-    Continuation, HostInstance, HostSlot, ModuleState, PendingOperation, Settlement,
+    Continuation, HOST_TASK_ID_LIMIT, HostInstance, HostSlot, HostTask, HostTaskState, ModuleState,
+    PendingOperation, Settlement,
 };
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value};
 use crate::vm::Vm;
@@ -179,6 +180,22 @@ impl Vm {
                 values: continuation.values.clone(),
             });
         }
+        snapshot.next_host_task_id = self.next_host_task_id;
+        for (&id, task) in &self.host_tasks {
+            let HostTaskState::Waiting(waiting_on) = task.state else {
+                return Err(VmError::InvalidState(format!(
+                    "host task {id} must be waiting to be snapshotted"
+                )));
+            };
+            snapshot.host_tasks.push(HostTaskRecord {
+                id,
+                owner: task.owner,
+                stage: task.stage,
+                receiver: task.receiver.clone(),
+                saved: task.saved.clone(),
+                waiting_on,
+            });
+        }
         for (id, operation) in &self.operations {
             snapshot.operations.push(PendingOperationRecord {
                 id: *id,
@@ -188,7 +205,7 @@ impl Vm {
                 state: operation
                     .checkpoint()
                     .map_err(|error| VmError::HostFault(error.0))?,
-                promise: operation.promise,
+                target: operation.target,
             });
         }
         for (id, state) in &self.heap.combines {
@@ -277,7 +294,15 @@ impl Vm {
         let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
         validate_preload_globals(&build, &heap, &builtins, script_env)?;
-        let operations = load_operations(&bindings, &heap, &snapshot.operations)?;
+        let operations = load_operations(&bindings, &heap, snapshot.operations)?;
+        let host_tasks = load_host_tasks(
+            &bindings,
+            &heap,
+            &host_instances,
+            &operations,
+            snapshot.host_tasks,
+            snapshot.next_host_task_id,
+        )?;
         let mut vm = Self::restored(
             build,
             bindings.clone(),
@@ -285,6 +310,8 @@ impl Vm {
                 heap,
                 continuations,
                 operations,
+                host_tasks,
+                next_host_task_id: snapshot.next_host_task_id,
                 host_classes,
                 host_instances,
                 module_states,
@@ -311,11 +338,14 @@ impl Vm {
         for (id, operation) in pending {
             match operation.recovery {
                 Recovery::Pause => {
-                    self.settle(operation.promise, Settlement::Fulfilled(Value::Undefined))?;
+                    self.deliver_operation(
+                        operation.target,
+                        Settlement::Fulfilled(Value::Undefined),
+                    )?;
                 }
                 Recovery::Reject => {
-                    self.settle(
-                        operation.promise,
+                    self.deliver_operation(
+                        operation.target,
                         Settlement::Rejected(Value::String(operation.rejection.into())),
                     )?;
                 }
@@ -1599,7 +1629,7 @@ fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(), VmError>
 fn load_operations(
     bindings: &Bindings,
     heap: &Heap,
-    records: &[PendingOperationRecord],
+    records: Vec<PendingOperationRecord>,
 ) -> Result<BTreeMap<u64, PendingOperation>, VmError> {
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
@@ -1632,34 +1662,107 @@ fn load_operations(
                     record.name, record.schema
                 ))
             })?;
-        match heap.get(record.promise) {
-            Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending) => {}
-            _ => {
+        if let DeliveryTarget::Promise(promise) = record.target {
+            let pending = matches!(heap.get(promise), Ok(Object::Promise(p)) if matches!(p.state, PromiseState::Pending));
+            if !pending {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "operation {:?} references non-pending Promise {}",
-                    record.name, record.promise
+                    "operation {:?} references non-pending Promise {promise}",
+                    record.name
                 )));
             }
-        }
-        if !operation_promises.insert(record.promise) {
-            return Err(VmError::InvalidSnapshot(format!(
-                "Promise {} is associated with more than one host operation",
-                record.promise
-            )));
+            if !operation_promises.insert(promise) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "Promise {promise} is associated with more than one host operation"
+                )));
+            }
         }
         operations.insert(
             record.id,
             PendingOperation {
-                name: record.name.clone(),
+                name: record.name,
                 schema: record.schema,
                 recovery,
                 rejection,
-                state: record.state.clone(),
-                promise: record.promise,
+                state: record.state,
+                target: record.target,
                 declaration,
                 live: None,
             },
         );
     }
     Ok(operations)
+}
+
+fn load_host_tasks(
+    bindings: &Bindings,
+    heap: &Heap,
+    instances: &BTreeMap<ObjectId, HostInstance>,
+    operations: &BTreeMap<u64, PendingOperation>,
+    records: Vec<HostTaskRecord>,
+    next_id: u64,
+) -> Result<BTreeMap<u64, HostTask>, VmError> {
+    if !(1..=HOST_TASK_ID_LIMIT).contains(&next_id) {
+        return Err(VmError::InvalidSnapshot(format!(
+            "invalid next host task id {next_id}"
+        )));
+    }
+    let mut tasks = BTreeMap::new();
+    for record in records {
+        let id = record.id;
+        let invalid =
+            |message: &str| VmError::InvalidSnapshot(format!("host task {id}: {message}"));
+        if !(1..next_id).contains(&id) || tasks.contains_key(&id) {
+            return Err(invalid("duplicate id or id outside its high-water mark"));
+        }
+        match operations.get(&record.waiting_on) {
+            Some(operation) if operation.target == DeliveryTarget::Task(id) => {}
+            _ => return Err(invalid("waiting operation does not target this task")),
+        }
+        match record.owner {
+            NativeTarget::Export(export) if matches!(bindings.export_decl(export), Some(ExportDecl::Function(f)) if !f.constructable) =>
+                {}
+            NativeTarget::Method(method) if bindings.method(method).is_some() => {
+                let valid_receiver = match &record.receiver {
+                    Value::Object(object) => instances.get(object).is_some_and(|instance| {
+                        bindings.class_is_a(instance.class, method.class as usize)
+                    }),
+                    _ => false,
+                };
+                if !valid_receiver {
+                    return Err(invalid("receiver is not an instance of the method's class"));
+                }
+            }
+            _ => return Err(invalid("invalid CPS owner")),
+        }
+        let stage = bindings
+            .cps(record.owner)
+            .and_then(|stages| stages.get(record.stage as usize))
+            .filter(|stage| matches!(stage.kind, CpsBoundary::External))
+            .ok_or_else(|| invalid("stage is not an external CPS boundary"))?;
+        if record.saved.len() != stage.slots.len() {
+            return Err(invalid("saved value count does not match CPS stage"));
+        }
+        require_value_objects(heap, std::iter::once(&record.receiver).chain(&record.saved))?;
+        tasks.insert(
+            id,
+            HostTask {
+                owner: record.owner,
+                stage: record.stage,
+                receiver: record.receiver,
+                saved: record.saved,
+                state: HostTaskState::Waiting(record.waiting_on),
+            },
+        );
+    }
+    for (&id, operation) in operations {
+        if let DeliveryTarget::Task(task) = operation.target {
+            let state = tasks.get(&task).map(|task| task.state);
+            if state != Some(HostTaskState::Waiting(id)) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "operation {id} targets host task {task}, which does not wait on it"
+                )));
+            }
+        }
+    }
+    Ok(tasks)
 }

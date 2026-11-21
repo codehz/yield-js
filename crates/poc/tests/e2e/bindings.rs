@@ -124,22 +124,22 @@ mod strategy_fixture {
 
         #[function(name = "pause")]
         fn pause(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(PauseOperation)
+            cx.promise(PauseOperation)
         }
 
         #[function(name = "resume")]
         fn resume(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(ResumeOperation)
+            cx.promise(ResumeOperation)
         }
 
         #[function(name = "reissue")]
         fn reissue(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(ReissueOperation)
+            cx.promise(ReissueOperation)
         }
 
         #[function(name = "reject")]
         fn reject(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(RejectOperation)
+            cx.promise(RejectOperation)
         }
     }
 
@@ -500,7 +500,7 @@ fn guest_call_cannot_be_replayed() {
     "#,
     );
     assert!(
-        matches!(result, Err(VmError::HostFault(message)) if message.contains("GuestCall used outside the call"))
+        matches!(result, Err(VmError::HostFault(message)) if message == "SuspendRequest used outside the call that produced it")
     );
     assert_eq!(runs, 0);
 }
@@ -517,7 +517,7 @@ fn gc_request_cannot_be_replayed() {
     "#,
     );
     assert!(
-        matches!(result, Err(VmError::HostFault(message)) if message.contains("GcRequest used outside the call"))
+        matches!(result, Err(VmError::HostFault(message)) if message == "SuspendRequest used outside the call that produced it")
     );
 }
 
@@ -634,7 +634,7 @@ mod counter_fixture {
                 .string(&arg)?
                 .to_utf8()
                 .map_err(|_| cx.type_error("wait requires a valid label"))?;
-            cx.start_operation(Wait { label })
+            cx.promise(Wait { label })
         }
     }
 
@@ -930,7 +930,7 @@ mod inherit_fixture {
 
         #[function(name = "wait")]
         fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(InheritWait)
+            cx.promise(InheritWait)
         }
 
         #[function(name = "assert")]
