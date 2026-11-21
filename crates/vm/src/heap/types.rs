@@ -36,6 +36,10 @@ pub(crate) const HAS_INSTANCE_SYMBOL: SymbolId = 8;
 pub(crate) const HAS_INSTANCE_DESCRIPTION: &str = "Symbol.hasInstance";
 pub(crate) const IS_CONCAT_SPREADABLE_SYMBOL: SymbolId = 9;
 pub(crate) const IS_CONCAT_SPREADABLE_DESCRIPTION: &str = "Symbol.isConcatSpreadable";
+pub(crate) const ASYNC_ITERATOR_SYMBOL: SymbolId = 10;
+pub(crate) const ASYNC_ITERATOR_DESCRIPTION: &str = "Symbol.asyncIterator";
+/// Bound for ordinary symbols. Every reserved well-known symbol stays below it.
+pub(crate) const NEXT_SYMBOL_ID: SymbolId = ASYNC_ITERATOR_SYMBOL + 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -95,9 +99,12 @@ pub struct PromiseObject {
     pub(super) extensible: bool,
 }
 
-/// Where a synchronous generator currently is.
+/// Where a generator currently is.
 ///
-/// `Executing` is a transient state that never survives a snapshot boundary.
+/// `Executing` and the two waiting states are transient frames of one call and
+/// never survive a snapshot boundary unchanged: while `Awaiting` the frame is
+/// in a continuation, and while `Closing` the return argument is in a Promise
+/// reaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GeneratorStatus {
@@ -105,10 +112,34 @@ pub enum GeneratorStatus {
     Start,
     /// Suspended at generator entry `index` of the function's resume table.
     Suspended(u32),
+    /// An async generator's body suspended at `await`. The frame lives in the
+    /// single continuation that targets this generator.
+    Awaiting,
+    /// The body cannot run any more and the queue head's `return` argument is
+    /// being assimilated before the request settles with `done: true`.
+    Closing,
     /// A resume is running. Reentrant resumes must throw a script TypeError.
     Executing,
     /// The body finished, threw, or was closed. The frame is gone.
     Completed,
+}
+
+/// The completion kind an async generator request carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncCompletion {
+    Next,
+    Throw,
+    Return,
+}
+
+/// One queued async generator request. The request Promise is settled exactly
+/// once, by the step that consumes the request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AsyncRequest {
+    pub completion: AsyncCompletion,
+    pub argument: Value,
+    pub promise: ObjectId,
 }
 
 /// Script-visible generator state. The object itself is an ordinary object with
@@ -121,6 +152,9 @@ pub struct GeneratorObject {
     pub env: Option<ObjectId>,
     /// Values in the resume entry's `saved_slots` order. Empty once completed.
     pub values: Vec<Value>,
+    /// Async generators only: FIFO of requests, head first. Synchronous
+    /// generators never push here.
+    pub requests: VecDeque<AsyncRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

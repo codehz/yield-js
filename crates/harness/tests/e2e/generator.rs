@@ -2,6 +2,7 @@
 
 use yield_harness::TestHost;
 use yield_vm::heap::GeneratorStatus;
+use yield_vm::snapshot::ContinuationTargetRecord;
 use yield_vm::{Completion, PromiseState, Value, Vm, VmError};
 
 use super::support::{Suspended, TEST_DECLARATIONS, declared, json_round_trip};
@@ -297,4 +298,138 @@ fn restore_rejects_a_generator_that_was_captured_while_executing() {
         Vm::restore(captured, suspended.vm.build().clone(), &mut TestHost::default()),
         Err(VmError::InvalidSnapshot(message)) if message.contains("captured while executing")
     ));
+}
+
+/// Two queued requests while the body is suspended at its own `await`: the
+/// snapshot keeps the FIFO, and the awaiting generator keeps no frame of its
+/// own.
+const ASYNC_QUEUE: &str = r#"
+import { wait } from "test";
+
+export const state = { it: null };
+
+export async function run() {
+  async function* g() {
+    yield await wait("a");
+    yield 2;
+  }
+  const it = g();
+  state.it = it;
+  const first = it.next();
+  it.next();
+  await first;
+  return "ok";
+}
+"#;
+
+#[test]
+fn restore_rejects_a_duplicate_async_request_promise() {
+    let suspended = start(ASYNC_QUEUE);
+    let mut captured = json_round_trip(&suspended.snapshot());
+    let record = captured.generators.values_mut().next().expect("generator");
+    assert_eq!(record.status, GeneratorStatus::Awaiting);
+    assert_eq!(record.requests.len(), 2);
+    let first = record.requests[0].promise;
+    record.requests[1].promise = first;
+    assert!(matches!(
+        Vm::restore(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("two requests for one Promise")
+    ));
+}
+
+/// One started and one unstarted instance of the same async generator.
+const TWO_ASYNC_GENERATORS: &str = r#"
+import { wait } from "test";
+
+export const state = { started: null, unstarted: null };
+
+export async function run() {
+  async function* g() {
+    await wait("a");
+    yield 1;
+  }
+  state.started = g();
+  state.unstarted = g();
+  const first = state.started.next();
+  await first;
+  return "ok";
+}
+"#;
+
+#[test]
+fn restore_rejects_a_continuation_targeting_another_generator() {
+    let suspended = start(TWO_ASYNC_GENERATORS);
+    let mut captured = json_round_trip(&suspended.snapshot());
+    let unstarted = captured
+        .generators
+        .iter()
+        .find(|(_, record)| record.status == GeneratorStatus::Start)
+        .map(|(id, _)| *id)
+        .expect("unstarted generator");
+    let continuation = captured.continuations.first_mut().expect("continuation");
+    continuation.target = ContinuationTargetRecord::Generator(unstarted);
+    assert!(matches!(
+        Vm::restore(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("is not awaiting")
+    ));
+}
+
+/// The argument of a queued request is a script object reachable only through
+/// the generator. It must survive an explicit collection, the snapshot, and the
+/// restore, and the body must read it back.
+const REQUEST_ARGUMENT_ROOT: &str = r#"
+import { wait } from "test";
+
+export const state = { it: null };
+
+export async function run() {
+  async function* g() {
+    // Dead at the suspension: it must not enter the saved values.
+    const transient = { tag: "gone" };
+    await wait("a");
+    const received = yield 1;
+    return received.tag;
+  }
+  const it = g();
+  state.it = it;
+  const first = it.next();
+  const marker = { tag: "kept" };
+  const second = it.next(marker);
+  await first;
+  const last = await second;
+  return last.value;
+}
+"#;
+
+#[test]
+fn pending_request_argument_survives_collection_and_restore() {
+    let mut suspended = start(REQUEST_ARGUMENT_ROOT);
+    let roots = suspended.roots();
+    suspended.vm.collect_garbage(&roots).expect("collect");
+
+    let captured = json_round_trip(&suspended.snapshot());
+    let (generator, record) = captured.generators.iter().next().expect("generator");
+    assert_eq!(record.status, GeneratorStatus::Awaiting);
+    assert_eq!(record.requests.len(), 2);
+    let continuation = captured.continuations.first().expect("continuation");
+    assert!(
+        continuation.values.is_empty(),
+        "a value dead at the suspension must not be saved"
+    );
+    let argument = match record.requests[1].argument.view() {
+        yield_vm::ValueRef::Object(id) => id,
+        other => panic!("request argument should be an object, found {other:?}"),
+    };
+    assert!(
+        captured.objects.iter().any(|object| object.id == argument),
+        "the request argument must be part of the restored heap"
+    );
+    assert!(captured.generators.contains_key(generator));
+
+    suspended.restore(captured).expect("restore queued request");
+    suspended.complete(
+        "wait:a",
+        Completion::Fulfilled(yield_vm::JsValue::number(1.0)),
+    );
+    assert_fulfilled(&suspended, "kept");
 }

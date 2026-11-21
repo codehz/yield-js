@@ -5,21 +5,22 @@ use crate::builtin::is_callable_object;
 use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
-use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::heap::{
-    CombineKind, EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap,
-    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
-    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
-    NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind,
-    PromiseCallback, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
-    RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
-    SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
+    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, AsyncCompletion, CombineKind, EnvRole,
+    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
+    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OwnProperty,
+    OwnedEdge, PrivateElement, PrivateMemberKind, PromiseCallback, PromiseState, Property,
+    REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, RejectionStatus, SEARCH_DESCRIPTION,
+    SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
+use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::host::Host;
 use crate::regexp::compile_pattern;
 use crate::runtime::{
-    Continuation, HOST_TASK_ID_LIMIT, HostInstance, HostSlot, HostTask, HostTaskState, ModuleState,
-    PendingOperation, Settlement,
+    Continuation, ContinuationTarget, HOST_TASK_ID_LIMIT, HostInstance, HostSlot, HostTask,
+    HostTaskState, ModuleState, PendingOperation, Settlement,
 };
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
@@ -187,7 +188,14 @@ impl Vm {
             })?;
             snapshot.continuations.push(ContinuationRecord {
                 id,
-                async_promise: continuation.async_promise,
+                target: match continuation.target {
+                    ContinuationTarget::Promise(promise) => {
+                        ContinuationTargetRecord::Promise(promise)
+                    }
+                    ContinuationTarget::Generator(generator) => {
+                        ContinuationTargetRecord::Generator(generator)
+                    }
+                },
                 func_id: continuation.func_id,
                 resume_id: continuation.resume_id,
                 waiting_on,
@@ -426,6 +434,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
+            ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -452,6 +461,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             IS_CONCAT_SPREADABLE_SYMBOL,
             IS_CONCAT_SPREADABLE_DESCRIPTION,
         ),
+        (ASYNC_ITERATOR_SYMBOL, ASYNC_ITERATOR_DESCRIPTION),
     ] {
         if !snapshot
             .symbols
@@ -477,6 +487,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
+            ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(
@@ -769,6 +780,7 @@ fn load_generators(
             .function(generator.func_id)
             .filter(|function| function.is_generator)
             .ok_or_else(|| invalid("references a non-generator function"))?;
+        let async_generator = function.is_async;
         match generator.status {
             GeneratorStatus::Executing => {
                 return Err(invalid("was captured while executing"));
@@ -777,8 +789,37 @@ fn load_generators(
                 if generator.env.is_some() || !generator.values.is_empty() {
                     return Err(invalid("is completed but keeps a frame"));
                 }
+                if !generator.requests.is_empty() {
+                    return Err(invalid("is completed with unsettled requests"));
+                }
+            }
+            GeneratorStatus::Awaiting => {
+                if !async_generator {
+                    return Err(invalid("awaits inside a synchronous generator"));
+                }
+                if generator.env.is_some() || !generator.values.is_empty() {
+                    return Err(invalid("is awaiting but keeps a frame"));
+                }
+                if generator.requests.is_empty() {
+                    return Err(invalid("is awaiting without a request"));
+                }
+            }
+            GeneratorStatus::Closing => {
+                if !async_generator {
+                    return Err(invalid("closes inside a synchronous generator"));
+                }
+                if generator.env.is_some() || !generator.values.is_empty() {
+                    return Err(invalid("is closing but keeps a frame"));
+                }
+                match generator.requests.front() {
+                    Some(head) if head.completion == AsyncCompletion::Return => {}
+                    _ => return Err(invalid("is closing without a return request")),
+                }
             }
             GeneratorStatus::Start => {
+                if !generator.requests.is_empty() {
+                    return Err(invalid("is unstarted with unsettled requests"));
+                }
                 let start = function
                     .generator_start
                     .as_ref()
@@ -788,6 +829,9 @@ fn load_generators(
                 }
             }
             GeneratorStatus::Suspended(index) => {
+                if !generator.requests.is_empty() {
+                    return Err(invalid("is suspended with unsettled requests"));
+                }
                 let entry = function
                     .generator_resumes
                     .get(index as usize)
@@ -797,8 +841,10 @@ fn load_generators(
                 }
             }
         }
-        if !matches!(generator.status, GeneratorStatus::Completed)
-            && generator.env.is_some() != function.needs_environment()
+        if !matches!(
+            generator.status,
+            GeneratorStatus::Completed | GeneratorStatus::Awaiting | GeneratorStatus::Closing
+        ) && generator.env.is_some() != function.needs_environment()
         {
             return Err(invalid("has the wrong environment presence"));
         }
@@ -807,6 +853,23 @@ fn load_generators(
                 .map_err(|_| invalid("references an invalid environment"))?;
         }
         require_value_objects(heap, generator.values.iter())?;
+        let mut promises = BTreeSet::new();
+        for request in &generator.requests {
+            if !matches!(
+                heap.get(request.promise),
+                Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending)
+            ) {
+                return Err(invalid("has a request that is not a pending Promise"));
+            }
+            if !promises.insert(request.promise) {
+                return Err(invalid("has two requests for one Promise"));
+            }
+            if let ValueRef::Object(target) = request.argument.view()
+                && !heap.contains(target)
+            {
+                return Err(invalid("has a request argument that is not an object"));
+            }
+        }
     }
     Ok(records)
 }
@@ -1600,13 +1663,33 @@ fn load_continuations(
             }
         }
     }
+    let mut awaiting = BTreeMap::new();
+    for record in indexed.values() {
+        if let ContinuationTargetRecord::Generator(generator) = record.target {
+            *awaiting.entry(generator).or_insert(0usize) += 1;
+        }
+    }
+    for (id, generator) in &heap.generators {
+        if matches!(generator.status, GeneratorStatus::Awaiting) && awaiting.get(id) != Some(&1) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "generator {id} is awaiting but does not own exactly one continuation"
+            )));
+        }
+    }
     Ok(indexed
         .into_values()
         .map(|record| {
             (
                 record.id,
                 Continuation {
-                    async_promise: record.async_promise,
+                    target: match record.target {
+                        ContinuationTargetRecord::Promise(promise) => {
+                            ContinuationTarget::Promise(promise)
+                        }
+                        ContinuationTargetRecord::Generator(generator) => {
+                            ContinuationTarget::Generator(generator)
+                        }
+                    },
                     func_id: record.func_id,
                     resume_id: record.resume_id,
                     waiting_on: Some(record.waiting_on),
@@ -1679,13 +1762,49 @@ fn validate_continuation(
             record.id
         )));
     }
-    match heap.get(record.async_promise) {
-        Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending) => {}
-        _ => {
-            return Err(VmError::InvalidSnapshot(format!(
-                "continuation {} async result {} is not a pending Promise",
-                record.id, record.async_promise
-            )));
+    match record.target {
+        ContinuationTargetRecord::Promise(promise) => {
+            if !function.is_async || function.is_generator {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} targets a Promise from a non-async function",
+                    record.id
+                )));
+            }
+            match heap.get(promise) {
+                Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending) => {}
+                _ => {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "continuation {} async result {promise} is not a pending Promise",
+                        record.id
+                    )));
+                }
+            }
+        }
+        ContinuationTargetRecord::Generator(generator) => {
+            if !(function.is_async && function.is_generator) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} targets a generator from a non-generator function",
+                    record.id
+                )));
+            }
+            let target = heap.generator(generator).ok_or_else(|| {
+                VmError::InvalidSnapshot(format!(
+                    "continuation {} targets missing generator {generator}",
+                    record.id
+                ))
+            })?;
+            if target.func_id != record.func_id {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} targets a generator of another function",
+                    record.id
+                )));
+            }
+            if !matches!(target.status, GeneratorStatus::Awaiting) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "continuation {} targets generator {generator} that is not awaiting",
+                    record.id
+                )));
+            }
         }
     }
     let waiting = match heap.get(record.waiting_on) {
@@ -1763,6 +1882,7 @@ fn validate_rejection_notifications(heap: &Heap, queue: &[ObjectId]) -> Result<(
 
 fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
     let mut adopts: BTreeMap<ObjectId, usize> = BTreeMap::new();
+    let mut closes: BTreeMap<ObjectId, Vec<(ObjectId, ObjectId)>> = BTreeMap::new();
     for (id, object) in heap.iter() {
         match object {
             Object::Promise(promise) => {
@@ -1783,6 +1903,10 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                         }
                         ReactionJob::Adopt { result } => {
                             require_promise(heap, *result, &format!("Promise {id} reaction"))?;
+                        }
+                        ReactionJob::GeneratorClose { generator, request } => {
+                            require_promise(heap, *request, &format!("Promise {id} reaction"))?;
+                            closes.entry(*generator).or_default().push((id, *request));
                         }
                     }
                     if let ReactionJob::Adopt { result } = job {
@@ -1826,6 +1950,35 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                     "Promise {id} adopts pending Promise {source} without an Adopt reaction"
                 )));
             }
+        }
+    }
+    for (generator, waits) in &closes {
+        let record = heap.generator(*generator).ok_or_else(|| {
+            VmError::InvalidSnapshot(format!(
+                "Promise reaction targets missing generator {generator}"
+            ))
+        })?;
+        let Some(head) = record.requests.front() else {
+            return Err(VmError::InvalidSnapshot(format!(
+                "generator {generator} has a close reaction without a request"
+            )));
+        };
+        if waits.len() != 1 || waits[0].1 != head.promise {
+            return Err(VmError::InvalidSnapshot(format!(
+                "generator {generator} must own exactly one close reaction for its head request"
+            )));
+        }
+        if record.status != GeneratorStatus::Closing {
+            return Err(VmError::InvalidSnapshot(format!(
+                "generator {generator} has a close reaction without closing"
+            )));
+        }
+    }
+    for (id, generator) in &heap.generators {
+        if generator.status == GeneratorStatus::Closing && !closes.contains_key(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "generator {id} is closing without a close reaction"
+            )));
         }
     }
     Ok(())

@@ -12,18 +12,20 @@ mod types;
 pub use object::ReactionJob;
 pub(crate) use object::{EnvRole, OwnedEdge, push_value, string_own_property};
 pub(crate) use store::{Heap, object_id};
-pub use types::{
-    ArrayIterationKind, ArrayObject, BoundObject, BoxedPrimitive, CollectionIteration,
-    CollectionKind, CombineKind, CombineState, EnvironmentObject, FunctionObject, GeneratorObject,
-    GeneratorStatus, NativeObject, Object, PlainObject, PromiseCallback, PromiseObject,
-    PromiseState, Property, PropertyTable, RejectionStatus, Resolution, WeakKey,
-};
 pub(crate) use types::{
-    Attributes, ClassElement, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
-    HostClassRecord, IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL,
-    ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
-    MATCH_DESCRIPTION, MATCH_SYMBOL, OwnProperty, PrivateElement, PrivateMember, PrivateMemberKind,
+    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, Attributes, ClassElement, DescriptorUpdate,
+    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, HostClassRecord,
+    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
+    ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION,
+    MATCH_SYMBOL, OwnProperty, PrivateElement, PrivateMember, PrivateMemberKind,
     REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
     SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, ScriptClass, ScriptClassSource,
     TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+};
+pub use types::{
+    ArrayIterationKind, ArrayObject, AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive,
+    CollectionIteration, CollectionKind, CombineKind, CombineState, EnvironmentObject,
+    FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object, PlainObject,
+    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, RejectionStatus,
+    Resolution, WeakKey,
 };

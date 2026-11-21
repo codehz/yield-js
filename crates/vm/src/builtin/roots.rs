@@ -191,6 +191,7 @@ impl Vm {
                 "array.prototype" => self.heap.array_prototype = Some(id),
                 "promise.prototype" => self.heap.promise_prototype = Some(id),
                 "generator.prototype" => self.heap.generator_prototype = Some(id),
+                "asyncGenerator.prototype" => self.heap.async_generator_prototype = Some(id),
                 _ => {}
             }
         }

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 42;
+pub const BYTECODE_VERSION: u32 = 43;
 
 pub use crate::builtin::BUILTINS;
 
@@ -407,12 +407,15 @@ pub enum Instr {
         input: Slot,
         resume: u32,
     },
-    /// Suspends a synchronous generator, handing `input` to its consumer.
+    /// Suspends a generator, handing `input` to its consumer.
     ///
     /// The VM stores `generator_resumes[generator].saved_slots` and returns the
     /// yielded value. Resuming enters `next_pc` (the fall-through here) or
     /// `throw_pc` with the injected value already written, or `return_pc` with
     /// a pending completion payload for `LoadGeneratorReturn`.
+    ///
+    /// An async generator never yields a delegate result object: the compiler
+    /// awaits the operand and the request queue wraps the value.
     Yield {
         input: Slot,
         generator: u32,
@@ -494,6 +497,13 @@ pub enum Instr {
     },
     /// Throws a TypeError for null or undefined without otherwise converting the value.
     AssertObjectCoercible {
+        src: Slot,
+    },
+    /// Throws a TypeError unless `src` is an object, without converting it.
+    ///
+    /// An asynchronous iterator method resolves to an object that must be
+    /// rechecked after the implicit `await`.
+    RequireObject {
         src: Slot,
     },
     /// Reads a property, projecting primitive sources as needed. The key is already converted.
@@ -585,7 +595,8 @@ pub struct Function {
     pub is_async: bool,
     pub is_arrow: bool,
     pub is_method: bool,
-    /// Synchronous generator. Mutually exclusive with `is_async`.
+    /// Generator, synchronous unless `is_async` is also set. An async
+    /// generator then carries both `resumes` and `generator_resumes`.
     pub is_generator: bool,
     /// Number of positional parameters before the first default, excluding rest.
     pub length: u16,
@@ -606,7 +617,7 @@ pub struct Function {
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
     pub resumes: Vec<ResumeEntry>,
-    /// Present exactly for a synchronous generator.
+    /// Present exactly for a generator, synchronous or asynchronous.
     pub generator_start: Option<GeneratorStart>,
     /// One entry per `Yield`, indexed by `Instr::Yield::generator`.
     pub generator_resumes: Vec<GeneratorEntry>,
@@ -1117,9 +1128,9 @@ impl Build {
         if function.resumes.len() > u32::MAX as usize {
             return Err(format!("{location}: too many resume entries"));
         }
-        if function.is_generator && function.is_async {
-            return Err(format!("{location}: generator cannot be async"));
-        }
+        // An async generator carries both tables: `resumes` for its own
+        // awaits and `generator_resumes` for the three injected completions.
+        // Each table is validated on its own below.
         if function.is_generator && function.is_arrow {
             return Err(format!("{location}: generator cannot be an arrow"));
         }
@@ -1131,8 +1142,10 @@ impl Build {
                 "{location}: generator resume table on a non-generator"
             ));
         }
-        if function.is_generator && !function.resumes.is_empty() {
-            return Err(format!("{location}: generator cannot have await resumes"));
+        if function.is_generator && !function.is_async && !function.resumes.is_empty() {
+            return Err(format!(
+                "{location}: synchronous generator cannot have await resumes"
+            ));
         }
         if function.generator_resumes.len() > u32::MAX as usize {
             return Err(format!("{location}: too many generator resume entries"));
@@ -1516,6 +1529,9 @@ impl Build {
                 Instr::AssertObjectCoercible { src } => {
                     check_slot(*src, "AssertObjectCoercible.src")?;
                 }
+                Instr::RequireObject { src } => {
+                    check_slot(*src, "RequireObject.src")?;
+                }
                 Instr::ObjectRest { dst, src, excluded } => {
                     check_slot(*dst, "ObjectRest.dst")?;
                     check_slot(*src, "ObjectRest.src")?;
@@ -1672,10 +1688,15 @@ impl Build {
                 Instr::Yield {
                     input,
                     generator,
-                    delegate: _,
+                    delegate,
                 } => {
                     if !function.is_generator {
                         return Err(format!("{location}: Yield in a non-generator function"));
+                    }
+                    if *delegate && function.is_async {
+                        return Err(format!(
+                            "{location}: async generator cannot hand back a delegate result object"
+                        ));
                     }
                     check_slot(*input, "Yield.input")?;
                     if *generator as usize >= function.generator_resumes.len() {

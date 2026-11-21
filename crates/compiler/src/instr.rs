@@ -60,6 +60,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::ToPropertyKey { .. }
         | Instr::DefineProperty { .. }
         | Instr::AssertObjectCoercible { .. }
+        | Instr::RequireObject { .. }
         | Instr::ObjectRest { .. }
         | Instr::CopyDataProperties { .. } => true,
         Instr::Const { .. }
@@ -289,6 +290,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.extend([target.index, source.index]);
         }
         Instr::AssertObjectCoercible { src } => {
+            uses.insert(src.index);
+        }
+        Instr::RequireObject { src } => {
             uses.insert(src.index);
         }
         Instr::ObjectRest { dst, src, excluded } => {
@@ -682,6 +686,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             key: remap(key),
         },
         Instr::AssertObjectCoercible { src } => Instr::AssertObjectCoercible { src: remap(src) },
+        Instr::RequireObject { src } => Instr::RequireObject { src: remap(src) },
         Instr::GetDestructuredMember { dst, object, key } => Instr::GetDestructuredMember {
             dst: remap(dst),
             object: remap(object),

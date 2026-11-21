@@ -1052,7 +1052,6 @@ fn rejects_gated_class_features() {
     for (source, feature) in [
         ("class C { x = arguments; }", "arguments"),
         ("class C { static { (() => arguments)(); } }", "arguments"),
-        ("class C { async *m() {} }", "async generator"),
     ] {
         let error = compile(source, &CompileOptions::default()).unwrap_err();
         assert!(error.message().contains(feature), "{error}");
@@ -1884,20 +1883,26 @@ export function* run(iterable) {
 }
 
 #[test]
-fn rejects_async_generator_with_location() {
-    let error = compile(
-        "const holder = { async *m() { yield 1; } };",
+fn lowers_async_generators_with_both_resume_tables() {
+    let build = compile(
+        "const holder = { async *m() { yield await 1; } };",
         &CompileOptions::default(),
     )
-    .unwrap_err();
-    assert!(
-        error
-            .message()
-            .contains("unsupported syntax: async generator"),
-        "{error}"
-    );
-    assert_eq!(error.line(), 1);
-    assert!(error.column() > 1);
+    .expect("async generators are supported");
+    let function = build
+        .functions
+        .iter()
+        .find(|function| function.is_generator)
+        .expect("async generator method");
+    assert!(function.is_async);
+    assert!(function.generator_start.is_some());
+    assert_eq!(function.generator_resumes.len(), 1);
+    // The explicit `await`, the yielded operand, and the return entry's own
+    // assimilation each take a resume point.
+    assert_eq!(function.resumes.len(), 3);
+    build
+        .validate()
+        .expect("an async generator carries both resume tables");
 }
 
 #[test]

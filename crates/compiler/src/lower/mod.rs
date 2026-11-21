@@ -549,13 +549,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             | FunctionSource::Method(function)
             | FunctionSource::Constructor(function)
             | FunctionSource::DerivedConstructor(function) => {
-                if function.generator && function.r#async {
-                    return Err(unsupported(
-                        self.source_text(),
-                        function.span,
-                        "async generator",
-                    ));
-                }
                 if function.generator
                     && matches!(
                         source,

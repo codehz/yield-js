@@ -56,6 +56,13 @@ pub enum ReactionJob {
     Adopt {
         result: ObjectId,
     },
+    /// An async generator already finished its body and is assimilating the
+    /// queue head's `return` argument. The request settles with `done: true`
+    /// once the awaited value is known.
+    GeneratorClose {
+        generator: ObjectId,
+        request: ObjectId,
+    },
 }
 
 impl Object {
@@ -602,6 +609,10 @@ impl ReactionJob {
             }
             Self::Adopt { result } => {
                 out.push(OwnedEdge::Object(*result));
+            }
+            Self::GeneratorClose { generator, request } => {
+                out.push(OwnedEdge::Object(*generator));
+                out.push(OwnedEdge::Object(*request));
             }
         }
     }

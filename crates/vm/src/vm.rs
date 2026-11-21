@@ -15,8 +15,8 @@ use crate::heap::{
 };
 use crate::host::{Completion, Host};
 use crate::runtime::{
-    ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, Invocation, Microtask,
-    PendingOperation, Settlement,
+    ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState,
+    Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value, ValueRef};
@@ -1190,6 +1190,11 @@ impl Vm {
                     result,
                     ref settlement,
                 } => self.run_adopt(host, roots, result, settlement)?,
+                Microtask::GeneratorClose {
+                    generator,
+                    request,
+                    ref settlement,
+                } => self.finish_closing_request(host, roots, generator, request, settlement)?,
                 Microtask::Call {
                     ref function,
                     ref args,
@@ -1499,6 +1504,13 @@ impl Vm {
                 self.microtasks
                     .push_back(Microtask::Adopt { result, settlement });
             }
+            ReactionJob::GeneratorClose { generator, request } => {
+                self.microtasks.push_back(Microtask::GeneratorClose {
+                    generator,
+                    request,
+                    settlement,
+                });
+            }
         }
         Ok(())
     }
@@ -1571,7 +1583,10 @@ impl Vm {
             .new_target_param
             .clone();
         let arguments_param = self.build.functions[function_index].arguments_param.clone();
-        let async_promise = is_async.then(|| self.heap.alloc_promise());
+        // An async generator's call returns the generator object, so it has no
+        // activation result Promise; each request owns its own instead.
+        let is_generator = self.build.functions[function_index].is_generator;
+        let result_promise = (is_async && !is_generator).then(|| self.heap.alloc_promise());
 
         let mut bindings = BTreeMap::new();
         let mut slot_args = Vec::new();
@@ -1620,14 +1635,14 @@ impl Vm {
             function_index,
             &self.build.functions[function_index],
             env,
-            async_promise,
+            result_promise.map(ContinuationTarget::Promise),
         );
         frame.callee = callee;
         for (slot, value) in slot_args {
             frame.write(slot, value)?;
         }
         let outcome = self.execute_frame(host, roots, frame)?;
-        match async_promise {
+        match result_promise {
             Some(promise) => {
                 self.settle_outcome(host, roots, promise, outcome)?;
                 Ok(Invocation::Value(Value::object(promise)))
@@ -1662,6 +1677,7 @@ impl Vm {
         } = state;
         heap.promise_prototype = Some(builtins.get("promise.prototype"));
         heap.generator_prototype = Some(builtins.get("generator.prototype"));
+        heap.async_generator_prototype = Some(builtins.get("asyncGenerator.prototype"));
         heap.object_prototype = Some(builtins.get("object.prototype"));
         heap.array_prototype = Some(builtins.get("array.prototype"));
         heap.function_prototype = Some(builtins.get("function.prototype"));

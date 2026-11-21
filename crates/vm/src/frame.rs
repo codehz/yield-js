@@ -4,6 +4,7 @@
 use crate::bytecode::{Function, Slot, SlotKind};
 use crate::error::VmError;
 use crate::gc::{TraceRoots, Tracer};
+use crate::runtime::ContinuationTarget;
 use crate::value::{ObjectId, Value};
 
 struct SlotFile {
@@ -50,7 +51,9 @@ pub(crate) struct Frame {
     pub(crate) callee: Option<ObjectId>,
     transient: SlotFile,
     persistent: SlotFile,
-    pub(crate) async_promise: Option<ObjectId>,
+    /// Where this activation delivers its result. `None` for synchronous
+    /// activations and for a generator body that must not await.
+    pub(crate) target: Option<ContinuationTarget>,
 }
 
 impl Frame {
@@ -58,7 +61,7 @@ impl Frame {
         function_index: usize,
         function: &Function,
         env: Option<ObjectId>,
-        async_promise: Option<ObjectId>,
+        target: Option<ContinuationTarget>,
     ) -> Self {
         Self {
             function: function_index,
@@ -69,7 +72,7 @@ impl Frame {
             callee: None,
             transient: SlotFile::new(function.transient_slots),
             persistent: SlotFile::new(function.persistent_slots),
-            async_promise,
+            target,
         }
     }
 
@@ -114,7 +117,7 @@ impl Frame {
 impl TraceRoots for Frame {
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         self.env.trace(tracer)?;
-        self.async_promise.trace(tracer)?;
+        self.target.map(ContinuationTarget::object).trace(tracer)?;
         self.generator_return.trace(tracer)?;
         self.generator.trace(tracer)?;
         self.callee.trace(tracer)?;

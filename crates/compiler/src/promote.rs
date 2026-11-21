@@ -258,7 +258,7 @@ fn resume_stubs(function: &LoweredFunction) -> Vec<ResumeEntry> {
                 fulfill_pc: site.fulfill_pc as u32,
                 fulfill_dst: result,
                 reject_pc: site.reject_pc as u32,
-                reject_dst: result,
+                reject_dst: logical(site.reject),
                 saved_slots: Vec::new(),
             }
         })

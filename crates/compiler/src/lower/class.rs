@@ -88,15 +88,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for element in &class.body.body {
             match element {
                 ClassElement::MethodDefinition(method) => {
-                    let feature = if !method.decorators.is_empty() {
-                        Some("class method decorator")
-                    } else if method.value.generator && method.value.r#async {
-                        Some("async generator")
-                    } else {
-                        None
-                    };
-                    if let Some(feature) = feature {
-                        return Err(unsupported(self.source_text(), method.span, feature));
+                    if !method.decorators.is_empty() {
+                        return Err(unsupported(
+                            self.source_text(),
+                            method.span,
+                            "class method decorator",
+                        ));
                     }
                     if method.kind == MethodDefinitionKind::Constructor {
                         if !matches!(constructor, FunctionSource::DefaultConstructor(_)) {

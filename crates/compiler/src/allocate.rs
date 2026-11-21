@@ -27,7 +27,7 @@ pub(crate) fn allocate(
             fulfill_pc: await_site.fulfill_pc as u32,
             fulfill_dst: result,
             reject_pc: await_site.reject_pc as u32,
-            reject_dst: result,
+            reject_dst: logical(await_site.reject),
             saved_slots: Vec::new(),
         });
     }

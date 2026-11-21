@@ -9,7 +9,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Source module environments and namespaces are indexed roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 55;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 56;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -85,8 +85,9 @@ pub struct ObjectRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ContinuationRecord {
     pub id: ContinuationId,
-    /// Async-function result Promise.
-    pub async_promise: ObjectId,
+    /// What the resumed step delivers its outcome to: an async activation's
+    /// result Promise, or the generator whose request is still waiting.
+    pub target: ContinuationTargetRecord,
     pub func_id: u32,
     pub resume_id: u32,
     /// Promise the continuation waits on. Only recoverable, unsettled promises
@@ -97,6 +98,13 @@ pub struct ContinuationRecord {
     pub env: Option<ObjectId>,
     /// Values in `ResumeEntry::saved_slots` order.
     pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationTargetRecord {
+    Promise(ObjectId),
+    Generator(ObjectId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

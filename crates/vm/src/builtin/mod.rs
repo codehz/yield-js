@@ -71,6 +71,7 @@ pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 
 pub(crate) mod array;
+pub(crate) mod async_generator;
 mod boolean;
 pub(crate) mod call;
 pub(crate) mod collections;

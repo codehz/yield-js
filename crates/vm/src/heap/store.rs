@@ -3,15 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::object::{EnvRole, OwnedEdge, push_value};
 use super::types::{
-    ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
-    GeneratorObject, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
-    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
-    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
-    NativeObject, Object, OrderedProperty, OwnProperty, PlainObject, PrivateElement,
-    PrivateMemberKind, PromiseObject, PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION,
-    REPLACE_SYMBOL, RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
-    SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
-    WeakKey, array_index,
+    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, ArrayObject, Attributes, CombineState,
+    DescriptorUpdate, EnvironmentObject, FunctionObject, GeneratorObject, HAS_INSTANCE_DESCRIPTION,
+    HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL,
+    ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
+    MATCH_DESCRIPTION, MATCH_SYMBOL, NEXT_SYMBOL_ID, NativeObject, Object, OrderedProperty,
+    OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
+    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
+    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -46,6 +46,9 @@ pub(crate) struct Heap {
     pub(crate) promise_prototype: Option<ObjectId>,
     /// Shared internal prototype of a generator without its own `prototype`.
     pub(crate) generator_prototype: Option<ObjectId>,
+    /// Shared internal prototype of an async generator, kept apart from the
+    /// synchronous one so neither inherits the other's request methods.
+    pub(crate) async_generator_prototype: Option<ObjectId>,
 }
 
 impl Heap {
@@ -67,9 +70,13 @@ impl Heap {
                     IS_CONCAT_SPREADABLE_SYMBOL,
                     Some(IS_CONCAT_SPREADABLE_DESCRIPTION.into()),
                 ),
+                (
+                    ASYNC_ITERATOR_SYMBOL,
+                    Some(ASYNC_ITERATOR_DESCRIPTION.into()),
+                ),
             ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: IS_CONCAT_SPREADABLE_SYMBOL + 1,
+            next_symbol_id: NEXT_SYMBOL_ID,
             combines: BTreeMap::new(),
             generators: BTreeMap::new(),
             private: BTreeMap::new(),
@@ -79,6 +86,7 @@ impl Heap {
             function_prototype: None,
             promise_prototype: None,
             generator_prototype: None,
+            async_generator_prototype: None,
         }
     }
 
@@ -227,6 +235,10 @@ impl Heap {
             }
             for value in &generator.values {
                 push_value(out, value);
+            }
+            for request in &generator.requests {
+                push_value(out, &request.argument);
+                out.push(OwnedEdge::Object(request.promise));
             }
         }
         if let Some(elements) = self.private.get(&id) {

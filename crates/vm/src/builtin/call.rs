@@ -63,6 +63,7 @@ impl Vm {
         let function = &self.build.functions[index];
         let constructable = function.is_constructable();
         let generator = function.is_generator;
+        let async_generator = generator && function.is_async;
         self.install_script_metadata(id, func_id)?;
         if constructable {
             let prototype = self.heap.alloc_plain();
@@ -82,7 +83,12 @@ impl Vm {
         if generator {
             // Instances inherit from this fresh object, which inherits the
             // shared generator prototype that owns next/return/throw.
-            let prototype = self.heap.alloc_plain_with(self.heap.generator_prototype);
+            let shared = if async_generator {
+                self.heap.async_generator_prototype
+            } else {
+                self.heap.generator_prototype
+            };
+            let prototype = self.heap.alloc_plain_with(shared);
             self.heap.define_data(
                 id,
                 "prototype",
@@ -816,6 +822,18 @@ impl Vm {
         self.heap
             .set_own_string(result, "done", Value::boolean(done))?;
         Ok(Invocation::Value(Value::object(result)))
+    }
+
+    /// Same result object, for callers that cannot report a script throw.
+    pub(crate) fn iterator_result_value(
+        &mut self,
+        value: Value,
+        done: bool,
+    ) -> Result<Value, VmError> {
+        match self.iterator_result(value, done)? {
+            Invocation::Value(result) => Ok(result),
+            Invocation::Thrown(_) => unreachable!("iteration results are never thrown"),
+        }
     }
 
     pub(crate) fn type_error(&mut self, message: &str) -> Result<Value, VmError> {

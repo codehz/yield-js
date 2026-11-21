@@ -3,6 +3,8 @@
 
 use std::any::Any;
 
+use serde::{Deserialize, Serialize};
+
 use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
 use crate::error::VmError;
 use crate::gc::{TraceRoots, Tracer};
@@ -105,9 +107,29 @@ impl TraceRoots for HostTask {
     }
 }
 
+/// Where a suspended async activation delivers its result.
+///
+/// An ordinary `await` settles the activation's result Promise. An `await`
+/// inside an async generator must instead resume the generator: the request
+/// that is waiting for this step owns the Promise that is settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ContinuationTarget {
+    Promise(ObjectId),
+    Generator(ObjectId),
+}
+
+impl ContinuationTarget {
+    pub(crate) fn object(self) -> ObjectId {
+        match self {
+            Self::Promise(id) | Self::Generator(id) => id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Continuation {
-    pub(crate) async_promise: ObjectId,
+    pub(crate) target: ContinuationTarget,
     pub(crate) func_id: u32,
     pub(crate) resume_id: u32,
     pub(crate) waiting_on: Option<ObjectId>,
@@ -117,7 +139,7 @@ pub(crate) struct Continuation {
 
 impl Continuation {
     pub(crate) fn linked_objects(&self) -> impl Iterator<Item = ObjectId> {
-        [Some(self.async_promise), self.waiting_on, self.env]
+        [Some(self.target.object()), self.waiting_on, self.env]
             .into_iter()
             .flatten()
     }
@@ -209,6 +231,12 @@ pub(crate) enum Microtask {
         result: ObjectId,
         settlement: Settlement,
     },
+    /// Finish assimilating a completed async generator's `return` argument.
+    GeneratorClose {
+        generator: ObjectId,
+        request: ObjectId,
+        settlement: Settlement,
+    },
     /// `queueMicrotask`. A throw is reported separately from Promise rejections.
     Call {
         function: Value,
@@ -248,6 +276,11 @@ impl TraceRoots for Microtask {
             } => (result, receiver, then).trace(tracer),
             Self::BeginAdopt { result, source } => (result, source).trace(tracer),
             Self::Adopt { result, settlement } => (result, settlement).trace(tracer),
+            Self::GeneratorClose {
+                generator,
+                request,
+                settlement,
+            } => (generator, request, settlement).trace(tracer),
             Self::Call { function, args } => (function, args).trace(tracer),
         }
     }

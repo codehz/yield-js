@@ -16,7 +16,11 @@ use crate::emit::Reg;
 pub(crate) type LogicalReg = Reg;
 #[derive(Debug)]
 pub(crate) struct AwaitSite {
+    /// Destination of a fulfilled settlement; also the fall-through register.
     pub(crate) result: LogicalReg,
+    /// Destination of a rejection. Usually the same register, but a generator
+    /// return entry routes the reason into its existing throw stub instead.
+    pub(crate) reject: LogicalReg,
     pub(crate) fulfill_pc: usize,
     pub(crate) reject_pc: usize,
 }

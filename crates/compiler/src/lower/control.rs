@@ -298,13 +298,52 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.patch_jump(skip_reject, fulfill_pc)?;
         self.control.awaits.push(AwaitSite {
             result,
+            reject: result,
             fulfill_pc,
             reject_pc,
         });
         Ok(result)
     }
 
+    /// Emit an `await` whose rejection lands on an existing block.
+    ///
+    /// A generator `return` entry reuses the yield's throw stub, so a rejected
+    /// argument is thrown where the yield's own `throw` completion is thrown.
+    fn emit_await_routing(
+        &mut self,
+        input: Reg,
+        reject: Reg,
+        reject_pc: usize,
+    ) -> Result<Reg, CompileError> {
+        let result = self.alloc_reg()?;
+        let resume = self.control.awaits.len() as u32;
+        self.emit(Instr::Await {
+            dst: self.slot(result),
+            input: self.slot(input),
+            resume,
+        });
+        let fulfill_pc = self.pc();
+        self.control.awaits.push(AwaitSite {
+            result,
+            reject,
+            fulfill_pc,
+            reject_pc,
+        });
+        Ok(result)
+    }
+
+    fn is_async_generator(&self) -> bool {
+        self.is_async && self.is_generator
+    }
+
     pub(super) fn emit_return(&mut self, value: Reg) -> Result<(), CompileError> {
+        // An async generator's return completion is assimilated before the
+        // finally clauses run, so a rejected value can reach a lexical catch.
+        let value = if self.is_async_generator() {
+            self.emit_await(value)?
+        } else {
+            value
+        };
         if self.control.finalizers.is_empty() {
             self.emit(Instr::Return {
                 src: self.slot(value),
@@ -324,6 +363,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     /// catch, and the return completion an `emit_pending_return` that crosses
     /// the current finalizer without entering a catch clause.
     pub(super) fn emit_yield(&mut self, input: Reg) -> Result<Reg, CompileError> {
+        // A consumer of an async generator only ever observes the assimilated
+        // value, and a rejection must reach the lexical handlers around `yield`.
+        let input = if self.is_async_generator() {
+            self.emit_await(input)?
+        } else {
+            input
+        };
         let next = self.alloc_reg()?;
         let thrown = self.alloc_reg()?;
         let skip = self.jump();
@@ -336,7 +382,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit(Instr::LoadGeneratorReturn {
             dst: self.slot(payload),
         });
-        self.emit_pending_return(payload)?;
+        if self.is_async_generator() {
+            // An injected `return` value is assimilated before the finally
+            // clauses run; a rejection enters the same throw entry.
+            let awaited = self.emit_await_routing(payload, thrown, throw_pc)?;
+            self.emit_pending_return(awaited)?;
+        } else {
+            self.emit_pending_return(payload)?;
+        }
         let yield_pc = self.pc();
         self.patch_jump(skip, yield_pc)?;
         let generator = self.control.yields.len() as u32;
@@ -355,37 +408,128 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(next)
     }
 
-    /// Emit `yield*` as an explicit delegation loop over the synchronous
-    /// iterator protocol and return the expression's value register.
+    /// Emit `yield*` as an explicit delegation loop and return the
+    /// expression's value register.
     ///
-    /// The delegate's result objects are handed back unwrapped, so `done` and
-    /// `value` are read here instead of being discarded by a `for...of` style
-    /// step. All three completions of the single suspension dispatch to the
+    /// A synchronous generator hands the delegate's result objects back
+    /// unwrapped and reads `done` / `value` only for its own completion. An
+    /// async generator resolves `[Symbol.asyncIterator]` first, assimilates
+    /// every method result before reading the iteration record, and yields the
+    /// value itself so the request machinery wraps it. A delegate without
+    /// `[Symbol.asyncIterator]` falls back to `Symbol.iterator`; the flag
+    /// recorded once stays a live slot across every suspension.
+    ///
+    /// All three completions of the single suspension dispatch to the
     /// delegate's own `throw` / `return` methods first, and only fall back to
     /// the outer throw or return when the delegate cannot handle them.
     pub(super) fn emit_yield_delegate(&mut self, iterable: Reg) -> Result<Reg, CompileError> {
+        let is_async = self.is_async_generator();
         let iterator = self.alloc_reg()?;
         let next = self.alloc_reg()?;
+        let sync_flag = if is_async {
+            Some(self.alloc_reg()?)
+        } else {
+            None
+        };
+        let mut enter_loop = Vec::new();
+        if is_async {
+            let symbol = self.alloc_reg()?;
+            let builtin = builtin_index("Symbol").ok_or_else(|| {
+                CompileError::new(
+                    self.source_text(),
+                    self.span,
+                    "internal compiler error: missing Symbol builtin",
+                )
+            })?;
+            self.emit(Instr::GetBuiltin {
+                dst: self.slot(symbol),
+                builtin: builtin as u32,
+            });
+            let key = self.emit_constant(Constant::String("asyncIterator".into()))?;
+            let well_known = self.alloc_reg()?;
+            self.emit(Instr::GetMember {
+                dst: self.slot(well_known),
+                object: self.slot(symbol),
+                key: self.slot(key),
+            });
+            let method = self.alloc_reg()?;
+            self.emit(Instr::GetMember {
+                dst: self.slot(method),
+                object: self.slot(iterable),
+                key: self.slot(well_known),
+            });
+            let absent = self.emit_absent_branch(method)?;
+            let raw = self.alloc_reg()?;
+            self.emit(Instr::CallValue {
+                dst: self.slot(raw),
+                callee: self.slot(method),
+                args: CallArgs::Slots(Vec::new()),
+                receiver: Some(self.slot(iterable)),
+            });
+            let awaited = self.emit_await(raw)?;
+            self.emit(Instr::RequireObject {
+                src: self.slot(awaited),
+            });
+            self.emit(Instr::Move {
+                dst: self.slot(iterator),
+                src: self.slot(awaited),
+            });
+            self.emit_member_read(next, iterator, "next")?;
+            let flag = sync_flag.expect("async delegate flag");
+            let native = self.emit_constant(Constant::Bool(false))?;
+            self.emit(Instr::Move {
+                dst: self.slot(flag),
+                src: self.slot(native),
+            });
+            enter_loop.push(self.jump());
+            let fallback = self.pc();
+            for jump in absent {
+                self.patch_jump(jump, fallback)?;
+            }
+        }
         self.emit(Instr::GetIterator {
             iterator: self.slot(iterator),
             next: self.slot(next),
             iterable: self.slot(iterable),
         });
+        if let Some(flag) = sync_flag {
+            let sync = self.emit_constant(Constant::Bool(true))?;
+            self.emit(Instr::Move {
+                dst: self.slot(flag),
+                src: self.slot(sync),
+            });
+        }
         // Also the suspension's next destination, so a consumer's next value
-        // lands exactly where the delegate step reads it.
+        // lands exactly where the delegate step reads it. Every path into the
+        // loop, including the native async prologue, initializes it first.
+        for jump in enter_loop {
+            let sent_init = self.pc();
+            self.patch_jump(jump, sent_init)?;
+        }
         let sent = self.alloc_reg()?;
         self.emit(Instr::Undefined {
             dst: self.slot(sent),
         });
         let head = self.pc();
         let result = self.alloc_reg()?;
+        let mut to_process = Vec::new();
+        let mut step_async = None;
+        if let Some(flag) = sync_flag {
+            step_async = Some(self.branch_false(flag));
+        }
         self.emit(Instr::IteratorCall {
             dst: self.slot(result),
             iterator: self.slot(iterator),
             method: self.slot(next),
             argument: Some(self.slot(sent)),
         });
-        let to_process = self.jump();
+        to_process.push(self.jump());
+        if let Some(jump) = step_async {
+            let step = self.pc();
+            self.patch_jump(jump, step)?;
+            self.emit_async_method_call(result, next, Some(sent), iterator)?;
+            to_process.push(self.jump());
+        }
 
         // throw entry: delegate to the iterator's own throw method.
         let throw_pc = self.pc();
@@ -393,28 +537,45 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let throw_method = self.alloc_reg()?;
         self.emit_member_read(throw_method, iterator, "throw")?;
         let absent_throw = self.emit_absent_branch(throw_method)?;
-        let delegated = self.alloc_reg()?;
+        let mut throw_async = None;
+        if let Some(flag) = sync_flag {
+            throw_async = Some(self.branch_false(flag));
+        }
         self.emit(Instr::IteratorCall {
-            dst: self.slot(delegated),
+            dst: self.slot(result),
             iterator: self.slot(iterator),
             method: self.slot(throw_method),
             argument: Some(self.slot(thrown)),
         });
-        self.emit(Instr::Move {
-            dst: self.slot(result),
-            src: self.slot(delegated),
-        });
-        let to_process_after_throw = self.jump();
+        to_process.push(self.jump());
+        if let Some(jump) = throw_async {
+            let step = self.pc();
+            self.patch_jump(jump, step)?;
+            self.emit_async_method_call(result, throw_method, Some(thrown), iterator)?;
+            to_process.push(self.jump());
+        }
         let absent_throw_pc = self.pc();
         for jump in absent_throw {
             self.patch_jump(jump, absent_throw_pc)?;
         }
-        // Close the delegate with no argument first; a failing close wins over
-        // the TypeError that reports the missing method.
-        self.emit(Instr::IteratorClose {
-            iterator: self.slot(iterator),
-            preserve_throw: false,
-        });
+        if is_async {
+            // Close the delegate with no argument first; a failing close wins
+            // over the TypeError that reports the missing method.
+            let close_method = self.alloc_reg()?;
+            self.emit_member_read(close_method, iterator, "return")?;
+            let absent_close = self.emit_absent_branch(close_method)?;
+            let closed = self.alloc_reg()?;
+            self.emit_async_method_call(closed, close_method, None, iterator)?;
+            let absent_close_pc = self.pc();
+            for jump in absent_close {
+                self.patch_jump(jump, absent_close_pc)?;
+            }
+        } else {
+            self.emit(Instr::IteratorClose {
+                iterator: self.slot(iterator),
+                preserve_throw: false,
+            });
+        }
         let error = self.emit_type_error("iterator does not have a throw method")?;
         self.emit(Instr::Throw {
             src: self.slot(error),
@@ -429,13 +590,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let return_method = self.alloc_reg()?;
         self.emit_member_read(return_method, iterator, "return")?;
         let absent_return = self.emit_absent_branch(return_method)?;
+        let mut return_async = None;
+        if let Some(flag) = sync_flag {
+            return_async = Some(self.branch_false(flag));
+        }
         self.emit(Instr::IteratorCall {
             dst: self.slot(result),
             iterator: self.slot(iterator),
             method: self.slot(return_method),
             argument: Some(self.slot(returned)),
         });
-        let to_check_return = self.jump();
+        let mut to_check_return = vec![self.jump()];
+        if let Some(jump) = return_async {
+            let step = self.pc();
+            self.patch_jump(jump, step)?;
+            self.emit_async_method_call(result, return_method, Some(returned), iterator)?;
+            to_check_return.push(self.jump());
+        }
         let absent_return_pc = self.pc();
         for jump in absent_return {
             self.patch_jump(jump, absent_return_pc)?;
@@ -445,35 +616,68 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         // next and throw completions share the done/value reads.
         let process = self.pc();
-        self.patch_jump(to_process, process)?;
-        self.patch_jump(to_process_after_throw, process)?;
+        for jump in to_process {
+            self.patch_jump(jump, process)?;
+        }
         let done = self.alloc_reg()?;
         self.emit_member_read(done, result, "done")?;
-        let not_done = self.branch_false(done);
         let value = self.alloc_reg()?;
-        self.emit_member_read(value, result, "value")?;
+        // An async generator yields the value itself, so the not-done path
+        // reads it too. A synchronous one hands the result object back and only
+        // needs the completion value.
+        let not_done = if is_async {
+            self.emit_member_read(value, result, "value")?;
+            self.branch_false(done)
+        } else {
+            let branch = self.branch_false(done);
+            self.emit_member_read(value, result, "value")?;
+            branch
+        };
         let finish = self.jump();
 
         let yield_pc = self.pc();
         self.patch_jump(not_done, yield_pc)?;
         let generator = self.control.yields.len() as u32;
-        self.emit(Instr::Yield {
-            input: self.slot(result),
-            generator,
-            delegate: true,
-        });
+        if let Some(flag) = sync_flag {
+            // A synchronous delegate's value is assimilated before it is
+            // yielded; a native async iterator already produced the value.
+            let native = self.branch_false(flag);
+            let awaited = self.emit_await(value)?;
+            self.emit(Instr::Move {
+                dst: self.slot(value),
+                src: self.slot(awaited),
+            });
+            let present = self.pc();
+            self.patch_jump(native, present)?;
+        }
+        let yield_instruction = self.pc();
+        if is_async {
+            self.emit(Instr::Yield {
+                input: self.slot(value),
+                generator,
+                delegate: false,
+            });
+        } else {
+            self.emit(Instr::Yield {
+                input: self.slot(result),
+                generator,
+                delegate: true,
+            });
+        }
         self.jump_to(head);
         self.control.yields.push(YieldSite {
             next: sent,
             thrown,
-            next_pc: yield_pc + 1,
+            next_pc: yield_instruction + 1,
             throw_pc,
             return_pc,
         });
 
         // A delegated return that is not done keeps the loop running.
         let check_return = self.pc();
-        self.patch_jump(to_check_return, check_return)?;
+        for jump in to_check_return {
+            self.patch_jump(jump, check_return)?;
+        }
         let return_done = self.alloc_reg()?;
         self.emit_member_read(return_done, result, "done")?;
         let return_not_done = self.branch_false(return_done);
@@ -490,6 +694,36 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let after = self.pc();
         self.patch_jump(finish, after)?;
         Ok(value)
+    }
+
+    /// Call one iterator method, assimilate its result, and revalidate the
+    /// object the asynchronous iterator protocol requires.
+    fn emit_async_method_call(
+        &mut self,
+        dst: Reg,
+        method: Reg,
+        argument: Option<Reg>,
+        iterator: Reg,
+    ) -> Result<(), CompileError> {
+        let raw = self.alloc_reg()?;
+        self.emit(Instr::CallValue {
+            dst: self.slot(raw),
+            callee: self.slot(method),
+            args: match argument {
+                Some(argument) => CallArgs::Slots(vec![self.slot(argument)]),
+                None => CallArgs::Slots(Vec::new()),
+            },
+            receiver: Some(self.slot(iterator)),
+        });
+        let awaited = self.emit_await(raw)?;
+        self.emit(Instr::RequireObject {
+            src: self.slot(awaited),
+        });
+        self.emit(Instr::Move {
+            dst: self.slot(dst),
+            src: self.slot(awaited),
+        });
+        Ok(())
     }
 
     /// Read a fixed own-or-inherited property from `object`.

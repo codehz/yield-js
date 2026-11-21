@@ -15,15 +15,16 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, BoundObject, ClassElement, DescriptorUpdate, GeneratorStatus, HAS_INSTANCE_SYMBOL,
-    ITERATOR_SYMBOL, NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property,
-    ScriptClass, ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id, string_own_property,
+    AsyncCompletion, AsyncRequest, Attributes, BoundObject, ClassElement, DescriptorUpdate,
+    GeneratorStatus, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty,
+    PlainObject, PrivateElement, Property, ScriptClass, ScriptClassSource, TO_PRIMITIVE_SYMBOL,
+    object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
-use crate::runtime::{Continuation, ExecOutcome, Invocation, Settlement};
+use crate::runtime::{Continuation, ContinuationTarget, ExecOutcome, Invocation, Settlement};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -345,13 +346,17 @@ impl Vm {
             )));
         }
 
-        let async_promise = continuation.async_promise;
+        let target = continuation.target;
         let mut frame = Frame::new(
             function_index,
             &self.build.functions[function_index],
             continuation.env,
-            Some(async_promise),
+            Some(target),
         );
+        if let ContinuationTarget::Generator(id) = target {
+            // The resumed body still suspends into the same generator object.
+            frame.generator = Some(id);
+        }
         for (slot, value) in resume_entry
             .saved_slots
             .iter()
@@ -377,7 +382,15 @@ impl Vm {
             }
         }
         let outcome = self.execute_frame(host, roots, frame)?;
-        self.settle_outcome(host, roots, async_promise, outcome)
+        match target {
+            ContinuationTarget::Promise(promise) => {
+                self.settle_outcome(host, roots, promise, outcome)
+            }
+            ContinuationTarget::Generator(id) => {
+                self.finish_async_generator_body(id, outcome)?;
+                self.drive_async_generator(host, roots, id)
+            }
+        }
     }
 
     fn step(
@@ -1178,6 +1191,15 @@ impl Vm {
                     ));
                 }
                 Ok(Step::Next)
+            }
+            Instr::RequireObject { src } => {
+                if matches!(frame.read_ref(src)?.view(), ValueRef::Object(_)) {
+                    Ok(Step::Next)
+                } else {
+                    Ok(Step::Throw(
+                        self.type_error("async iterator must be an object")?,
+                    ))
+                }
             }
             Instr::ObjectRest { dst, src, excluded } => {
                 let source = frame.read_ref(src)?;
@@ -2483,8 +2505,8 @@ impl Vm {
         resume: u32,
     ) -> Result<Step, VmError> {
         let input_value = frame.read(input)?;
-        let async_promise = frame
-            .async_promise
+        let target = frame
+            .target
             .ok_or_else(|| VmError::InvalidState("Await outside an async frame".to_owned()))?;
         let func_id = self.build.functions[frame.function].func_id;
         let resume_entry = self.build.functions[frame.function]
@@ -2505,7 +2527,7 @@ impl Vm {
         self.continuations.insert(
             continuation_id,
             Continuation {
-                async_promise,
+                target,
                 func_id,
                 resume_id: resume,
                 waiting_on,
@@ -2513,6 +2535,16 @@ impl Vm {
                 values,
             },
         );
+        if let ContinuationTarget::Generator(id) = target {
+            // The frame now lives in the continuation; the generator object
+            // only records that its body is waiting.
+            let record = self.heap.generator_mut(id).ok_or_else(|| {
+                VmError::InvalidState(format!("generator object {id} is missing"))
+            })?;
+            record.status = crate::heap::GeneratorStatus::Awaiting;
+            record.env = None;
+            record.values.clear();
+        }
         self.schedule_resume(continuation_id, waiting_on, plain)?;
         Ok(Step::Suspend)
     }
@@ -2563,6 +2595,11 @@ impl Vm {
     ) -> Result<Step, VmError> {
         let function = &self.build.functions[frame.function];
         let func_id = function.func_id;
+        let shared = if function.is_async {
+            self.heap.async_generator_prototype
+        } else {
+            self.heap.generator_prototype
+        };
         let start = function.generator_start.clone().ok_or_else(|| {
             VmError::InvalidState("GeneratorStart outside a generator".to_owned())
         })?;
@@ -2576,20 +2613,21 @@ impl Vm {
                 match read {
                     Invocation::Value(value) => match value.view() {
                         ValueRef::Object(id) => Some(id),
-                        _ => self.heap.generator_prototype,
+                        _ => shared,
                     },
                     Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                 }
             }
-            None => self.heap.generator_prototype,
+            None => shared,
         };
         let id = self.heap.alloc_generator(
-            prototype.or(self.heap.generator_prototype),
+            prototype.or(shared),
             crate::heap::GeneratorObject {
                 func_id,
                 status: crate::heap::GeneratorStatus::Start,
                 env: frame.env,
                 values,
+                requests: std::collections::VecDeque::new(),
             },
         );
         Ok(Step::Return(Value::object(id)))
@@ -2686,6 +2724,40 @@ pub(crate) enum GeneratorCompletion {
 }
 
 impl Vm {
+    /// Queue one request for an async generator method call.
+    ///
+    /// A receiver that is not an async generator still returns a Promise: the
+    /// method rejects with a `TypeError` instead of throwing synchronously.
+    pub(crate) fn resume_async_generator(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+        completion: GeneratorCompletion,
+        argument: Value,
+    ) -> Result<Invocation, VmError> {
+        let id = match receiver.view() {
+            ValueRef::Object(id) => id,
+            _ => return self.reject_type_error("receiver is not an async generator"),
+        };
+        let Some(record) = self.heap.generator(id) else {
+            return self.reject_type_error("receiver is not an async generator");
+        };
+        let func_id = record.func_id;
+        if !self.is_async_generator(func_id)? {
+            return self.reject_type_error("receiver is not an async generator");
+        }
+        self.enqueue_async_request(host, roots, id, completion, argument)
+    }
+
+    /// A fresh Promise already rejected with a script `TypeError`.
+    fn reject_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
+        let error = self.type_error(message)?;
+        let promise = self.heap.alloc_promise();
+        self.settle(promise, Settlement::Rejected(error))?;
+        Ok(Invocation::Value(Value::object(promise)))
+    }
+
     /// Resume (or start, or close) a generator object.
     ///
     /// The suspended frame is taken out of the object and the object is marked
@@ -2693,6 +2765,9 @@ impl Vm {
     /// script TypeError instead of observing a half-taken frame. Only the
     /// persistent slots in the entry's `saved_slots` are restored; every other
     /// slot keeps the "uninitialized" state it must have had at the suspension.
+    ///
+    /// An async generator never runs the body here: the completion becomes a
+    /// queued request, so the body may already be executing or awaiting.
     pub(crate) fn resume_generator(
         &mut self,
         host: &mut dyn Host,
@@ -2708,39 +2783,91 @@ impl Vm {
         let Some(record) = self.heap.generator(id).cloned() else {
             return self.throw_type_error("receiver is not a generator");
         };
+        if self.is_async_generator(record.func_id)? {
+            return self.enqueue_async_request(host, roots, id, completion, argument);
+        }
+        if matches!(
+            record.status,
+            GeneratorStatus::Awaiting | GeneratorStatus::Closing
+        ) {
+            return Err(VmError::InvalidState(format!(
+                "synchronous generator {id} is in an async waiting state"
+            )));
+        }
+        if matches!(record.status, GeneratorStatus::Executing) {
+            return self.throw_type_error("generator is already executing");
+        }
+        if matches!(record.status, GeneratorStatus::Completed) {
+            return match completion {
+                GeneratorCompletion::Next => self.iterator_result(Value::UNDEFINED, true),
+                GeneratorCompletion::Throw => Ok(Invocation::Thrown(argument)),
+                GeneratorCompletion::Return => self.iterator_result(argument, true),
+            };
+        }
+        let outcome = self.enter_generator(id, &record, completion, argument.clone())?;
+        let Some(frame) = outcome else {
+            // Nothing ran yet, so the body is never entered: the generator
+            // completes with the injected completion itself.
+            return match completion {
+                GeneratorCompletion::Next => Err(VmError::InvalidState(
+                    "a generator body cannot stay unentered for next".to_owned(),
+                )),
+                GeneratorCompletion::Throw => Ok(Invocation::Thrown(argument)),
+                GeneratorCompletion::Return => self.iterator_result(argument, true),
+            };
+        };
+        let outcome = self.execute_frame(host, roots, frame)?;
+        self.finish_generator(id, outcome)
+    }
+
+    fn is_async_generator(&self, func_id: u32) -> Result<bool, VmError> {
+        let function = self
+            .build
+            .function(func_id)
+            .ok_or_else(|| VmError::InvalidState(format!("function {func_id} does not exist")))?;
+        Ok(function.is_generator && function.is_async)
+    }
+
+    /// Restore the frame for one externally injected completion.
+    ///
+    /// `None` means the body must never run: a completion other than `next`
+    /// arrived before the first `next`. The generator is completed here so the
+    /// caller reports the completion itself.
+    fn enter_generator(
+        &mut self,
+        id: ObjectId,
+        record: &crate::heap::GeneratorObject,
+        completion: GeneratorCompletion,
+        argument: Value,
+    ) -> Result<Option<Frame>, VmError> {
         let function_index = self.function_index(record.func_id)?;
-        let function = &self.build.functions[function_index];
-        let start = function.generator_start.clone();
+        let target = self.build.functions[function_index]
+            .is_async
+            .then_some(ContinuationTarget::Generator(id));
         match record.status {
-            GeneratorStatus::Start => match completion {
-                GeneratorCompletion::Next => {
-                    let start = start.ok_or_else(|| {
+            GeneratorStatus::Start => {
+                if completion != GeneratorCompletion::Next {
+                    self.complete_generator(id)?;
+                    return Ok(None);
+                }
+                let start = self.build.functions[function_index]
+                    .generator_start
+                    .clone()
+                    .ok_or_else(|| {
                         VmError::InvalidState(format!("{} is not a generator", record.func_id))
                     })?;
-                    self.mark_generator_executing(id)?;
-                    let mut frame = Frame::new(
-                        function_index,
-                        &self.build.functions[function_index],
-                        record.env,
-                        None,
-                    );
-                    self.restore_saved(&mut frame, &start.saved_slots, &record.values)?;
-                    frame.pc = start.body_pc as usize;
-                    frame.generator = Some(id);
-                    let outcome = self.execute_frame(host, roots, frame)?;
-                    self.finish_generator(id, outcome)
-                }
-                // Nothing ran yet, so the body is never entered: the generator
-                // completes with the injected completion itself.
-                GeneratorCompletion::Throw => {
-                    self.complete_generator(id)?;
-                    Ok(Invocation::Thrown(argument))
-                }
-                GeneratorCompletion::Return => {
-                    self.complete_generator(id)?;
-                    self.iterator_result(argument, true)
-                }
-            },
+                self.mark_generator_executing(id)?;
+                let mut frame = Frame::new(
+                    function_index,
+                    &self.build.functions[function_index],
+                    record.env,
+                    target,
+                );
+                self.restore_saved(&mut frame, &start.saved_slots, &record.values)?;
+                frame.pc = start.body_pc as usize;
+                frame.generator = Some(id);
+                Ok(Some(frame))
+            }
             GeneratorStatus::Suspended(index) => {
                 let entry = self.build.functions[function_index]
                     .generator_resumes
@@ -2754,7 +2881,7 @@ impl Vm {
                     function_index,
                     &self.build.functions[function_index],
                     record.env,
-                    None,
+                    target,
                 );
                 self.restore_saved(&mut frame, &entry.saved_slots, &record.values)?;
                 match completion {
@@ -2772,15 +2899,210 @@ impl Vm {
                     }
                 }
                 frame.generator = Some(id);
-                let outcome = self.execute_frame(host, roots, frame)?;
-                self.finish_generator(id, outcome)
+                Ok(Some(frame))
             }
-            GeneratorStatus::Executing => self.throw_type_error("generator is already executing"),
-            GeneratorStatus::Completed => match completion {
-                GeneratorCompletion::Next => self.iterator_result(Value::UNDEFINED, true),
-                GeneratorCompletion::Throw => Ok(Invocation::Thrown(argument)),
-                GeneratorCompletion::Return => self.iterator_result(argument, true),
+            _ => Err(VmError::InvalidState(format!(
+                "generator {id} cannot run its body while {:?}",
+                record.status
+            ))),
+        }
+    }
+
+    /// Queue one async generator request and drive the generator as far as the
+    /// queue allows. The request Promise is always pending until a step settles
+    /// it, so a caller inside the body only appends.
+    fn enqueue_async_request(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        completion: GeneratorCompletion,
+        argument: Value,
+    ) -> Result<Invocation, VmError> {
+        let promise = self.heap.alloc_promise();
+        let record = self
+            .heap
+            .generator_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("generator object {id} is missing")))?;
+        record.requests.push_back(AsyncRequest {
+            completion: match completion {
+                GeneratorCompletion::Next => AsyncCompletion::Next,
+                GeneratorCompletion::Throw => AsyncCompletion::Throw,
+                GeneratorCompletion::Return => AsyncCompletion::Return,
             },
+            argument,
+            promise,
+        });
+        self.drive_async_generator(host, roots, id)?;
+        Ok(Invocation::Value(Value::object(promise)))
+    }
+
+    /// Drain the async generator queue one step at a time. Each step runs the
+    /// body at most once or settles the head request, never both, so the queue
+    /// is not emptied by recursion.
+    fn drive_async_generator(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<(), VmError> {
+        while self.async_generator_step(host, roots, id)? {}
+        Ok(())
+    }
+
+    fn async_generator_step(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<bool, VmError> {
+        let Some(record) = self.heap.generator(id).cloned() else {
+            return Err(VmError::InvalidState(format!(
+                "generator object {id} is missing"
+            )));
+        };
+        if matches!(
+            record.status,
+            GeneratorStatus::Executing | GeneratorStatus::Awaiting | GeneratorStatus::Closing
+        ) {
+            return Ok(false);
+        }
+        let Some(head) = record.requests.front().cloned() else {
+            return Ok(false);
+        };
+        match record.status {
+            GeneratorStatus::Completed => {
+                self.settle_finished_request(host, roots, id, &head)?;
+                Ok(true)
+            }
+            GeneratorStatus::Start | GeneratorStatus::Suspended(_) => {
+                let completion = match head.completion {
+                    AsyncCompletion::Next => GeneratorCompletion::Next,
+                    AsyncCompletion::Throw => GeneratorCompletion::Throw,
+                    AsyncCompletion::Return => GeneratorCompletion::Return,
+                };
+                let Some(frame) =
+                    self.enter_generator(id, &record, completion, head.argument.clone())?
+                else {
+                    // A completion before the first `next` never enters the
+                    // body; the completed branch settles it on the next step.
+                    return Ok(true);
+                };
+                let outcome = self.execute_frame(host, roots, frame)?;
+                self.finish_async_generator_body(id, outcome)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Settle one request against a generator whose body can no longer run.
+    ///
+    /// `next` reports `done`, `throw` rejects, and `return` assimilates its
+    /// argument through a persisted Promise reaction before reporting `done`.
+    fn settle_finished_request(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        head: &AsyncRequest,
+    ) -> Result<(), VmError> {
+        match head.completion {
+            AsyncCompletion::Next => {
+                let result = self.iterator_result_value(Value::UNDEFINED, true)?;
+                self.settle(head.promise, Settlement::Fulfilled(result))?;
+                self.pop_async_request(id, head.promise)?;
+            }
+            AsyncCompletion::Throw => {
+                self.settle(head.promise, Settlement::Rejected(head.argument.clone()))?;
+                self.pop_async_request(id, head.promise)?;
+            }
+            AsyncCompletion::Return => {
+                match self.prepare_await(
+                    host,
+                    &roots.with(&head.argument),
+                    head.argument.clone(),
+                )? {
+                    Ok(AwaitPrepared::Plain(value)) => {
+                        let result = self.iterator_result_value(value, true)?;
+                        self.settle(head.promise, Settlement::Fulfilled(result))?;
+                        self.pop_async_request(id, head.promise)?;
+                    }
+                    Ok(AwaitPrepared::Promise(promise)) => {
+                        self.react(
+                            promise,
+                            crate::heap::ReactionJob::GeneratorClose {
+                                generator: id,
+                                request: head.promise,
+                            },
+                        )?;
+                        let record = self.heap.generator_mut(id).ok_or_else(|| {
+                            VmError::InvalidState(format!("generator object {id} is missing"))
+                        })?;
+                        record.status = GeneratorStatus::Closing;
+                    }
+                    Err(error) => {
+                        // Reading the argument's `then` threw: this request
+                        // alone is rejected, the generator stays completed.
+                        self.settle(head.promise, Settlement::Rejected(error))?;
+                        self.pop_async_request(id, head.promise)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle the request whose return argument finished assimilating.
+    pub(crate) fn finish_closing_request(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        generator: ObjectId,
+        request: ObjectId,
+        settlement: &Settlement,
+    ) -> Result<(), VmError> {
+        let record = self.heap.generator(generator).ok_or_else(|| {
+            VmError::InvalidState(format!("generator object {generator} is missing"))
+        })?;
+        if record.status != GeneratorStatus::Closing {
+            return Err(VmError::InvalidState(format!(
+                "generator {generator} is not closing a request"
+            )));
+        }
+        match settlement {
+            Settlement::Fulfilled(value) => {
+                let result = self.iterator_result_value(value.clone(), true)?;
+                self.settle(request, Settlement::Fulfilled(result))?;
+            }
+            Settlement::Rejected(reason) => {
+                self.settle(request, Settlement::Rejected(reason.clone()))?;
+            }
+        }
+        self.complete_generator(generator)?;
+        self.pop_async_request(generator, request)?;
+        self.drive_async_generator(host, roots, generator)
+    }
+
+    fn head_async_request(&self, id: ObjectId) -> Result<AsyncRequest, VmError> {
+        self.heap
+            .generator(id)
+            .and_then(|record| record.requests.front().cloned())
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("async generator {id} has no active request"))
+            })
+    }
+
+    fn pop_async_request(&mut self, id: ObjectId, promise: ObjectId) -> Result<(), VmError> {
+        let record = self
+            .heap
+            .generator_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("generator object {id} is missing")))?;
+        match record.requests.pop_front() {
+            Some(request) if request.promise == promise => Ok(()),
+            _ => Err(VmError::InvalidState(format!(
+                "async generator {id} head is not request {promise}"
+            ))),
         }
     }
 
@@ -2855,6 +3177,45 @@ impl Vm {
             ExecOutcome::Suspended => Err(VmError::InvalidState(
                 "generator awaited inside a synchronous generator".to_owned(),
             )),
+        }
+    }
+
+    /// Settle the in-progress request from how one body step finished.
+    ///
+    /// A yield fulfils it with `done: false`, a return with `done: true`, and an
+    /// uncaught script throw rejects it and closes the generator. An `await`
+    /// leaves the request in place: the continuation resumes this body, not a
+    /// fresh request.
+    fn finish_async_generator_body(
+        &mut self,
+        id: ObjectId,
+        outcome: ExecOutcome,
+    ) -> Result<(), VmError> {
+        let head = self.head_async_request(id)?;
+        match outcome {
+            // `suspend` already marked the generator `Awaiting`.
+            ExecOutcome::Suspended => Ok(()),
+            ExecOutcome::Yielded { value, delegate } => {
+                if delegate {
+                    return Err(VmError::InvalidState(
+                        "async generator yielded a delegate result object".to_owned(),
+                    ));
+                }
+                let result = self.iterator_result_value(value, false)?;
+                self.settle(head.promise, Settlement::Fulfilled(result))?;
+                self.pop_async_request(id, head.promise)
+            }
+            ExecOutcome::Return(value) => {
+                self.complete_generator(id)?;
+                let result = self.iterator_result_value(value, true)?;
+                self.settle(head.promise, Settlement::Fulfilled(result))?;
+                self.pop_async_request(id, head.promise)
+            }
+            ExecOutcome::Thrown(value) => {
+                self.complete_generator(id)?;
+                self.settle(head.promise, Settlement::Rejected(value))?;
+                self.pop_async_request(id, head.promise)
+            }
         }
     }
 }
