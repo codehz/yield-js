@@ -30,6 +30,8 @@ enum Destination<'ast> {
     Pattern(Pattern<'ast>),
     AssignmentBinding(BindingId),
     AssignmentReadOnly,
+    ProbeMissing,
+    MissingGlobal(String),
     Member(PropertyRef),
 }
 
@@ -61,6 +63,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Ok(Destination::AssignmentBinding(binding))
         } else if self.names().read_only(name).is_some() {
             Ok(Destination::AssignmentReadOnly)
+        } else if self.probed_missing(name) {
+            Ok(Destination::MissingGlobal(name.to_owned()))
+        } else if self.is_probe() {
+            Ok(Destination::ProbeMissing)
         } else {
             Err(CompileError::new(
                 self.source_text(),
@@ -94,6 +100,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Destination::Pattern(pattern) => return self.compile_pattern(pattern, value),
             Destination::AssignmentBinding(binding) => self.put_binding(binding, value),
             Destination::AssignmentReadOnly => self.emit(Instr::ThrowAssignmentToConst),
+            Destination::MissingGlobal(name) => {
+                let _ = self.emit_missing_global(&name)?;
+                0
+            }
+            Destination::ProbeMissing => 0,
             Destination::Member(reference) => self.emit_set_property(reference, value),
         };
         Ok(())

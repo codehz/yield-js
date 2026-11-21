@@ -85,19 +85,15 @@ React 19 bundle 通过 preload 提供空实现 `reportError`，并将未实现�
 
 ### 8.2 React reconciler 编译缺口
 
-按 `react-reconciler-0.31.0.mjs` 当前实际遇到的顺序：
+测试 `react_reconciler_custom_renderer_headless_smoke` 使用真实 React 19、`react-reconciler` 与原 renderer；首个阻断仍按源码实际编译顺序固定。`typeof` 探测缺名会折叠可证明的条件并跳过不可达子树，但不推断可达的环境依赖：
 
 | 顺序 | 首个诊断 | 归属 | 位置与原因 |
 | --- | --- | --- | --- |
-| 1 | `unknown binding "TextDecoder"` | 框架 | `6:2701`；unenv 的 `process.stdout.write` 直接调用 `new TextDecoder().decode(...)` |
+| 1 | `unknown binding "TextDecoder"` | 框架 | `6:2701`；unenv 的 `process.stdout.write` 可达地调用 `new TextDecoder().decode(...)` |
 | 2 | `unknown callee "setTimeout"` | 宿主 | `6:8835`；unenv 的 `nextTick` fallback；`clearTimeout` 同样需要 |
-| 3 | `unknown binding "performance"` | 宿主 | `6:10440`；`typeof performance == "object"` 只折叠操作数，真分支 `m = performance` 仍被 lower |
-| 4 | `unknown binding "MessageChannel"` | 宿主 | `6:11711`；`typeof MessageChannel < "u"` 的死分支仍引用 `new MessageChannel` |
-| 5 | `unknown binding "AbortController"` | 框架 | `13:100997`；同样的 `typeof` 死分支 |
-| 6 | `unknown callee "encodeURIComponent"` | 框架 | `6:13754`；React 构造压缩错误 URL 时调用；`decodeURIComponent` 也未实现 |
-| 7 | `unknown binding "__REACT_DEVTOOLS_GLOBAL_HOOK__"` | 宿主 | `17:462`；`typeof` 守卫的 else 分支 |
+| 3 | `unknown callee "encodeURIComponent"` | 框架 | `6:13754`；React 构造压缩错误 URL 时调用；`decodeURIComponent` 也未实现 |
 
-编译器不对 `typeof` 守卫做死代码消除，因此即使运行期不会进入对应分支，被引用的名字仍必须可解析。宿主侧 preload 应提供 `setTimeout`、`clearTimeout`、`performance`、`MessageChannel`、`__REACT_DEVTOOLS_GLOBAL_HOOK__`，以及现有的 `console`、`reportError`、`window`、`process`、`kEvents`。框架侧应实现 `TextDecoder`、`AbortController`、`encodeURIComponent` / `decodeURIComponent`。
+`performance`、`MessageChannel`、`AbortController` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。它们不属于此编译路径的实际可达依赖。额外 e2e 编译探针不再从 preload 导出 `window` / `process`，同时保留 `console`、`reportError` 与 `kEvents`；这不等于 renderer 可运行。实际可达的 timer 依赖仍须宿主提供，`TextDecoder` 与 URI 编码 API 仍须框架实现。
 
 ### 8.3 React reconciler 运行时缺口
 

@@ -34,6 +34,15 @@ impl Session {
         }
     }
 
+    /// Isolate scratch lowering while keeping its IDs disjoint from reserved IDs.
+    pub(crate) fn fork_for_probe(&self) -> Self {
+        Self {
+            next_func_id: self.next_func_id,
+            next_binding_id: self.next_binding_id,
+            ..Self::new()
+        }
+    }
+
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
         if let Constant::String(value) = constant {
             if let Some(&index) = self.string_constants.get(&value) {

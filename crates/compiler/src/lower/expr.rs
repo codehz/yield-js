@@ -44,6 +44,28 @@ impl PropertyRef {
     }
 }
 
+enum GuardValue {
+    Bool(bool),
+    String(JsString),
+}
+
+impl GuardValue {
+    fn truthy(&self) -> bool {
+        match self {
+            Self::Bool(value) => *value,
+            Self::String(value) => !value.is_empty(),
+        }
+    }
+
+    fn takes_rhs(&self, op: LogicalOperator) -> bool {
+        match op {
+            LogicalOperator::And => self.truthy(),
+            LogicalOperator::Or => !self.truthy(),
+            LogicalOperator::Coalesce => false,
+        }
+    }
+}
+
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_named_expression(
         &mut self,
@@ -102,6 +124,85 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 PropertyDefinition::Set => Some(AccessorPrefix::Set),
             },
         });
+    }
+
+    pub(super) fn guard_truth(&self, expression: &Expression<'_>) -> Option<bool> {
+        Some(self.typeof_guard(expression)?.truthy())
+    }
+
+    fn typeof_guard(&self, expression: &Expression<'_>) -> Option<GuardValue> {
+        if self.is_probe() {
+            return None;
+        }
+        let (value, used_probe) = self.eval_guard(expression)?;
+        used_probe.then_some(value)
+    }
+
+    // Track whether an actually evaluated operand used a missing-name fact.
+    fn eval_guard(&self, expression: &Expression<'_>) -> Option<(GuardValue, bool)> {
+        use GuardValue::{Bool, String};
+        match expression.without_parentheses() {
+            Expression::BooleanLiteral(literal) => Some((Bool(literal.value), false)),
+            Expression::StringLiteral(literal) => {
+                Some((String(self.string_literal_text(literal).ok()?), false))
+            }
+            Expression::UnaryExpression(unary) => match unary.operator {
+                UnaryOperator::Typeof => {
+                    let Expression::Identifier(id) = unary.argument.without_parentheses() else {
+                        return None;
+                    };
+                    let name = id.name.as_str();
+                    if !self.probed_missing(name) {
+                        return None;
+                    }
+                    let folded = self.names().typeof_fold(&self.env, name)?;
+                    Some((String(folded.into()), true))
+                }
+                UnaryOperator::LogicalNot => {
+                    let (value, used_probe) = self.eval_guard(&unary.argument)?;
+                    Some((Bool(!value.truthy()), used_probe))
+                }
+                _ => None,
+            },
+            Expression::BinaryExpression(binary)
+                if matches!(
+                    binary.left.without_parentheses(),
+                    Expression::StringLiteral(_)
+                ) || matches!(
+                    binary.right.without_parentheses(),
+                    Expression::StringLiteral(_)
+                ) =>
+            {
+                let (String(left), left_probe) = self.eval_guard(&binary.left)? else {
+                    return None;
+                };
+                let (String(right), right_probe) = self.eval_guard(&binary.right)? else {
+                    return None;
+                };
+                // JsString orders by UTF-16 code units, not Unicode scalar values.
+                let order = left.cmp(&right);
+                let result = match binary.operator {
+                    BinaryOperator::Equality | BinaryOperator::StrictEquality => order.is_eq(),
+                    BinaryOperator::Inequality | BinaryOperator::StrictInequality => !order.is_eq(),
+                    BinaryOperator::LessThan => order.is_lt(),
+                    BinaryOperator::LessEqualThan => !order.is_gt(),
+                    BinaryOperator::GreaterThan => order.is_gt(),
+                    BinaryOperator::GreaterEqualThan => !order.is_lt(),
+                    _ => return None,
+                };
+                Some((Bool(result), left_probe || right_probe))
+            }
+            Expression::LogicalExpression(logical) => {
+                let (left, left_probe) = self.eval_guard(&logical.left)?;
+                if left.takes_rhs(logical.operator) {
+                    let (right, right_probe) = self.eval_guard(&logical.right)?;
+                    Some((right, left_probe || right_probe))
+                } else {
+                    Some((left, left_probe))
+                }
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn compile_expression<'node>(
@@ -181,6 +282,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Expression::LogicalExpression(expression) => self.compile_logical(expression),
             Expression::ConditionalExpression(expression) => {
+                if let Some(test) = self.guard_truth(&expression.test) {
+                    return self.compile_expression(if test {
+                        &expression.consequent
+                    } else {
+                        &expression.alternate
+                    });
+                }
                 let result = self.alloc_reg()?;
                 let test = self.compile_expression(&expression.test)?;
                 let alternate_branch = self.branch_false(test);
@@ -358,6 +466,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         decode_string_body(&quoted[1..quoted.len() - 1], false)
             .ok_or_else(|| unsupported(self.source_text(), span, "invalid string escape"))
     }
+    pub(super) fn emit_missing_global(&mut self, name: &str) -> Result<Reg, CompileError> {
+        let constructor = self.alloc_reg()?;
+        self.emit(Instr::GetBuiltin {
+            dst: self.slot(constructor),
+            builtin: builtin_index("ReferenceError").expect("ReferenceError builtin") as u32,
+        });
+        let message =
+            self.emit_constant(Constant::String(format!("{name} is not defined").into()))?;
+        let error = self.alloc_reg()?;
+        self.emit(Instr::Construct {
+            dst: self.slot(error),
+            callee: self.slot(constructor),
+            args: CallArgs::Slots(vec![self.slot(message)]),
+        });
+        self.emit(Instr::Throw {
+            src: self.slot(error),
+        });
+        Ok(error)
+    }
 
     pub(super) fn static_key_name(
         &self,
@@ -466,6 +593,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 Ok(dst)
             }
+            ValueName::Unknown if self.probed_missing(name) => self.emit_missing_global(name),
+            ValueName::Unknown if self.is_probe() => self.emit_undefined(),
             ValueName::Unknown => Err(CompileError::new(
                 self.source_text(),
                 identifier.span,
@@ -557,6 +686,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         expression: &'ast LogicalExpression<'ast>,
     ) -> Result<Reg, CompileError> {
+        if let Some(left) = self.typeof_guard(&expression.left) {
+            if left.takes_rhs(expression.operator) {
+                return self.compile_expression(&expression.right);
+            }
+            return self.emit_constant(match left {
+                GuardValue::Bool(value) => Constant::Bool(value),
+                GuardValue::String(value) => Constant::String(value),
+            });
+        }
         let result = self.alloc_reg()?;
         let left = self.compile_expression(&expression.left)?;
         self.emit(Instr::Move {
@@ -621,15 +759,20 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if matches!(expression.operator, UnaryOperator::Delete) {
             return self.compile_delete(&expression.argument);
         }
-        if matches!(expression.operator, UnaryOperator::Typeof)
-            && let Expression::Identifier(identifier) = &expression.argument
-        {
-            let name = identifier.name.as_str();
-            if let Some(binding) = self.lookup(name) {
-                self.check_tdz(binding, name, identifier.span)?;
+        if matches!(expression.operator, UnaryOperator::Typeof) {
+            let mut argument = &expression.argument;
+            while let Expression::ParenthesizedExpression(paren) = argument {
+                argument = &paren.expression;
             }
-            if let Some(folded) = self.names().typeof_fold(&self.env, name) {
-                return self.emit_constant(Constant::String(folded.into()));
+            if let Expression::Identifier(identifier) = argument {
+                let name = identifier.name.as_str();
+                if let Some(binding) = self.lookup(name) {
+                    self.check_tdz(binding, name, identifier.span)?;
+                }
+                if let Some(folded) = self.names().typeof_fold(&self.env, name) {
+                    self.record_typeof_fold(name);
+                    return self.emit_constant(Constant::String(folded.into()));
+                }
             }
         }
         let src = self.compile_expression(&expression.argument)?;
@@ -985,6 +1128,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Callee::Unknown if expression.optional && name == "undefined" => {
                     self.compile_identifier(identifier)?
                 }
+                Callee::Unknown if self.probed_missing(name) => self.emit_missing_global(name)?,
+                Callee::Unknown if self.is_probe() => self.emit_undefined()?,
                 Callee::Unknown => {
                     return Err(CompileError::new(
                         self.source_text(),
@@ -1120,6 +1265,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let Some(binding) = self.lookup(name) else {
                 if let Some(read_only) = self.names().read_only(name) {
                     return self.compile_read_only_assignment(expression, read_only);
+                }
+                if self.probed_missing(name) {
+                    if matches!(expression.operator, AssignmentOperator::Assign) {
+                        self.compile_named_expression(&expression.right, name)?;
+                    }
+                    return self.emit_missing_global(name);
+                }
+                if self.is_probe() {
+                    return self.compile_named_expression(&expression.right, name);
                 }
                 return Err(CompileError::new(
                     self.source_text(),
@@ -1271,8 +1425,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Binding(BindingId),
             ReadOnly(ReadOnlyName<'name>),
             Member(PropertyRef),
+            ProbeMissing,
         }
-
         // The parser normalizes parenthesized simple assignment targets, so
         // `(x)++`, `++(obj.x)` and `((obj.x))--` arrive here as plain
         // identifier/member targets; no paren unwrapping is needed.
@@ -1285,6 +1439,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Target::Binding(binding)
             } else if let Some(read_only) = self.names().read_only(name) {
                 Target::ReadOnly(read_only)
+            } else if self.probed_missing(name) {
+                return self.emit_missing_global(name);
+            } else if self.is_probe() {
+                Target::ProbeMissing
             } else {
                 return Err(CompileError::new(
                     self.source_text(),
@@ -1311,6 +1469,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_binding_read(old, *binding);
                 old
             }
+            Target::ProbeMissing => self.emit_undefined()?,
         };
         let numeric = self.alloc_reg()?;
         self.emit(Instr::Unary {
@@ -1332,6 +1491,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Target::Binding(binding) => self.put_binding(*binding, updated),
             Target::ReadOnly(_) => self.emit(Instr::ThrowAssignmentToConst),
             Target::Member(reference) => self.emit_set_property(*reference, updated),
+            Target::ProbeMissing => 0,
         };
         Ok(if expression.prefix { updated } else { numeric })
     }

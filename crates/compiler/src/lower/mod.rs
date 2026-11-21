@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use oxc::ast::ast::*;
 use oxc::ast_visit::{Visit, walk};
 use oxc::span::{GetSpan, Span};
+use oxc::syntax::operator::UnaryOperator;
 use oxc::syntax::scope::ScopeFlags;
 use yield_vm::BindingId;
 use yield_vm::bytecode::{Build, Constant, Instr, ModuleExport, ModuleTarget, SourceModule};
@@ -145,6 +146,42 @@ struct ModuleScope<'src> {
     preload: Option<&'src BTreeMap<String, Target>>,
 }
 
+#[derive(Default)]
+struct TypeofCandidateScan {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for TypeofCandidateScan {
+    fn visit_unary_expression(&mut self, expression: &UnaryExpression<'ast>) {
+        if expression.operator == UnaryOperator::Typeof {
+            let mut operand = &expression.argument;
+            while let Expression::ParenthesizedExpression(paren) = operand {
+                operand = &paren.expression;
+            }
+            if matches!(operand, Expression::Identifier(_)) {
+                self.found = true;
+            }
+        }
+        if !self.found {
+            walk::walk_unary_expression(self, expression);
+        }
+    }
+}
+
+enum LoweringMode<'a> {
+    Probe(&'a mut BTreeSet<String>),
+    Emit(&'a BTreeSet<String>),
+}
+
+impl LoweringMode<'_> {
+    fn reborrow(&mut self) -> LoweringMode<'_> {
+        match self {
+            Self::Probe(names) => LoweringMode::Probe(names),
+            Self::Emit(names) => LoweringMode::Emit(names),
+        }
+    }
+}
+
 fn lower_module<'ast>(
     session: &mut Session,
     scope: &ModuleScope<'_>,
@@ -154,6 +191,55 @@ fn lower_module<'ast>(
     name: String,
     public: &BTreeSet<BindingId>,
 ) -> Result<(), CompileError> {
+    let mut scan = TypeofCandidateScan::default();
+    for statement in statements {
+        scan.visit_statement(statement);
+        if scan.found {
+            break;
+        }
+    }
+    let mut missing = BTreeSet::new();
+    if scan.found {
+        // Reuse the declaration/evaluation roots and immutable module links,
+        // but never commit probe constants, nested IDs, or lowered functions.
+        lower_module_functions(
+            &mut session.fork_for_probe(),
+            scope,
+            statements,
+            declaration,
+            evaluation,
+            name.clone(),
+            LoweringMode::Probe(&mut missing),
+        )?;
+    }
+    let lowered = lower_module_functions(
+        session,
+        scope,
+        statements,
+        declaration,
+        evaluation,
+        name,
+        LoweringMode::Emit(&missing),
+    )?;
+    let mut facts = bindings::classify(&lowered)?;
+    facts.shared.extend(public);
+    for mut function in lowered {
+        promote::promote(scope.source, &mut function, &facts)?;
+        session.push_function(allocate::allocate(scope.source, function)?);
+    }
+    Ok(())
+}
+
+fn lower_module_functions<'ast>(
+    session: &mut Session,
+    scope: &ModuleScope<'_>,
+    statements: &'ast [Statement<'ast>],
+    declaration: u32,
+    evaluation: u32,
+    name: String,
+    mut mode: LoweringMode<'_>,
+) -> Result<Vec<LoweredFunction>, CompileError> {
+    let probe = matches!(&mode, LoweringMode::Probe(_));
     let mut tasks = VecDeque::new();
     let script = |func_id, name| Task {
         source: FunctionSource::Script(statements),
@@ -170,27 +256,34 @@ fn lower_module<'ast>(
         &mut tasks,
         scope,
         script(declaration, format!("\0declare@{declaration}")),
+        mode.reborrow(),
     );
     declare.module_declaration = true;
     let declared = declare.compile()?;
     let (env, hoisted, default_binding) = (declare.env, declare.hoisted, declare.default_binding);
-    let mut evaluate = Lowerer::new(session, &mut tasks, scope, script(evaluation, name));
+    let mut evaluate = Lowerer::new(
+        session,
+        &mut tasks,
+        scope,
+        script(evaluation, name),
+        mode.reborrow(),
+    );
     evaluate.env = env;
     evaluate.hoisted = hoisted;
     evaluate.default_binding = default_binding;
     let evaluated = evaluate.compile()?;
-    let mut lowered = vec![declared, evaluated];
+    let mut lowered = if probe {
+        Vec::new()
+    } else {
+        vec![declared, evaluated]
+    };
     while let Some(task) = tasks.pop_front() {
-        lowered.push(Lowerer::new(session, &mut tasks, scope, task).compile()?);
+        let function = Lowerer::new(session, &mut tasks, scope, task, mode.reborrow()).compile()?;
+        if !probe {
+            lowered.push(function);
+        }
     }
-    let mut facts = bindings::classify(&lowered)?;
-    facts.shared.extend(public);
-    for function in lowered {
-        let mut function = function;
-        promote::promote(scope.source, &mut function, &facts)?;
-        session.push_function(allocate::allocate(scope.source, function)?);
-    }
-    Ok(())
+    Ok(lowered)
 }
 
 #[derive(Clone, Copy)]
@@ -272,6 +365,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     session: &'borrow mut Session,
     tasks: &'borrow mut VecDeque<Task<'ast>>,
     module: &'borrow ModuleScope<'src>,
+    mode: LoweringMode<'borrow>,
     func_id: u32,
     name: String,
     initial_name: String,
@@ -311,6 +405,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         tasks: &'borrow mut VecDeque<Task<'ast>>,
         module: &'borrow ModuleScope<'src>,
         task: Task<'ast>,
+        mode: LoweringMode<'borrow>,
     ) -> Self {
         let span = task.source.span();
         let is_async = task.source.is_async();
@@ -318,6 +413,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             session,
             tasks,
             module,
+            mode,
             func_id: task.func_id,
             name: task.name,
             initial_name: task.initial_name,
@@ -349,6 +445,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             arguments_binding: None,
             hoisted: BTreeSet::new(),
             default_binding: None,
+        }
+    }
+
+    fn is_probe(&self) -> bool {
+        matches!(&self.mode, LoweringMode::Probe(_))
+    }
+
+    fn record_typeof_fold(&mut self, name: &str) {
+        if let LoweringMode::Probe(names) = &mut self.mode {
+            names.insert(name.to_owned());
+        }
+    }
+
+    fn probed_missing(&self, name: &str) -> bool {
+        match &self.mode {
+            LoweringMode::Probe(_) => false,
+            LoweringMode::Emit(names) => names.contains(name),
         }
     }
 

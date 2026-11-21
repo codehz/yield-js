@@ -2006,3 +2006,111 @@ export function* run(a) {
     assert_ne!(build.build_id, before);
     assert_ne!(build.compute_id(), before);
 }
+
+#[test]
+fn typeof_missing_global_prunes_dead_function_creation() {
+    let options = CompileOptions::default();
+    let guarded = compile(
+        "export function run() { if (typeof Device < 'u') { var saved = () => new Device(); } return saved; }",
+        &options,
+    )
+    .expect("the dead side is not lowered");
+    let baseline = compile(
+        "export function run() { var saved; return saved; }",
+        &options,
+    )
+    .expect("baseline compiles");
+
+    assert_eq!(guarded.functions.len(), baseline.functions.len());
+    assert!(guarded.functions.iter().all(|function| {
+        !function
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::BranchFalse { .. }))
+    }));
+}
+
+#[test]
+fn typeof_pruning_covers_expression_forms_and_checks_dead_syntax() {
+    let source = r#"
+export function run() {
+  var a;
+  if ('u' > typeof Device) { a = () => new Device(); }
+  var b = typeof Device === 'undefined' ? 1 : (() => Missing())();
+  var c = typeof Device === 'object' && (() => new Device());
+  var d = typeof Device || (() => Missing())();
+  return [a, b, c, d];
+}
+"#;
+    let guarded = compile(source, &CompileOptions::default()).expect("guards lower");
+    let baseline = compile(
+        "export function run() { var a, b, c, d; return [a, b, c, d]; }",
+        &CompileOptions::default(),
+    )
+    .expect("baseline compiles");
+    assert_eq!(
+        guarded.functions.len(),
+        baseline.functions.len(),
+        "dead functions are not enqueued"
+    );
+
+    let error = compile(
+        "export function run() { if (typeof Device == 'object') tag`unsupported`; }",
+        &CompileOptions::default(),
+    )
+    .expect_err("the probe pass must validate dead syntax");
+    assert!(
+        error
+            .message()
+            .contains("expression form outside the PoC subset"),
+        "{error}"
+    );
+    assert_eq!((error.line(), error.column()), (1, 56));
+}
+
+#[test]
+fn typeof_probe_does_not_cross_bindings_modules_or_tdz() {
+    let options = CompileOptions::default();
+    let parameter_shadow = compile(
+        "function local(Device) { return typeof Device; } export function run() { return Device; }",
+        &options,
+    )
+    .expect_err("a local parameter must not authorize another function");
+    assert!(
+        parameter_shadow
+            .message()
+            .contains("unknown binding \"Device\"")
+    );
+
+    let tdz = compile("typeof x; let x;", &options)
+        .expect_err("typeof preserves the existing same-function TDZ error");
+    assert!(tdz.message().contains("before initialization"), "{tdz}");
+
+    let reachable = compile(
+        "export function run() { typeof Device; return Missing(); }",
+        &options,
+    )
+    .expect_err("an unrelated unknown callee remains a compile error");
+    assert!(reachable.message().contains("unknown callee \"Missing\""));
+}
+
+#[test]
+fn typeof_probe_does_not_leak_between_modules() {
+    let resolver = MemoryResolver::new([
+        (
+            "main.js",
+            "import { probe } from './probe.js'; export function run() { return Device; }",
+        ),
+        (
+            "probe.js",
+            "export function probe() { return typeof Device; }",
+        ),
+    ])
+    .expect("valid module paths");
+    let error = yield_compiler::compile("main.js", None, &resolver, &CompileOptions::default())
+        .expect_err("the imported module's probe cannot authorize the entry");
+    assert!(
+        error.message().contains("unknown binding \"Device\""),
+        "{error}"
+    );
+}

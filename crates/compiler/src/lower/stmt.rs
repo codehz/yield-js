@@ -43,6 +43,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(())
             }
             Statement::IfStatement(statement) => {
+                if let Some(test) = self.guard_truth(&statement.test) {
+                    return if test {
+                        self.compile_statement(&statement.consequent)
+                    } else if let Some(alternate) = &statement.alternate {
+                        self.compile_statement(alternate)
+                    } else {
+                        Ok(())
+                    };
+                }
                 let test = self.compile_expression(&statement.test)?;
                 let branch = self.branch_false(test);
                 self.compile_statement(&statement.consequent)?;
