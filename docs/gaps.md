@@ -67,4 +67,4 @@
 
 ## 8. 真实源码兼容性探针
 
-`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出（`export { Je as default, … }` 等）已支持，bundle 不再因默认导出失败；当前首个诊断为 `unknown callee "reportError"`，位于第 7 行第 4256 列——bundle 读取浏览器全局 `reportError`，它不是局部绑定、宿主导入或内建，名字解析在编译期拒绝。测试按此钉住，并用最小输入（`function probe(){ reportError('x'); }`）确认原因；若某天能编过或诊断变化，测试变红，届时把探针升级为真实执行用例并同步刷新本文与 `implemented.md`。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
+`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出（`export { Je as default, … }` 等）已支持。探针通过 preload 模块导出空实现 `reportError`，跨过该浏览器全局后，当前首个诊断为 `unknown binding "window"`，位于第 7 行第 4315 列——bundle 接着读取浏览器全局 `window`，尚无对应 polyfill；测试钉住这一诊断。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
