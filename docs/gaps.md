@@ -14,7 +14,8 @@
 
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
-- 同步生成器（含 `yield*` 同步委托）与 async generator（含异步 `yield*` 委托和同步回退）已支持；`for await…of` 在 async 函数与 async generator 中支持，顶层 `for await…of` 仍按 top-level await 在编译期拒绝。`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
+- 顶层 `for await…of` 仍按 top-level await 在编译期拒绝；`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
+- 生成器（含 async generator）正文若以 `for (;;)`、`while (…)` 或 `do…while` 这类回边落在正文入口的循环开始，编译期以 `internal bytecode validation failed: … ordinary control flow enters generator body pc N` 失败：`GeneratorStart.body_pc` 恰好是循环的回边目标。前置空语句不改变结果；`for (let …; …; …)`、`for…of` 等头部不在正文入口的循环正常编译。这是加载期校验缺陷（合法 JS 被拒），不是语法子集限制；把循环前挪一条语句或改用 `for…of` 可绕开。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整
@@ -47,7 +48,7 @@
 
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - 顶层 `await`、动态 `import()`、`eval`、`Function` 构造
-- 标签模板：仍由离线构建降级。`class` 由 VM 原生执行，不再离线降级。
+- 标签模板在编译期拒绝，报带行列的 `unsupported syntax: …`。
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
@@ -63,9 +64,9 @@
 - `for…in` / `for…of` 循环头的变量声明只能有一个声明项（其中可以解构多个绑定），且在严格 ESM 中不能带初始化器。
 - 数组、对象解构赋值模式只能配 `=`；复合及逻辑赋值要求简单赋值目标，自增减也要求有效的赋值目标。
 - 模块顶层及仅嵌套在其中的箭头函数不能使用 `new.target`。普通函数有自己的 `new.target`，嵌套箭头函数可捕获它。
-- 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。合法的 `export default function () {}`（含 `async`）已支持。
+- 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。
 - 严格模式下不能使用 `with`，也不能删除裸标识符（包括加括号的标识符）。
 
 ## 8. 真实源码兼容性探针
 
-`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出已支持。探针通过 preload 提供空实现 `reportError`，并将未实现的环境全局 `window`、`process` 设为 `undefined`，通过 `console` 宿主模块导入基础 `debug` / `error` / `info` / `log` / `warn` 接口；bundle 可以编译通过，没有遇到尚未实现的 ECMAScript 标准全局。该探针只证明编译通过，不证明运行时兼容。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
+`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。探针通过 preload 提供空实现 `reportError`，并将未实现的环境全局 `window`、`process` 设为 `undefined`，通过 `console` 宿主模块导入基础 `debug` / `error` / `info` / `log` / `warn` 接口；bundle 可以编译通过，没有遇到尚未实现的 ECMAScript 标准全局。该探针只证明编译通过，不证明运行时兼容。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
