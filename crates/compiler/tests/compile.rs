@@ -382,6 +382,171 @@ fn rejects_invalid_private_names() {
 }
 
 #[test]
+fn non_captured_loop_head_bindings_skip_iteration_environments() {
+    let build = compile(
+        r#"
+function run(n) {
+  let total = 0;
+  for (let i = 0; i < n; i += 1) {
+    let doubled = i + i;
+    total += doubled;
+  }
+  for (const value of [1, 2, 3]) total += value;
+  for (const key in { a: 1 }) total += key.length;
+  return total;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    assert!(
+        !run.code.iter().any(|instruction| matches!(
+            instruction,
+            Instr::SaveEnv { .. } | Instr::NewIterationEnv { .. } | Instr::RestoreEnv { .. }
+        )),
+        "non-captured loop heads must not allocate iteration environments"
+    );
+    build.validate().unwrap();
+}
+
+#[test]
+fn captured_loop_head_bindings_keep_iteration_environments() {
+    let build = compile(
+        r#"
+function run() {
+  const out = [];
+  for (let i = 0; i < 2; i += 1) out.push(() => i);
+  for (const value of [1, 2]) out.push(() => value);
+  return out;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    assert!(
+        run.code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::SaveEnv { .. }))
+    );
+    assert!(run.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::NewIterationEnv { bindings, .. } if !bindings.is_empty()
+    )));
+    assert!(
+        run.code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::RestoreEnv { .. }))
+    );
+    build.validate().unwrap();
+}
+
+#[test]
+fn mixed_loop_head_escapes_copy_only_the_captured_binding() {
+    let build = compile(
+        r#"
+function run() {
+  const out = [];
+  for (let i = 0, j = 0; i < 2; i += 1, j += 10) out.push(() => i);
+  return out;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    let mut enters = 0;
+    for instruction in &run.code {
+        if let Instr::NewIterationEnv { bindings, .. } = instruction {
+            enters += 1;
+            assert_eq!(
+                bindings.len(),
+                1,
+                "only the captured loop binding is copied"
+            );
+        }
+    }
+    assert_eq!(enters, 2, "a C-style for enters before test and update");
+    build.validate().unwrap();
+}
+
+#[test]
+fn promoted_loop_head_keeps_environment_for_captured_body_bindings() {
+    let build = compile(
+        r#"
+function run() {
+  const out = [];
+  for (let i = 0; i < 2; i += 1) {
+    let x = i;
+    out.push(() => x);
+  }
+  return out;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    let enters: Vec<_> = run
+        .code
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instr::NewIterationEnv { bindings, .. } => Some(bindings),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        enters.len(),
+        2,
+        "a C-style for enters before test and update"
+    );
+    assert!(
+        enters.iter().all(|bindings| bindings.is_empty()),
+        "promoted loop-head bindings are not copied"
+    );
+    assert!(
+        run.code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::SaveEnv { .. }))
+    );
+    assert!(
+        run.code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::RestoreEnv { .. }))
+    );
+    build.validate().unwrap();
+}
+
+#[test]
+fn promoted_loop_head_across_await_uses_a_persistent_slot() {
+    let build = compile(
+        r#"
+async function run() {
+  let total = 0;
+  for (let i = 0; i < 2; i += 1) {
+    total += await i;
+  }
+  return total;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let run = build.function_named("run").expect("missing run");
+    assert!(!run.code.iter().any(|instruction| matches!(
+        instruction,
+        Instr::SaveEnv { .. } | Instr::NewIterationEnv { .. } | Instr::RestoreEnv { .. }
+    )));
+    assert!(
+        run.resumes
+            .iter()
+            .any(|resume| !resume.saved_slots.is_empty())
+    );
+    build.validate().unwrap();
+}
+
+#[test]
 fn for_await_lowers_the_async_protocol_across_awaits() {
     let function = compile_run(
         r#"

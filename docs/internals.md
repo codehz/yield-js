@@ -19,7 +19,7 @@ yield-harness  →  yield-compiler  →  yield-vm
   → frontend     解析可达模块，解析 import/export 目标
   → lower        绑定、异常、await  →  LoweredFunction
   → bindings     确定哪些 id 跨函数共享
-  → promote      不共享的绑定变为逻辑寄存器
+  → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
   → analyze      CFG live-in，包含两条恢复边与处理器边
   → allocate     跨 await 的值分配持久槽，其余分配瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
@@ -48,6 +48,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 异步生成器调用不分配结果 Promise：`GeneratorStart` 返回生成器对象。每次 `next` / `throw` / `return` 创建请求 Promise、入队，并一次一步驱动队列。队首是进行中的请求；`yield` 以 `done: false` 兑现它，正文返回或落底以 `done: true` 兑现，未捕获脚本异常使生成器完成并拒绝它。正文中的 `await` 记录唯一续体、把生成器标为 `Awaiting`、保留队首请求，并恢复同一正文——绝不新建请求。已完成的生成器以 `{value: undefined, done: true}` 结算 `next`，拒绝 `throw`，并通过持久化的 `ReactionJob::GeneratorClose` 同化 `return` 参数后报告 `done: true`；后续请求永不越过队首。
 - `undefined` 是真实值。帧槽中的 `None` 表示未初始化，而不是 `undefined`。
 - 被其他函数读写的绑定、以及导出绑定，留在堆环境中。其余绑定是帧槽。既不共享绑定也不创建闭包的调用不分配环境。
+- 循环头 `let` / `const` 只有被嵌套函数读写时才保留在每轮环境；未捕获的绑定提升为帧槽，循环各轮复用同一槽。循环体内若有被嵌套函数读写的块级声明，保留空绑定表的每轮环境以提供新单元格；否则删除整组 `SaveEnv` / `NewIterationEnv` / `RestoreEnv`。
 - `finally` 是显式完成状态（种类 + payload），不是原生异常栈。`finally` 内的嵌套 `await` 必须保留该待完成状态。
 - 准备成功后，`Await` 总是经微任务队列恢复，即使是已 settled 的 promise。抛错的 `constructor` getter 直接转入脚本异常处理器，不挂起。
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
@@ -61,7 +62,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | --- | --- |
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
-| 绑定逃逸 / 循环头环境省略 | `bindings.rs` 的跨函数共享集合、`promote.rs` 的提升判定、lowerer 的迭代环境分组元数据；删除环境指令时还要统一重映射跳转、异常表、恢复表与生成器表 PC |
+| 绑定逃逸 / 循环头环境省略 | `bindings.rs` 的跨函数共享集合、`promote.rs` 的提升判定与 `elide_iteration_environments`、lowerer 的 `IterationEnvGroup`；删除环境指令时由 `compact_dead_instructions` 统一重映射跳转、异常表、await/yield 站点与 `generator_start` |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
@@ -73,7 +74,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 ## 4. 易错点
 
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
-- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器；`slot.kind` 在 `FrameLayout` 重映射前没有意义。`promote` 保证一条指令换一条指令，因此跳转、恢复与处理器 PC 保持有效。
+- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器；`slot.kind` 在 `FrameLayout` 重映射前没有意义。普通提升改写保证一条指令换一条指令；删除空迭代环境组是唯一的删除路径，`compact_dead_instructions` 必须同时重映射 `Jump` / `BranchFalse`、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`，漏掉任一张表都会让恢复入口或处理器指向错误指令。
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。不要存一个可伪造的标志。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
@@ -84,7 +85,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 目录职责：
 
 - `crates/vm/src` — 字节码契约、加载校验、解释器、堆与对象表、Promise/微任务、宿主协议、快照
-- `crates/compiler/src` — Oxc 前端、降低、活性分析、槽分配
+- `crates/compiler/src` — Oxc 前端、降低、绑定逃逸、活性分析、槽分配
 - `crates/host-dts/src` — 宿主 `.d.ts` 清单：每个字符串模块块下的直接值导出，以及带位置的拒绝
 - `crates/binding-macros/src` — 类型化宏；`host_bindings!` 读取 `dts` 并在展开期校验声明名
 - `crates/compiler/src/lower` — 唯一的函数体 walker：`stmt`、`expr`、`control`、`pattern`
@@ -111,7 +112,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）。两者都变才同时升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。
 - 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。
-- `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ。`for` 的 `let` / `const` 头（C 风格、`for…in`、`for…of`、`for await…of`）现在每轮建立独立环境：`NewIterationEnv` 从当前环境复制循环绑定到以保存的外层环境为父的新环境，`RestoreEnv` 在循环结束后恢复外层环境。因此这些绑定不得由 `compiler/src/promote.rs` 提升为帧槽。
+- `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ。`for` 的 `let` / `const` 头（C 风格、`for…in`、`for…of`、`for await…of`）每轮建立独立环境：`NewIterationEnv` 从当前环境复制仍逃逸的循环绑定到以保存的外层环境为父的新环境，`RestoreEnv` 在循环结束后恢复外层环境。未逃逸的循环头绑定由 `compiler/src/promote.rs` 提升为帧槽并从 `NewIterationEnv` 的绑定表移除；绑定表为空且循环体没有仍需独立单元格的被捕获声明时，整组环境指令被删除。循环体内的被捕获块级声明仍要求每轮新单元格，因此即使循环头绑定全部提升也要保留空绑定表的 `NewIterationEnv`。
 - 名字解析（`compiler/src/names.rs`）：本地绑定、静态导入（源码与宿主）、合格的 preload 全局，最后是内建。裸 preload 名在 preload 子图之外经 `globalThis` 读取只读 getter。
 - 宿主模块使用排序的 `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` 清单。`CompileOptions::from_dts` 从宿主 `.d.ts` 读出它；`host_bindings! { dts: "path" }`（路径相对调用方 `Cargo.toml`）在宏展开时重新解析同一文件，把每个声明的 `module:export` 与生成的 `__YIELD_NAMES` 表比对。声明了但 `#[host_module]` 未实现的名字在编译期报 `missing host export: module:export`；多出的实现允许存在，且不进入命名空间导出。Harness 声明是 `crates/harness/test.d.ts` 与 `crates/harness/demo.d.ts`；e2e 夹具在 `crates/harness/tests/dts/`，按排序后的模块组合命名。
 - `TestHost` 要点：导出名单以 `crates/harness/test.d.ts` 为准；`seed()` 返回 `10`；`wait(label)` 启动 `Wait` operation（显示标签 `wait:{label}`，默认恢复策略 `Resume`）；`bind(label)` 分配带 payload `label` 与 `label()` 方法的 `Node` 实例；`expect(actual)` 分配带槽 `actual` 的 `Matcher` 实例；`inspect` / `setLabel` 返回 `undefined`。用 `host.labels().set_reject_restore_operation(true)` 注入恢复失败；通过编辑 record 破坏快照 payload。

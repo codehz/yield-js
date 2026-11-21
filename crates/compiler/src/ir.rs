@@ -2,7 +2,7 @@
 //!
 //! Instructions still use the VM [`Instr`] enum, but every [`Slot`] is a
 //! logical register: `kind` is meaningless and `index` is a [`Reg`]. Oxc is
-//! gone. Liveness and slot allocation are the only consumers.
+//! gone. Promotion, liveness, and slot allocation are the only consumers.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +23,23 @@ pub(crate) struct AwaitSite {
     pub(crate) reject: LogicalReg,
     pub(crate) fulfill_pc: usize,
     pub(crate) reject_pc: usize,
+}
+
+/// One lowered per-iteration environment group, before escape analysis decides
+/// which bindings still need fresh copies.
+#[derive(Debug)]
+pub(crate) struct IterationEnvGroup {
+    /// Loop-head bindings copied by `NewIterationEnv`.
+    pub(crate) bindings: Vec<BindingId>,
+    /// Register holding the outer environment saved by `SaveEnv`.
+    pub(crate) saved_env: LogicalReg,
+    /// PC of the `SaveEnv`.
+    pub(crate) save_pc: usize,
+    /// PCs of every `NewIterationEnv` that installs a fresh environment.
+    /// A C-style `for` has one before the test and one before `update`.
+    pub(crate) enter_pcs: Vec<usize>,
+    /// PC of the `RestoreEnv` after the loop.
+    pub(crate) restore_pc: Option<usize>,
 }
 
 /// One function lowered to logical-register bytecode.
@@ -55,6 +72,7 @@ pub(crate) struct LoweredFunction {
     pub(crate) generator_start: Option<GeneratorStartSite>,
     pub(crate) yields: Vec<YieldSite>,
     pub(crate) handlers: Vec<ExceptionHandler>,
+    pub(crate) iteration_envs: Vec<IterationEnvGroup>,
     pub(crate) span: Span,
 }
 

@@ -1,8 +1,13 @@
 //! Move bindings that are not shared across functions into logical registers.
 //!
-//! Replacements are one instruction for one instruction, so jump, resume, and
-//! handler PCs stay put. Expression temps are left alone; a later store cannot
-//! overwrite an operand that a compound expression still needs.
+//! Ordinary replacements are one instruction for one instruction, so jump,
+//! resume, and handler PCs stay put. Expression temps are left alone; a later
+//! store cannot overwrite an operand that a compound expression still needs.
+//!
+//! After rewriting, loop-head bindings that no nested function reads or writes
+//! are removed from their per-iteration environment. A group that keeps no
+//! binding and has no captured body declaration is deleted by a compacting
+//! pass that also remaps every PC-bearing table.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -44,23 +49,9 @@ pub(crate) fn promote(
         awaits: &resumes,
         generators: &generators,
     };
-    // A per-iteration environment copies these bindings from the heap, so they
-    // must keep their environment slot even when no nested function shares them.
-    let iteration_bindings: BTreeSet<BindingId> = function
-        .code
-        .iter()
-        .filter_map(|instruction| match instruction {
-            Instr::NewIterationEnv { bindings, .. } => Some(bindings.iter().copied()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
     let mut accepted: Vec<(BindingId, BTreeMap<usize, bool>)> = Vec::new();
     for (binding, owner) in &facts.owners {
-        if *owner != function.func_id
-            || facts.shared.contains(binding)
-            || iteration_bindings.contains(binding)
-        {
+        if *owner != function.func_id || facts.shared.contains(binding) {
             continue;
         }
         if let Some(inits) = promotion_inits(function, suspensions, *binding)? {
@@ -85,6 +76,139 @@ pub(crate) fn promote(
         code.push(rewrite(instruction, pc, &function.promoted, &accepted));
     }
     function.code = code;
+    elide_iteration_environments(function, facts)?;
+    Ok(())
+}
+
+/// Remove promoted bindings from every per-iteration environment and delete
+/// groups that no longer carry any binding.
+///
+/// A group must stay even when every loop-head binding is promoted: a captured
+/// binding declared inside the loop body still lands in the current
+/// environment, and a closure created there observes that per-iteration cell.
+/// Keeping the group with an empty binding list allocates the fresh
+/// environment without copying the promoted loop-head bindings. A body binding
+/// that merely failed promotion but is not captured does not need a fresh cell;
+/// the function environment is enough because no closure can observe it.
+fn elide_iteration_environments(
+    function: &mut LoweredFunction,
+    facts: &BindingFacts,
+) -> Result<(), CompileError> {
+    if function.iteration_envs.is_empty() {
+        return Ok(());
+    }
+    for instruction in &mut function.code {
+        if let Instr::NewIterationEnv { bindings, .. } = instruction {
+            bindings.retain(|binding| !function.promoted.contains_key(binding));
+        }
+    }
+
+    let groups = std::mem::take(&mut function.iteration_envs);
+    let mut dead = BTreeSet::new();
+    for group in &groups {
+        let escaping_head = group
+            .bindings
+            .iter()
+            .any(|binding| facts.shared.contains(binding));
+        let body_declares_environment_binding = match group.restore_pc {
+            Some(restore_pc) => {
+                function.code[group.save_pc..restore_pc]
+                    .iter()
+                    .any(|instruction| match instruction {
+                        Instr::DeclareBinding { binding } => {
+                            !function.promoted.contains_key(binding)
+                                && facts.shared.contains(binding)
+                        }
+                        _ => false,
+                    })
+            }
+            // A missing restore is malformed lowering; keep the group rather
+            // than deleting state that is still referenced.
+            None => true,
+        };
+        if escaping_head || body_declares_environment_binding {
+            continue;
+        }
+        dead.insert(group.save_pc);
+        dead.extend(group.enter_pcs.iter().copied());
+        let restore_pc = group.restore_pc.ok_or_else(|| {
+            CompileError::internal("internal compiler error: iteration environment has no restore")
+        })?;
+        dead.insert(restore_pc);
+    }
+    if dead.is_empty() {
+        return Ok(());
+    }
+    compact_dead_instructions(function, &dead)
+}
+
+/// Delete instructions and remap every PC-bearing field. Jump targets that
+/// pointed at a deleted instruction land on the next surviving instruction,
+/// which is the loop header or exit the deleted environment instruction stood
+/// in front of.
+fn compact_dead_instructions(
+    function: &mut LoweredFunction,
+    dead: &BTreeSet<usize>,
+) -> Result<(), CompileError> {
+    let old_len = function.code.len();
+    if dead.iter().any(|&pc| pc >= old_len) {
+        return Err(CompileError::internal(
+            "internal compiler error: deleted instruction is out of range",
+        ));
+    }
+    let mut mapping = Vec::with_capacity(old_len + 1);
+    let mut next = 0u32;
+    for pc in 0..old_len {
+        mapping.push(next);
+        if !dead.contains(&pc) {
+            next = next.checked_add(1).ok_or_else(|| {
+                CompileError::internal("internal compiler error: too many instructions")
+            })?;
+        }
+    }
+    mapping.push(next);
+    let remap = |pc: u32| -> Result<u32, CompileError> {
+        mapping
+            .get(pc as usize)
+            .copied()
+            .ok_or_else(|| CompileError::internal("internal compiler error: PC is out of range"))
+    };
+
+    let mut code = Vec::with_capacity(next as usize);
+    for (pc, instruction) in std::mem::take(&mut function.code).into_iter().enumerate() {
+        if dead.contains(&pc) {
+            continue;
+        }
+        code.push(match instruction {
+            Instr::Jump { target } => Instr::Jump {
+                target: remap(target)?,
+            },
+            Instr::BranchFalse { cond, target } => Instr::BranchFalse {
+                cond,
+                target: remap(target)?,
+            },
+            other => other,
+        });
+    }
+    function.code = code;
+
+    for site in &mut function.awaits {
+        site.fulfill_pc = remap(site.fulfill_pc as u32)? as usize;
+        site.reject_pc = remap(site.reject_pc as u32)? as usize;
+    }
+    for site in &mut function.yields {
+        site.next_pc = remap(site.next_pc as u32)? as usize;
+        site.throw_pc = remap(site.throw_pc as u32)? as usize;
+        site.return_pc = remap(site.return_pc as u32)? as usize;
+    }
+    if let Some(start) = &mut function.generator_start {
+        start.body_pc = remap(start.body_pc as u32)? as usize;
+    }
+    for handler in &mut function.handlers {
+        handler.start_pc = remap(handler.start_pc)?;
+        handler.end_pc = remap(handler.end_pc)?;
+        handler.target_pc = remap(handler.target_pc)?;
+    }
     Ok(())
 }
 

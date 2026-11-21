@@ -10,6 +10,7 @@ use super::control::{CloseMode, JumpTarget};
 use super::{FunctionSource, Lowerer, for_each_binding_name, local_declaration};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
+use crate::ir::IterationEnvGroup;
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_statement<'node>(
@@ -123,7 +124,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 let bindings = self.for_init_bindings(&statement.init)?;
                 let saved = self.save_iteration_env(&bindings)?;
                 if let Some(saved) = saved {
-                    self.enter_iteration_env(saved, &bindings);
+                    self.enter_iteration_env(saved);
                 }
                 let test_pc = self.emit.loop_header();
                 let exit_branch = if let Some(test) = &statement.test {
@@ -143,7 +144,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 // increment, so closures created in the body keep the value
                 // the body observed while the update mutates the next copy.
                 if let Some(saved) = saved {
-                    self.enter_iteration_env(saved, &bindings);
+                    self.enter_iteration_env(saved);
                 }
                 if let Some(update) = &statement.update {
                     self.compile_expression(update)?;
@@ -310,7 +311,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
         if let Some(saved) = saved {
-            self.enter_iteration_env(saved, &bindings);
+            self.enter_iteration_env(saved);
         }
         let done = self.alloc_reg()?;
         let value = self.alloc_reg()?;
@@ -360,7 +361,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
         if let Some(saved) = saved {
-            self.enter_iteration_env(saved, &bindings);
+            self.enter_iteration_env(saved);
         }
         let done = self.alloc_reg()?;
         let value = self.alloc_reg()?;
@@ -422,7 +423,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
         if let Some(saved) = saved {
-            self.enter_iteration_env(saved, &bindings);
+            self.enter_iteration_env(saved);
         }
         let result = self.alloc_reg()?;
         let async_step = self.branch_false(sync);
@@ -515,28 +516,47 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     /// Save the outer environment once before a per-iteration loop. `None`
     /// when the loop needs no fresh binding environment.
-    fn save_iteration_env(&mut self, bindings: &[BindingId]) -> Result<Option<Reg>, CompileError> {
+    fn save_iteration_env(
+        &mut self,
+        bindings: &[BindingId],
+    ) -> Result<Option<usize>, CompileError> {
         if bindings.is_empty() {
             return Ok(None);
         }
-        let saved = self.alloc_reg()?;
+        let saved_env = self.alloc_reg()?;
+        let save_pc = self.pc();
         self.emit(Instr::SaveEnv {
-            dst: self.slot(saved),
+            dst: self.slot(saved_env),
         });
-        Ok(Some(saved))
-    }
-
-    fn enter_iteration_env(&mut self, saved: Reg, bindings: &[BindingId]) {
-        self.emit(Instr::NewIterationEnv {
-            parent: self.slot(saved),
+        let group = self.iteration_envs.len();
+        self.iteration_envs.push(IterationEnvGroup {
             bindings: bindings.to_vec(),
+            saved_env,
+            save_pc,
+            enter_pcs: Vec::new(),
+            restore_pc: None,
         });
+        Ok(Some(group))
     }
 
-    fn leave_iteration_env(&mut self, saved: Reg) {
-        self.emit(Instr::RestoreEnv {
-            src: self.slot(saved),
+    fn enter_iteration_env(&mut self, group: usize) {
+        let saved_env = self.iteration_envs[group].saved_env;
+        let bindings = self.iteration_envs[group].bindings.clone();
+        let enter_pc = self.pc();
+        self.emit(Instr::NewIterationEnv {
+            parent: self.slot(saved_env),
+            bindings,
         });
+        self.iteration_envs[group].enter_pcs.push(enter_pc);
+    }
+
+    fn leave_iteration_env(&mut self, group: usize) {
+        let saved_env = self.iteration_envs[group].saved_env;
+        let restore_pc = self.pc();
+        self.emit(Instr::RestoreEnv {
+            src: self.slot(saved_env),
+        });
+        self.iteration_envs[group].restore_pc = Some(restore_pc);
     }
 
     /// Loop bindings declared by a C-style `for` initializer. `var` stays

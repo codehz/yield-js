@@ -11,7 +11,8 @@
 //!   → frontend   parse and link reachable modules
 //!   → lower      module declaration and evaluation phases, then nested functions
 //!   → bindings   owner table; cross-function reads and writes stay shared
-//!   → promote    unshared bindings become logical registers
+//!   → promote    unshared bindings become logical registers; non-escaping
+//!                loop bindings leave the per-iteration environment
 //!   → analyze    CFG live-in, including resume and handler edges
 //!   → allocate   persistent slots for cross-await values, transient otherwise
 //!   → Build

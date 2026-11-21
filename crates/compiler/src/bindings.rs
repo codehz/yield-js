@@ -3,7 +3,9 @@
 //! Ownership comes only from parameters and `DeclareBinding`. A read or write
 //! in a different function keeps that id shared, including a capture nested
 //! several functions away and a capture that is only written. A closure
-//! instruction does not by itself pin every binding in the scope.
+//! instruction does not by itself pin every binding in the scope. Shared ids
+//! stay in environments; promotion uses this set to decide which loop-head
+//! bindings can leave their per-iteration environment.
 
 use std::collections::{BTreeMap, BTreeSet};
 

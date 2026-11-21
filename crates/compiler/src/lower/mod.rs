@@ -26,7 +26,7 @@ use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
 use crate::frontend::link::{DEFAULT_SLOT, Graph, Target};
-use crate::ir::{GeneratorStartSite, LoweredFunction};
+use crate::ir::{GeneratorStartSite, IterationEnvGroup, LoweredFunction};
 use crate::names::Tables;
 use crate::promote;
 use crate::session::Session;
@@ -397,6 +397,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     hoisted: BTreeSet<u32>,
     // The synthetic slot for a default export without a local name.
     default_binding: Option<BindingId>,
+    iteration_envs: Vec<IterationEnvGroup>,
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
@@ -445,6 +446,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             arguments_binding: None,
             hoisted: BTreeSet::new(),
             default_binding: None,
+            iteration_envs: Vec::new(),
         }
     }
 
@@ -596,6 +598,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             generator_start,
             yields: self.control.take_yields(),
             handlers: self.control.take_handlers(),
+            iteration_envs: std::mem::take(&mut self.iteration_envs),
             span: self.span,
         })
     }
