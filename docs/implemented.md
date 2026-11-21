@@ -2,7 +2,7 @@
 
 当前实现由代码推导的覆盖范围清单。语法子集与未覆盖项见 [`docs/gaps.md`](gaps.md)。
 
-- 字节码 **42** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
+- 字节码 **42** 将源码模块图、声明与求值函数、入口、可选 preload、最终导出目标和生成器恢复表纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter、原有指令结构，以及生成器函数的种类、唯一启动边界、三个恢复落点、槽范围与升序 `saved_slots`；普通控制流不得进入 `throw` / `return` / 正文入口，坏产物返回 `InvalidBuild`。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - `compile(entry, preload, resolver, options)` 用同步 `ModuleResolver` 链接可达源码；`MemoryResolver` 和 `FileResolver` 使用根相对规范 ID。`CompileOptions::from_dts` 从宿主声明文件（`.d.ts`）单独读出模块与值导出清单；无法解释的导出语法按位置拒绝。支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出。星号不传递 `default`；相同最终目标不冲突，不同目标的同名导出从命名空间排除，对该名字的显式请求报错。
 - VM 在执行任何模块体前创建全部模块环境和命名空间，并初始化提升函数和 `var`。依赖优先、按源码声明顺序求值；循环回边跳过，共享模块只执行一次。读取另一模块未初始化的词法绑定抛出可捕获的 `ReferenceError`。命名空间无原型、不可扩展，按导出名排序，通过只读 getter 提供活绑定。
