@@ -432,6 +432,15 @@ fn rejects_delete_of_identifier_in_strict_modules() {
 }
 
 #[test]
+fn rejects_non_lvalue_update_targets() {
+    for expression in ["++1", "(1 + 2)--"] {
+        let source = format!("function run() {{\n  return {expression};\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        assert_eq!(error.line(), 2, "{source}: {error}");
+    }
+}
+
+#[test]
 fn rejects_unsupported_optional_chain_syntax_with_location() {
     for (source, message, column) in [
         (
