@@ -2,8 +2,8 @@
 
 use proc_macro::TokenStream;
 
-mod cps;
 mod registry;
+mod state_machine;
 mod typed;
 
 fn expand(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {

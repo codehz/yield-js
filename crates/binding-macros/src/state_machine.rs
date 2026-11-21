@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, quote_spanned};
@@ -55,6 +55,7 @@ fn lower_impl<'a>(
         bindings: Vec::new(),
         nodes: Vec::new(),
         boundaries: Vec::new(),
+        loops: Vec::new(),
     };
     let entry = graph.node();
     let mut env = Env::new();
@@ -194,8 +195,8 @@ fn lower_impl<'a>(
             quote!(#index => { #(#restore)* #output #next })
         });
     let arms = (0..graph.nodes.len()).map(|id| r.node(id));
-    let dispatch =
-        quote! { loop { match #state { #(#arms,)* _ => unreachable!("invalid CPS node"), } } };
+    let dispatch_label = dispatch_label();
+    let dispatch = quote! { #dispatch_label: loop { match #state { #(#arms,)* _ => unreachable!("invalid state-machine node"), } } };
     let run = if spawn {
         quote! {
             let mut #pending = None;
@@ -210,7 +211,7 @@ fn lower_impl<'a>(
         dispatch
     };
     let helper = quote! {
-        #[allow(unused_mut, unused_variables, unreachable_code)]
+        #[allow(unused_mut, unused_variables, unused_labels, unreachable_code)]
         fn #runner(#cx_pat: #context, #inputs: ::core::option::Option<(#(#arg_types,)*)>, #stage: usize, #outcome: #guest) -> ::yield_vm::JsResult<#step> {
             #(#declarations)*
             let mut #entered = false;
@@ -375,7 +376,7 @@ impl Render<'_, '_> {
             let take = self.take(id);
             quote!(let #mutable #ident = #take;)
         });
-        let exit = match node.end.as_ref().expect("complete CPS graph") {
+        let exit = match node.end.as_ref().expect("complete state graph") {
             End::Next(to) => {
                 let renames = self.renames(&node.shadow, &active);
                 self.edge(*to, &node.shadow, &active, &renames)
@@ -383,19 +384,19 @@ impl Render<'_, '_> {
             End::Finish(expr) => expr.clone(),
             End::If(cond, yes, no) => {
                 let renames = self.renames(&yes.bindings, &active);
-                let cond = Rename::default().condition((*cond).clone(), &renames);
+                let cond = Rename::default().condition(cond.as_ref().clone(), &renames);
                 let yes = self.edge(yes.to, &yes.bindings, &active, &renames);
                 let no = self.edge(no.to, &no.bindings, &active, &Renames::new());
                 quote!(if #cond #yes else #no)
             }
             End::Match(expr, arms) => {
-                let arms = arms.iter().map(|(arm, edge)| {
+                let arms = arms.iter().map(|(arm, guard, edge)| {
                     let attrs = &arm.attrs;
                     let renames = self.renames(&edge.bindings, &active);
                     let mut rename = Rename::default();
                     let pat = rename.pattern(arm.pat.clone(), &renames);
-                    let guard = arm.guard.as_ref().map(|(_, guard)| {
-                        let guard = rename.condition((**guard).clone(), &renames);
+                    let guard = guard.as_ref().map(|guard| {
+                        let guard = rename.condition(guard.as_ref().clone(), &renames);
                         quote!(if #guard)
                     });
                     let edge = self.edge(edge.to, &edge.bindings, &active, &renames);
@@ -403,12 +404,42 @@ impl Render<'_, '_> {
                 });
                 quote!(match #expr { #(#arms,)* })
             }
-            End::Await(stage, effect) => self.request(*stage, *effect, &active),
+            End::Eval(expr, edge) => {
+                let result = edge
+                    .bindings
+                    .first()
+                    .map(|&id| &self.graph.bindings[id].ident);
+                let eval = if let Some(result) = result {
+                    quote!(let #result = #expr;)
+                } else {
+                    quote!(let _ = #expr;)
+                };
+                let edge = self.edge(edge.to, &edge.bindings, &active, &Renames::new());
+                quote!(#eval #edge)
+            }
+            End::Await(stage, effect) => self.request(*stage, effect, &active),
+        };
+        let exit = if let Some(escapes) = &node.escapes {
+            let (declaration, arms) = escapes.render(&self.graph.bindings);
+            let label = &escapes.label;
+            let dispatch = dispatch_label();
+            let arms = arms.iter().map(|(pat, edge)| {
+                let edge = self.edge(edge.to, &edge.bindings, &active, &Renames::new());
+                quote!(#pat => #edge)
+            });
+            // A normal branch commits its edge and leaves immediately; only
+            // the escape paths still have their locals available here.
+            quote! {
+                #declaration
+                match #label: { #exit continue #dispatch; } { #(#arms,)* }
+            }
+        } else {
+            exit
         };
         quote!(#id => { #(#load)* #code #exit })
     }
 
-    fn request(&self, stage: usize, effect: Effect<'_>, active: &[BindingId]) -> TokenStream {
+    fn request(&self, stage: usize, effect: &Effect<'_>, active: &[BindingId]) -> TokenStream {
         let cx = self.cx;
         let saved = self.saved(&self.graph.boundaries[stage]).into_iter().filter_map(|(id, _)| {
             let binding = &self.graph.bindings[id];
@@ -424,7 +455,8 @@ impl Render<'_, '_> {
         let index = stage as u32;
         let resume = quote!(|cx, outcome| #runner(cx, None, #stage, outcome));
         let request = match effect {
-            Effect::Call([callee, receiver, args]) => {
+            Effect::Call(arguments) => {
+                let [callee, receiver, args] = arguments;
                 let f = generated("callee", stage);
                 let this = generated("receiver", stage);
                 let argv = generated("args", stage);
@@ -471,11 +503,30 @@ enum Kind<'a> {
     Outcome,
 }
 
-#[derive(Clone, Copy)]
 enum Effect<'a> {
-    Call([&'a Expr; 3]),
+    Call([Fragment<'a>; 3]),
     Gc,
-    External(&'a Expr),
+    External(Fragment<'a>),
+}
+
+enum Fragment<'a> {
+    Source(&'a Expr),
+    Rewritten(Box<Expr>),
+}
+
+impl AsRef<Expr> for Fragment<'_> {
+    fn as_ref(&self) -> &Expr {
+        match self {
+            Self::Source(expr) => expr,
+            Self::Rewritten(expr) => expr,
+        }
+    }
+}
+
+impl quote::ToTokens for Fragment<'_> {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.as_ref().to_tokens(tokens);
+    }
 }
 
 struct Boundary {
@@ -492,6 +543,7 @@ struct Node<'a> {
     definitions: Vec<BindingId>,
     shadow: Vec<BindingId>,
     deferred: Option<Error>,
+    escapes: Option<Escapes>,
     end: Option<End<'a>>,
 }
 fn pattern_bindings(pat: &Pat) -> Vec<&PatIdent> {
@@ -680,8 +732,48 @@ enum End<'a> {
     Next(NodeId),
     Finish(TokenStream),
     Await(usize, Effect<'a>),
-    If(&'a Expr, Edge, Edge),
-    Match(&'a Expr, Vec<(&'a syn::Arm, Edge)>),
+    If(Fragment<'a>, Edge, Edge),
+    Match(Fragment<'a>, Vec<MatchEdge<'a>>),
+    Eval(Box<Expr>, Edge),
+}
+
+type MatchEdge<'a> = (&'a syn::Arm, Option<Fragment<'a>>, Edge);
+
+impl End<'_> {
+    fn successors(&self, boundaries: &[Boundary], mut edge: impl FnMut(NodeId, &[BindingId])) {
+        match self {
+            Self::Next(to) => edge(*to, &[]),
+            Self::If(_, yes, no) => {
+                edge(yes.to, &yes.bindings);
+                edge(no.to, &no.bindings);
+            }
+            Self::Match(_, arms) => {
+                for (_, _, arm) in arms {
+                    edge(arm.to, &arm.bindings);
+                }
+            }
+            Self::Eval(_, next) => edge(next.to, &next.bindings),
+            Self::Await(stage, _) => {
+                let boundary = &boundaries[*stage];
+                edge(boundary.resume, boundary.output.as_slice());
+            }
+            Self::Finish(_) => {}
+        }
+    }
+}
+
+impl Node<'_> {
+    fn successors(&self, boundaries: &[Boundary], mut edge: impl FnMut(NodeId, &[BindingId])) {
+        self.end
+            .as_ref()
+            .expect("complete state graph")
+            .successors(boundaries, &mut edge);
+        if let Some(escapes) = &self.escapes {
+            for (_, escape) in &escapes.arms {
+                edge(escape.to, &escape.bindings);
+            }
+        }
+    }
 }
 
 struct Edge {
@@ -696,77 +788,55 @@ enum Dest {
     Next(NodeId, Option<BindingId>),
 }
 
+#[derive(Clone, Copy)]
+struct LoopTarget<'a> {
+    label: Option<&'a syn::Label>,
+    header: NodeId,
+    exit: NodeId,
+    result: Option<BindingId>,
+    accepts_value: bool,
+}
+
 struct Graph<'a> {
     cx: &'a str,
     spawn: bool,
     bindings: Vec<Binding<'a>>,
     nodes: Vec<Node<'a>>,
     boundaries: Vec<Boundary>,
+    loops: Vec<LoopTarget<'a>>,
 }
 
 impl<'a> Graph<'a> {
     fn liveness(&mut self) -> syn::Result<Vec<Live>> {
-        // DFS gives reverse topological order; joins may have a smaller ID
-        // than their incoming arms because the join is allocated up front.
-        fn resolve(
-            id: NodeId,
-            nodes: &[Node<'_>],
-            boundaries: &[Boundary],
-            live: &mut [Option<Live>],
-            continuation: &mut [bool],
-        ) {
-            if live[id].is_some() {
-                return;
-            }
-            let node = &nodes[id];
-            let mut incoming = Live::new();
-            let mut edge = |to: NodeId, kills: &[BindingId]| {
-                resolve(to, nodes, boundaries, live, continuation);
-                incoming.extend(
-                    live[to]
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|(&id, &span)| (!kills.contains(&id)).then_some((id, span))),
-                );
-            };
-            match node.end.as_ref().expect("complete CPS graph") {
-                End::Next(to) => edge(*to, &[]),
-                End::If(_, yes, no) => {
-                    edge(yes.to, &yes.bindings);
-                    edge(no.to, &no.bindings);
-                }
-                End::Match(_, arms) => {
-                    for (_, arm) in arms {
-                        edge(arm.to, &arm.bindings);
+        let count = self.nodes.len();
+        let mut predecessors = vec![Vec::new(); count];
+        for (id, node) in self.nodes.iter().enumerate() {
+            node.successors(&self.boundaries, |to, _| predecessors[to].push(id));
+        }
+        let mut live = vec![Live::new(); count];
+        let mut queued = vec![true; count];
+        let mut queue: VecDeque<_> = (0..count).rev().collect();
+        while let Some(id) = queue.pop_front() {
+            queued[id] = false;
+            let node = &self.nodes[id];
+            let mut incoming = node.uses.clone();
+            node.successors(&self.boundaries, |to, kills| {
+                for (&binding, &span) in &live[to] {
+                    if !kills.contains(&binding) && !node.definitions.contains(&binding) {
+                        incoming.entry(binding).or_insert(span);
                     }
                 }
-                End::Await(stage, _) => {
-                    let boundary = &boundaries[*stage];
-                    let output: Vec<_> = boundary.output.into_iter().collect();
-                    edge(boundary.resume, &output);
-                    continuation[boundary.resume] = true;
+            });
+            // The transfer is monotone; spans are diagnostic witnesses only.
+            if incoming.len() > live[id].len() {
+                live[id] = incoming;
+                for &pred in &predecessors[id] {
+                    if !std::mem::replace(&mut queued[pred], true) {
+                        queue.push_back(pred);
+                    }
                 }
-                End::Finish(_) => {}
             }
-            for id in &node.definitions {
-                incoming.remove(id);
-            }
-            incoming.extend(node.uses.iter().map(|(&id, &span)| (id, span)));
-            live[id] = Some(incoming);
         }
-        let mut live = vec![None; self.nodes.len()];
-        let mut continuation = vec![false; self.nodes.len()];
-        for id in 0..self.nodes.len() {
-            resolve(
-                id,
-                &self.nodes,
-                &self.boundaries,
-                &mut live,
-                &mut continuation,
-            );
-        }
-        let live: Vec<_> = live.into_iter().map(Option::unwrap).collect();
         for boundary in &self.boundaries {
             for (&id, &span) in &live[boundary.resume] {
                 if Some(id) != boundary.output && matches!(self.bindings[id].kind, Kind::Outcome) {
@@ -777,34 +847,23 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        let mut queue: Vec<_> = continuation
-            .iter()
-            .enumerate()
-            .filter_map(|(id, &yes)| yes.then_some(id))
-            .collect();
+        let mut continuation = vec![false; count];
+        let mut queue = Vec::new();
+        for boundary in &self.boundaries {
+            if !std::mem::replace(&mut continuation[boundary.resume], true) {
+                queue.push(boundary.resume);
+            }
+        }
         while let Some(id) = queue.pop() {
             let node = &mut self.nodes[id];
             if let Some(error) = node.deferred.take() {
                 return Err(error);
             }
-            let mut enqueue = |to| {
+            node.successors(&self.boundaries, |to, _| {
                 if !std::mem::replace(&mut continuation[to], true) {
                     queue.push(to);
                 }
-            };
-            match node.end.as_ref().unwrap() {
-                End::Next(to) => enqueue(*to),
-                End::If(_, yes, no) => {
-                    enqueue(yes.to);
-                    enqueue(no.to);
-                }
-                End::Match(_, arms) => {
-                    for (_, arm) in arms {
-                        enqueue(arm.to);
-                    }
-                }
-                _ => {}
-            }
+            });
         }
         Ok(live)
     }
@@ -897,14 +956,14 @@ impl<'a> Graph<'a> {
         &mut self,
         node: NodeId,
         env: &Env,
-        effect: Effect<'a>,
+        mut effect: Effect<'a>,
         checked: bool,
         output: Option<BindingId>,
     ) -> syn::Result<NodeId> {
-        let kind = match effect {
+        let kind = match &effect {
             Effect::Call(args) => {
-                for arg in args {
-                    self.scan_expr(node, env, arg)?;
+                for arg in args.iter() {
+                    self.scan_expr(node, env, arg.as_ref())?;
                 }
                 "Call"
             }
@@ -916,10 +975,22 @@ impl<'a> Graph<'a> {
                         "external await is only supported inside the tail `cx.spawn(async move { ... })` block",
                     ));
                 }
-                self.scan_expr(node, env, op)?;
+                self.scan_expr(node, env, op.as_ref())?;
                 "External"
             }
         };
+        let mut rewrite = JumpRewrite::new(&self.loops);
+        let args: &mut [Fragment<'_>] = match &mut effect {
+            Effect::Call(args) => args.as_mut(),
+            Effect::External(op) => std::slice::from_mut(op),
+            Effect::Gc => &mut [],
+        };
+        for arg in args {
+            if let Fragment::Source(expr) = *arg {
+                *arg = rewrite.selector(expr);
+            }
+        }
+        self.nodes[node].escapes = rewrite.finish()?;
         let stage = self.boundaries.len();
         let resume = self.node();
         self.boundaries.push(Boundary {
@@ -930,6 +1001,121 @@ impl<'a> Graph<'a> {
         });
         self.nodes[node].end = Some(End::Await(stage, effect));
         Ok(resume)
+    }
+
+    fn loop_expr(
+        &mut self,
+        label: Option<&'a syn::Label>,
+        condition: Option<&'a Expr>,
+        body: &'a Block,
+        env: Env,
+        node: NodeId,
+        dest: Dest,
+    ) -> syn::Result<()> {
+        let header = self.node();
+        let exit = self.node();
+        let result = match dest {
+            Dest::Next(_, None) => None,
+            _ => Some(self.temporary(body.span(), Kind::Value)),
+        };
+        self.nodes[node].end = Some(End::Next(header));
+        self.loops.push(LoopTarget {
+            label,
+            header,
+            exit,
+            result,
+            accepts_value: condition.is_none(),
+        });
+        let mut body_env = env;
+        let body_node = if let Some(condition) = condition {
+            let mut rewrite = JumpRewrite::new(&self.loops);
+            let lowered_condition = rewrite.selector(condition);
+            self.nodes[header].escapes = rewrite.finish()?;
+            let mut scan = Scan::new(self.cx);
+            let mut pats = Vec::new();
+            scan.scope(|scan| scan.condition_bindings(condition, &mut pats));
+            self.record(header, &body_env, scan)?;
+            let bindings = pats
+                .into_iter()
+                .map(|pat| self.bind(&mut body_env, pat, Kind::Value))
+                .collect();
+            let yes = self.node();
+            let no = self.node();
+            self.exit_unit(no, exit, result);
+            self.nodes[header].end = Some(End::If(
+                lowered_condition,
+                Edge { to: yes, bindings },
+                Edge {
+                    to: no,
+                    bindings: Vec::new(),
+                },
+            ));
+            yes
+        } else {
+            header
+        };
+        self.sequence(&body.stmts, body_env, body_node, Dest::Next(header, None))?;
+        self.loops.pop();
+        if let Some(id) = result {
+            self.nodes[exit].uses.insert(id, body.span());
+            if let Dest::Next(_, Some(out)) = dest {
+                self.bindings[out].kind = self.bindings[id].kind;
+            }
+            let ident = &self.bindings[id].ident;
+            self.deliver(exit, dest, quote!(#ident));
+        } else {
+            let Dest::Next(to, None) = dest else {
+                unreachable!("discarded loop destination")
+            };
+            self.nodes[exit].end = Some(End::Next(to));
+        }
+        Ok(())
+    }
+
+    fn splits(&self, expr: &Expr) -> bool {
+        contains_await(expr) || self.has_jump(expr)
+    }
+
+    fn has_jump(&self, expr: &Expr) -> bool {
+        JumpFinder::find(expr)
+    }
+
+    fn check_selector(&self, expr: &Expr) -> syn::Result<()> {
+        if self.has_jump(expr) {
+            return Err(Error::new_spanned(
+                expr,
+                "move the loop jump out of the selector",
+            ));
+        }
+        Ok(())
+    }
+
+    fn exit_unit(&mut self, node: NodeId, exit: NodeId, result: Option<BindingId>) {
+        if result.is_some() {
+            self.deliver(node, Dest::Next(exit, result), quote!(()));
+        } else {
+            self.nodes[node].end = Some(End::Next(exit));
+        }
+    }
+
+    fn sync_jump(&mut self, expr: &Expr, env: &Env, node: NodeId, dest: Dest) -> syn::Result<()> {
+        use syn::fold::Fold;
+
+        self.scan_expr(node, env, expr)?;
+        let mut rewrite = JumpRewrite::new(&self.loops);
+        let rewritten = rewrite.fold_expr(expr.clone());
+        self.nodes[node].escapes = rewrite.finish()?;
+        self.nodes[node].end = Some(match dest {
+            Dest::Next(to, result) => End::Eval(
+                Box::new(rewritten),
+                Edge {
+                    to,
+                    bindings: result.into_iter().collect(),
+                },
+            ),
+            _ => End::Finish(quote!(return #rewritten;)),
+        });
+        Ok(())
     }
 
     fn sequence(
@@ -944,6 +1130,9 @@ impl<'a> Graph<'a> {
             match stmt {
                 Stmt::Local(local) => {
                     if let Some(init) = &local.init {
+                        if let Some((_, diverge)) = &init.diverge {
+                            self.check_selector(diverge)?;
+                        }
                         if let Some((effect, checked)) = effect(&init.expr, self.cx)? {
                             let output = plain_ident(&local.pat).ok_or_else(|| {
                                 Error::new_spanned(
@@ -963,11 +1152,13 @@ impl<'a> Graph<'a> {
                             node = self.await_at(node, &before, effect, checked, Some(id))?;
                             continue;
                         }
-                        if structural(&init.expr) && contains_await(&init.expr) {
+                        if (structural(&init.expr) && contains_await(&init.expr))
+                            || self.has_jump(&init.expr)
+                        {
                             if init.diverge.is_some() || !local.attrs.is_empty() {
                                 return Err(Error::new_spanned(
                                     local,
-                                    "a suspending branch binding cannot have attributes or a let-else clause",
+                                    "a split binding cannot have attributes or a let-else clause",
                                 ));
                             }
                             let join = self.node();
@@ -1040,14 +1231,14 @@ impl<'a> Graph<'a> {
                     return self.expr(expr, env, node, dest);
                 }
                 Stmt::Expr(expr, _) if matches!(ungroup(expr), Expr::Return(_)) => {
-                    if contains_await(expr) {
+                    if self.splits(expr) {
                         return self.expr(expr, env, node, Dest::Return);
                     }
                     self.scan_expr(node, &env, expr)?;
                     self.nodes[node].end = Some(End::Finish(quote!(#expr;)));
                     return Ok(());
                 }
-                Stmt::Expr(expr, _) if contains_await(expr) => {
+                Stmt::Expr(expr, _) if self.splits(expr) => {
                     let next = self.node();
                     self.expr(expr, env.clone(), node, Dest::Next(next, None))?;
                     node = next;
@@ -1065,7 +1256,9 @@ impl<'a> Graph<'a> {
     }
 
     fn expr(&mut self, expr: &'a Expr, env: Env, node: NodeId, dest: Dest) -> syn::Result<()> {
-        if !contains_await(expr) {
+        let suspends = contains_await(expr);
+        let jumps = self.has_jump(expr);
+        if !suspends && !jumps {
             self.scan_expr(node, &env, expr)?;
             let returns = match ungroup(expr) {
                 Expr::Return(_) => true,
@@ -1107,18 +1300,68 @@ impl<'a> Graph<'a> {
             return Ok(());
         }
         match ungroup(expr) {
+            Expr::Loop(expr) if expr.attrs.is_empty() => {
+                self.loop_expr(expr.label.as_ref(), None, &expr.body, env, node, dest)
+            }
+            Expr::While(expr) => {
+                if contains_await(&expr.cond) {
+                    return Err(Error::new_spanned(
+                        &expr.cond,
+                        "a while condition cannot suspend",
+                    ));
+                }
+                if !expr.attrs.is_empty() {
+                    return Err(Error::new_spanned(
+                        expr,
+                        "a split while cannot have attributes",
+                    ));
+                }
+                self.loop_expr(
+                    expr.label.as_ref(),
+                    Some(&expr.cond),
+                    &expr.body,
+                    env,
+                    node,
+                    dest,
+                )
+            }
+            Expr::ForLoop(expr) if suspends => {
+                Err(Error::new_spanned(expr, "a for loop cannot suspend"))
+            }
+            Expr::Break(jump) if jump.attrs.is_empty() && jumps => {
+                let target = resolve_loop(&self.loops, jump.label.as_ref(), jump.span())?;
+                let dest = Dest::Next(target.exit, target.result);
+                if let Some(value) = &jump.expr {
+                    if !target.accepts_value {
+                        return Err(Error::new_spanned(jump, "only loop accepts a break value"));
+                    }
+                    if suspends {
+                        return self.scan_expr(node, &env, expr);
+                    }
+                    self.expr(value, env, node, dest)
+                } else {
+                    self.exit_unit(node, target.exit, target.result);
+                    Ok(())
+                }
+            }
+            Expr::Continue(jump) if jump.attrs.is_empty() && jumps => {
+                let target = resolve_loop(&self.loops, jump.label.as_ref(), jump.span())?;
+                self.nodes[node].end = Some(End::Next(target.header));
+                Ok(())
+            }
             Expr::Block(block) if block.label.is_none() && block.attrs.is_empty() => {
                 self.sequence(&block.block.stmts, env, node, dest)
             }
             Expr::Return(ret) if ret.attrs.is_empty() => self.expr(
-                ret.expr
-                    .as_deref()
-                    .expect("suspending return has an operand"),
+                ret.expr.as_deref().expect("split return has an operand"),
                 env,
                 node,
                 Dest::Return,
             ),
             Expr::If(branch) if branch.attrs.is_empty() => {
+                let mut rewrite = JumpRewrite::new(&self.loops);
+                let condition = rewrite.selector(&branch.cond);
+                self.nodes[node].escapes = rewrite.finish()?;
                 let mut scan = Scan::new(self.cx);
                 let mut pats = Vec::new();
                 scan.scope(|scan| scan.condition_bindings(&branch.cond, &mut pats));
@@ -1137,7 +1380,7 @@ impl<'a> Graph<'a> {
                     self.deliver(else_node, dest, quote!({}));
                 }
                 self.nodes[node].end = Some(End::If(
-                    &branch.cond,
+                    condition,
                     Edge {
                         to: then_node,
                         bindings,
@@ -1150,9 +1393,17 @@ impl<'a> Graph<'a> {
                 Ok(())
             }
             Expr::Match(branch) if branch.attrs.is_empty() => {
+                let mut rewrite = JumpRewrite::new(&self.loops);
+                let selector = rewrite.selector(&branch.expr);
+                let guards: Vec<_> = branch
+                    .arms
+                    .iter()
+                    .map(|arm| arm.guard.as_ref().map(|(_, guard)| rewrite.selector(guard)))
+                    .collect();
+                self.nodes[node].escapes = rewrite.finish()?;
                 self.scan_expr(node, &env, &branch.expr)?;
                 let mut arms = Vec::new();
-                for arm in &branch.arms {
+                for (arm, guard) in branch.arms.iter().zip(guards) {
                     let mut scan = Scan::new(self.cx);
                     let mut pats = Vec::new();
                     scan.scope(|scan| {
@@ -1169,13 +1420,294 @@ impl<'a> Graph<'a> {
                         .collect();
                     let to = self.node();
                     self.expr(&arm.body, arm_env, to, dest)?;
-                    arms.push((arm, Edge { to, bindings }));
+                    arms.push((arm, guard, Edge { to, bindings }));
                 }
-                self.nodes[node].end = Some(End::Match(&branch.expr, arms));
+                self.nodes[node].end = Some(End::Match(selector, arms));
                 Ok(())
             }
+            _ if jumps && !suspends => self.sync_jump(expr, &env, node, dest),
             _ => self.scan_expr(node, &env, expr),
         }
+    }
+}
+
+fn resolve_loop<'a>(
+    loops: &[LoopTarget<'a>],
+    label: Option<&syn::Lifetime>,
+    span: Span,
+) -> syn::Result<LoopTarget<'a>> {
+    loops
+        .iter()
+        .rev()
+        .copied()
+        .find(|target| {
+            label.is_none_or(|label| {
+                target
+                    .label
+                    .is_some_and(|target| target.name.ident == label.ident)
+            })
+        })
+        .ok_or_else(|| Error::new(span, "jump has no matching loop target"))
+}
+
+fn dispatch_label() -> syn::Lifetime {
+    syn::Lifetime::new("'__yield_dispatch", Span::mixed_site())
+}
+
+struct Escapes {
+    label: syn::Lifetime,
+    ty: Ident,
+    arms: Vec<(Ident, Edge)>,
+}
+
+impl Escapes {
+    fn render(&self, bindings: &[Binding<'_>]) -> (TokenStream, Vec<(TokenStream, &Edge)>) {
+        let ty = &self.ty;
+        let mut generics = Vec::new();
+        let mut variants = Vec::new();
+        let mut arms = Vec::new();
+        for (variant, edge) in &self.arms {
+            if let Some(&id) = edge.bindings.first() {
+                let generic = Ident::new(&format!("T{}", generics.len()), Span::mixed_site());
+                let ident = &bindings[id].ident;
+                variants.push(quote!(#variant(#generic)));
+                arms.push((quote!(#ty::#variant(#ident)), edge));
+                generics.push(generic);
+            } else {
+                variants.push(quote!(#variant));
+                arms.push((quote!(#ty::#variant), edge));
+            }
+        }
+        let params = (!generics.is_empty()).then(|| quote!(<#(#generics),*>));
+        (quote!(enum #ty #params { #(#variants),* }), arms)
+    }
+}
+
+#[derive(Default)]
+struct JumpFinder<'a> {
+    native: Vec<(Option<&'a syn::Lifetime>, bool)>,
+    found: bool,
+}
+
+fn native_target<'a>(
+    mut targets: impl Iterator<Item = (Option<&'a syn::Lifetime>, bool)>,
+    label: Option<&syn::Lifetime>,
+) -> bool {
+    targets.any(|(name, is_loop)| {
+        label.map_or(is_loop, |label| {
+            name.is_some_and(|name| label.ident == name.ident)
+        })
+    })
+}
+
+impl<'a> JumpFinder<'a> {
+    fn find(expr: &'a Expr) -> bool {
+        let mut finder = Self::default();
+        finder.visit_expr(expr);
+        finder.found
+    }
+}
+
+impl<'a> Visit<'a> for JumpFinder<'a> {
+    fn visit_item(&mut self, _: &'a syn::Item) {}
+
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if self.found {
+            return;
+        }
+        let (label, is_loop, condition, block) = match expr {
+            Expr::Closure(_) | Expr::Async(_) | Expr::Const(_) => return,
+            Expr::Break(jump) => {
+                self.found = !native_target(self.native.iter().copied(), jump.label.as_ref());
+                if let Some(value) = &jump.expr {
+                    self.visit_expr(value);
+                }
+                return;
+            }
+            Expr::Continue(jump) => {
+                self.found = !native_target(self.native.iter().copied(), jump.label.as_ref());
+                return;
+            }
+            Expr::Loop(expr) => (&expr.label, true, None, &expr.body),
+            Expr::While(expr) => (&expr.label, true, Some(expr.cond.as_ref()), &expr.body),
+            Expr::ForLoop(expr) => {
+                self.visit_expr(&expr.expr);
+                (&expr.label, true, None, &expr.body)
+            }
+            Expr::Block(expr) => (&expr.label, false, None, &expr.block),
+            _ => return visit::visit_expr(self, expr),
+        };
+        self.native
+            .push((label.as_ref().map(|label| &label.name), is_loop));
+        if let Some(condition) = condition {
+            self.visit_expr(condition);
+        }
+        self.visit_block(block);
+        self.native.pop();
+    }
+}
+
+// A synchronous Rust fragment (notably a for loop) retains its own targets.
+// Jumps to graph targets leave through a hygienic block with a typed tag.
+struct JumpRewrite<'g, 'a> {
+    loops: &'g [LoopTarget<'a>],
+    native: Vec<(Option<syn::Lifetime>, bool)>,
+    label: syn::Lifetime,
+    ty: Ident,
+    arms: Vec<(Ident, Edge)>,
+    error: Option<Error>,
+}
+
+impl<'g, 'a> JumpRewrite<'g, 'a> {
+    fn new(loops: &'g [LoopTarget<'a>]) -> Self {
+        Self {
+            loops,
+            native: Vec::new(),
+            label: syn::Lifetime::new("'__yield_escape", Span::mixed_site()),
+            ty: Ident::new("__YieldEscape", Span::mixed_site()),
+            arms: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn selector<'e>(&mut self, expr: &'e Expr) -> Fragment<'e> {
+        if JumpFinder::find(expr) {
+            Fragment::Rewritten(Box::new(syn::fold::Fold::fold_expr(self, expr.clone())))
+        } else {
+            Fragment::Source(expr)
+        }
+    }
+
+    fn finish(self) -> syn::Result<Option<Escapes>> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        Ok((!self.arms.is_empty()).then_some(Escapes {
+            label: self.label,
+            ty: self.ty,
+            arms: self.arms,
+        }))
+    }
+
+    fn scope<T>(
+        &mut self,
+        label: Option<&syn::Label>,
+        is_loop: bool,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.native
+            .push((label.map(|label| label.name.clone()), is_loop));
+        let result = f(self);
+        self.native.pop();
+        result
+    }
+
+    fn escape(
+        &mut self,
+        expr: &Expr,
+        label: Option<&syn::Lifetime>,
+        value: Option<&Expr>,
+        is_break: bool,
+    ) -> Option<Expr> {
+        if native_target(
+            self.native
+                .iter()
+                .map(|(name, is_loop)| (name.as_ref(), *is_loop)),
+            label,
+        ) {
+            return None;
+        }
+        let target = match resolve_loop(self.loops, label, expr.span()) {
+            Ok(target) => target,
+            Err(error) => {
+                self.error.get_or_insert(error);
+                return None;
+            }
+        };
+        if value.is_some() && !target.accepts_value {
+            self.error
+                .get_or_insert_with(|| Error::new_spanned(expr, "only loop accepts a break value"));
+            return None;
+        }
+        let (to, result) = if is_break {
+            (target.exit, target.result)
+        } else {
+            (target.header, None)
+        };
+        let variant = Ident::new(&format!("Jump{}", self.arms.len()), Span::mixed_site());
+        self.arms.push((
+            variant.clone(),
+            Edge {
+                to,
+                bindings: result.into_iter().collect(),
+            },
+        ));
+        let ty = &self.ty;
+        let escape = &self.label;
+        Some(match (result, value) {
+            (Some(_), Some(value)) => syn::parse_quote!(break #escape #ty::#variant(#value)),
+            (Some(_), None) => syn::parse_quote!(break #escape #ty::#variant(())),
+            (None, Some(value)) => {
+                syn::parse_quote!({ let _ = #value; break #escape #ty::#variant })
+            }
+            (None, None) => syn::parse_quote!(break #escape #ty::#variant),
+        })
+    }
+}
+
+impl syn::fold::Fold for JumpRewrite<'_, '_> {
+    fn fold_expr(&mut self, expr: Expr) -> Expr {
+        let expr = syn::fold::fold_expr(self, expr);
+        match &expr {
+            Expr::Break(jump) => self
+                .escape(&expr, jump.label.as_ref(), jump.expr.as_deref(), true)
+                .unwrap_or(expr),
+            Expr::Continue(jump) => self
+                .escape(&expr, jump.label.as_ref(), None, false)
+                .unwrap_or(expr),
+            _ => expr,
+        }
+    }
+
+    fn fold_item(&mut self, item: syn::Item) -> syn::Item {
+        item
+    }
+    fn fold_expr_closure(&mut self, expr: syn::ExprClosure) -> syn::ExprClosure {
+        expr
+    }
+    fn fold_expr_async(&mut self, expr: syn::ExprAsync) -> syn::ExprAsync {
+        expr
+    }
+    fn fold_expr_const(&mut self, expr: syn::ExprConst) -> syn::ExprConst {
+        expr
+    }
+
+    fn fold_expr_loop(&mut self, mut expr: syn::ExprLoop) -> syn::ExprLoop {
+        expr.body = self.scope(expr.label.as_ref(), true, |this| this.fold_block(expr.body));
+        expr
+    }
+
+    fn fold_expr_while(&mut self, mut expr: syn::ExprWhile) -> syn::ExprWhile {
+        (expr.cond, expr.body) = self.scope(expr.label.as_ref(), true, |this| {
+            (
+                Box::new(this.fold_expr(*expr.cond)),
+                this.fold_block(expr.body),
+            )
+        });
+        expr
+    }
+
+    fn fold_expr_for_loop(&mut self, mut expr: syn::ExprForLoop) -> syn::ExprForLoop {
+        *expr.expr = self.fold_expr(*expr.expr);
+        expr.body = self.scope(expr.label.as_ref(), true, |this| this.fold_block(expr.body));
+        expr
+    }
+
+    fn fold_expr_block(&mut self, mut expr: syn::ExprBlock) -> syn::ExprBlock {
+        expr.block = self.scope(expr.label.as_ref(), false, |this| {
+            this.fold_block(expr.block)
+        });
+        expr
     }
 }
 
@@ -1192,19 +1724,39 @@ fn generated(role: &str, id: usize) -> Ident {
 }
 
 fn structural(expr: &Expr) -> bool {
-    matches!(ungroup(expr), Expr::Block(_) | Expr::If(_) | Expr::Match(_))
+    matches!(
+        ungroup(expr),
+        Expr::Block(_)
+            | Expr::If(_)
+            | Expr::Match(_)
+            | Expr::Loop(_)
+            | Expr::While(_)
+            | Expr::ForLoop(_)
+    )
+}
+
+fn find_await(walk: impl FnOnce(&mut AwaitFinder)) -> bool {
+    let mut find = AwaitFinder(false);
+    walk(&mut find);
+    find.0
+}
+
+struct AwaitFinder(bool);
+
+impl<'ast> Visit<'ast> for AwaitFinder {
+    fn visit_item(&mut self, _: &'ast syn::Item) {}
+
+    fn visit_expr_await(&mut self, _: &'ast syn::ExprAwait) {
+        self.0 = true;
+    }
 }
 
 fn contains_await(expr: &Expr) -> bool {
-    struct Find(bool);
-    impl<'ast> Visit<'ast> for Find {
-        fn visit_expr_await(&mut self, _: &'ast syn::ExprAwait) {
-            self.0 = true;
-        }
-    }
-    let mut find = Find(false);
-    find.visit_expr(expr);
-    find.0
+    find_await(|find| find.visit_expr(expr))
+}
+
+fn stmt_contains_await(stmt: &Stmt) -> bool {
+    find_await(|find| find.visit_stmt(stmt))
 }
 
 fn effect<'a>(expr: &'a Expr, cx: &str) -> syn::Result<Option<(Effect<'a>, bool)>> {
@@ -1243,7 +1795,7 @@ fn effect<'a>(expr: &'a Expr, cx: &str) -> syn::Result<Option<(Effect<'a>, bool)
                 "`cx.effect` requires exactly one operation argument",
             ));
         };
-        Effect::External(op)
+        Effect::External(Fragment::Source(op))
     } else {
         let mut args = call.args.iter();
         let (Some(callee), Some(receiver), Some(argv), None) =
@@ -1254,7 +1806,7 @@ fn effect<'a>(expr: &'a Expr, cx: &str) -> syn::Result<Option<(Effect<'a>, bool)
                 "`cx.call` requires exactly three arguments: callee, receiver, and args",
             ));
         };
-        Effect::Call([callee, receiver, argv])
+        Effect::Call([callee, receiver, argv].map(Fragment::Source))
     };
     if !awaited.attrs.is_empty() || !call.attrs.is_empty() {
         return Err(Error::new_spanned(
@@ -1339,7 +1891,6 @@ struct Scan<'a> {
     error: Option<Error>,
     scopes: Vec<HashSet<String>>,
     free: HashMap<String, Span>,
-    item_depth: usize,
 }
 
 impl<'a> Scan<'a> {
@@ -1350,7 +1901,6 @@ impl<'a> Scan<'a> {
             error: None,
             scopes: Vec::new(),
             free: HashMap::new(),
-            item_depth: 0,
         }
     }
 
@@ -1418,9 +1968,7 @@ impl<'a> Scan<'a> {
 
 impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_expr(&mut self, expr: &'ast Expr) {
-        if self.item_depth == 0
-            && let Some(ident) = value_path(expr)
-        {
+        if let Some(ident) = value_path(expr) {
             let name = name(ident);
             if name != self.cx && !self.scopes.iter().rev().any(|scope| scope.contains(&name)) {
                 self.free.entry(name).or_insert_with(|| ident.span());
@@ -1430,7 +1978,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_await(&mut self, expr: &'ast syn::ExprAwait) {
-        self.fail(Error::new(expr.span(), "await is only supported on CallCx effects in a binding, statement, or structural branch tail; conditions, guards, loops, and nested expressions cannot suspend"));
+        self.fail(Error::new(expr.span(), "await is only supported on CallCx effects in a binding, statement, or structural tail; conditions, guards, and nested expressions cannot suspend"));
     }
 
     fn visit_expr_async(&mut self, expr: &'ast syn::ExprAsync) {
@@ -1466,26 +2014,23 @@ impl<'ast> Visit<'ast> for Scan<'_> {
                 dot = matches!(&token, TokenTree::Punct(p) if p.as_char() == '.');
             }
         }
-        if self.item_depth == 0 {
-            self.deferred.get_or_insert_with(|| Error::new_spanned(mac, "macro calls are not supported after await; move this call to a synchronous helper"));
-            inspect(self, mac.tokens.clone());
-        }
+        self.deferred.get_or_insert_with(|| {
+            Error::new_spanned(
+                mac,
+                "macro calls are not supported after await; move this call to a synchronous helper",
+            )
+        });
+        inspect(self, mac.tokens.clone());
     }
 
     fn visit_pat_ident(&mut self, pat: &'ast PatIdent) {
-        if self.item_depth == 0
-            && let Err(error) = reject_cx(pat, self.cx)
-        {
+        if let Err(error) = reject_cx(pat, self.cx) {
             self.fail(error);
         }
         visit::visit_pat_ident(self, pat);
     }
 
-    fn visit_item(&mut self, item: &'ast syn::Item) {
-        self.item_depth += 1;
-        visit::visit_item(self, item);
-        self.item_depth -= 1;
-    }
+    fn visit_item(&mut self, _: &'ast syn::Item) {}
 
     fn visit_block(&mut self, block: &'ast Block) {
         self.scope(|scan| visit::visit_block(scan, block));
@@ -1507,6 +2052,13 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_while(&mut self, expr: &'ast syn::ExprWhile) {
+        if contains_await(&expr.cond) {
+            self.fail(Error::new_spanned(
+                &expr.cond,
+                "a while condition cannot suspend",
+            ));
+            return;
+        }
         self.scope(|scan| {
             scan.condition(&expr.cond);
             scan.visit_block(&expr.body);
@@ -1514,6 +2066,10 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+        if contains_await(&expr.expr) || expr.body.stmts.iter().any(stmt_contains_await) {
+            self.fail(Error::new_spanned(expr, "a for loop cannot suspend"));
+            return;
+        }
         self.visit_expr(&expr.expr);
         self.scope(|scan| {
             scan.bind(&expr.pat);
@@ -1549,8 +2105,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if self.item_depth == 0
-            && (call.method == "args" || call.method == "arg")
+        if (call.method == "args" || call.method == "arg")
             && is_cx(ungroup(&call.receiver), self.cx)
         {
             self.deferred.get_or_insert_with(|| {
@@ -1692,18 +2247,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_await_in_conditions_guards_loops_and_macro_tokens() {
-        let cases: [Block; 4] = [
+    fn rejects_await_in_conditions_guards_and_macro_tokens() {
+        let cases: [Block; 3] = [
             syn::parse_quote!({ if ctx.gc().await? { done() } else { done() } }),
             syn::parse_quote!({
                 match value() {
                     _ if ctx.gc().await? => done(),
                     _ => done(),
-                }
-            }),
-            syn::parse_quote!({
-                loop {
-                    ctx.gc().await;
                 }
             }),
             syn::parse_quote!({
@@ -1713,6 +2263,73 @@ mod tests {
         ];
         for block in cases {
             assert!(expand(block).unwrap_err().to_string().contains("await"));
+        }
+    }
+
+    #[test]
+    fn rejects_suspending_for_and_while_condition_at_the_source() {
+        for (source, expected, column) in [
+            (
+                "{ for x in items() { ctx.gc().await; } done() }",
+                "a for loop cannot suspend",
+                2,
+            ),
+            (
+                "{ while ctx.gc().await? {} done() }",
+                "a while condition cannot suspend",
+                8,
+            ),
+        ] {
+            let error = expand(syn::parse_str(source).unwrap()).unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(error.span().start().column, column);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_loop_jumps_and_outcomes_carried_by_backedges() {
+        for (block, expected) in [
+            (
+                syn::parse_quote!({
+                    loop {
+                        ctx.gc().await?;
+                        continue 'missing;
+                    }
+                }),
+                "no matching loop target",
+            ),
+            (
+                syn::parse_quote!({
+                    while ready() {
+                        ctx.gc().await?;
+                        break 1;
+                    }
+                    done()
+                }),
+                "only loop accepts a break value",
+            ),
+            (
+                syn::parse_quote!({
+                    let keep = ctx.gc().await;
+                    loop {
+                        consume(&keep);
+                        ctx.gc().await?;
+                    }
+                }),
+                "GuestOutcome cannot cross",
+            ),
+            (
+                syn::parse_quote!({
+                    loop {
+                        ctx.arg(0)?;
+                        ctx.gc().await?;
+                    }
+                }),
+                "named parameters",
+            ),
+        ] {
+            let error = expand(block).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 
@@ -1728,15 +2345,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_suspensions_and_continuation_constructs() {
-        let cases: [(Block, &str); 7] = [
-            (
-                syn::parse_quote!({
-                    while ready() {
-                        let value = ctx.call(a, b, c).await;
-                    }
-                }),
-                "loops",
-            ),
+        let cases: [(Block, &str); 6] = [
             (
                 syn::parse_quote!({
                     let value = other.call(a, b, c).await;

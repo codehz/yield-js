@@ -1,4 +1,4 @@
-//! Host task ABI exercised without relying on CPS macro lowering.
+//! Host task ABI and macro-lowered continuations exercised across VM restore.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use yield_vm::{
 struct TaskHost {
     bindings: Arc<Bindings>,
     labels: Arc<LabelService>,
+    errors: Option<Vec<JsValue>>,
 }
 
 impl TaskHost {
@@ -55,6 +56,7 @@ impl TaskHost {
         Self {
             bindings: Arc::new(bindings),
             labels,
+            errors: None,
         }
     }
 }
@@ -64,7 +66,10 @@ impl Host for TaskHost {
         Arc::clone(&self.bindings)
     }
     fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected error: {error}");
+        match &mut self.errors {
+            Some(errors) => errors.push(error),
+            None => panic!("unexpected error: {error}"),
+        }
     }
 }
 
@@ -259,6 +264,127 @@ mod branch {
         })
     }
 
+    #[function(name = "repeat")]
+    fn repeat(cx: &mut CallCx<'_>, cb: JsValue) -> JsResult<JsValue> {
+        cx.spawn(async move {
+            hit(cx, "repeat-prefix");
+            let mut previous = JsValue::undefined();
+            loop {
+                let next = cx
+                    .effect(Wait {
+                        label: "repeat".into(),
+                    })
+                    .await?;
+                let seen = std::mem::replace(&mut previous, next);
+                if !seen.is_undefined() {
+                    cx.call(cb.clone(), JsValue::undefined(), Vec::from([seen]))
+                        .await?;
+                }
+                if previous.as_string().is_some_and(|text| text == "stop") {
+                    break;
+                }
+            }
+            hit(cx, "repeat-exit");
+            Ok(())
+        })
+    }
+
+    #[function(name = "countWhile")]
+    async fn count_while(cx: &mut CallCx<'_>, limit: JsValue) -> JsResult<HostStep> {
+        let mut count = JsValue::number(0.0);
+        while {
+            hit(cx, "while-check");
+            cx.number(&count)? < cx.number(&limit)?
+        } {
+            cx.gc().await?;
+            count = JsValue::number(cx.number(&count)? + 1.0);
+        }
+        Ok(HostStep::Return(count))
+    }
+
+    #[function(name = "countWhileLet")]
+    async fn count_while_let(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        let mut value = JsValue::number(0.0);
+        let mut sum = JsValue::number(0.0);
+        while let Some(value) = next_match(cx, &mut value)? {
+            cx.gc().await?;
+            sum = JsValue::number(cx.number(&sum)? + cx.number(&value)?);
+        }
+        Ok(HostStep::Return(JsValue::number(
+            cx.number(&sum)? + cx.number(&value)?,
+        )))
+    }
+
+    fn next_match(cx: &mut CallCx<'_>, count: &mut JsValue) -> JsResult<Option<JsValue>> {
+        hit(cx, "while-let-check");
+        let next = cx.number(count)? + 1.0;
+        *count = JsValue::number(next);
+        Ok((next <= 2.0).then(|| JsValue::number(next * 10.0)))
+    }
+
+    #[function(name = "labeled")]
+    async fn labeled(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        let mut round = JsValue::number(0.0);
+        let result = 'outer: loop {
+            round = JsValue::number(cx.number(&round)? + 1.0);
+            'inner: loop {
+                if cx.number(&round)? == 1.0 {
+                    continue 'outer;
+                }
+                cx.gc().await?;
+                if cx.number(&round)? == 2.0 {
+                    break 'outer round;
+                }
+                break 'inner;
+            }
+            hit(cx, "after-inner");
+        };
+        Ok(HostStep::Return(result))
+    }
+
+    #[function(name = "nativeFor")]
+    async fn native_for(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        let result = 'outer: loop {
+            cx.gc().await?;
+            for index in 0..3 {
+                if index == 0 {
+                    continue;
+                }
+                hit(cx, "for-break-value");
+                break 'outer JsValue::number(f64::from(index));
+            }
+            hit(cx, "after-for");
+        };
+        Ok(HostStep::Return(result))
+    }
+
+    #[function(name = "selectorJump")]
+    async fn selector_jump(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        let mut count = JsValue::number(0.0);
+        'outer: while {
+            count = JsValue::number(cx.number(&count)? + 1.0);
+            if cx.number(&count)? == 1.0 {
+                continue 'outer;
+            }
+            cx.number(&count)? <= 3.0
+        } {
+            match cx.number(&count)? {
+                n if {
+                    if n == 3.0 {
+                        break 'outer;
+                    }
+                    true
+                } =>
+                {
+                    cx.gc().await?
+                }
+                _ => JsValue::undefined(),
+            };
+            hit(cx, "after-guard");
+        }
+        Ok(HostStep::Return(count))
+    }
+
     fn hit(cx: &CallCx<'_>, name: &str) {
         cx.service::<Arc<yield_poc::Counters>>("counters")
             .unwrap()
@@ -296,6 +422,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let mut host = TaskHost {
         bindings: Arc::new(bindings),
         labels,
+        errors: None,
     };
     let build = compile(
         r#"
@@ -389,4 +516,186 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(counters.count("one"), 1);
     assert_eq!(counters.count("other"), 0);
     assert_eq!(counters.count("tail"), 1);
+}
+
+fn branch_host() -> (TaskHost, Arc<yield_poc::Counters>) {
+    let labels = Arc::new(LabelService::default());
+    let counters = Arc::new(yield_poc::Counters::default());
+    let bindings = yield_vm::host_bindings! {
+        modules: [branch], classes: [], states: [], operations: [Wait],
+        services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],
+    }
+    .unwrap();
+    (
+        TaskHost {
+            bindings: Arc::new(bindings),
+            labels,
+            errors: None,
+        },
+        counters,
+    )
+}
+
+fn branch_build(source: &str, imports: &[&str]) -> yield_vm::Build {
+    compile(
+        source,
+        &CompileOptions {
+            imports: [(
+                "branch".into(),
+                imports.iter().copied().map(Into::into).collect(),
+            )]
+            .into(),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
+    let (mut host, counters) = branch_host();
+    let build = branch_build(
+        r#"
+        import { repeat } from 'branch';
+        export let observed = '';
+        function record(value) { observed += value + ';'; }
+        export function run() { return repeat(record); }
+    "#,
+        &["repeat"],
+    );
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let handle = vm.start(&mut host, "run", vec![]).unwrap();
+    let first = host.labels.token("wait:repeat").unwrap();
+    let first_snapshot = vm.snapshot(&[]).unwrap();
+    let [first_task] = first_snapshot.host_tasks.as_slice() else {
+        panic!("expected one task")
+    };
+    assert_eq!(Value::Number(first_task.id as f64), handle);
+    vm.complete_operation(first, Completion::Fulfilled(JsValue::string("first")))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(vm.get_export("observed").unwrap(), Value::String("".into()));
+    let second = host.labels.token("wait:repeat").unwrap();
+    let second_snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
+    let [second_task] = second_snapshot.host_tasks.as_slice() else {
+        panic!("expected one task")
+    };
+    assert_eq!(
+        (second_task.id, second_task.stage),
+        (first_task.id, first_task.stage)
+    );
+    assert_ne!(second_task.waiting_on, first_task.waiting_on);
+    assert!(matches!(
+        vm.complete_operation(first, Completion::Fulfilled(JsValue::undefined())),
+        Err(VmError::UnknownOperation(_))
+    ));
+
+    vm = Vm::restore(second_snapshot, build, &mut host).unwrap();
+    vm.start_recovered_operations().unwrap();
+    let recovered = host.labels.token("wait:repeat").unwrap();
+    assert!(matches!(
+        vm.complete_operation(second, Completion::Fulfilled(JsValue::undefined())),
+        Err(VmError::UnknownOperation(_))
+    ));
+    vm.complete_operation(recovered, Completion::Fulfilled(JsValue::string("second")))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.get_export("observed").unwrap(),
+        Value::String("first;".into())
+    );
+    let third = host.labels.token("wait:repeat").unwrap();
+    vm.complete_operation(third, Completion::Fulfilled(JsValue::string("stop")))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.get_export("observed").unwrap(),
+        Value::String("first;second;".into())
+    );
+    assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
+    assert!(host.labels.pending_labels().is_empty());
+    assert_eq!(counters.count("repeat-prefix"), 1);
+    assert_eq!(counters.count("repeat-exit"), 1);
+
+    host.errors = Some(Vec::new());
+    vm.start(&mut host, "run", vec![]).unwrap();
+    let token = host.labels.token("wait:repeat").unwrap();
+    vm.complete_operation(token, Completion::Rejected(JsValue::string("rejected")))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let errors = host.errors.unwrap();
+    let [error] = errors.as_slice() else {
+        panic!("expected one rejection")
+    };
+    assert!(error.as_string().is_some_and(|text| text == "rejected"));
+    assert!(host.labels.pending_labels().is_empty());
+    assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
+    assert_eq!(counters.count("repeat-exit"), 1);
+}
+
+#[test]
+fn while_evaluates_once_per_test_and_while_let_preserves_both_bindings() {
+    let (mut host, counters) = branch_host();
+    let build = branch_build(
+        r#"
+        import { countWhile, countWhileLet } from 'branch';
+        export function run(n) { return countWhile(n); }
+        export function runLet() { return countWhileLet(); }
+    "#,
+        &["countWhile", "countWhileLet"],
+    );
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![JsValue::number(0.0)])
+            .unwrap(),
+        Value::Number(0.0)
+    );
+    assert_eq!(counters.count("while-check"), 1);
+    assert_eq!(
+        vm.start(&mut host, "run", vec![JsValue::number(5.0)])
+            .unwrap(),
+        Value::Number(5.0)
+    );
+    assert_eq!(counters.count("while-check") - 1, 6);
+    assert_eq!(
+        vm.start(&mut host, "runLet", vec![]).unwrap(),
+        Value::Number(33.0)
+    );
+    assert_eq!(counters.count("while-let-check"), 3);
+}
+
+#[test]
+fn labeled_jumps_skip_the_tail_and_native_for_can_exit_the_graph_loop() {
+    let (mut host, counters) = branch_host();
+    let build = branch_build(
+        r#"
+        import { labeled, nativeFor, selectorJump, countWhile } from 'branch';
+        export function run() { return labeled(); }
+        export function fromFor() { return nativeFor(); }
+        export function selector() { return selectorJump(); }
+        export function many() { return countWhile(2048); }
+    "#,
+        &["labeled", "nativeFor", "selectorJump", "countWhile"],
+    );
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::Number(2.0)
+    );
+    assert_eq!(
+        vm.start(&mut host, "fromFor", vec![]).unwrap(),
+        Value::Number(1.0)
+    );
+    assert_eq!(counters.count("for-break-value"), 1);
+    assert_eq!(counters.count("after-for"), 0);
+    assert_eq!(counters.count("after-inner"), 0);
+    assert_eq!(
+        vm.start(&mut host, "selector", vec![]).unwrap(),
+        Value::Number(3.0)
+    );
+    assert_eq!(counters.count("after-guard"), 1);
+    assert_eq!(
+        vm.start(&mut host, "many", vec![]).unwrap(),
+        Value::Number(2048.0)
+    );
+    assert_eq!(counters.count("while-check"), 2049);
 }

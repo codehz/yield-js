@@ -242,6 +242,7 @@ impl CallCx {
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
 - 异步结果只能通过 operation 交付，或在 VM 空闲后由宿主以新的任务轮次投递。原生 timer、网络回调、UI 事件都属于后者。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
+- `loop`、`while` 和 `while let` 的循环体可使用受支持的 `await`；条件必须同步，`for` 不可挂起。回边不会主动让出执行权；后台循环再次到达同一个外部 `await` 时复用任务 ID 和恢复阶段，但登记新的 operation，必须用新的令牌投递。
 
 ## 7. 异步 operation
 

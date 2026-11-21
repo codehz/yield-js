@@ -11,7 +11,7 @@ use syn::{
     spanned::Spanned,
 };
 
-use super::cps;
+use super::state_machine;
 
 fn options(tokens: TokenStream, allowed: &[&str]) -> Result<HashMap<String, Meta>> {
     let mut options = HashMap::new();
@@ -141,8 +141,8 @@ fn lower_async(
         ));
     }
     let body = match class {
-        Some(class) => cps::lower_method(sig, block, class)?,
-        None => cps::lower(sig, block)?,
+        Some(class) => state_machine::lower_method(sig, block, class)?,
+        None => state_machine::lower(sig, block)?,
     };
     *block = syn::parse2(body)?;
     sig.asyncness = None;
@@ -204,7 +204,7 @@ fn lower_binding(
             "expected an async move block",
         ));
     }
-    let (body, stages) = cps::lower_spawn(sig, prefix, &background.block, class)?;
+    let (body, stages) = state_machine::lower_spawn(sig, prefix, &background.block, class)?;
     *block = syn::parse2(body)?;
     sig.output = syn::parse_quote!(-> ::yield_vm::JsResult<::yield_vm::HostStep>);
     Ok((call, Some(stages)))
