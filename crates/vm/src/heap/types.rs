@@ -45,6 +45,17 @@ pub enum PromiseState {
     Rejected(Value),
 }
 
+/// Reaction observation and host notification state, separate from settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionStatus {
+    Unobserved,
+    Handled,
+    PendingReport,
+    Reported,
+    PendingHandled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CombineKind {
@@ -67,6 +78,7 @@ pub struct CombineState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromiseObject {
     pub state: PromiseState,
+    pub rejection_status: RejectionStatus,
     pub reactions: Vec<ReactionJob>,
     /// Resolution has started (adoption or a fulfilled value) and must not
     /// start again. Distinct from [`PromiseState::Pending`]: a locked promise

@@ -10,7 +10,9 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::HostClassRecord;
-use crate::heap::{Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob};
+use crate::heap::{
+    Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob, RejectionStatus,
+};
 use crate::host::{Completion, Host};
 use crate::runtime::{
     ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, Invocation, Microtask,
@@ -157,6 +159,8 @@ pub struct Vm {
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) microtasks: VecDeque<Microtask>,
+    /// FIFO of rejected promises with a pending host notification.
+    pub(crate) pending_rejection_notifications: VecDeque<ObjectId>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) imports: Vec<ImportModule>,
     /// Class tag id to the VM-owned prototype object.
@@ -209,6 +213,7 @@ impl Vm {
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
             microtasks: VecDeque::new(),
+            pending_rejection_notifications: VecDeque::new(),
             globals: BTreeMap::new(),
             host_classes: Vec::new(),
             host_instances: BTreeMap::new(),
@@ -1008,6 +1013,34 @@ impl Vm {
                 } => self.run_queue_call(host, roots, function, args)?,
             }
         }
+        self.deliver_rejection_notifications(host)
+    }
+
+    fn deliver_rejection_notifications(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        while let Some(id) = self.pending_rejection_notifications.pop_front() {
+            let object = self.heap.promise_mut(id)?;
+            let reason = match (&object.state, object.rejection_status) {
+                (PromiseState::Rejected(reason), RejectionStatus::PendingReport) => {
+                    object.rejection_status = RejectionStatus::Reported;
+                    Some(reason.clone())
+                }
+                (PromiseState::Rejected(_), RejectionStatus::PendingHandled) => {
+                    object.rejection_status = RejectionStatus::Handled;
+                    None
+                }
+                _ => {
+                    return Err(VmError::InvalidState(format!(
+                        "invalid rejection notification for Promise {id}"
+                    )));
+                }
+            };
+            let promise = self.host_value(Value::object(id));
+            if let Some(reason) = reason {
+                host.unhandled_rejection(promise, self.host_value(reason));
+            } else {
+                host.rejection_handled(promise);
+            }
+        }
         Ok(())
     }
 
@@ -1211,6 +1244,12 @@ impl Vm {
                 )));
             }
             promise_object.state = settlement.to_state();
+            if matches!(settlement, Settlement::Rejected(_))
+                && promise_object.rejection_status == RejectionStatus::Unobserved
+            {
+                promise_object.rejection_status = RejectionStatus::PendingReport;
+                self.pending_rejection_notifications.push_back(promise);
+            }
             std::mem::take(&mut promise_object.reactions)
         };
         for job in reactions {
@@ -1222,12 +1261,29 @@ impl Vm {
     pub(crate) fn react(&mut self, promise: ObjectId, job: ReactionJob) -> Result<(), VmError> {
         let settlement = Settlement::from_state(&self.heap.promise(promise)?.state);
         match settlement {
-            None => {
-                self.heap.promise_mut(promise)?.reactions.push(job);
-                Ok(())
-            }
-            Some(settlement) => self.enqueue_job(job, settlement),
+            None => self.heap.promise_mut(promise)?.reactions.push(job),
+            Some(settlement) => self.enqueue_job(job, settlement)?,
         }
+        let status = &mut self.heap.promise_mut(promise)?.rejection_status;
+        match *status {
+            RejectionStatus::Unobserved => *status = RejectionStatus::Handled,
+            RejectionStatus::PendingReport => {
+                *status = RejectionStatus::Handled;
+                if let Some(index) = self
+                    .pending_rejection_notifications
+                    .iter()
+                    .rposition(|&id| id == promise)
+                {
+                    self.pending_rejection_notifications.remove(index);
+                }
+            }
+            RejectionStatus::Reported => {
+                *status = RejectionStatus::PendingHandled;
+                self.pending_rejection_notifications.push_back(promise);
+            }
+            RejectionStatus::Handled | RejectionStatus::PendingHandled => {}
+        }
+        Ok(())
     }
 
     pub(crate) fn enqueue_job(
@@ -1441,6 +1497,7 @@ impl Vm {
             next_host_task_id,
             recovered_operations,
             microtasks: VecDeque::new(),
+            pending_rejection_notifications: VecDeque::new(),
             globals,
             imports: Vec::new(),
             host_classes,

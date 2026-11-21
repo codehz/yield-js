@@ -8,9 +8,9 @@ use super::types::{
     IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
     MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OrderedProperty,
     OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
-    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION,
-    SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
+    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
+    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -167,6 +167,7 @@ impl Heap {
     pub(crate) fn alloc_promise(&mut self) -> ObjectId {
         self.alloc(Object::Promise(PromiseObject {
             state: PromiseState::Pending,
+            rejection_status: RejectionStatus::Unobserved,
             reactions: Vec::new(),
             locked: false,
             adopting: None,

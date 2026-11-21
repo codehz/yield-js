@@ -18,9 +18,7 @@
 
 ## 3. 能编过，但语义不完整
 
-| 语义点 | 现状 |
-| --- | --- |
-| `queueMicrotask` / Promise 拒绝 | `queueMicrotask` 回调抛出的异常通过 `Host::report_error` 交给宿主；未处理的 Promise 拒绝仍不跟踪 |
+当前未列出此类独立缺口；内建限制见下节。
 
 ## 4. 内建 API 的限制与缺项
 

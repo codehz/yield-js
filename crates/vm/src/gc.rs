@@ -206,6 +206,9 @@ impl Vm {
                 job.trace(&mut tracer)?;
             }
         }
+        for &promise in &self.pending_rejection_notifications {
+            tracer.mark_object(promise)?;
+        }
         for value in self.globals.values() {
             tracer.mark_value(value)?;
         }

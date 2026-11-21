@@ -16,7 +16,7 @@ pub use types::{
     ArrayIterationKind, ArrayObject, BoundObject, BoxedPrimitive, CollectionIteration,
     CollectionKind, CombineKind, CombineState, EnvironmentObject, FunctionObject, NativeObject,
     Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    Resolution, WeakKey,
+    RejectionStatus, Resolution, WeakKey,
 };
 pub(crate) use types::{
     Attributes, ClassElement, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,

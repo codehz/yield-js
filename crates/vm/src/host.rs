@@ -27,4 +27,12 @@ pub trait Host {
 
     /// Reports an uncaught microtask error. The host decides whether to log it.
     fn report_error(&mut self, error: JsValue);
+
+    /// Reports a rejection that still has no reaction at the microtask checkpoint.
+    /// This callback must not re-enter the VM.
+    fn unhandled_rejection(&mut self, _promise: JsValue, _reason: JsValue) {}
+
+    /// Reports the first observation of a previously reported rejection.
+    /// This callback must not re-enter the VM.
+    fn rejection_handled(&mut self, _promise: JsValue) {}
 }

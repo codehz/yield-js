@@ -87,8 +87,8 @@
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
-- `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
-- 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
+- `queueMicrotask` 回调抛出的异常通过独立的 `Host::report_error` 通道报告。微任务正常排空后，VM 按发生顺序调用 `Host::unhandled_rejection`，报告本轮仍无 reaction 的拒绝；之后第一次注册 reaction 会在下一次检查点调用 `Host::rejection_handled`。`.then()` 即使未提供拒绝回调也算观察，透传给子 Promise 的拒绝独立判定。快照格式 **53** 保存待交付队列及 Promise 的跟踪状态；恢复不立即交付，也不重报已交付通知。
+- 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、待交付的拒绝通知、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
 - 宿主可在 VM 调用之间、排空微任务后显式调用 `Vm::collect_garbage(&[roots])`。它原地回收不可达对象（包括环）及其旁表、宿主实例和续体，清除不可达普通 Symbol，只返回删除的堆对象数；不改变存活 ID，也不复用被回收的 ID。宿主每次须显式提供仍要使用但不由 VM 持有的本 VM `Value`；这不延长临时宿主绑定 `JsValue` 的有效期。GC 不执行微任务、脚本或宿主绑定回调，标记失败不清扫。与快照不同，GC 可丢弃不可达且未调用的决议能力。
 - 宿主绑定可选择通过 `CallCx::request_gc` 暴露同步 GC。VM 在当前 `CallCx` 结束后追踪活动帧、跨调用的 Rust 值、排队及正在派发的微任务和 `Host::gc_roots()`，随后回收并以删除的对象数恢复宿主绑定。活动收集不会排空或重排微任务，也不改变快照边界；追踪失败直接返回 VM 错误，不清扫或恢复宿主绑定。
 - 宿主绑定宏将 `call`、`gc` 和后台块内的 `effect` 降为状态机的挂起边。支持结构化 `if` / `match`、`loop`、`while` 和 `while let`，以及带标签的 `break` / `continue`；每个语法上的 `await` 固定占用一个恢复阶段，循环再次到达时复用该阶段。`await?` 将拒绝或 guest throw 沿当前宿主异常路径传播。只保存在等待边上存活的 guest 值，方法的 `This<T>` 从原接收者重建。绑定指纹包含持久阶段的类别、活槽布局和接收者类标签，不包含 Rust 函数指针或内部状态机节点号。

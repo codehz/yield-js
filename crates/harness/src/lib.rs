@@ -434,12 +434,19 @@ fn register_label<O: Operation>(
     service.register(format!("{}:{label}", O::NAME), token, restoring)
 }
 
+#[derive(Debug, PartialEq)]
+pub enum RejectionEvent {
+    Unhandled { promise: JsValue, reason: JsValue },
+    Handled { promise: JsValue },
+}
+
 pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
     clock: Arc<FakeClock>,
     errors: Vec<JsValue>,
+    rejection_events: Vec<RejectionEvent>,
     gc_roots: Vec<yield_vm::Value>,
     pub reject_native: bool,
 }
@@ -463,6 +470,7 @@ impl TestHost {
             labels,
             clock,
             errors: Vec::new(),
+            rejection_events: Vec::new(),
             gc_roots: Vec::new(),
             reject_native: false,
         }
@@ -474,6 +482,10 @@ impl TestHost {
 
     pub fn errors(&self) -> &[JsValue] {
         &self.errors
+    }
+
+    pub fn rejection_events(&self) -> &[RejectionEvent] {
+        &self.rejection_events
     }
 
     /// Replaces the values kept alive by guest-triggered GC. The values must
@@ -527,6 +539,16 @@ impl Host for TestHost {
 
     fn report_error(&mut self, error: JsValue) {
         self.errors.push(error);
+    }
+
+    fn unhandled_rejection(&mut self, promise: JsValue, reason: JsValue) {
+        self.rejection_events
+            .push(RejectionEvent::Unhandled { promise, reason });
+    }
+
+    fn rejection_handled(&mut self, promise: JsValue) {
+        self.rejection_events
+            .push(RejectionEvent::Handled { promise });
     }
 }
 

@@ -12,8 +12,8 @@ use crate::heap::{
     ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
     NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind,
     PromiseCallback, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
-    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
-    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
+    RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
+    SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::host::Host;
 use crate::regexp::compile_pattern;
@@ -54,6 +54,11 @@ impl Vm {
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
+        snapshot.pending_rejection_notifications = self
+            .pending_rejection_notifications
+            .iter()
+            .copied()
+            .collect();
         for (class, tag) in self.bindings.classes() {
             snapshot
                 .class_prototypes
@@ -269,6 +274,7 @@ impl Vm {
             }
             heap.insert_restore(id, object)?;
         }
+        validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
         heap.combines = snapshot.combines.clone();
         validate_symbol_tables(&snapshot)?;
         heap.restore_symbols(
@@ -321,6 +327,8 @@ impl Vm {
                 script_env,
             },
         );
+        // Recovery can append new notifications; the captured ones must stay first.
+        vm.pending_rejection_notifications = snapshot.pending_rejection_notifications.into();
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         validate_native_import_objects(&vm.heap, &vm.imports)?;
         check_heap_edges(&vm.build, &vm.heap)?;
@@ -1521,6 +1529,50 @@ fn validate_continuation(
             "continuation {} must appear exactly once in Promise {} reactions, found {occurrences}",
             record.id, record.waiting_on
         )));
+    }
+    Ok(())
+}
+
+fn validate_rejection_notifications(heap: &Heap, queue: &[ObjectId]) -> Result<(), VmError> {
+    use RejectionStatus::{Handled, PendingHandled, PendingReport, Reported, Unobserved};
+
+    let mut queued = BTreeSet::new();
+    for &id in queue {
+        if !queued.insert(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate pending rejection notification for Promise {id}"
+            )));
+        }
+        if !matches!(heap.get(id), Ok(Object::Promise(promise))
+            if matches!(promise.state, PromiseState::Rejected(_))
+                && matches!(promise.rejection_status, PendingReport | PendingHandled))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "pending rejection notification {id} must reference a rejected Promise with a pending notification"
+            )));
+        }
+    }
+
+    for (id, object) in heap.iter() {
+        let Object::Promise(promise) = object else {
+            continue;
+        };
+        let valid = match promise.rejection_status {
+            PendingReport | PendingHandled => queued.contains(&id),
+            Reported => matches!(promise.state, PromiseState::Rejected(_)),
+            Unobserved => match promise.state {
+                PromiseState::Pending => promise.reactions.is_empty(),
+                PromiseState::Fulfilled(_) => true,
+                PromiseState::Rejected(_) => false,
+            },
+            Handled => true,
+        };
+        if !valid {
+            return Err(VmError::InvalidSnapshot(format!(
+                "Promise {id} has inconsistent rejection status {:?}",
+                promise.rejection_status
+            )));
+        }
     }
     Ok(())
 }

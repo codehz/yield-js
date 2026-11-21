@@ -1,9 +1,9 @@
 //! Promise reactions and combination state survive suspension and restore.
 
-use super::support::{RUN, Suspended};
-use yield_harness::{TestHost, build};
+use super::support::{RUN, Suspended, json_round_trip};
+use yield_harness::{RejectionEvent, TestHost, build};
 use yield_vm::heap::PromiseCallback;
-use yield_vm::{Completion, JsValue, Object, PromiseState, Value, Vm, VmError};
+use yield_vm::{Completion, JsValue, Object, ObjectId, PromiseState, Value, ValueRef, Vm, VmError};
 
 #[test]
 fn script_reaction_survives_restore_and_runs_on_fulfill() {
@@ -165,4 +165,218 @@ fn restore_rejects_a_non_callable_combine_capability() {
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("capability is not callable"))
     );
+}
+
+fn object_id(value: &Value) -> ObjectId {
+    let ValueRef::Object(id) = value.view() else {
+        panic!("expected an object, got {value:?}");
+    };
+    id
+}
+
+fn assert_host_identity(handle: &JsValue, value: &Value) {
+    // JsValue keeps the raw object ID private but displays it for diagnostics.
+    assert_eq!(handle.to_string(), format!("object({})", object_id(value)));
+}
+
+#[test]
+fn passthrough_reports_only_the_child_and_late_catches_notify_once() {
+    let source = r#"
+let child;
+export function run() {
+  child = Promise.reject('pass through').then();
+  return child;
+}
+export function catchTwice() {
+  child.catch(() => {});
+  child.catch(() => {});
+}
+"#;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let child = vm.start(&mut host, "run", vec![]).expect("start");
+    assert!(host.rejection_events().is_empty());
+    vm.run_until_idle(&mut host).expect("first checkpoint");
+    let [RejectionEvent::Unhandled { promise, reason }] = host.rejection_events() else {
+        panic!(
+            "expected only the child rejection: {:?}",
+            host.rejection_events()
+        );
+    };
+    assert_host_identity(promise, &child);
+    assert_eq!(reason, &JsValue::string("pass through"));
+    assert!(host.errors().is_empty());
+
+    for _ in 0..2 {
+        vm.run_until_idle(&mut host).expect("empty checkpoint");
+        assert_eq!(host.rejection_events().len(), 1);
+    }
+
+    vm.start(&mut host, "catchTwice", vec![])
+        .expect("attach catches");
+    assert_eq!(host.rejection_events().len(), 1);
+    vm.run_until_idle(&mut host).expect("late catch checkpoint");
+    vm.run_until_idle(&mut host).expect("empty checkpoint");
+    let [
+        RejectionEvent::Unhandled { .. },
+        RejectionEvent::Handled { promise },
+    ] = host.rejection_events()
+    else {
+        panic!(
+            "expected exactly one handled event: {:?}",
+            host.rejection_events()
+        );
+    };
+    assert_host_identity(promise, &child);
+}
+
+#[test]
+fn catch_attached_in_a_microtask_suppresses_rejection_notification() {
+    let source = r#"
+export function run() {
+  const promise = Promise.reject('caught');
+  queueMicrotask(() => { promise.catch(() => {}); });
+  queueMicrotask(() => { throw 'callback error'; });
+}
+"#;
+    let s = Suspended::start(source, vec![]);
+    assert!(s.host.rejection_events().is_empty());
+    assert_eq!(s.host.errors(), &[JsValue::string("callback error")]);
+}
+
+#[test]
+fn rejection_queue_survives_gc_and_json_restore_without_replaying_reports() {
+    let source = r#"
+export function enqueue() { return Promise.reject({}); }
+export function catchReported() { reported.catch(() => {}); }
+let reported;
+export function run() {
+  reported = Promise.reject('already reported');
+  return reported;
+}
+"#;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let reported = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host)
+        .expect("report the first rejection");
+    let [RejectionEvent::Unhandled { promise, reason }] = host.rejection_events() else {
+        panic!("expected the initial report: {:?}", host.rejection_events());
+    };
+    assert_host_identity(promise, &reported);
+    assert_eq!(reason, &JsValue::string("already reported"));
+
+    let queued = [(); 2].map(|()| {
+        let promise = vm.start(&mut host, "enqueue", vec![]).expect("enqueue");
+        let PromiseState::Rejected(reason) = vm.promise_state(&promise).expect("read state") else {
+            panic!("expected a rejected promise");
+        };
+        (promise, reason)
+    });
+    assert_ne!(queued[0].1, queued[1].1);
+    assert_eq!(host.rejection_events().len(), 1);
+
+    // Neither queued promise nor either reason is otherwise rooted in the VM.
+    vm.collect_garbage(&[])
+        .expect("collect with a pending queue");
+    let snapshot = json_round_trip(&vm.snapshot(&[]).expect("snapshot pending reports"));
+    assert_eq!(
+        snapshot.pending_rejection_notifications,
+        queued.each_ref().map(|(promise, _)| object_id(promise)),
+    );
+    let mut restored_host = TestHost::default();
+    let mut vm = Vm::restore(snapshot, vm.build().clone(), &mut restored_host).expect("restore");
+    assert!(restored_host.rejection_events().is_empty());
+    vm.run_until_idle(&mut restored_host)
+        .expect("first restored checkpoint");
+    assert_eq!(restored_host.rejection_events().len(), queued.len());
+    for (event, (expected_promise, expected_reason)) in
+        restored_host.rejection_events().iter().zip(&queued)
+    {
+        let RejectionEvent::Unhandled { promise, reason } = event else {
+            panic!("expected an unhandled rejection, got {event:?}");
+        };
+        assert_host_identity(promise, expected_promise);
+        assert_host_identity(reason, expected_reason);
+    }
+
+    vm.start(&mut restored_host, "catchReported", vec![])
+        .expect("attach late catch");
+    vm.run_until_idle(&mut restored_host)
+        .expect("late catch checkpoint");
+    assert_eq!(restored_host.rejection_events().len(), queued.len() + 1);
+    let RejectionEvent::Handled { promise } = &restored_host.rejection_events()[queued.len()]
+    else {
+        panic!("expected a handled notification for the already-reported promise");
+    };
+    assert_host_identity(promise, &reported);
+}
+
+#[test]
+fn restore_operation_rejection_notifies_only_at_the_next_checkpoint() {
+    let source = r#"
+import { rejectAfterRestore } from 'test';
+export function run() { return rejectAfterRestore('a'); }
+"#;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let promise = vm.start(&mut host, "run", vec![]).expect("start operation");
+    vm.run_until_idle(&mut host).expect("drain before snapshot");
+    assert_eq!(
+        vm.promise_state(&promise).expect("read state"),
+        PromiseState::Pending
+    );
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&promise))
+        .expect("snapshot operation");
+    let mut restored_host = TestHost::default();
+    let mut vm = Vm::restore(snapshot, vm.build().clone(), &mut restored_host).expect("restore");
+    vm.start_recovered_operations()
+        .expect("start recovered operations");
+    assert!(restored_host.rejection_events().is_empty());
+    vm.run_until_idle(&mut restored_host)
+        .expect("first restored checkpoint");
+    let [
+        RejectionEvent::Unhandled {
+            promise: notified,
+            reason,
+        },
+    ] = restored_host.rejection_events()
+    else {
+        panic!(
+            "expected the recovery rejection: {:?}",
+            restored_host.rejection_events()
+        );
+    };
+    assert_host_identity(notified, &promise);
+    assert_eq!(reason, &JsValue::string("reject rejected during restore"));
+    assert!(restored_host.errors().is_empty());
+}
+
+#[test]
+fn restore_rejects_duplicate_omitted_and_dangling_pending_notification_ids() {
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(
+        build("export function run() { return Promise.reject('pending report'); }"),
+        &mut host,
+    )
+    .expect("create VM");
+    let promise = vm.start(&mut host, "run", vec![]).expect("reject");
+    let id = object_id(&promise);
+
+    for corruption in ["duplicate ID", "omitted ID", "dangling ID"] {
+        let mut snapshot = vm.snapshot(&[]).expect("capture queued rejection");
+        assert_eq!(snapshot.pending_rejection_notifications, [id]);
+        match corruption {
+            "duplicate ID" => snapshot.pending_rejection_notifications.push(id),
+            "omitted ID" => snapshot.pending_rejection_notifications.clear(),
+            "dangling ID" => snapshot.objects.retain(|record| record.id != id),
+            _ => unreachable!(),
+        }
+        let result = Vm::restore(snapshot, vm.build().clone(), &mut host);
+        assert!(
+            matches!(result, Err(VmError::InvalidSnapshot(_))),
+            "accepted {corruption}"
+        );
+    }
 }

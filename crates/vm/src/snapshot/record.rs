@@ -8,8 +8,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Promise combinators persist shared element callback state.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 52;
+// Promise rejection notifications persist across snapshots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 53;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -176,6 +176,8 @@ pub struct Snapshot {
     pub operations: Vec<PendingOperationRecord>,
     pub host_tasks: Vec<HostTaskRecord>,
     pub next_host_task_id: u64,
+    /// Promises awaiting rejection notifications, in delivery order.
+    pub pending_rejection_notifications: Vec<ObjectId>,
     #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
@@ -210,6 +212,7 @@ impl Snapshot {
             operations: Vec::new(),
             host_tasks: Vec::new(),
             next_host_task_id: 1,
+            pending_rejection_notifications: Vec::new(),
             imports: Vec::new(),
             class_prototypes: BTreeMap::new(),
             host_instances: Vec::new(),

@@ -1,11 +1,11 @@
 //! VM builtins: promises, microtasks, and object model methods.
 //!
 //! Script-visible `Error` and `TypeError` are objects, including VM-generated
-//! TypeErrors. The `AggregateError` rejection from `Promise.any` is a string.
+//! TypeErrors. `Promise.any` rejects with an `AggregateError` object.
 //!
 //! `queueMicrotask` enqueues a VM microtask. A throw from its callback has no
-//! result promise and is delivered through `Host::report_error`. Unhandled
-//! promise rejections are not tracked.
+//! result promise and is delivered through `Host::report_error`. Promise
+//! rejection notifications are delivered separately at the microtask checkpoint.
 
 use crate::heap::{Attributes, DescriptorUpdate};
 use crate::intrinsic::IntrinsicKey;
