@@ -2,7 +2,7 @@
 //! New results define own data properties, bypassing inherited setters.
 
 use crate::builtin::globals::Owner;
-use crate::builtin::{RootKind, RootSpec};
+use crate::builtin::{RootKind, RootSpec, define_builtin_data, link_constructor};
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object};
@@ -14,24 +14,35 @@ use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = u32::MAX as usize;
-macro_rules! array_operation {
-    ($slot:ident, $name:literal) => {
-        IntrinsicDef::call(
-            IntrinsicKey::new("Array", Slot::$slot, $name),
-            |vm, host, roots, args, receiver| {
-                vm.array_operation(host, roots, $name, receiver, args)
-            },
-        )
-    };
+
+#[yield_binding_macros::builtin_global(name = "Array", root = "array", kind = "constructor")]
+mod members {
+    static_calls! {
+        isArray | from | of as name => |vm, host, roots, args, receiver| {
+            vm.array_operation(host, roots, name, receiver, args)
+        };
+    }
+
+    prototype_calls! {
+        push | pop | shift | unshift | splice | slice | fill | map | filter | reduce | forEach
+            | some | every | flat | indexOf | lastIndexOf | includes | concat | find | findIndex
+            | flatMap as name => |vm, host, roots, args, receiver| {
+                vm.array_operation(host, roots, name, receiver, args)
+            };
+        join => |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args);
+        toString => |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver);
+    }
 }
 
 const ARRAY_CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Array", Slot::Global, "");
 const ARRAY_VALUES: IntrinsicKey = IntrinsicKey::new("Array", Slot::Prototype, "values");
+const ARRAY_ITERATOR_NEXT: IntrinsicKey =
+    IntrinsicKey::new("ArrayIterator", Slot::Prototype, "next");
 
 pub(crate) const OWNER: Owner = Owner::new(
-    "array",
+    members::ROOT,
     ARRAY_ROOTS,
-    &[ARRAY_INTRINSICS],
+    &[ARRAY_INTRINSICS, members::INTRINSICS],
     Some(|vm, identity| {
         vm.install_array(
             vm.builtins.get("array"),
@@ -72,45 +83,12 @@ pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
             vm.with_result_prototype(result, prototype)
         },
     ),
-    array_operation!(Static, "isArray"),
-    array_operation!(Static, "from"),
-    array_operation!(Static, "of"),
-    array_operation!(Prototype, "push"),
-    array_operation!(Prototype, "pop"),
-    array_operation!(Prototype, "shift"),
-    array_operation!(Prototype, "unshift"),
-    array_operation!(Prototype, "splice"),
-    array_operation!(Prototype, "slice"),
-    array_operation!(Prototype, "fill"),
-    array_operation!(Prototype, "map"),
-    array_operation!(Prototype, "filter"),
-    array_operation!(Prototype, "reduce"),
-    array_operation!(Prototype, "forEach"),
-    array_operation!(Prototype, "some"),
-    array_operation!(Prototype, "every"),
-    array_operation!(Prototype, "flat"),
-    array_operation!(Prototype, "indexOf"),
-    array_operation!(Prototype, "lastIndexOf"),
-    array_operation!(Prototype, "includes"),
-    array_operation!(Prototype, "concat"),
-    array_operation!(Prototype, "find"),
-    array_operation!(Prototype, "findIndex"),
-    array_operation!(Prototype, "flatMap"),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Array", Slot::Prototype, "join"),
-        |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args),
-    ),
-    IntrinsicDef::call(
-        IntrinsicKey::new("Array", Slot::Prototype, "toString"),
-        |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver),
-    ),
     IntrinsicDef::call(ARRAY_VALUES, |vm, _, _, _, receiver| {
         vm.array_values(receiver)
     }),
-    IntrinsicDef::call(
-        IntrinsicKey::new("ArrayIterator", Slot::Prototype, "next"),
-        |vm, host, roots, _, receiver| vm.array_iterator_next(host, roots, receiver),
-    ),
+    IntrinsicDef::call(ARRAY_ITERATOR_NEXT, |vm, host, roots, _, receiver| {
+        vm.array_iterator_next(host, roots, receiver)
+    }),
 ];
 
 type Completion<T> = Result<Result<T, Value>, VmError>;
@@ -161,55 +139,29 @@ impl Vm {
         iterator: ObjectId,
         identity: &Value,
     ) {
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("Array stores its prototype");
+        link_constructor(self, constructor, prototype);
+        self.heap.array_prototype = Some(prototype);
+        members::install_members(self, constructor, prototype);
+        // `values` is already rooted; both properties must point to that object.
+        define_builtin_data(
+            self,
+            prototype,
+            ARRAY_VALUES.member,
+            Value::Object(values),
+            Attributes::METHOD,
+        );
         self.heap
             .define_data(
                 prototype,
-                "constructor",
-                Value::Object(constructor),
+                PropertyKey::Symbol(ITERATOR_SYMBOL),
+                Value::Object(values),
                 Attributes::METHOD,
             )
-            .expect("Array.prototype stores its constructor");
-        self.heap.array_prototype = Some(prototype);
-        for def in ARRAY_INTRINSICS {
-            let target = match (def.key.owner, def.key.slot) {
-                ("Array", Slot::Global) => continue,
-                ("Array", Slot::Static) => constructor,
-                ("Array", Slot::Prototype) => prototype,
-                ("ArrayIterator", Slot::Prototype) => iterator,
-                _ => unreachable!("unexpected Array declaration: {:?}", def.key),
-            };
-            let id = if def.key == ARRAY_VALUES {
-                values
-            } else {
-                self.alloc_intrinsic(def.key)
-            };
-            self.heap
-                .define_data(
-                    target,
-                    def.key.member,
-                    Value::Object(id),
-                    Attributes::METHOD,
-                )
-                .expect("Array builtin method");
-            if def.key == ARRAY_VALUES {
-                self.heap
-                    .define_data(
-                        prototype,
-                        PropertyKey::Symbol(ITERATOR_SYMBOL),
-                        Value::Object(id),
-                        Attributes::METHOD,
-                    )
-                    .expect("Array iterator alias");
-            }
-        }
+            .expect("Array iterator alias");
+        let next = self.alloc_intrinsic(ARRAY_ITERATOR_NEXT);
+        self.heap
+            .define_data(iterator, "next", Value::Object(next), Attributes::METHOD)
+            .expect("Array iterator next");
         self.heap
             .define_data(
                 iterator,

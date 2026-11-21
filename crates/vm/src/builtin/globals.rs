@@ -56,12 +56,6 @@ macro_rules! builtin_globals {
     };
 }
 
-macro_rules! module {
-    ($module:ident $(, $extra:ident)?) => {
-        Global::Owner(Owner::new($module::ROOT, $module::ROOTS, &[$($module::$extra,)? $module::INTRINSICS], Some($module::install)))
-    };
-}
-
 // Foundational roots and non-global functions are not bytecode globals.
 const ITERATOR_IDENTITY: IntrinsicKey =
     IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "identity");
@@ -77,13 +71,13 @@ const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(
 )];
 
 builtin_globals! {
-    promise_members::NAME => module!(promise_members, GLOBAL),
+    promise_members::NAME => Global::Owner(promise_members::OWNER),
     "queueMicrotask" => Global::Owner(queue_family::OWNER),
     "Error" => Global::Owner(error_family::ERROR),
     "TypeError" => Global::Owner(error_family::TYPE_ERROR),
     "Symbol" => Global::Owner(symbol_family::OWNER),
-    reflect_namespace::NAME => module!(reflect_namespace),
-    object_members::NAME => module!(object_members, GLOBAL),
+    reflect_namespace::NAME => Global::Owner(reflect_namespace::OWNER),
+    object_members::NAME => Global::Owner(object_members::OWNER),
     "NaN" => Global::Number(f64::NAN),
     "Infinity" => Global::Number(f64::INFINITY),
     "Array" => Global::Owner(array::OWNER),
@@ -95,8 +89,8 @@ builtin_globals! {
     "URIError" => Global::Owner(error_family::URI_ERROR),
     "AggregateError" => Global::Owner(error_family::AGGREGATE_ERROR),
     number::members::NAME => Global::Owner(number::OWNER),
-    math::NAME => module!(math),
-    json::NAME => module!(json),
+    math::NAME => Global::Owner(math::OWNER),
+    json::NAME => Global::Owner(json::OWNER),
     "Map" => Global::Owner(collections::MAP_OWNER),
     "Set" => Global::Owner(collections::SET_OWNER),
     "WeakMap" => Global::Owner(collections::WEAK_MAP_OWNER),

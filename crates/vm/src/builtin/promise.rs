@@ -1,41 +1,31 @@
 #[yield_binding_macros::builtin_global(name = "Promise", root = "promise", kind = "constructor")]
 pub(crate) mod members {
+    use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
-    use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, install_getter};
+    use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data};
     use crate::heap::{Attributes, SPECIES_SYMBOL};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
-    use crate::value::{PropertyKey, Value};
+    use crate::value::Value;
     use crate::vm::Vm;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
-    const SPECIES: IntrinsicKey = IntrinsicKey::new(NAME, Slot::StaticSymbolGetter, "species");
     pub(crate) const THEN: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Prototype, "then");
-    pub(crate) const ROOTS: &[RootSpec] = &[
+    const ROOTS: &[RootSpec] = &[
         RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
             .fixed("promise.prototype"),
         RootSpec::new("promise.prototype", RootKind::Plain, OBJECT_PARENT),
     ];
-    pub(crate) const GLOBAL: &[IntrinsicDef] = &[
-        IntrinsicDef::constructor(
-            CONSTRUCTOR,
-            |vm, _, _, _, _| vm.throw_type_error("Promise constructor requires new"),
-            |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
-        ),
-        IntrinsicDef::call(SPECIES, |_, _, _, _, receiver| {
-            Ok(Invocation::Value(receiver.clone()))
-        }),
-    ];
+    const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
+        CONSTRUCTOR,
+        |vm, _, _, _, _| vm.throw_type_error("Promise constructor requires new"),
+        |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
+    )];
+    pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
 
-    pub(crate) fn install(vm: &mut Vm, _: &Value) {
+    fn install(vm: &mut Vm, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get("promise.prototype");
-        install_getter(
-            vm,
-            constructor,
-            PropertyKey::Symbol(SPECIES_SYMBOL),
-            SPECIES,
-        );
         install_members(vm, constructor, prototype);
         define_builtin_data(
             vm,
@@ -54,6 +44,9 @@ pub(crate) mod members {
     }
 
     static_calls! {
+        get symbol(SPECIES_SYMBOL) species => |_, _, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        };
         resolve | reject | all | allSettled | race | any as key => |vm, host, roots, args, receiver| {
             if !matches!(receiver, Value::Object(id) if *id == vm.builtins.get(ROOT)) {
                 return vm.throw_type_error("incompatible Promise receiver");

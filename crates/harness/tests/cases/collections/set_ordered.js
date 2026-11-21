@@ -18,6 +18,9 @@ export function run() {
   expect(s[Symbol.iterator]).toBe(s.values);
   expect(Set.prototype.constructor).toBe(Set);
   expect(Object.getPrototypeOf(Set.prototype)).toBe(Object.prototype);
+  const keys = Reflect.ownKeys(Set.prototype);
+  expect(keys.slice(0, -1).join(',')).toBe('constructor,add,has,delete,clear,size,forEach,values,keys,entries');
+  expect(keys[keys.length - 1]).toBe(Symbol.iterator);
   const e = s.entries();
   expect(e[Symbol.iterator]()).toBe(e);
   const zero = e.next().value;

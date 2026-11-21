@@ -6,7 +6,7 @@ use crate::builtin::regexp_runtime::RegExpMethod;
 use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_RANGEERROR_PROTOTYPE,
     ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind,
-    RootSpec,
+    RootSpec, link_constructor,
 };
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
@@ -157,8 +157,7 @@ pub(crate) const OWNER: Owner = Owner::new(
         let Value::Object(identity) = *identity else {
             unreachable!("iterator identity is a function")
         };
-        install(vm);
-        install_iterator_prototype(vm, identity);
+        install(vm, identity);
     }),
 );
 
@@ -186,15 +185,11 @@ pub(crate) const STRING_ROOTS: &[RootSpec] = &[
     ),
 ];
 
-fn install(vm: &mut Vm) {
-    vm.init_string_constructor(
-        vm.builtins.get(members::ROOT),
-        vm.builtins.get(ROOT_STRING_PROTOTYPE),
-        vm.builtins.get(ROOT_STRING_ITERATOR),
-    );
-}
-
-pub(crate) fn install_iterator_prototype(vm: &mut Vm, identity: ObjectId) {
+fn install(vm: &mut Vm, identity: ObjectId) {
+    let constructor = vm.builtins.get(members::ROOT);
+    let prototype = vm.builtins.get(ROOT_STRING_PROTOTYPE);
+    let iterator = vm.builtins.get(ROOT_STRING_ITERATOR);
+    vm.init_string_constructor(constructor, prototype, iterator);
     vm.init_string_iterator_prototype(vm.builtins.get(ROOT_STRING_ITERATOR_PROTOTYPE), identity);
 }
 
@@ -205,22 +200,7 @@ impl Vm {
         prototype: ObjectId,
         iterator: ObjectId,
     ) {
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("String stores its prototype");
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(constructor),
-                Attributes::METHOD,
-            )
-            .expect("String.prototype stores its constructor");
+        link_constructor(self, constructor, prototype);
         self.heap
             .define_data(
                 prototype,

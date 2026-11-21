@@ -1,5 +1,6 @@
 #[yield_binding_macros::builtin_global(name = "Object", root = "object", kind = "constructor")]
 pub(crate) mod members {
+    use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, link_constructor};
     use crate::heap::IntegrityLevel;
@@ -15,7 +16,7 @@ pub(crate) mod members {
         RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
             .fixed("object.prototype"),
     ];
-    pub(crate) const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
+    const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
         CONSTRUCTOR,
         |vm, _, _, args, _| vm.construct_object(&args),
         |vm, _, _, args, prototype| match prototype {
@@ -26,7 +27,9 @@ pub(crate) mod members {
         },
     )];
 
-    pub(crate) fn install(vm: &mut Vm, _: &Value) {
+    pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
+
+    fn install(vm: &mut Vm, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get("object.prototype");
         link_constructor(vm, constructor, prototype);

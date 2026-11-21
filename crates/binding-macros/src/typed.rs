@@ -6,6 +6,7 @@ use syn::{
     Attribute, Error, Expr, Fields, FnArg, GenericArgument, Ident, ImplItem, Item, ItemImpl,
     ItemMod, ItemStruct, Lit, LitInt, LitStr, Meta, Path, PathArguments, Result, ReturnType,
     Signature, Token, Type,
+    ext::IdentExt,
     parse::{ParseStream, Parser},
     punctuated::Punctuated,
     spanned::Spanned,
@@ -446,6 +447,8 @@ enum BuiltinMemberAction {
     Handler(TokenStream),
     Direct {
         binding: Option<Ident>,
+        getter: bool,
+        symbol: Option<Box<Expr>>,
         call: Box<Expr>,
     },
 }
@@ -457,13 +460,39 @@ struct BuiltinMember {
     action: BuiltinMemberAction,
 }
 
+// Entries are `name | name as key => handler;`, optionally prefixed with
+// `get` for an accessor and `symbol(SYMBOL_ID)` for a symbol property.
 fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMemberAction)>> {
     if input.is_empty() {
         return Err(input.error("expected at least one builtin member"));
     }
     let mut members = Vec::new();
     while !input.is_empty() {
-        let names = Punctuated::<Ident, Token![|]>::parse_separated_nonempty(input)?;
+        // Keep `get` and `symbol` available as ordinary method names.
+        let getter = input.peek(Ident::peek_any)
+            && input.peek2(Ident::peek_any)
+            && !input.peek2(Token![as])
+            && input.fork().call(Ident::parse_any)? == "get";
+        if getter {
+            input.call(Ident::parse_any)?;
+        }
+        let symbol = if input.peek(Ident::peek_any)
+            && input.peek2(syn::token::Paren)
+            && input.fork().call(Ident::parse_any)? == "symbol"
+        {
+            input.call(Ident::parse_any)?;
+            let contents;
+            syn::parenthesized!(contents in input);
+            let symbol: Expr = contents.parse()?;
+            if !contents.is_empty() {
+                return Err(contents.error("expected a single symbol expression"));
+            }
+            Some(Box::new(symbol))
+        } else {
+            None
+        };
+        let names =
+            Punctuated::<Ident, Token![|]>::parse_separated_nonempty_with(input, Ident::parse_any)?;
         let binding = if input.peek(Token![as]) {
             input.parse::<Token![as]>()?;
             Some(input.parse::<Ident>()?)
@@ -478,6 +507,8 @@ fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMem
                 LitStr::new(&plain_ident(&ident), ident.span()),
                 BuiltinMemberAction::Direct {
                     binding: binding.clone(),
+                    getter,
+                    symbol: symbol.clone(),
                     call: Box::new(call.clone()),
                 },
             ));
@@ -496,9 +527,17 @@ fn builtin_member_cfg(attrs: &[Attribute]) -> Vec<Attribute> {
 
 fn collect_builtin_members(items: &mut Vec<Item>, constructor: bool) -> Result<Vec<BuiltinMember>> {
     let mut keys = HashSet::new();
+    let mut symbols = HashSet::new();
     let mut members = Vec::new();
     let mut push = |name: LitStr, prototype, cfg: &[Attribute], action| {
-        if !keys.insert(name.value()) {
+        let symbol = match &action {
+            BuiltinMemberAction::Direct { symbol, .. } => symbol.as_deref(),
+            _ => None,
+        };
+        // Symbol members have both an intrinsic name and a property identity.
+        if !keys.insert((prototype, symbol.is_some(), name.value()))
+            || symbol.is_some_and(|id| !symbols.insert((prototype, quote!(#id).to_string())))
+        {
             return Err(Error::new_spanned(name, "duplicate builtin member name"));
         }
         members.push(BuiltinMember {
@@ -692,10 +731,24 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         } else {
             object.clone()
         };
-        let slot = if prototype {
-            quote!(Prototype)
-        } else {
-            quote!(Static)
+        let (getter, symbol) = match &action {
+            BuiltinMemberAction::Direct { getter, symbol, .. } => (*getter, symbol.as_deref()),
+            _ => (false, None),
+        };
+        let slot = match (prototype, symbol.is_some(), getter) {
+            (false, false, false) => quote!(Static),
+            (false, false, true) => quote!(StaticGetter),
+            (false, true, false) => quote!(StaticSymbol),
+            (false, true, true) => quote!(StaticSymbolGetter),
+            (true, false, false) => quote!(Prototype),
+            (true, false, true) => quote!(PrototypeGetter),
+            (true, true, false) => quote!(PrototypeSymbol),
+            (true, true, true) => quote!(PrototypeSymbolGetter),
+        };
+        let property = match symbol {
+            Some(symbol) => quote!(crate::value::PropertyKey::Symbol(#symbol)),
+            None if getter => quote!(crate::value::PropertyKey::from(#member)),
+            None => quote!(#member),
         };
         let key = quote!(crate::intrinsic::IntrinsicKey::new(NAME, crate::intrinsic::Slot::#slot, #member));
         let call = match action {
@@ -712,7 +765,9 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 continue;
             }
             BuiltinMemberAction::Handler(handler) => handler,
-            BuiltinMemberAction::Direct { binding, mut call } => {
+            BuiltinMemberAction::Direct {
+                binding, mut call, ..
+            } => {
                 if let Some(key) = binding {
                     let Expr::Closure(closure) = call.as_mut() else {
                         return Err(Error::new_spanned(
@@ -726,16 +781,23 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 quote!(#call)
             }
         };
-        install.push(quote! {
-            #(#cfg)*
-            {
-                let method = vm.alloc_intrinsic(#key);
-                vm.heap.define_data(
-                    #target,
-                    #member,
-                    crate::value::Value::Object(method),
-                    crate::heap::Attributes::METHOD,
-                ).expect("builtin stores methods");
+        install.push(if getter {
+            quote! {
+                #(#cfg)*
+                crate::builtin::install_getter(vm, #target, #property, #key);
+            }
+        } else {
+            quote! {
+                #(#cfg)*
+                {
+                    let method = vm.alloc_intrinsic(#key);
+                    vm.heap.define_data(
+                        #target,
+                        #property,
+                        crate::value::Value::Object(method),
+                        crate::heap::Attributes::METHOD,
+                    ).expect("builtin stores methods");
+                }
             }
         });
         descriptors.push(quote! {
@@ -745,7 +807,11 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     }
 
     items.push(syn::parse_quote!(pub(crate) const NAME: &str = #name;));
-    items.push(syn::parse_quote!(pub(crate) const ROOT: &str = #root;));
+    items.push(if constructor {
+        syn::parse_quote!(pub(crate) const ROOT: &str = #root;)
+    } else {
+        syn::parse_quote!(const ROOT: &str = #root;)
+    });
     if constructor {
         items.push(syn::parse_quote! {
             pub(crate) fn install_members(
@@ -758,19 +824,29 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         });
     } else {
         items.push(syn::parse_quote! {
-            pub(crate) const ROOTS: &[crate::builtins::RootSpec] = &[
+            const ROOTS: &[crate::builtins::RootSpec] = &[
                 crate::builtins::RootSpec::new(ROOT, crate::builtins::RootKind::Plain, Some("object.prototype")),
             ];
         });
         items.push(syn::parse_quote! {
-            pub(crate) fn install(vm: &mut crate::vm::Vm, _: &crate::value::Value) {
+            fn install(vm: &mut crate::vm::Vm, _: &crate::value::Value) {
                 let object = vm.builtins.get(ROOT);
                 #(#install)*
             }
         });
+        items.push(syn::parse_quote! {
+            pub(crate) const OWNER: crate::builtin::globals::Owner =
+                crate::builtin::globals::Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
+        });
     }
-    items.push(syn::parse_quote! {
-        pub(crate) const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
+    items.push(if constructor {
+        syn::parse_quote! {
+            pub(crate) const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
+        }
+    } else {
+        syn::parse_quote! {
+            const INTRINSICS: &[crate::intrinsic::IntrinsicDef] = &[#(#descriptors)*];
+        }
     });
     Ok(quote!(#module))
 }
@@ -1686,26 +1762,32 @@ mod tests {
 
     #[test]
     fn builtin_global_accepts_empty_namespace() {
-        builtin_global(
+        let expanded = builtin_global(
             quote!(name = "JSON", root = "json"),
             quote! { mod namespace {} },
         )
-        .expect("empty builtin namespace should expand");
+        .expect("empty builtin namespace should expand")
+        .to_string();
+        assert!(expanded.contains("pub (crate) const OWNER"));
+        assert!(expanded.contains("Owner :: new (ROOT , ROOTS , & [INTRINSICS] , Some (install))"));
     }
 
     #[test]
     fn builtin_global_validates_constructor_methods() {
         let args = quote!(name = "String", root = "string", kind = "constructor");
-        for (items, message) in [
-            (
-                quote! {
+        builtin_global(
+            args.clone(),
+            quote! {
+                mod members {
                     #[functions(shared = Static::Shared)]
                     fn call_static() {}
                     #[methods(shared = Method::Shared)]
                     fn call_method() {}
-                },
-                "duplicate builtin member name",
-            ),
+                }
+            },
+        )
+        .expect("static and prototype members may share a name");
+        for (items, message) in [
             (
                 quote! {
                     #[methods()]
@@ -1752,19 +1834,22 @@ mod tests {
     #[test]
     fn builtin_global_validates_direct_calls() {
         let constructor = quote!(name = "Example", root = "example", kind = "constructor");
-        diagnostic(
-            builtin_global(
-                constructor.clone(),
-                quote! {
-                    mod members {
-                        #[function(name = "shared")]
-                        fn shared() {}
-                        prototype_calls! { shared => example; }
-                    }
-                },
-            ),
-            "duplicate builtin member name",
-        );
+        for items in [
+            quote! {
+                #[function(name = "shared")]
+                fn shared() {}
+                static_calls! { get shared => example; }
+            },
+            quote! {
+                prototype_calls! { symbol(MATCH_SYMBOL) r#match => example; }
+                prototype_calls! { get symbol(MATCH_SYMBOL) other => example; }
+            },
+        ] {
+            diagnostic(
+                builtin_global(constructor.clone(), quote! { mod members { #items } }),
+                "duplicate builtin member name",
+            );
+        }
         diagnostic(
             builtin_global(
                 quote!(name = "Example", root = "example"),
@@ -1794,6 +1879,46 @@ mod tests {
             },
         )
         .expect("grouped builtin calls should expand");
+    }
+
+    #[test]
+    fn builtin_global_expands_getters_and_symbol_members() {
+        let expanded = builtin_global(
+            quote!(name = "String", root = "string", kind = "constructor"),
+            quote! {
+                mod members {
+                    static_calls! {
+                        match => call;
+                        get symbol(crate::heap::SPECIES_SYMBOL) species => species;
+                        get as key => |_, _, _, _, _| handler(key);
+                    }
+                    #[cfg(feature = "example")]
+                    prototype_calls! {
+                        r#match => call;
+                        symbol(MATCH_SYMBOL) r#match => symbol_call;
+                        get source | flags as key => |_, _, _, _, _| handler(key);
+                    }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        for expected in [
+            "Slot :: StaticSymbolGetter , \"species\"",
+            "Slot :: PrototypeSymbol , \"match\"",
+            "Slot :: Prototype , \"match\"",
+            "Slot :: PrototypeGetter , \"source\"",
+            "Slot :: PrototypeGetter , \"flags\"",
+            "Slot :: Static , \"get\"",
+            "install_getter (vm , constructor , crate :: value :: PropertyKey :: Symbol",
+            "install_getter (vm , prototype , crate :: value :: PropertyKey :: from",
+        ] {
+            assert!(
+                expanded.contains(expected),
+                "missing {expected}: {expanded}"
+            );
+        }
+        assert!(!expanded.contains("const OWNER"));
     }
 
     #[test]

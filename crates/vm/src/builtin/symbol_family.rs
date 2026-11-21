@@ -1,6 +1,4 @@
-use super::{
-    FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, install_getter, link_constructor,
-};
+use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
 use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::heap::{
@@ -8,72 +6,56 @@ use crate::heap::{
     REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
 };
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::value::{PropertyKey, Value};
+use crate::value::Value;
 use crate::vm::Vm;
 
-pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Symbol", Slot::Global, "");
-const DESCRIPTION: IntrinsicKey = IntrinsicKey::new("Symbol", Slot::PrototypeGetter, "description");
-const ROOT: &str = "symbol";
+pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(members::NAME, Slot::Global, "");
 const PROTOTYPE: &str = "symbol.prototype";
 
-macro_rules! symbol_methods {
-    ($($slot:ident $name:literal => $call:expr),* $(,)?) => {
-        const METHODS: &[IntrinsicDef] = &[$(IntrinsicDef::call(IntrinsicKey::new("Symbol", Slot::$slot, $name), $call)),*];
-    };
-}
+#[yield_binding_macros::builtin_global(name = "Symbol", root = "symbol", kind = "constructor")]
+mod members {
+    use crate::vm::Vm;
 
-symbol_methods! {
-    Prototype "valueOf" => |vm, _, _, _, receiver| vm.symbol_method(receiver, "valueOf"),
-    Prototype "toString" => |vm, _, _, _, receiver| vm.symbol_method(receiver, "toString"),
-    Static "for" => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args),
-    Static "keyFor" => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args),
+    prototype_calls! {
+        valueOf | toString as name => |vm, _, _, _, receiver| vm.symbol_method(receiver, name);
+    }
+
+    static_calls! {
+        r#for => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args);
+        keyFor => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args);
+    }
+
+    prototype_calls! {
+        get description => |vm, _, _, _, receiver| vm.symbol_method(receiver, "get description");
+    }
 }
 
 pub(crate) const OWNER: Owner = Owner::new(
-    ROOT,
+    members::ROOT,
     &[
-        RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT).fixed(PROTOTYPE),
+        RootSpec::new(
+            members::ROOT,
+            RootKind::Native(CONSTRUCTOR),
+            FUNCTION_PARENT,
+        )
+        .fixed(PROTOTYPE),
         RootSpec::new(PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
     ],
     &[
-        &[
-            IntrinsicDef::call(CONSTRUCTOR, |vm, host, roots, args, _| {
-                vm.symbol_constructor(host, roots, args)
-            }),
-            IntrinsicDef::call(DESCRIPTION, |vm, _, _, _, receiver| {
-                vm.symbol_method(receiver, "get description")
-            }),
-        ],
-        METHODS,
+        &[IntrinsicDef::call(
+            CONSTRUCTOR,
+            |vm, host, roots, args, _| vm.symbol_constructor(host, roots, args),
+        )],
+        members::INTRINSICS,
     ],
     Some(install),
 );
 
 fn install(vm: &mut Vm, _: &Value) {
-    let constructor = vm.builtins.get(ROOT);
+    let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
-    for def in METHODS {
-        let target = if def.key.slot == Slot::Static {
-            constructor
-        } else {
-            prototype
-        };
-        let method = vm.alloc_intrinsic(def.key);
-        define_builtin_data(
-            vm,
-            target,
-            def.key.member,
-            Value::Object(method),
-            Attributes::METHOD,
-        );
-    }
-    install_getter(
-        vm,
-        prototype,
-        PropertyKey::String("description".into()),
-        DESCRIPTION,
-    );
+    members::install_members(vm, constructor, prototype);
     for (name, id) in [
         ("iterator", ITERATOR_SYMBOL),
         ("toPrimitive", TO_PRIMITIVE_SYMBOL),

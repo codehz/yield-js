@@ -5,15 +5,16 @@ use std::fmt::Write as _;
 use crate::builtin::globals::Owner;
 use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, RootKind, RootSpec,
+    link_constructor,
 };
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
-use crate::heap::{Attributes, BoxedPrimitive, Object};
+use crate::heap::{BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, Value};
+use crate::value::Value;
 use crate::vm::Vm;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -84,7 +85,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     members::ROOT,
     NUMBER_ROOTS,
     &[NUMBER_INTRINSICS, members::INTRINSICS],
-    Some(|vm, _| install(vm)),
+    Some(install),
 );
 
 pub(crate) const NUMBER_ROOTS: &[RootSpec] = &[
@@ -102,34 +103,14 @@ pub(crate) const NUMBER_ROOTS: &[RootSpec] = &[
     ),
 ];
 
-fn install(vm: &mut Vm) {
-    vm.init_number_constructor(
-        vm.builtins.get(members::ROOT),
-        vm.builtins.get(ROOT_NUMBER_PROTOTYPE),
-    );
+fn install(vm: &mut Vm, _: &Value) {
+    let constructor = vm.builtins.get(members::ROOT);
+    let prototype = vm.builtins.get(ROOT_NUMBER_PROTOTYPE);
+    link_constructor(vm, constructor, prototype);
+    members::install_members(vm, constructor, prototype);
 }
 
 impl Vm {
-    fn init_number_constructor(&mut self, constructor: ObjectId, prototype: ObjectId) {
-        self.heap
-            .define_data(
-                constructor,
-                "prototype",
-                Value::Object(prototype),
-                Attributes::FIXED,
-            )
-            .expect("Number stores its prototype");
-        self.heap
-            .define_data(
-                prototype,
-                "constructor",
-                Value::Object(constructor),
-                Attributes::METHOD,
-            )
-            .expect("Number.prototype stores its constructor");
-        members::install_members(self, constructor, prototype);
-    }
-
     fn call_number(
         &mut self,
         host: &mut dyn Host,

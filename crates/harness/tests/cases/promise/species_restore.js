@@ -13,6 +13,7 @@ function Species(executor) {
 
 export async function run() {
   const key = Symbol.species;
+  const species = Object.getOwnPropertyDescriptor(Promise, key);
   const box = { [key]: Species };
   const source = (async () => await wait("species"))();
   source.constructor = box;
@@ -23,5 +24,10 @@ export async function run() {
   expect(await result).toBe(6);
   expect(await final).toBe(5);
   expect(key).toBe(Symbol.species);
+  expect(species.get).toBe(Object.getOwnPropertyDescriptor(Promise, key).get);
+  expect(Reflect.apply(species.get, Promise, [])).toBe(Promise);
+  expect(species.set).toBe(undefined);
+  expect(species.enumerable).toBe(false);
+  expect(species.configurable).toBe(true);
   expect(box[Symbol.species]).toBe(Species);
 }
