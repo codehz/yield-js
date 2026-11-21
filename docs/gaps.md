@@ -8,13 +8,13 @@
 
 `Value` 仍是 `Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。`RegExp` 实例与显式包装对象通过堆对象表示，不是新的 `Value` 变体。
 
-- `Symbol.asyncIterator` 作为保留 well-known Symbol 提供，但只有 async generator 原型实现它；没有 `for await…of`，也没有通用的同步转异步包装器（`AsyncFromSyncIterator`）或其它内建异步迭代器。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
+- `Symbol.asyncIterator` 作为保留 well-known Symbol 提供，由 async generator 与 `for await…of` 消费；`for await…of` 由编译器展开，同步回退不分配可反射的 `AsyncFromSyncIterator` 包装器（也没有其它内建异步迭代器），并且只对每轮的 `value` 做隐式 `await`。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
 
 ## 2. 合法输入的编译期限制
 
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
-- 同步生成器（含 `yield*` 同步委托）与 async generator（含异步 `yield*` 委托和同步回退）已支持；`for await…of` 仍在编译期拒绝，报带行列的 `unsupported syntax: for-await-of`。`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
+- 同步生成器（含 `yield*` 同步委托）与 async generator（含异步 `yield*` 委托和同步回退）已支持；`for await…of` 在 async 函数与 async generator 中支持，顶层 `for await…of` 仍按 top-level await 在编译期拒绝。`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整

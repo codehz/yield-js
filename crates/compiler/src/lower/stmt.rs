@@ -5,7 +5,7 @@ use oxc::ast::ast::*;
 use oxc::span::GetSpan;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
-use super::control::JumpTarget;
+use super::control::{CloseMode, JumpTarget};
 use super::{FunctionSource, Lowerer, for_each_binding_name, local_declaration};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
@@ -313,15 +313,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         statement: &'ast ForOfStatement<'ast>,
     ) -> Result<(), CompileError> {
         if statement.r#await {
-            return Err(unsupported(
-                self.source_text(),
-                statement.span,
-                if self.is_script {
-                    "top-level await"
-                } else {
-                    "for-await-of"
-                },
-            ));
+            return self.compile_for_await_of(statement);
         }
         self.env.enter_block();
         self.declare_iteration_bindings(&statement.left, "for-of")?;
@@ -346,10 +338,83 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let has_value = self.branch_false(done);
         let exhausted = self.jump();
         self.patch_jump(has_value, self.pc())?;
-        let loop_context = self.compile_iterator_body(iterator, step_pc, |this| {
-            this.assign_iteration_value(&statement.left, value)?;
-            this.compile_statement(&statement.body)
-        })?;
+        let loop_context =
+            self.compile_iterator_body(iterator, step_pc, CloseMode::Sync, |this| {
+                this.assign_iteration_value(&statement.left, value)?;
+                this.compile_statement(&statement.body)
+            })?;
+
+        let end = self.pc();
+        self.patch_jump(exhausted, end)?;
+        self.patch_loop(loop_context, end)?;
+        self.env.exit_block();
+        Ok(())
+    }
+
+    /// `for await…of`: the asynchronous iterator protocol, expanded inline.
+    ///
+    /// The head awaits every native step and falls back to `Symbol.iterator`
+    /// for a missing `[Symbol.asyncIterator]`, awaiting only each iteration's
+    /// `value` there. The cached `next`, the iterator, and the fallback flag are
+    /// ordinary live slots across suspension, so restore keeps them.
+    fn compile_for_await_of(
+        &mut self,
+        statement: &'ast ForOfStatement<'ast>,
+    ) -> Result<(), CompileError> {
+        if self.is_script {
+            return Err(unsupported(
+                self.source_text(),
+                statement.span,
+                "top-level await",
+            ));
+        }
+        if !self.is_async {
+            return Err(unsupported(
+                self.source_text(),
+                statement.span,
+                "for-await-of outside async function",
+            ));
+        }
+        self.env.enter_block();
+        self.declare_iteration_bindings(&statement.left, "for-await-of")?;
+
+        let iterable = self.compile_expression(&statement.right)?;
+        let (iterator, next, sync) = self.emit_async_iterator_setup(iterable)?;
+
+        let step_pc = self.pc();
+        let result = self.alloc_reg()?;
+        let async_step = self.branch_false(sync);
+        self.emit(Instr::IteratorCall {
+            dst: self.slot(result),
+            iterator: self.slot(iterator),
+            method: self.slot(next),
+            argument: None,
+        });
+        let joined = self.jump();
+        self.patch_jump(async_step, self.pc())?;
+        self.emit_async_method_call(result, next, None, iterator)?;
+        self.patch_jump(joined, self.pc())?;
+
+        let done = self.alloc_reg()?;
+        self.emit_member_read(done, result, "done")?;
+        let not_done = self.branch_false(done);
+        let exhausted = self.jump();
+        self.patch_jump(not_done, self.pc())?;
+        let value = self.alloc_reg()?;
+        self.emit_member_read(value, result, "value")?;
+        let native = self.branch_false(sync);
+        let awaited_value = self.emit_await(value)?;
+        self.emit(Instr::Move {
+            dst: self.slot(value),
+            src: self.slot(awaited_value),
+        });
+        self.patch_jump(native, self.pc())?;
+
+        let loop_context =
+            self.compile_iterator_body(iterator, step_pc, CloseMode::Async, |this| {
+                this.assign_iteration_value(&statement.left, value)?;
+                this.compile_statement(&statement.body)
+            })?;
 
         let end = self.pc();
         self.patch_jump(exhausted, end)?;

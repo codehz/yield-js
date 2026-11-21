@@ -33,6 +33,13 @@ impl Completion {
     }
 }
 
+/// Which iterator protocol a loop body closes with on abrupt exit.
+#[derive(Clone, Copy)]
+pub(super) enum CloseMode {
+    Sync,
+    Async,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum JumpTarget {
     LoopBreak(usize),
@@ -408,6 +415,112 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(next)
     }
 
+    /// Resolve the iterator of an asynchronous iteration.
+    ///
+    /// Returns `(iterator, next, sync)`. `sync` is `false` on the native path
+    /// and `true` on the `Symbol.iterator` fallback, and it stays an ordinary
+    /// live slot for the whole loop. The async method result is assimilated and
+    /// revalidated before `next` is read.
+    pub(super) fn emit_async_iterator_setup(
+        &mut self,
+        iterable: Reg,
+    ) -> Result<(Reg, Reg, Reg), CompileError> {
+        let iterator = self.alloc_reg()?;
+        let next = self.alloc_reg()?;
+        let sync = self.alloc_reg()?;
+        let symbol = self.alloc_reg()?;
+        let builtin = builtin_index("Symbol").ok_or_else(|| {
+            CompileError::new(
+                self.source_text(),
+                self.span,
+                "internal compiler error: missing Symbol builtin",
+            )
+        })?;
+        self.emit(Instr::GetBuiltin {
+            dst: self.slot(symbol),
+            builtin: builtin as u32,
+        });
+        let key = self.emit_constant(Constant::String("asyncIterator".into()))?;
+        let well_known = self.alloc_reg()?;
+        self.emit(Instr::GetMember {
+            dst: self.slot(well_known),
+            object: self.slot(symbol),
+            key: self.slot(key),
+        });
+        let method = self.alloc_reg()?;
+        self.emit(Instr::GetMember {
+            dst: self.slot(method),
+            object: self.slot(iterable),
+            key: self.slot(well_known),
+        });
+        let absent = self.emit_absent_branch(method)?;
+        let raw = self.alloc_reg()?;
+        self.emit(Instr::CallValue {
+            dst: self.slot(raw),
+            callee: self.slot(method),
+            args: CallArgs::Slots(Vec::new()),
+            receiver: Some(self.slot(iterable)),
+        });
+        let awaited = self.emit_await(raw)?;
+        self.emit(Instr::RequireObject {
+            src: self.slot(awaited),
+        });
+        self.emit(Instr::Move {
+            dst: self.slot(iterator),
+            src: self.slot(awaited),
+        });
+        self.emit_member_read(next, iterator, "next")?;
+        let native = self.emit_constant(Constant::Bool(false))?;
+        self.emit(Instr::Move {
+            dst: self.slot(sync),
+            src: self.slot(native),
+        });
+        let present = self.jump();
+        let fallback = self.pc();
+        for jump in absent {
+            self.patch_jump(jump, fallback)?;
+        }
+        self.emit(Instr::GetIterator {
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+            iterable: self.slot(iterable),
+        });
+        let fallback_flag = self.emit_constant(Constant::Bool(true))?;
+        self.emit(Instr::Move {
+            dst: self.slot(sync),
+            src: self.slot(fallback_flag),
+        });
+        let join = self.pc();
+        self.patch_jump(present, join)?;
+        Ok((iterator, next, sync))
+    }
+
+    /// Close an asynchronous iterator, discarding every close failure.
+    ///
+    /// A throwing `return` getter, a rejected `await`, and a non-object awaited
+    /// result all land on the instruction after the close, so the original
+    /// completion proceeds unchanged.
+    pub(super) fn emit_async_iterator_close(&mut self, iterator: Reg) -> Result<(), CompileError> {
+        let start = self.pc();
+        let method = self.alloc_reg()?;
+        self.emit_member_read(method, iterator, "return")?;
+        let absent = self.emit_absent_branch(method)?;
+        let closed = self.alloc_reg()?;
+        self.emit_async_method_call(closed, method, None, iterator)?;
+        let after = self.pc();
+        for jump in absent {
+            self.patch_jump(jump, after)?;
+        }
+        let ignored = self.alloc_reg()?;
+        self.control.push_handler(ExceptionHandler {
+            start_pc: start as u32,
+            end_pc: after as u32,
+            target_pc: after as u32,
+            dst: self.slot(ignored),
+        });
+        Ok(())
+    }
+
     /// Emit `yield*` as an explicit delegation loop and return the
     /// expression's value register.
     ///
@@ -424,88 +537,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     /// the outer throw or return when the delegate cannot handle them.
     pub(super) fn emit_yield_delegate(&mut self, iterable: Reg) -> Result<Reg, CompileError> {
         let is_async = self.is_async_generator();
-        let iterator = self.alloc_reg()?;
-        let next = self.alloc_reg()?;
-        let sync_flag = if is_async {
-            Some(self.alloc_reg()?)
+        let (iterator, next, sync_flag) = if is_async {
+            let (iterator, next, sync) = self.emit_async_iterator_setup(iterable)?;
+            (iterator, next, Some(sync))
         } else {
-            None
+            let iterator = self.alloc_reg()?;
+            let next = self.alloc_reg()?;
+            self.emit(Instr::GetIterator {
+                iterator: self.slot(iterator),
+                next: self.slot(next),
+                iterable: self.slot(iterable),
+            });
+            (iterator, next, None)
         };
-        let mut enter_loop = Vec::new();
-        if is_async {
-            let symbol = self.alloc_reg()?;
-            let builtin = builtin_index("Symbol").ok_or_else(|| {
-                CompileError::new(
-                    self.source_text(),
-                    self.span,
-                    "internal compiler error: missing Symbol builtin",
-                )
-            })?;
-            self.emit(Instr::GetBuiltin {
-                dst: self.slot(symbol),
-                builtin: builtin as u32,
-            });
-            let key = self.emit_constant(Constant::String("asyncIterator".into()))?;
-            let well_known = self.alloc_reg()?;
-            self.emit(Instr::GetMember {
-                dst: self.slot(well_known),
-                object: self.slot(symbol),
-                key: self.slot(key),
-            });
-            let method = self.alloc_reg()?;
-            self.emit(Instr::GetMember {
-                dst: self.slot(method),
-                object: self.slot(iterable),
-                key: self.slot(well_known),
-            });
-            let absent = self.emit_absent_branch(method)?;
-            let raw = self.alloc_reg()?;
-            self.emit(Instr::CallValue {
-                dst: self.slot(raw),
-                callee: self.slot(method),
-                args: CallArgs::Slots(Vec::new()),
-                receiver: Some(self.slot(iterable)),
-            });
-            let awaited = self.emit_await(raw)?;
-            self.emit(Instr::RequireObject {
-                src: self.slot(awaited),
-            });
-            self.emit(Instr::Move {
-                dst: self.slot(iterator),
-                src: self.slot(awaited),
-            });
-            self.emit_member_read(next, iterator, "next")?;
-            let flag = sync_flag.expect("async delegate flag");
-            let native = self.emit_constant(Constant::Bool(false))?;
-            self.emit(Instr::Move {
-                dst: self.slot(flag),
-                src: self.slot(native),
-            });
-            enter_loop.push(self.jump());
-            let fallback = self.pc();
-            for jump in absent {
-                self.patch_jump(jump, fallback)?;
-            }
-        }
-        self.emit(Instr::GetIterator {
-            iterator: self.slot(iterator),
-            next: self.slot(next),
-            iterable: self.slot(iterable),
-        });
-        if let Some(flag) = sync_flag {
-            let sync = self.emit_constant(Constant::Bool(true))?;
-            self.emit(Instr::Move {
-                dst: self.slot(flag),
-                src: self.slot(sync),
-            });
-        }
         // Also the suspension's next destination, so a consumer's next value
         // lands exactly where the delegate step reads it. Every path into the
         // loop, including the native async prologue, initializes it first.
-        for jump in enter_loop {
-            let sent_init = self.pc();
-            self.patch_jump(jump, sent_init)?;
-        }
         let sent = self.alloc_reg()?;
         self.emit(Instr::Undefined {
             dst: self.slot(sent),
@@ -698,7 +745,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     /// Call one iterator method, assimilate its result, and revalidate the
     /// object the asynchronous iterator protocol requires.
-    fn emit_async_method_call(
+    pub(super) fn emit_async_method_call(
         &mut self,
         dst: Reg,
         method: Reg,
@@ -727,7 +774,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     /// Read a fixed own-or-inherited property from `object`.
-    fn emit_member_read(&mut self, dst: Reg, object: Reg, name: &str) -> Result<(), CompileError> {
+    pub(super) fn emit_member_read(
+        &mut self,
+        dst: Reg,
+        object: Reg,
+        name: &str,
+    ) -> Result<(), CompileError> {
         let key = self.emit_constant(Constant::String(name.into()))?;
         self.emit(Instr::GetMember {
             dst: self.slot(dst),
@@ -809,6 +861,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         iterator: Reg,
         step_pc: usize,
+        close: CloseMode,
         body: impl FnOnce(&mut Self) -> Result<(), CompileError>,
     ) -> Result<Loop, CompileError> {
         let exception = self.alloc_reg()?;
@@ -820,10 +873,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.jump_to(step_pc);
 
         let throw_pc = self.pc();
-        self.emit(Instr::IteratorClose {
-            iterator: self.slot(iterator),
-            preserve_throw: true,
-        });
+        self.emit_iterator_close(iterator, close, true)?;
         self.emit(Instr::Throw {
             src: self.slot(exception),
         });
@@ -841,12 +891,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for &jump in &context.entry_jumps {
             self.patch_jump(jump, close_pc)?;
         }
-        self.emit(Instr::IteratorClose {
-            iterator: self.slot(iterator),
-            preserve_throw: false,
-        });
+        self.emit_iterator_close(iterator, close, false)?;
         self.dispatch_finally(&context)?;
         Ok(self.control.pop_loop())
+    }
+
+    /// Close `iterator` for the loop's protocol, preserving a pending throw
+    /// when it is the original abrupt completion.
+    fn emit_iterator_close(
+        &mut self,
+        iterator: Reg,
+        close: CloseMode,
+        preserve_throw: bool,
+    ) -> Result<(), CompileError> {
+        match close {
+            CloseMode::Sync => {
+                self.emit(Instr::IteratorClose {
+                    iterator: self.slot(iterator),
+                    preserve_throw,
+                });
+            }
+            CloseMode::Async => self.emit_async_iterator_close(iterator)?,
+        }
+        Ok(())
     }
 
     pub(super) fn compile_try(

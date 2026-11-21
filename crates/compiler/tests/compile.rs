@@ -382,14 +382,37 @@ fn rejects_invalid_private_names() {
 }
 
 #[test]
-fn rejects_for_await_of_with_location() {
-    let source = "async function run() {\n  for await (const x of []) {}\n}";
-    let error = compile(source, &CompileOptions::default()).unwrap_err();
-    assert!(
-        error.message().contains("unsupported syntax: for-await-of"),
-        "{error}"
+fn for_await_lowers_the_async_protocol_across_awaits() {
+    let function = compile_run(
+        r#"
+async function run(source) {
+  let total = 0;
+  for await (const value of source) total += value;
+  return total;
+}
+"#,
     );
-    assert_eq!(error.line(), 2);
+    let iterator = function
+        .code
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instr::GetIterator { iterator, .. } => Some(*iterator),
+            _ => None,
+        })
+        .expect("for-await emits the synchronous fallback");
+    assert_eq!(iterator.kind, yield_vm::bytecode::SlotKind::Persistent);
+    assert!(
+        function
+            .resumes
+            .iter()
+            .any(|resume| resume.saved_slots.contains(&iterator.index))
+    );
+    assert!(
+        function
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::Await { .. }))
+    );
 }
 
 #[test]
