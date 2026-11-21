@@ -67,4 +67,4 @@
 
 ## 8. 真实源码兼容性探针
 
-`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出（`export { Je as default, … }` 等）已支持。探针通过 preload 模块导出空实现 `reportError`，跨过该浏览器全局后，当前首个诊断为 `unknown binding "window"`，位于第 7 行第 4315 列——bundle 接着读取浏览器全局 `window`，尚无对应 polyfill；测试钉住这一诊断。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
+`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出已支持。探针通过 preload 提供空实现 `reportError`，并将未实现的环境全局 `window`、`process`、`console` 设为 `undefined` 后，bundle 可以编译通过；没有遇到尚未实现的 ECMAScript 标准全局。该探针只证明编译通过，不证明运行时兼容。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
