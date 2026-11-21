@@ -286,7 +286,13 @@ impl Object {
         if string_length.is_some() && !enumerable_strings_only {
             keys.push(((1, 0), PropertyKeyRef::String("length")));
         }
-        keys.sort_unstable_by_key(|&(order, _)| order);
+        if matches!(self, Self::Plain(object) if object.module_namespace.is_some()) {
+            // Module namespace export names are ordered by UTF-16 code units,
+            // including names that ordinary objects would treat as array indices.
+            keys.sort_unstable_by_key(|&(_, key)| key);
+        } else {
+            keys.sort_unstable_by_key(|&(order, _)| order);
+        }
         let array = match self {
             Self::Array(array) => Some(array),
             _ => None,

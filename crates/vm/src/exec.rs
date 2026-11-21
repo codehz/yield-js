@@ -500,35 +500,26 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetImport { dst, import } => {
-                let module = self.imports.get(import.module as usize).ok_or_else(|| {
-                    VmError::InvalidState(format!("import module {} does not exist", import.module))
-                })?;
-                let declared_module = self
-                    .build
-                    .imports
-                    .keys()
-                    .nth(import.module as usize)
-                    .ok_or_else(|| {
-                        VmError::InvalidState(format!(
-                            "import module {} is not declared",
-                            import.module
-                        ))
-                    })?;
-                if declared_module != &module.module {
-                    return Err(VmError::InvalidState(format!(
-                        "import module index {} is inconsistent",
-                        import.module
-                    )));
-                }
-                let value = match import.export {
-                    None => Value::object(module.namespace),
-                    Some(export) => {
-                        module.values.get(export as usize).cloned().ok_or_else(|| {
-                            VmError::InvalidState(format!("import export {export} does not exist"))
-                        })?
-                    }
+                let value = self.read_host_import(import)?;
+                frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
+            Instr::GetModuleBinding {
+                dst,
+                module,
+                binding,
+            } => {
+                let env = self.module_environment(module)?;
+                let Some(value) = self.heap.get_module_binding(env, binding)? else {
+                    return Ok(Step::Throw(self.reference_error(&format!(
+                        "module binding {binding} is not initialized"
+                    ))?));
                 };
                 frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
+            Instr::GetModuleNamespace { dst, module } => {
+                frame.write(dst, self.module_namespace(module)?)?;
                 Ok(Step::Next)
             }
             Instr::CallValue {

@@ -27,6 +27,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::SetPrivate { .. }
         | Instr::HasPrivate { .. }
         | Instr::CallValue { .. }
+        | Instr::GetModuleBinding { .. }
         | Instr::LoadClassBinding { .. }
         | Instr::CreateClass { .. }
         | Instr::DefineClassMethod { .. }
@@ -64,6 +65,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Undefined { .. }
         | Instr::Move { .. }
         | Instr::GetImport { .. }
+        | Instr::GetModuleNamespace { .. }
         | Instr::Closure { .. }
         | Instr::SetHome { .. }
         | Instr::SetFunctionName { .. }
@@ -132,7 +134,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.extend(object.map(|slot| slot.index));
             defs.insert(dst.index);
         }
-        Instr::GetImport { dst, .. } => {
+        Instr::GetImport { dst, .. }
+        | Instr::GetModuleBinding { dst, .. }
+        | Instr::GetModuleNamespace { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::CallValue {
@@ -407,6 +411,19 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::GetImport { dst, import } => Instr::GetImport {
             dst: remap(dst),
             import,
+        },
+        Instr::GetModuleBinding {
+            dst,
+            module,
+            binding,
+        } => Instr::GetModuleBinding {
+            dst: remap(dst),
+            module,
+            binding,
+        },
+        Instr::GetModuleNamespace { dst, module } => Instr::GetModuleNamespace {
+            dst: remap(dst),
+            module,
         },
         Instr::CallValue {
             dst,

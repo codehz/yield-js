@@ -156,13 +156,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::LabeledStatement(statement) => self.compile_labeled(statement),
             Statement::ExportNamedDeclaration(_) => Ok(()),
             Statement::ExportDefaultDeclaration(export) => self.compile_export_default(export),
-            Statement::ExportFromDeclaration(export) => {
-                Err(unsupported(self.source_text(), export.span, "re-export"))
-            }
-            Statement::ExportAllDeclaration(export) => {
-                Err(unsupported(self.source_text(), export.span, "re-export"))
-            }
-            Statement::ImportDeclaration(_) => Ok(()),
+            Statement::ExportFromDeclaration(_)
+            | Statement::ExportAllDeclaration(_)
+            | Statement::ImportDeclaration(_) => Ok(()),
             other => Err(unsupported(
                 self.source_text(),
                 other.span(),
@@ -267,7 +263,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.compile_named_expression(expression, "default")?
             }
         };
-        self.emit(Instr::DeclareBinding { binding });
         self.emit(Instr::SetBinding {
             binding,
             src: self.slot(value),
@@ -391,7 +386,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             for_each_binding_name(&declarator.id, &mut |identifier| {
                 let (binding, _) =
                     self.declare(identifier.name.as_str(), declaration.kind, identifier.span)?;
-                self.emit(Instr::DeclareBinding { binding });
+                if !self.is_script {
+                    self.emit(Instr::DeclareBinding { binding });
+                }
                 Ok::<(), CompileError>(())
             })?;
         }

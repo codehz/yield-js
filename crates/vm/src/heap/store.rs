@@ -242,6 +242,12 @@ impl Heap {
         self.alloc(Object::Plain(PlainObject::new(prototype)))
     }
 
+    pub(crate) fn alloc_module_namespace(&mut self, module: u32) -> ObjectId {
+        let mut object = PlainObject::new(None);
+        object.module_namespace = Some(module);
+        self.alloc(Object::Plain(object))
+    }
+
     pub(crate) fn alloc_for_in_iterator(
         &mut self,
         source: &Value,
@@ -317,7 +323,9 @@ impl Heap {
         parent: Option<ObjectId>,
         bindings: BTreeMap<BindingId, Value>,
     ) -> ObjectId {
-        self.alloc(Object::Environment(EnvironmentObject { parent, bindings }))
+        self.alloc(Object::Environment(EnvironmentObject::new(
+            parent, bindings,
+        )))
     }
 
     pub(crate) fn insert_restore(&mut self, id: ObjectId, object: Object) -> Result<(), VmError> {
@@ -693,6 +701,27 @@ impl Heap {
             .ok_or_else(|| VmError::InvalidState(format!("binding {binding} is not initialized")))
     }
 
+    /// A linked read addresses the module itself, never a parent environment.
+    /// `None` denotes the module's temporal dead zone, not a JS value.
+    pub(crate) fn get_module_binding(
+        &self,
+        env: ObjectId,
+        binding: BindingId,
+    ) -> Result<Option<Value>, VmError> {
+        let environment = self.environment(env)?;
+        if environment.uninitialized.contains(&binding) {
+            return Ok(None);
+        }
+        environment
+            .bindings
+            .get(&binding)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("module binding {binding} is not declared"))
+            })
+    }
+
     pub(crate) fn find_binding(
         &self,
         env: ObjectId,
@@ -715,7 +744,13 @@ impl Heap {
                 "binding {binding} is not declared"
             )));
         };
-        self.environment_mut(owner)?.bindings.insert(binding, value);
+        let environment = self.environment_mut(owner)?;
+        environment.bindings.insert(binding, value);
+        // A nested function retains ordinary assignment behavior but cannot
+        // initialize the module's lexical slot for linked readers.
+        if owner == env {
+            environment.uninitialized.remove(&binding);
+        }
         Ok(())
     }
 

@@ -2,9 +2,11 @@
 
 当前实现由代码推导的覆盖范围清单。语法子集与未覆盖项见 [`docs/gaps.md`](gaps.md)。
 
-- 字节码版本、构建 ID 摘要、函数/导入/导出/常量/恢复表/异常表结构校验；导出表拒绝重复公开名，目标必须是初始化函数声明的绑定。
+- 字节码 **40** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
-- `compile_with_preload(main, preload, options)` 分别编译两个模块，共用宿主导入清单。模块可将宿主导入以本地命名导出语法发布。新的 VM 先执行 preload，再将其显式导出安装为 `globalThis` 的可枚举、不可配置、仅 getter 的活绑定，然后执行主模块并排空微任务；不会等待宿主异步操作。主模块裸名称按局部绑定、显式导入、preload 导出、内建的顺序解析。`Vm::get_export` 和 `Vm::start` 仍只访问主模块导出；恢复校验 getter 和其环境，不重跑初始化。
+- `compile(entry, preload, resolver, options)` 用同步 `ModuleResolver` 链接可达源码；`MemoryResolver` 和 `FileResolver` 使用根相对规范 ID。`CompileOptions::from_bindings` 单独派生宿主清单。支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出。星号不传递 `default`；相同最终目标不冲突，不同目标的同名导出从命名空间排除，对该名字的显式请求报错。
+- VM 在执行任何模块体前创建全部模块环境和命名空间，并初始化提升函数和 `var`。依赖优先、按源码声明顺序求值；循环回边跳过，共享模块只执行一次。读取另一模块未初始化的词法绑定抛出可捕获的 `ReferenceError`。命名空间无原型、不可扩展，按导出名排序，通过只读 getter 提供活绑定。
+- 先求值 preload 的可达子图，再把 preload 根的链接导出安装为 `globalThis` 的只读活绑定；裸 preload 名只在不属于该子图的 entry 依赖中可用（包含 entry 本身）。模块之间不排空微任务。`Vm::get_export` 和 `Vm::start` 只使用 entry 的链接导出。快照 **54** 保存模块环境与命名空间根；恢复校验根、槽归属与 getter，不重跑初始化。
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。Rust 宿主用 `#[host_module]`、`#[host_class]` / `#[methods]`、`#[host_state]` 和 `#[operation]` 声明绑定，`host_bindings!` 一次性链接；编译器清单由同一份声明派生。`#[function]` / `#[method]` 的 `async fn -> JsResult<HostStep>` 可用受限 CPS 语法表达 guest 调用续接，不创建 Rust Future。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。非零大小载荷必须声明 schema 与 codec，否则分配实例是 `HostFault`，避免恢复时静默丢失数据。带 `class` 的 `#[constructor]` 导出暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并；基类方法与访问器接受派生实例。payload 仍属于具体实例类。脚本类可继承宿主构造器：只对本次构造中与声明类匹配的宿主分配使用派生原型，不修改其他分配或构造器返回的替换对象。宿主接收者仍校验声明类标签；脚本私元素与宿主槽和 payload 独立，均可跨快照恢复。

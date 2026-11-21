@@ -417,7 +417,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Some(binding) = self.lookup(name) {
             self.check_tdz(binding, name, identifier.span)?;
         }
-        match self.session.names().value(&self.env, name) {
+        match self.names().value(&self.env, name) {
             ValueName::Binding(binding) => {
                 let dst = self.alloc_reg()?;
                 self.emit_binding_read(dst, binding);
@@ -443,12 +443,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     fn emit_read_only(&mut self, name: ReadOnlyName<'_>) -> Result<Reg, CompileError> {
         match name {
-            ReadOnlyName::Import(import) => {
+            ReadOnlyName::Import(target) => {
                 let dst = self.alloc_reg()?;
-                self.emit(Instr::GetImport {
-                    dst: self.slot(dst),
-                    import,
-                });
+                self.emit(crate::session::read_target(self.slot(dst), target));
                 Ok(dst)
             }
             ReadOnlyName::Preload(name) => {
@@ -598,7 +595,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             if let Some(binding) = self.lookup(name) {
                 self.check_tdz(binding, name, identifier.span)?;
             }
-            if let Some(folded) = self.session.names().typeof_fold(&self.env, name) {
+            if let Some(folded) = self.names().typeof_fold(&self.env, name) {
                 return self.emit_constant(Constant::String(folded.into()));
             }
         }
@@ -936,7 +933,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         let (callee, receiver) = if let Expression::Identifier(identifier) = callee {
             let name = identifier.name.as_str();
-            let value = match self.session.names().callee(&self.env, name) {
+            let value = match self.names().callee(&self.env, name) {
                 Callee::Binding(binding) => {
                     self.check_tdz(binding, name, identifier.span)?;
                     let value = self.alloc_reg()?;
@@ -1088,7 +1085,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &expression.left {
             let name = identifier.name.as_str();
             let Some(binding) = self.lookup(name) else {
-                if let Some(read_only) = self.session.names().read_only(name) {
+                if let Some(read_only) = self.names().read_only(name) {
                     return self.compile_read_only_assignment(expression, read_only);
                 }
                 return Err(CompileError::new(
@@ -1253,7 +1250,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             if let Some(binding) = self.lookup(name) {
                 self.check_tdz(binding, name, identifier.span)?;
                 Target::Binding(binding)
-            } else if let Some(read_only) = self.session.names().read_only(name) {
+            } else if let Some(read_only) = self.names().read_only(name) {
                 Target::ReadOnly(read_only)
             } else {
                 return Err(CompileError::new(

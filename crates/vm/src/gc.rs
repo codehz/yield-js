@@ -234,25 +234,27 @@ impl Vm {
         for id in self.builtins.ids() {
             tracer.mark_object(id)?;
         }
-        let script_needs_env = self
-            .build
-            .function(self.build.script)
-            .is_some_and(|function| function.needs_environment());
-        match (script_needs_env, self.script_env) {
-            (true, Some(id)) => tracer.mark_object(id)?,
-            (false, None) => {}
-            // During initialization the script environment is owned by its frame.
-            (true, None) if active.is_some() => {}
-            (true, None) => {
-                return Err(VmError::InvalidState(
-                    "script environment is missing".to_owned(),
-                ));
-            }
-            (false, Some(id)) => {
+        if self.module_envs.len() != self.build.modules.len()
+            || self.module_namespaces.len() != self.build.modules.len()
+        {
+            return Err(VmError::InvalidState(
+                "source module root count mismatch".to_owned(),
+            ));
+        }
+        for (module, env) in self.module_envs.iter().enumerate() {
+            if env.is_some() != self.build.module_needs_environment(module as u32) {
                 return Err(VmError::InvalidState(format!(
-                    "script environment {id} is unexpected"
+                    "wrong environment presence for source module {module}"
                 )));
             }
+        }
+        for &id in self
+            .module_envs
+            .iter()
+            .flatten()
+            .chain(&self.module_namespaces)
+        {
+            tracer.mark_object(id)?;
         }
         tracer.live.symbols.extend([
             ITERATOR_SYMBOL,

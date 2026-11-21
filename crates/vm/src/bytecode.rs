@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 39;
+pub const BYTECODE_VERSION: u32 = 40;
 
 pub use crate::builtin::BUILTINS;
 
@@ -74,7 +74,7 @@ pub enum Constant {
     String(JsString),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ImportDecl {
     /// Position in the build's sorted module manifest.
     pub module: u32,
@@ -187,6 +187,15 @@ pub enum Instr {
     GetImport {
         dst: Slot,
         import: ImportDecl,
+    },
+    GetModuleBinding {
+        dst: Slot,
+        module: u32,
+        binding: BindingId,
+    },
+    GetModuleNamespace {
+        dst: Slot,
+        module: u32,
     },
     CallValue {
         dst: Slot,
@@ -577,14 +586,30 @@ impl Function {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Preload {
-    pub initializer: u32,
-    #[serde(deserialize_with = "deserialize_exports")]
-    pub exports: BTreeMap<String, BindingId>,
-    /// Public names mapped to private getter functions. Aliases share a getter.
-    #[serde(deserialize_with = "deserialize_exports")]
-    pub getters: BTreeMap<String, u32>,
+/// Final identity of a linked export, independent of the path used to resolve it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleTarget {
+    Binding { module: u32, binding: BindingId },
+    Namespace { module: u32 },
+    Host(ImportDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleExport {
+    pub target: ModuleTarget,
+    pub getter: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceModule {
+    pub id: String,
+    pub declaration: u32,
+    pub evaluation: u32,
+    /// Direct source dependencies in first occurrence order.
+    pub dependencies: Vec<u32>,
+    #[serde(deserialize_with = "deserialize_unique_map")]
+    pub exports: BTreeMap<String, ModuleExport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -594,26 +619,26 @@ pub struct Build {
     pub constants: Vec<Constant>,
     pub imports: BTreeMap<String, BTreeSet<String>>,
     pub functions: Vec<Function>,
-    /// Compiler script function. It runs once when the VM is created.
-    pub script: u32,
-    /// Public module name to a live binding declared in [`Self::script`].
-    #[serde(deserialize_with = "deserialize_exports")]
-    pub exports: BTreeMap<String, BindingId>,
-    #[serde(default)]
-    pub preload: Option<Preload>,
+    /// Linked source modules, indexed by module operands.
+    pub modules: Vec<SourceModule>,
+    /// Source module whose linked exports are exposed to the host.
+    pub entry: u32,
+    /// Optional source module evaluated before the entry graph.
+    pub preload: Option<u32>,
 }
 
-fn deserialize_exports<'de, D>(deserializer: D) -> Result<BTreeMap<String, BindingId>, D::Error>
+fn deserialize_unique_map<'de, D, V>(deserializer: D) -> Result<BTreeMap<String, V>, D::Error>
 where
     D: Deserializer<'de>,
+    V: Deserialize<'de>,
 {
-    struct Exports;
+    struct UniqueMap<V>(std::marker::PhantomData<V>);
 
-    impl<'de> Visitor<'de> for Exports {
-        type Value = BTreeMap<String, BindingId>;
+    impl<'de, V: Deserialize<'de>> Visitor<'de> for UniqueMap<V> {
+        type Value = BTreeMap<String, V>;
 
         fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a map of unique export names to binding IDs")
+            formatter.write_str("a map of unique export names")
         }
 
         fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
@@ -635,7 +660,7 @@ where
         }
     }
 
-    deserializer.deserialize_map(Exports)
+    deserializer.deserialize_map(UniqueMap(std::marker::PhantomData))
 }
 
 #[derive(Serialize)]
@@ -645,9 +670,9 @@ struct DigestInput<'a> {
     constants: &'a [Constant],
     imports: &'a BTreeMap<String, BTreeSet<String>>,
     functions: &'a [Function],
-    script: u32,
-    exports: &'a BTreeMap<String, BindingId>,
-    preload: &'a Option<Preload>,
+    modules: &'a [SourceModule],
+    entry: u32,
+    preload: Option<u32>,
 }
 
 impl Build {
@@ -655,8 +680,9 @@ impl Build {
         constants: Vec<Constant>,
         imports: BTreeMap<String, BTreeSet<String>>,
         functions: Vec<Function>,
-        script: u32,
-        exports: BTreeMap<String, BindingId>,
+        modules: Vec<SourceModule>,
+        entry: u32,
+        preload: Option<u32>,
     ) -> Self {
         Self {
             bytecode_version: BYTECODE_VERSION,
@@ -664,9 +690,9 @@ impl Build {
             constants,
             imports,
             functions,
-            script,
-            exports,
-            preload: None,
+            modules,
+            entry,
+            preload,
         }
     }
 
@@ -684,9 +710,9 @@ impl Build {
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,
-            script: self.script,
-            exports: &self.exports,
-            preload: &self.preload,
+            modules: &self.modules,
+            entry: self.entry,
+            preload: self.preload,
         };
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
         let digest = Sha256::digest(bytes);
@@ -761,45 +787,219 @@ impl Build {
             }
         }
 
+        let (binding_owners, getters) = self.validate_modules()?;
         for function in &self.functions {
-            self.validate_function(function, &private_limits)?;
+            self.validate_function(function, &private_limits, &binding_owners, &getters)?;
         }
-        self.validate_script()?;
         Ok(())
     }
 
     pub(crate) fn is_initializer(&self, func_id: u32) -> bool {
-        func_id == self.script
-            || self
-                .preload
-                .as_ref()
-                .is_some_and(|preload| func_id == preload.initializer)
+        self.modules
+            .iter()
+            .any(|module| func_id == module.declaration || func_id == module.evaluation)
     }
 
-    fn validate_script(&self) -> Result<(), String> {
-        self.validate_initializer(self.script, &self.exports, "script")?;
-        if let Some(preload) = &self.preload {
-            if self.script == preload.initializer {
-                return Err("script and preload initializers must be distinct".to_owned());
-            }
-            self.validate_initializer(preload.initializer, &preload.exports, "preload")?;
-            self.validate_preload_getters(preload)?;
+    /// Module-owned bindings are declared during the declaration phase.
+    pub fn module_bindings(&self, module: u32) -> impl Iterator<Item = BindingId> + '_ {
+        self.modules
+            .get(module as usize)
+            .and_then(|module| self.function(module.declaration))
+            .into_iter()
+            .flat_map(|function| &function.code)
+            .filter_map(|instruction| match instruction {
+                Instr::DeclareBinding { binding } => Some(*binding),
+                _ => None,
+            })
+    }
+
+    /// Both initialization phases share one module environment when needed.
+    pub fn module_needs_environment(&self, module: u32) -> bool {
+        let module = &self.modules[module as usize];
+        [module.declaration, module.evaluation]
+            .into_iter()
+            .filter_map(|id| self.function(id))
+            .any(Function::needs_environment)
+    }
+
+    fn validate_modules(&self) -> Result<(BTreeMap<BindingId, u32>, BTreeSet<u32>), String> {
+        let mut pending = vec![self.entry];
+        pending.extend(self.preload);
+        for &root in &pending {
+            self.check_module(root)?;
         }
-        for function in &self.functions {
-            for instruction in &function.code {
-                if let Instr::Closure {
-                    function: callee, ..
-                } = instruction
-                    && self.is_initializer(*callee)
+
+        let mut module_ids = BTreeSet::new();
+        let mut initializers = BTreeSet::new();
+        let mut binding_owners = BTreeMap::new();
+        for (index, module) in self.modules.iter().enumerate() {
+            let index = u32::try_from(index).map_err(|_| "too many source modules")?;
+            if module.id.is_empty() || !module_ids.insert(module.id.as_str()) {
+                return Err(format!(
+                    "empty or duplicate source module ID {:?}",
+                    module.id
+                ));
+            }
+            for initializer in [module.declaration, module.evaluation] {
+                if !initializers.insert(initializer) {
+                    return Err(format!("module initializer {initializer} is not distinct"));
+                }
+                let function = self.function(initializer).ok_or_else(|| {
+                    format!(
+                        "module {:?} references missing initializer {initializer}",
+                        module.id
+                    )
+                })?;
+                if !function.is_constructable()
+                    || !Self::has_no_invocation_inputs(function)
+                    || !function.resumes.is_empty()
                 {
-                    let kind = if *callee == self.script {
-                        "script"
-                    } else {
-                        "preload"
-                    };
+                    return Err(format!("invalid module initializer {initializer}"));
+                }
+                if initializer == module.declaration
+                    && (!function.handlers.is_empty()
+                        || function.code.iter().any(|instruction| {
+                            !matches!(
+                                instruction,
+                                Instr::Undefined { .. }
+                                    | Instr::Move { .. }
+                                    | Instr::DeclareBinding { .. }
+                                    | Instr::SetBinding { .. }
+                                    | Instr::Closure { .. }
+                                    | Instr::Return { .. }
+                            )
+                        }))
+                {
                     return Err(format!(
-                        "function {} ({}) closes over the {kind} function",
-                        function.func_id, function.name
+                        "invalid module declaration initializer {initializer}"
+                    ));
+                }
+            }
+            let mut dependencies = BTreeSet::new();
+            for &dependency in &module.dependencies {
+                self.check_module(dependency)?;
+                if !dependencies.insert(dependency) {
+                    return Err(format!(
+                        "duplicate dependency {dependency} in module {:?}",
+                        module.id
+                    ));
+                }
+            }
+            for binding in self.module_bindings(index) {
+                if binding_owners.insert(binding, index).is_some() {
+                    return Err(format!("duplicate declaration of module binding {binding}"));
+                }
+            }
+        }
+
+        let mut reachable = vec![false; self.modules.len()];
+        while let Some(index) = pending.pop() {
+            if !std::mem::replace(&mut reachable[index as usize], true) {
+                pending.extend(&self.modules[index as usize].dependencies);
+            }
+        }
+        if let Some(index) = reachable.iter().position(|seen| !seen) {
+            return Err(format!("unreachable module {:?}", self.modules[index].id));
+        }
+
+        let mut by_target = BTreeMap::new();
+        let mut getters = BTreeSet::new();
+        for module in &self.modules {
+            for (name, export) in &module.exports {
+                let ModuleExport { target, getter } = *export;
+                match by_target.entry(target) {
+                    Entry::Occupied(entry) if *entry.get() == getter => continue,
+                    Entry::Occupied(_) => {
+                        return Err(format!("exports of {target:?} must share a getter"));
+                    }
+                    Entry::Vacant(entry) => entry.insert(getter),
+                };
+                self.check_module_target(target, &binding_owners)?;
+                let function = self.function(getter).ok_or_else(|| {
+                    format!(
+                        "missing getter {getter} for module {:?} export {name:?}",
+                        module.id
+                    )
+                })?;
+                if initializers.contains(&getter)
+                    || !getters.insert(getter)
+                    || !function.is_accessor_method()
+                    || !Self::has_no_invocation_inputs(function)
+                    || !function.resumes.is_empty()
+                    || !function.handlers.is_empty()
+                    || Self::getter_target(&function.code) != Some(target)
+                {
+                    return Err(format!(
+                        "invalid getter {getter} for module {:?} export {name:?}",
+                        module.id
+                    ));
+                }
+            }
+        }
+        Ok((binding_owners, getters))
+    }
+
+    fn has_no_invocation_inputs(function: &Function) -> bool {
+        function.params.is_empty()
+            && function.rest_param.is_none()
+            && function.this_param.is_none()
+            && function.new_target_param.is_none()
+            && function.home_param.is_none()
+            && function.arguments_param.is_none()
+    }
+
+    fn getter_target(code: &[Instr]) -> Option<ModuleTarget> {
+        let [read, Instr::Return { src }] = code else {
+            return None;
+        };
+        match *read {
+            Instr::GetModuleBinding {
+                dst,
+                module,
+                binding,
+            } if dst == *src => Some(ModuleTarget::Binding { module, binding }),
+            Instr::GetModuleNamespace { dst, module } if dst == *src => {
+                Some(ModuleTarget::Namespace { module })
+            }
+            Instr::GetImport { dst, import } if dst == *src => Some(ModuleTarget::Host(import)),
+            _ => None,
+        }
+    }
+
+    fn check_module(&self, module: u32) -> Result<(), String> {
+        if module as usize >= self.modules.len() {
+            return Err(format!("invalid source module index {module}"));
+        }
+        Ok(())
+    }
+
+    fn check_module_target(
+        &self,
+        target: ModuleTarget,
+        binding_owners: &BTreeMap<BindingId, u32>,
+    ) -> Result<(), String> {
+        match target {
+            ModuleTarget::Binding { module, binding } => {
+                self.check_module(module)?;
+                if binding_owners.get(&binding) != Some(&module) {
+                    return Err(format!(
+                        "binding {binding} is not declared in module {module}"
+                    ));
+                }
+            }
+            ModuleTarget::Namespace { module } => self.check_module(module)?,
+            ModuleTarget::Host(import) => {
+                let exports = self
+                    .imports
+                    .values()
+                    .nth(import.module as usize)
+                    .ok_or_else(|| format!("invalid host module index {}", import.module))?;
+                if let Some(export) = import.export
+                    && export as usize >= exports.len()
+                {
+                    return Err(format!(
+                        "invalid host export index {export} for module {}",
+                        import.module
                     ));
                 }
             }
@@ -807,85 +1007,6 @@ impl Build {
         Ok(())
     }
 
-    fn validate_preload_getters(&self, preload: &Preload) -> Result<(), String> {
-        if !preload.getters.keys().eq(preload.exports.keys()) {
-            return Err("preload getter names do not match exports".to_owned());
-        }
-        let mut by_binding = BTreeMap::new();
-        for (name, &binding) in &preload.exports {
-            let id = preload.getters[name];
-            let Some(getter) = self.function(id) else {
-                return Err(format!("missing preload getter {id} for {name:?}"));
-            };
-            if self.is_initializer(id)
-                || !getter.is_accessor_method()
-                || !getter.params.is_empty()
-                || getter.rest_param.is_some()
-                || getter.this_param.is_some()
-                || getter.new_target_param.is_some()
-                || getter.home_param.is_some()
-                || getter.arguments_param.is_some()
-                || !getter.resumes.is_empty()
-                || !getter.handlers.is_empty()
-                || !matches!(getter.code.as_slice(), [
-                    Instr::GetBinding { dst, binding: read }, Instr::Return { src }
-                ] if dst == src && *read == binding)
-            {
-                return Err(format!(
-                    "invalid preload getter {id} for {name:?} binding {binding}"
-                ));
-            }
-            if *by_binding.entry(binding).or_insert(id) != id {
-                return Err(format!(
-                    "preload aliases for binding {binding} must share a getter"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_initializer(
-        &self,
-        initializer: u32,
-        exports: &BTreeMap<String, BindingId>,
-        kind: &str,
-    ) -> Result<(), String> {
-        let Some(script) = self.function(initializer) else {
-            return Err(format!("{kind} function {initializer} does not exist"));
-        };
-        if script.is_async || script.is_arrow || script.is_method {
-            return Err(format!(
-                "{kind} function {initializer} must be a synchronous ordinary function"
-            ));
-        }
-        if !script.params.is_empty()
-            || script.rest_param.is_some()
-            || script.this_param.is_some()
-            || script.new_target_param.is_some()
-            || script.home_param.is_some()
-            || script.arguments_param.is_some()
-        {
-            return Err(format!(
-                "{kind} function {initializer} must not take arguments or a receiver"
-            ));
-        }
-        let declared: BTreeSet<_> = script
-            .code
-            .iter()
-            .filter_map(|instruction| match instruction {
-                Instr::DeclareBinding { binding } => Some(*binding),
-                _ => None,
-            })
-            .collect();
-        for (name, binding) in exports {
-            if !declared.contains(binding) {
-                return Err(format!(
-                    "export {name:?} binding {binding} is not declared in the {kind}"
-                ));
-            }
-        }
-        Ok(())
-    }
     fn check_builtin(
         &self,
         builtin: u32,
@@ -905,6 +1026,8 @@ impl Build {
         &self,
         function: &Function,
         private_limits: &BTreeMap<BindingId, u32>,
+        binding_owners: &BTreeMap<BindingId, u32>,
+        getters: &BTreeSet<u32>,
     ) -> Result<(), String> {
         let check_private = |lexical, index| {
             if private_limits
@@ -980,6 +1103,11 @@ impl Build {
             match param {
                 ParamTarget::Binding(binding) => {
                     check_binding(*binding)?;
+                    if binding_owners.contains_key(binding) {
+                        return Err(format!(
+                            "{location}: parameter shadows module binding {binding}"
+                        ));
+                    }
                     if !seen_bindings.insert(*binding) {
                         return Err(format!("{location}: duplicate parameter binding {binding}"));
                     }
@@ -1049,20 +1177,29 @@ impl Build {
                 }
                 Instr::GetImport { dst, import } => {
                     check_slot(*dst, "GetImport.dst")?;
-                    let Some(exports) = self.imports.values().nth(import.module as usize) else {
-                        return Err(format!(
-                            "{location}: GetImport at pc {pc} references module {}",
-                            import.module
-                        ));
-                    };
-                    if let Some(export) = import.export
-                        && export as usize >= exports.len()
-                    {
-                        return Err(format!(
-                            "{location}: GetImport at pc {pc} references export {export} of module {}",
-                            import.module
-                        ));
-                    }
+                    self.check_module_target(ModuleTarget::Host(*import), binding_owners)
+                        .map_err(|err| format!("{location}: GetImport at pc {pc}: {err}"))?;
+                }
+                Instr::GetModuleBinding {
+                    dst,
+                    module,
+                    binding,
+                } => {
+                    check_slot(*dst, "GetModuleBinding.dst")?;
+                    self.check_module_target(
+                        ModuleTarget::Binding {
+                            module: *module,
+                            binding: *binding,
+                        },
+                        binding_owners,
+                    )
+                    .map_err(|err| format!("{location}: GetModuleBinding at pc {pc}: {err}"))?;
+                }
+                Instr::GetModuleNamespace { dst, module } => {
+                    check_slot(*dst, "GetModuleNamespace.dst")?;
+                    self.check_module(*module).map_err(|err| {
+                        format!("{location}: GetModuleNamespace at pc {pc}: {err}")
+                    })?;
                 }
                 Instr::CallValue {
                     dst,
@@ -1132,6 +1269,11 @@ impl Build {
                     function: callee,
                 } => {
                     check_slot(*dst, "Closure.dst")?;
+                    if self.is_initializer(*callee) || getters.contains(callee) {
+                        return Err(format!(
+                            "{location}: Closure at pc {pc} references reserved function {callee}"
+                        ));
+                    }
                     if self.function(*callee).is_none() {
                         return Err(format!(
                             "{location}: Closure at pc {pc} references function {callee}"
@@ -1194,7 +1336,10 @@ impl Build {
                 } => {
                     check_slot(*dst, "ScopedClosure.dst")?;
                     check_slot(*scope, "ScopedClosure.scope")?;
-                    if self.is_initializer(*function) || self.function(*function).is_none() {
+                    if self.is_initializer(*function)
+                        || getters.contains(function)
+                        || self.function(*function).is_none()
+                    {
                         return Err(format!(
                             "{location}: invalid scoped closure function {function} at pc {pc}"
                         ));
@@ -1402,7 +1547,14 @@ impl Build {
                     check_binding(*binding)?;
                     check_slot(*src, "SetBinding.src")?;
                 }
-                Instr::DeclareBinding { binding } => check_binding(*binding)?,
+                Instr::DeclareBinding { binding } => {
+                    check_binding(*binding)?;
+                    if let Some(&module) = binding_owners.get(binding)
+                        && self.modules[module as usize].declaration != function.func_id
+                    {
+                        return Err(format!("{location}: redeclares module binding {binding}"));
+                    }
+                }
                 Instr::Await { dst, input, resume } => {
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));

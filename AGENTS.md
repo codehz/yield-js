@@ -15,8 +15,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 `yield-vm` owns the bytecode contract and never imports the compiler. Oxc AST stays inside `yield-compiler` (`frontend` and `lower` only). The only Oxc type on the public compiler surface is `oxc::span::Span` on `CompileError`.
 
 ```text
-source (strict .mjs; explicit local named exports, no module loading)
-  → frontend     parse a strict ES module
+source roots and synchronous resolver (strict ES modules)
+  → frontend     parse reachable modules and resolve import/export targets
   → lower        bindings, exceptions, await  →  LoweredFunction
   → bindings     which ids stay shared across functions
   → promote      unshared bindings become logical registers
@@ -28,10 +28,9 @@ source (strict .mjs; explicit local named exports, no module loading)
 
 Public entry points:
 
-- `yield_compiler::compile(source, &CompileOptions { imports }) -> Result<Build, CompileError>`
-- `yield_compiler::compile_with_preload(source, preload, options)` compiles two separate strict modules with one host import manifest. The preload export names are read-only globals in the main module.
-- `Vm::new(build, &mut host)` validates the build and imports, runs the optional preload once, installs its live getters on `globalThis`, runs the main initializer once, and drains initialization microtasks without waiting on host operations
-- `Vm::get_export("name")` reads the current value of an explicitly exported main module binding
+- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` links explicit roots; `CompileOptions::from_bindings` derives the separate host import manifest.
+- `Vm::new(build, &mut host)` validates the build and imports, instantiates all source modules, evaluates the optional preload graph and installs its live global getters, then evaluates entry and drains initialization microtasks.
+- `Vm::get_export("name")` reads the current value of an unambiguous linked entry export, including re-exports.
 - `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver; `args` are `JsValue` constants, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::collect_garbage(roots)` explicitly sweeps unreachable heap state between calls, only with an empty microtask queue; `roots` is a slice of same-VM `Value`s the host still needs. It returns the number of heap objects removed and preserves live IDs.
@@ -47,7 +46,7 @@ Suspend/resume invariants (do not weaken these):
 - Bindings read or written from another function, plus exported bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
 - After successful preparation, `Await` always resumes through the microtask queue, even for settled promises. A throwing `constructor` getter transfers control to the script exception handler without suspending.
-- Snapshot roots include the script environment, builtins, class prototypes, module state slots, pending operations, queued Promise rejection notifications, and caller-supplied script roots. Traverse reachable closure environments, host instance slots, and async continuations. Rejection notifications are delivered at the next successful microtask checkpoint, not by restore. Native pointers, host callbacks, and queued microtasks are not in the snapshot.
+- Snapshot roots include indexed source module environments and namespaces, builtins, class prototypes, host module state slots, pending operations, queued Promise rejection notifications, and caller-supplied script roots. Traverse reachable closure environments, host instance slots, and async continuations. Rejection notifications are delivered at the next successful microtask checkpoint, not by restore. Native pointers, host callbacks, and queued microtasks are not in the snapshot.
 - Restore is exact-version: `SNAPSHOT_FORMAT_VERSION`, `BYTECODE_VERSION`, `build_id`, and the binding fingerprint must match. Missing declarations, slot/payload mismatch, or missing operation rejects the whole restore; the VM must not start. No snapshot migration.
 
 Host binding functions are synchronous and must not re-enter the VM. Declarations are immutable and shared; the VM owns prototypes, instances, slots, payloads, module state, and operation records. `JsValue` handles are valid only for the VM generation and call that produced them; retaining a value requires a declared slot or module state slot.
@@ -94,7 +93,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-harness` (not the directo
 - Errors: `CompileError` is a located struct (`message`, `line`, `column`, `span`), not a `thiserror` enum. `VmError` is `thiserror` (`InvalidBuild`, `InvalidSnapshot`, `MissingImport` / `MissingOperation`, `Host`, `HostFault`, `UnknownOperation`, `InvalidState`, `Thrown`). Script throws are `Value`s (`ExecOutcome::Thrown`), not `VmError`, until they reject an async result. Host binding functions return `JsResult` (`JsError::Throw` / `JsError::Fault`); host scheduling failures use `HostFault`. `Host::report_error` receives a `JsValue`.
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
-- Name policy (`compiler/src/names.rs`): local/module bindings, static host imports, preload globals, then builtins. Host imports are indexed first-class values; preload names read getter-only properties through the fixed `globalThis` root. Preserve legacy `typeof` shadowing folds outside the preload export list.
+- Name policy (`compiler/src/names.rs`): local bindings, static imports (source and host), eligible preload globals, then builtins. Bare preload names read getter-only properties through `globalThis` outside the preload subgraph.
 - Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `harness/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
 - `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Inject recovery failure with `host.labels().set_reject_restore_operation(true)`; corrupt snapshot payloads by editing the record.
 
@@ -112,10 +111,10 @@ Where to edit:
 
 Easy to break:
 
-- Top-level statements lower into a synchronous module initializer. Direct functions are hoisted whether exported or private. Only explicit exports are visible to the host. Snapshot the module environment and never re-run initialization during restore. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
+- Each source module has separate synchronous declaration and evaluation functions. Hoisted functions close over the module environment before any body runs. Only the entry's linked export table is public to the host. Snapshot module roots and never rerun initialization during restore. Nested functions are a worklist of Oxc nodes plus the captured scope chain.
 - Before `allocate`, every `Slot` is a logical register stuffed into `SlotKind::Transient`. `slot.kind` is meaningless until `FrameLayout` remaps it. `promote` rewrites one instruction to one instruction so jump, resume, and handler PCs stay valid.
 - `instr.rs::may_throw` must classify any opcode that can deliver a JavaScript exception, or exception edges never reach liveness or promotion. A `VmError` is not a JavaScript exception.
-- `Function::needs_environment` is derived from params and code (`GetBinding` and friends). Do not store a forgeable flag. Restore requires an env iff that function needs one.
+- `Function::needs_environment` is derived from params and code (`GetBinding` and friends). Do not store a forgeable flag. Each module uses one environment if either initializer needs one.
 - Build constants and host numbers may be non-finite. Build JSON uses the same special-number markers as snapshot values; finite numbers stay JSON numbers.
 - IDs are counters (`ObjectId`, `ContinuationId`) with overflow checks. Snapshot JSON order follows `BTreeMap`.
 

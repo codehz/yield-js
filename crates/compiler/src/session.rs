@@ -4,121 +4,34 @@
 //! No AST. Nested functions enqueue work through [`crate::lower`], which
 //! borrows this session only for interning and id allocation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use oxc::span::Span;
 use yield_vm::BindingId;
 use yield_vm::bytecode::{
-    Build, Constant, Function as BytecodeFunction, ImportDecl, Instr, Preload, Slot,
+    Build, Constant, Function as BytecodeFunction, Instr, ModuleTarget, Slot, SourceModule,
 };
 
 use crate::CompileOptions;
 use crate::error::CompileError;
-use crate::names::Tables;
 
-pub(crate) struct Session<'src> {
-    pub(crate) source: &'src str,
-    import_bindings: BTreeMap<String, ImportDecl>,
-    exports: BTreeMap<String, BindingId>,
-    preload: Option<Preload>,
+pub(crate) struct Session {
     constants: Vec<Constant>,
     string_constants: BTreeMap<yield_vm::JsString, u32>,
     functions: Vec<BytecodeFunction>,
-    imports: BTreeMap<String, BTreeSet<String>>,
     next_func_id: u32,
     next_binding_id: BindingId,
 }
 
-impl<'src> Session<'src> {
-    pub(crate) fn new(source: &'src str, options: &CompileOptions) -> Self {
+impl Session {
+    pub(crate) fn new() -> Self {
         Self {
-            source,
-            exports: BTreeMap::new(),
-            preload: None,
             constants: Vec::new(),
             string_constants: BTreeMap::new(),
             functions: Vec::new(),
-            imports: options.imports.clone(),
-            import_bindings: BTreeMap::new(),
             next_func_id: 1,
             next_binding_id: 0,
         }
-    }
-
-    pub(crate) fn resolve_import(
-        &self,
-        module: &str,
-        module_span: Span,
-        export: Option<(&str, Span)>,
-    ) -> Result<ImportDecl, CompileError> {
-        let (module_index, (_, exports)) = self
-            .imports
-            .iter()
-            .enumerate()
-            .find(|(_, (specifier, _))| specifier.as_str() == module)
-            .ok_or_else(|| {
-                crate::error::unsupported(
-                    self.source,
-                    module_span,
-                    &format!("unknown host module {module:?}"),
-                )
-            })?;
-        let export = export
-            .map(|(name, span)| {
-                let index = exports
-                    .iter()
-                    .position(|export| export == name)
-                    .ok_or_else(|| {
-                        crate::error::unsupported(
-                            self.source,
-                            span,
-                            &format!("host module {module:?} has no export {name:?}"),
-                        )
-                    })?;
-                u32::try_from(index).map_err(|_| {
-                    CompileError::new(self.source, span, "too many host module exports")
-                })
-            })
-            .transpose()?;
-        let module = u32::try_from(module_index)
-            .map_err(|_| CompileError::new(self.source, module_span, "too many host modules"))?;
-        Ok(ImportDecl { module, export })
-    }
-
-    pub(crate) fn bind_import(&mut self, local: &str, import: ImportDecl) {
-        self.import_bindings.insert(local.to_owned(), import);
-    }
-
-    pub(crate) fn import(&self, name: &str) -> Option<ImportDecl> {
-        self.import_bindings.get(name).copied()
-    }
-
-    pub(crate) fn names(&self) -> Tables<'_> {
-        Tables {
-            imports: &self.import_bindings,
-            preload: self.preload.as_ref().map(|preload| &preload.exports),
-        }
-    }
-
-    pub(crate) fn insert_export(
-        &mut self,
-        name: &str,
-        binding: BindingId,
-        span: Span,
-    ) -> Result<(), CompileError> {
-        if self.exports.contains_key(name) {
-            return Err(CompileError::new(
-                self.source,
-                span,
-                format!("duplicate export name {name:?}"),
-            ));
-        }
-        self.exports.insert(name.to_owned(), binding);
-        Ok(())
-    }
-
-    pub(crate) fn exports(&self) -> &BTreeMap<String, BindingId> {
-        &self.exports
     }
 
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
@@ -140,12 +53,12 @@ impl<'src> Session<'src> {
         &mut self.next_binding_id
     }
 
-    pub(crate) fn alloc_func_id(&mut self, span: Span) -> Result<u32, CompileError> {
+    pub(crate) fn alloc_func_id(&mut self, source: &str, span: Span) -> Result<u32, CompileError> {
         let func_id = self.next_func_id;
         self.next_func_id = self
             .next_func_id
             .checked_add(1)
-            .ok_or_else(|| CompileError::new(self.source, span, "too many functions"))?;
+            .ok_or_else(|| CompileError::new(source, span, "too many functions"))?;
         Ok(func_id)
     }
 
@@ -158,76 +71,64 @@ impl<'src> Session<'src> {
         }
     }
 
-    pub(crate) fn finish_preload(
-        &mut self,
-        initializer: u32,
-        main_source: &'src str,
-    ) -> Result<(), CompileError> {
-        let exports = std::mem::take(&mut self.exports);
-        let mut by_binding = BTreeMap::new();
-        let mut getters = BTreeMap::new();
-        for (name, &binding) in &exports {
-            let func_id = match by_binding.entry(binding) {
-                std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    let func_id = self.alloc_func_id(Span::default())?;
-                    let slot = Slot::transient(0);
-                    self.push_function(BytecodeFunction {
-                        func_id,
-                        name: format!("\0preload_getter@{func_id}"),
-                        initial_name: String::new(),
-                        is_async: false,
-                        is_arrow: false,
-                        is_method: true,
-                        length: 0,
-                        params: Vec::new(),
-                        rest_param: None,
-                        this_param: None,
-                        home_param: None,
-                        new_target_param: None,
-                        arguments_param: None,
-                        transient_slots: 1,
-                        persistent_slots: 0,
-                        code: vec![
-                            Instr::GetBinding { dst: slot, binding },
-                            Instr::Return { src: slot },
-                        ],
-                        resumes: Vec::new(),
-                        handlers: Vec::new(),
-                    });
-                    *entry.insert(func_id)
-                }
-            };
-            getters.insert(name.clone(), func_id);
-        }
-        self.preload = Some(Preload {
-            initializer,
-            exports,
-            getters,
+    pub(crate) fn getter(&mut self, target: ModuleTarget) -> Result<u32, CompileError> {
+        let func_id = self.alloc_func_id("", Span::default())?;
+        let slot = Slot::transient(0);
+        self.push_function(BytecodeFunction {
+            func_id,
+            name: format!("\0module_getter@{func_id}"),
+            initial_name: String::new(),
+            is_async: false,
+            is_arrow: false,
+            is_method: true,
+            length: 0,
+            params: Vec::new(),
+            rest_param: None,
+            this_param: None,
+            home_param: None,
+            new_target_param: None,
+            arguments_param: None,
+            transient_slots: 1,
+            persistent_slots: 0,
+            code: vec![read_target(slot, target), Instr::Return { src: slot }],
+            resumes: Vec::new(),
+            handlers: Vec::new(),
         });
-        self.import_bindings.clear();
-        self.source = main_source;
-        Ok(())
+        Ok(func_id)
     }
 
-    pub(crate) fn finish(self) -> Result<Build, CompileError> {
-        let source = self.source;
+    pub(crate) fn finish(
+        self,
+        modules: Vec<SourceModule>,
+        entry: u32,
+        preload: Option<u32>,
+        options: &CompileOptions,
+    ) -> Result<Build, CompileError> {
         let mut build = Build::new(
             self.constants,
-            self.imports,
+            options.imports.clone(),
             self.functions,
-            0,
-            self.exports,
+            modules,
+            entry,
+            preload,
         );
-        build.preload = self.preload;
         build.finalize();
         build.validate().map_err(|error| {
-            CompileError::new(
-                source,
-                Span::default(),
-                format!("internal bytecode validation failed: {error}"),
-            )
+            CompileError::internal(format!("internal bytecode validation failed: {error}"))
+                .in_module(&build.modules[entry as usize].id)
         })?;
         Ok(build)
+    }
+}
+
+pub(crate) fn read_target(dst: Slot, target: ModuleTarget) -> Instr {
+    match target {
+        ModuleTarget::Binding { module, binding } => Instr::GetModuleBinding {
+            dst,
+            module,
+            binding,
+        },
+        ModuleTarget::Namespace { module } => Instr::GetModuleNamespace { dst, module },
+        ModuleTarget::Host(import) => Instr::GetImport { dst, import },
     }
 }

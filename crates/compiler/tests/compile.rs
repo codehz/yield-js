@@ -3,11 +3,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yield_compiler::{CompileError, CompileOptions, FileResolver, MemoryResolver, ModuleResolver};
-use yield_vm::bytecode::{Build, CallArgs, Instr};
+use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
 
 fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).unwrap();
     yield_compiler::compile("main.js", None, &resolver, options)
+}
+
+fn entry_module(build: &Build) -> &SourceModule {
+    &build.modules[build.entry as usize]
 }
 
 fn compile_with_preload(
@@ -42,11 +46,27 @@ fn compiles_preload_and_main_in_separate_module_scopes() {
         &options,
     )
     .unwrap();
-    let preload = build.preload.as_ref().unwrap();
-    assert_eq!(build.script, 0);
-    assert_eq!(preload.initializer, 1);
-    assert_ne!(build.exports["shared"], preload.exports["shared"]);
-    assert_eq!(build.constants.len(), 1);
+    let entry = &build.modules[build.entry as usize];
+    let preload = &build.modules[build.preload.unwrap() as usize];
+    assert_eq!(build.function(entry.evaluation).unwrap().name, "\0script");
+    assert_eq!(
+        build.function(preload.evaluation).unwrap().name,
+        "\0preload"
+    );
+    assert_ne!(
+        entry.exports["shared"].target,
+        preload.exports["shared"].target
+    );
+    assert_eq!(
+        build
+            .constants
+            .iter()
+            .filter(|constant| matches!(
+                constant, yield_vm::bytecode::Constant::String(value) if value == "same"
+            ))
+            .count(),
+        1
+    );
 
     let error = compile_with_preload("", "\nmissing;", &options).unwrap_err();
     assert_eq!(error.module(), "preload.js");
@@ -58,45 +78,59 @@ fn compiles_preload_and_main_in_separate_module_scopes() {
 }
 
 #[test]
-fn validates_preload_initializer_and_its_own_exports() {
+fn validates_module_initializers_and_export_bindings() {
     let build = compile_with_preload(
         "export let main = 0; export function run() {}",
         "export let n = 1;",
         &CompileOptions::default(),
     )
     .unwrap();
+    let entry = build.entry as usize;
+    let preload = build.preload.unwrap() as usize;
     let mut changed = build.clone();
-    changed.preload.as_mut().unwrap().initializer = changed.script;
+    changed.modules[preload].evaluation = changed.modules[entry].evaluation;
     assert!(changed.validate().unwrap_err().contains("build_id"));
     changed.finalize();
-    assert!(changed.validate().unwrap_err().contains("distinct"));
+    assert!(changed.validate().unwrap_err().contains("is not distinct"));
 
     let mut changed = build.clone();
-    changed.preload.as_mut().unwrap().initializer = u32::MAX;
-    changed.finalize();
-    assert!(changed.validate().unwrap_err().contains("does not exist"));
-
-    let mut changed = build.clone();
-    changed
-        .preload
-        .as_mut()
-        .unwrap()
-        .exports
-        .insert("n".into(), changed.exports["main"]);
+    changed.modules[preload].evaluation = u32::MAX;
     changed.finalize();
     assert!(
         changed
             .validate()
             .unwrap_err()
-            .contains("not declared in the preload")
+            .contains("missing initializer")
+    );
+
+    let mut changed = build.clone();
+    let ModuleTarget::Binding { binding, .. } = changed.modules[entry].exports["main"].target
+    else {
+        panic!("expected a local export binding");
+    };
+    changed.modules[preload]
+        .exports
+        .get_mut("n")
+        .unwrap()
+        .target = ModuleTarget::Binding {
+        module: preload as u32,
+        binding,
+    };
+    changed.finalize();
+    assert!(
+        changed
+            .validate()
+            .unwrap_err()
+            .contains("is not declared in module")
     );
 
     let mut changed = build;
-    let initializer = changed.preload.as_ref().unwrap().initializer;
+    let initializer = changed.modules[preload].evaluation;
+    let declaration = changed.modules[entry].declaration;
     let main = changed
         .functions
         .iter_mut()
-        .find(|f| f.func_id == changed.script)
+        .find(|f| f.func_id == declaration)
         .unwrap();
     let closure = main
         .code
@@ -112,24 +146,19 @@ fn validates_preload_initializer_and_its_own_exports() {
         changed
             .validate()
             .unwrap_err()
-            .contains("closes over the preload")
+            .contains("references reserved function")
     );
 }
 
 #[test]
-fn rejects_preload_getters_reading_the_wrong_binding() {
+fn rejects_module_getters_reading_the_wrong_binding() {
     let mut build =
         compile_with_preload("", "export let x = 1, y = 2;", &CompileOptions::default()).unwrap();
-    let preload = build.preload.as_mut().unwrap();
-    preload.getters.insert("x".into(), preload.getters["y"]);
+    let exports = &mut build.modules[build.preload.unwrap() as usize].exports;
+    exports.get_mut("x").unwrap().getter = exports["y"].getter;
     assert!(build.validate().unwrap_err().contains("build_id"));
     build.finalize();
-    assert!(
-        build
-            .validate()
-            .unwrap_err()
-            .contains("invalid preload getter")
-    );
+    assert!(build.validate().unwrap_err().contains("invalid getter"));
 }
 
 #[test]
@@ -822,7 +851,11 @@ function run() {}
     )
     .unwrap();
     assert_eq!(
-        build.exports.keys().map(String::as_str).collect::<Vec<_>>(),
+        entry_module(&build)
+            .exports
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         [
             "",
             "a",
@@ -836,15 +869,13 @@ function run() {}
             "v"
         ]
     );
+    let exports = &entry_module(&build).exports;
     for name in ["", "a", "b"] {
-        assert_eq!(build.exports[name], build.exports["n"]);
+        assert_eq!(exports[name].target, exports["n"].target);
+        assert_eq!(exports[name].getter, exports["n"].getter);
     }
-    assert!(
-        compile("function run() {}", &CompileOptions::default())
-            .unwrap()
-            .exports
-            .is_empty()
-    );
+    let unexported = compile("function run() {}", &CompileOptions::default()).unwrap();
+    assert!(entry_module(&unexported).exports.is_empty());
 }
 
 #[test]
@@ -879,7 +910,8 @@ fn host_import_export_aliases_share_one_binding() {
         },
     )
     .unwrap();
-    assert_eq!(build.exports["inspect"], build.exports["check"]);
+    let exports = &entry_module(&build).exports;
+    assert_eq!(exports["inspect"].target, exports["check"].target);
 }
 
 #[test]
@@ -910,7 +942,8 @@ fn registers_default_exports_and_rejects_their_misuses() {
         &CompileOptions::default(),
     )
     .unwrap();
-    assert_eq!(build.exports["default"], build.exports["alias"]);
+    let exports = &entry_module(&build).exports;
+    assert_eq!(exports["default"].target, exports["alias"].target);
     // A named default function projects the local binding; the name itself is
     // not auto-exported.
     let build = compile(
@@ -918,15 +951,16 @@ fn registers_default_exports_and_rejects_their_misuses() {
         &CompileOptions::default(),
     )
     .unwrap();
-    assert!(build.exports.contains_key("default"));
-    assert!(!build.exports.contains_key("f"));
+    assert!(entry_module(&build).exports.contains_key("default"));
+    assert!(!entry_module(&build).exports.contains_key("f"));
     // A named default class shares one binding with the exported local name.
     let build = compile(
         "export default class C {}\nexport { C };",
         &CompileOptions::default(),
     )
     .unwrap();
-    assert_eq!(build.exports["default"], build.exports["C"]);
+    let exports = &entry_module(&build).exports;
+    assert_eq!(exports["default"].target, exports["C"].target);
     // A second default is rejected at its source location.
     let error = compile(
         "let x;\nexport { x as default };\nexport default 2;",
@@ -957,9 +991,8 @@ fn rejects_unsupported_module_syntax() {
         ("for await (const value of []) {}", "top-level await"),
         ("import('dep');", "dynamic import"),
         ("import.meta;", "import.meta"),
-        ("export { x } from 'dep';", "re-export"),
-        ("export * from 'dep';", "re-export"),
-        ("export * as ns from 'dep';", "re-export"),
+        ("import 'dep' with { type: 'json' };", "attributes"),
+        ("export * from 'dep' with { type: 'json' };", "attributes"),
     ] {
         let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
@@ -969,6 +1002,49 @@ fn rejects_unsupported_module_syntax() {
         );
         assert!(error.message().contains(feature), "{error}");
     }
+}
+
+#[test]
+fn rejects_unresolved_and_ambiguous_exports_at_the_request() {
+    let check = |files: &[(&str, &str)], expected_module, expected_line, expected: &str| {
+        let resolver = MemoryResolver::new(files.iter().copied()).unwrap();
+        let err = yield_compiler::compile("a.js", None, &resolver, &CompileOptions::default())
+            .unwrap_err();
+        assert_eq!(err.module(), expected_module, "{err}");
+        assert_eq!(err.line(), expected_line, "{err}");
+        assert!(err.message().contains(expected), "{err}");
+    };
+    check(
+        &[
+            ("a.js", "import './b.js';"),
+            ("b.js", "\nimport { missing } from './a.js';"),
+            ("c.js", "not reachable!"),
+        ],
+        "b.js",
+        2,
+        "missing",
+    );
+    check(
+        &[
+            ("a.js", "\nexport { x } from './b.js';"),
+            ("b.js", "export { x } from './a.js';"),
+            ("c.js", "export const x = 7;"),
+        ],
+        "a.js",
+        2,
+        "x",
+    );
+    check(
+        &[
+            ("a.js", "\nimport { x } from './b.js';"),
+            ("b.js", "export * from './c.js'; export * from './d.js';"),
+            ("c.js", "export let x = 1;"),
+            ("d.js", "export let x = 2;"),
+        ],
+        "a.js",
+        2,
+        "ambiguous",
+    );
 }
 
 #[test]
@@ -1035,7 +1111,9 @@ fn derived_constructor_lowering_captures_context_only_in_lexical_arrows() {
     )
     .unwrap();
     build.validate().unwrap();
-    let constructors: Vec<_> = build.functions[0]
+    let constructors: Vec<_> = build
+        .function(entry_module(&build).evaluation)
+        .unwrap()
         .code
         .iter()
         .filter_map(|op| match op {
@@ -1045,7 +1123,7 @@ fn derived_constructor_lowering_captures_context_only_in_lexical_arrows() {
                 ..
             } => Some((
                 *default_constructor,
-                build.functions[*constructor as usize].this_param.is_some(),
+                build.function(*constructor).unwrap().this_param.is_some(),
             )),
             _ => None,
         })
@@ -1089,7 +1167,8 @@ fn class_lowering_keeps_the_inner_name_out_of_ordinary_bindings() {
     )
     .unwrap();
     build.validate().unwrap();
-    let script = &build.functions[build.script as usize];
+    let entry = entry_module(&build);
+    let script = build.function(entry.evaluation).unwrap();
     let class_ops = script
         .code
         .iter()
@@ -1134,8 +1213,8 @@ fn class_lowering_keeps_the_inner_name_out_of_ordinary_bindings() {
     assert_eq!(scope, constructor_scope);
     assert_eq!(scope, method_scope);
     assert_eq!(scope, init_scope);
-    assert!(!build.functions[*constructor as usize].is_method);
-    assert!(build.functions[*function as usize].is_method);
+    assert!(!build.function(*constructor).unwrap().is_method);
+    assert!(build.function(*function).unwrap().is_method);
     let arrow = build
         .functions
         .iter()
@@ -1144,9 +1223,18 @@ fn class_lowering_keeps_the_inner_name_out_of_ordinary_bindings() {
     assert!(arrow.code.iter().any(|op| matches!(op,
         Instr::LoadClassBinding { scope: None, binding: inner, .. } if inner == binding
     )));
-    assert!(!script.code.iter().any(|op| matches!(op,
-        Instr::DeclareBinding { binding: outer } if outer == binding
-    )));
+    for id in [entry.declaration, entry.evaluation] {
+        assert!(
+            !build
+                .function(id)
+                .unwrap()
+                .code
+                .iter()
+                .any(|op| matches!(op,
+                    Instr::DeclareBinding { binding: outer } if outer == binding
+                ))
+        );
+    }
 }
 
 #[test]
@@ -1440,11 +1528,8 @@ fn imported_assignments_use_const_throws_without_binding_cells() {
         },
     )
     .expect("readonly import assignment lowers");
-    let script = build
-        .functions
-        .iter()
-        .find(|function| function.func_id == build.script)
-        .unwrap();
+    let entry = entry_module(&build);
+    let script = build.function(entry.evaluation).unwrap();
     assert!(
         script
             .code
@@ -1457,6 +1542,7 @@ fn imported_assignments_use_const_throws_without_binding_cells() {
             .iter()
             .any(|ins| matches!(ins, Instr::ThrowAssignmentToConst))
     );
+    assert!(build.module_bindings(build.entry).next().is_none());
     assert!(
         !script
             .code
@@ -1556,7 +1642,11 @@ fn names_nested_in_exported_patterns_are_public() {
     )
     .unwrap();
     assert_eq!(
-        build.exports.keys().map(String::as_str).collect::<Vec<_>>(),
+        entry_module(&build)
+            .exports
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         ["a", "rest"]
     );
 }

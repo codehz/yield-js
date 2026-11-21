@@ -7,9 +7,9 @@
 //! as the byte [`oxc::span::Span`] on [`CompileError`].
 //!
 //! ```text
-//! source
-//!   → frontend   parse
-//!   → lower      script function 0, then nested functions
+//! source roots and resolver
+//!   → frontend   parse and link reachable modules
+//!   → lower      module declaration and evaluation phases, then nested functions
 //!   → bindings   owner table; cross-function reads and writes stay shared
 //!   → promote    unshared bindings become logical registers
 //!   → analyze    CFG live-in, including resume and handler edges
@@ -71,63 +71,9 @@ pub fn compile(
     resolver: &dyn ModuleResolver,
     options: &CompileOptions,
 ) -> Result<Build, CompileError> {
-    let root = |specifier: &str| {
-        let result = if specifier.is_empty() {
-            Err("empty source root".into())
-        } else {
-            resolved_id(resolver, None, specifier)
-        };
-        result.map_err(|reason| root_error(specifier, reason))
-    };
-    let preload_id = preload.map(root).transpose()?;
-    let entry_id = root(entry)?;
-    let preload_source = preload_id
-        .as_deref()
-        .zip(preload)
-        .map(|(id, request)| {
-            resolver
-                .load(id)
-                .map_err(|reason| root_error(request, reason))
-        })
-        .transpose()?;
-    let entry_source = match (&preload_source, preload_id.as_deref()) {
-        (Some(source), Some(id)) if id == entry_id => std::borrow::Cow::Borrowed(source.as_ref()),
-        _ => resolver
-            .load(&entry_id)
-            .map_err(|reason| root_error(entry, reason))?,
-    };
-    let loaded_roots: Vec<_> = preload_id
-        .as_deref()
-        .into_iter()
-        .chain([entry_id.as_str()])
-        .collect();
     let allocator = Allocator::default();
-    let mut session =
-        session::Session::new(preload_source.as_deref().unwrap_or(&entry_source), options);
-    if let Some((id, source)) = preload_id.as_deref().zip(preload_source.as_deref()) {
-        (|| {
-            let initializer = session.alloc_func_id(oxc::span::Span::default())?;
-            let program = frontend::parse(&allocator, source)?;
-            frontend::check_dependencies(&program, id, source, resolver, options, &loaded_roots)?;
-            lower::lower_program(&mut session, &program, initializer, "\0preload")?;
-            session.finish_preload(initializer, &entry_source)
-        })()
-        .map_err(|err: CompileError| err.in_module(id))?;
-    }
-    (|| {
-        let program = frontend::parse(&allocator, &entry_source)?;
-        frontend::check_dependencies(
-            &program,
-            &entry_id,
-            &entry_source,
-            resolver,
-            options,
-            &loaded_roots,
-        )?;
-        lower::lower_program(&mut session, &program, 0, "\0script")?;
-        session.finish()
-    })()
-    .map_err(|err: CompileError| err.in_module(&entry_id))
+    let graph = frontend::link::link(&allocator, entry, preload, resolver, options)?;
+    lower::lower_graph(&graph, options)
 }
 
 fn root_error(request: &str, reason: String) -> CompileError {

@@ -26,7 +26,8 @@ fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<JsString> {
 
 fn has_call_environment(snapshot: &yield_vm::Snapshot) -> bool {
     snapshot.objects.iter().any(|record| {
-        Some(record.id) != snapshot.script_env && matches!(record.object, Object::Environment(_))
+        matches!(record.object, Object::Environment(_))
+            && !snapshot.module_envs.contains(&Some(record.id))
     })
 }
 

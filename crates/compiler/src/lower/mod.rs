@@ -17,53 +17,178 @@ use oxc::ast_visit::{Visit, walk};
 use oxc::span::{GetSpan, Span};
 use oxc::syntax::scope::ScopeFlags;
 use yield_vm::BindingId;
-use yield_vm::bytecode::{Constant, Instr};
+use yield_vm::bytecode::{Build, Constant, Instr, ModuleExport, ModuleTarget, SourceModule};
 
 use crate::allocate;
 use crate::bindings;
 use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
+use crate::frontend::link::{DEFAULT_SLOT, Graph, Target};
 use crate::ir::LoweredFunction;
+use crate::names::Tables;
 use crate::promote;
 use crate::session::Session;
 use control::Control;
 
-pub(crate) fn lower_program<'ast>(
-    session: &mut Session<'_>,
-    program: &'ast Program<'ast>,
-    initializer: u32,
-    name: &str,
+pub(crate) fn lower_graph<'ast>(
+    graph: &'ast Graph<'ast>,
+    options: &crate::CompileOptions,
+) -> Result<Build, CompileError> {
+    let mut session = Session::new();
+    // Reserve graph-wide binding IDs before lowering the first declaration.
+    let mut reservations = Vec::with_capacity(graph.modules.len());
+    for module in &graph.modules {
+        let mut ids = BTreeMap::new();
+        for name in &module.locals {
+            let next = session.binding_ids();
+            let id = *next;
+            *next = next
+                .checked_add(1)
+                .ok_or_else(|| CompileError::internal("too many bindings").in_module(&module.id))?;
+            ids.insert(name.as_str(), id);
+        }
+        reservations.push(ids);
+    }
+    let target = |target: &Target| match target {
+        Target::Binding { module, name } => ModuleTarget::Binding {
+            module: *module,
+            binding: reservations[*module as usize][name.as_str()],
+        },
+        Target::Namespace { module } => ModuleTarget::Namespace { module: *module },
+        Target::Host(import) => ModuleTarget::Host(*import),
+    };
+    let mut keep = vec![BTreeSet::new(); graph.modules.len()];
+    for module in &graph.modules {
+        for export in module.exports.values() {
+            if let ModuleTarget::Binding { module, binding } = target(export) {
+                keep[module as usize].insert(binding);
+            }
+        }
+    }
+    let preload_names = graph
+        .preload
+        .map(|index| &graph.modules[index as usize].exports);
+    let mut getters = BTreeMap::new();
+    let mut modules = Vec::with_capacity(graph.modules.len());
+    for (index, module) in graph.modules.iter().enumerate() {
+        let index = index as u32;
+        let source = module.program.source_text;
+        let result = (|| {
+            let scope = ModuleScope {
+                source,
+                entry: index == graph.entry,
+                slots: &reservations[index as usize],
+                imports: module
+                    .imports
+                    .iter()
+                    .map(|(name, link)| (name.clone(), target(link)))
+                    .collect(),
+                preload: if module.in_preload {
+                    None
+                } else {
+                    preload_names
+                },
+            };
+            let declaration = session.alloc_func_id(source, Span::default())?;
+            let (evaluation, name) = if index == graph.entry {
+                (0, "\0script".to_owned())
+            } else {
+                let id = session.alloc_func_id(source, Span::default())?;
+                (
+                    id,
+                    if Some(index) == graph.preload {
+                        "\0preload".to_owned()
+                    } else {
+                        format!("\0evaluate@{index}")
+                    },
+                )
+            };
+            lower_module(
+                &mut session,
+                &scope,
+                &module.program.body,
+                declaration,
+                evaluation,
+                name,
+                &keep[index as usize],
+            )?;
+            let mut exports = BTreeMap::new();
+            for (name, link) in &module.exports {
+                let target = target(link);
+                let getter = match getters.entry(target) {
+                    std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        *entry.insert(session.getter(target)?)
+                    }
+                };
+                exports.insert(name.to_owned(), ModuleExport { target, getter });
+            }
+            Ok(SourceModule {
+                id: module.id.clone(),
+                declaration,
+                evaluation,
+                dependencies: module.deps.clone(),
+                exports,
+            })
+        })();
+        modules.push(result.map_err(|err: CompileError| err.in_module(&module.id))?);
+    }
+    session.finish(modules, graph.entry, graph.preload, options)
+}
+
+struct ModuleScope<'src> {
+    source: &'src str,
+    entry: bool,
+    slots: &'src BTreeMap<&'src str, BindingId>,
+    imports: BTreeMap<String, ModuleTarget>,
+    preload: Option<&'src BTreeMap<String, Target>>,
+}
+
+fn lower_module<'ast>(
+    session: &mut Session,
+    scope: &ModuleScope<'_>,
+    statements: &'ast [Statement<'ast>],
+    declaration: u32,
+    evaluation: u32,
+    name: String,
+    public: &BTreeSet<BindingId>,
 ) -> Result<(), CompileError> {
     let mut tasks = VecDeque::new();
-    let mut lowered = Vec::new();
-    lowered.push(Lowerer::compile_task(
+    let script = |func_id, name| Task {
+        source: FunctionSource::Script(statements),
+        func_id,
+        name,
+        initial_name: String::new(),
+        outer: CapturedEnv::default(),
+        class_bindings: BTreeSet::new(),
+        private_scopes: Vec::new(),
+        derived_this: false,
+    };
+    let mut declare = Lowerer::new(
         session,
         &mut tasks,
-        Task {
-            source: FunctionSource::Script(&program.body),
-            func_id: initializer,
-            name: name.to_owned(),
-            initial_name: String::new(),
-            outer: CapturedEnv::default(),
-            class_bindings: BTreeSet::new(),
-            private_scopes: Vec::new(),
-            derived_this: false,
-        },
-    )?);
+        scope,
+        script(declaration, format!("\0declare@{declaration}")),
+    );
+    declare.module_declaration = true;
+    let declared = declare.compile()?;
+    let (env, hoisted, default_binding) = (declare.env, declare.hoisted, declare.default_binding);
+    let mut evaluate = Lowerer::new(session, &mut tasks, scope, script(evaluation, name));
+    evaluate.env = env;
+    evaluate.hoisted = hoisted;
+    evaluate.default_binding = default_binding;
+    let evaluated = evaluate.compile()?;
+    let mut lowered = vec![declared, evaluated];
     while let Some(task) = tasks.pop_front() {
-        lowered.push(Lowerer::compile_task(session, &mut tasks, task)?);
+        lowered.push(Lowerer::new(session, &mut tasks, scope, task).compile()?);
     }
     let mut facts = bindings::classify(&lowered)?;
-    for binding in session.exports().values().copied() {
-        facts.shared.insert(binding);
-    }
-    for function in &mut lowered {
-        promote::promote(session.source, function, &facts)?;
-    }
+    facts.shared.extend(public);
     for function in lowered {
-        let function = allocate::allocate(session.source, function)?;
-        session.push_function(function);
+        let mut function = function;
+        promote::promote(scope.source, &mut function, &facts)?;
+        session.push_function(allocate::allocate(scope.source, function)?);
     }
     Ok(())
 }
@@ -130,8 +255,9 @@ struct Task<'ast> {
 }
 
 struct Lowerer<'ast, 'borrow, 'src> {
-    session: &'borrow mut Session<'src>,
+    session: &'borrow mut Session,
     tasks: &'borrow mut VecDeque<Task<'ast>>,
+    module: &'borrow ModuleScope<'src>,
     func_id: u32,
     name: String,
     initial_name: String,
@@ -141,6 +267,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     is_arrow: bool,
     is_method: bool,
     is_script: bool,
+    module_declaration: bool,
     // In an explicit derived constructor and its arrows, the this binding
     // holds the opaque construction context rather than the receiver.
     derived_this: bool,
@@ -159,33 +286,23 @@ struct Lowerer<'ast, 'borrow, 'src> {
     new_target_binding: Option<BindingId>,
     arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
-    exported_imports: BTreeMap<(u32, Option<u32>), BindingId>,
-    // Anonymous `export default` statements have no source identifier to look
-    // up, so their public slot is allocated during export collection.
+    // The synthetic slot for a default export without a local name.
     default_binding: Option<BindingId>,
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
-    fn compile_task(
-        session: &'borrow mut Session<'src>,
-        tasks: &'borrow mut VecDeque<Task<'ast>>,
-        task: Task<'ast>,
-    ) -> Result<LoweredFunction, CompileError> {
-        let mut lowerer = Self::new(session, tasks, task);
-        lowerer.compile()
-    }
-
     fn new(
-        session: &'borrow mut Session<'src>,
+        session: &'borrow mut Session,
         tasks: &'borrow mut VecDeque<Task<'ast>>,
+        module: &'borrow ModuleScope<'src>,
         task: Task<'ast>,
     ) -> Self {
         let span = task.source.span();
         let is_async = task.source.is_async();
-        let source_text = session.source;
         Self {
             session,
             tasks,
+            module,
             func_id: task.func_id,
             name: task.name,
             initial_name: task.initial_name,
@@ -200,12 +317,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     | FunctionSource::ClassBlock(_)
             ),
             is_script: matches!(task.source, FunctionSource::Script(_)),
+            module_declaration: false,
             derived_this: task.derived_this,
             env: Env::new(task.outer),
             class_bindings: task.class_bindings,
             private_scopes: task.private_scopes,
             class_scope: None,
-            emit: Emitter::new(source_text, span),
+            emit: Emitter::new(module.source, span),
             control: Control::new(),
             param_bindings: Vec::new(),
             rest_binding: None,
@@ -214,7 +332,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             new_target_binding: None,
             arguments_binding: None,
             hoisted: BTreeSet::new(),
-            exported_imports: BTreeMap::new(),
             default_binding: None,
         }
     }
@@ -262,11 +379,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_implicit_return()?;
             }
             FunctionSource::Script(statements) => {
-                self.init_imports(statements)?;
-                self.hoist_script(statements)?;
-                self.collect_exports(statements)?;
-                for statement in statements {
-                    self.compile_statement(statement)?;
+                if self.module_declaration {
+                    self.hoist_script(statements)?;
+                    self.hoist_anonymous_default(statements)?;
+                } else {
+                    for statement in statements {
+                        self.compile_statement(statement)?;
+                    }
                 }
                 self.emit_implicit_return()?;
             }
@@ -514,7 +633,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     pub(super) fn source_text(&self) -> &'src str {
-        self.session.source
+        self.module.source
+    }
+
+    fn names(&self) -> Tables<'_> {
+        Tables {
+            imports: &self.module.imports,
+            preload: self.module.preload,
+        }
     }
 
     pub(super) fn alloc_reg(&mut self) -> Result<Reg, CompileError> {
@@ -563,7 +689,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         span: Span,
     ) -> Result<(BindingId, bool), CompileError> {
         let binding_kind = as_binding_kind(self.source_text(), kind, span)?;
-        let source = self.session.source;
+        let source = self.module.source;
         self.env
             .declare(self.session.binding_ids(), source, name, binding_kind, span)
     }
@@ -603,7 +729,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         name: &str,
         span: Span,
     ) -> Result<(), CompileError> {
-        self.env.check_tdz(binding, name, self.session.source, span)
+        self.env.check_tdz(binding, name, self.module.source, span)
     }
     pub(super) fn emit_constant(&mut self, constant: Constant) -> Result<Reg, CompileError> {
         let index = self.session.intern(constant);
@@ -650,7 +776,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         initial_name: String,
         span: Span,
     ) -> Result<u32, CompileError> {
-        let func_id = self.session.alloc_func_id(span)?;
+        let func_id = self.session.alloc_func_id(self.module.source, span)?;
         self.tasks.push_back(Task {
             source,
             func_id,
@@ -710,11 +836,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         name: &str,
         span: Span,
     ) -> Result<u32, CompileError> {
-        let func_id = self.session.alloc_func_id(span)?;
+        let func_id = self.session.alloc_func_id(self.module.source, span)?;
         self.tasks.push_back(Task {
             source: FunctionSource::Function(function),
             func_id,
-            name: if self.func_id == 0 {
+            name: if self.module.entry {
                 name.to_owned()
             } else {
                 format!("{name}@{func_id}")
@@ -779,205 +905,33 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    /// Validate and register static host imports before any body lowering,
-    /// so nested functions can emit direct indexed operands.
-    fn init_imports(&mut self, statements: &[Statement<'_>]) -> Result<(), CompileError> {
-        use ImportDeclarationSpecifier::*;
-
-        for statement in statements {
-            let Statement::ImportDeclaration(import) = statement else {
-                continue;
-            };
-            if import.phase.is_some() || import.with_clause.is_some() {
-                return Err(unsupported(
-                    self.source_text(),
-                    import.span,
-                    "import phases or attributes",
-                ));
-            }
-            let Some(module) = import.source.value.as_str() else {
-                return Err(unsupported(
-                    self.source_text(),
-                    import.source.span,
-                    "non-string module specifier",
-                ));
-            };
-            let module_span = import.source.span;
-            let specifiers = import
-                .specifiers
-                .as_ref()
-                .map(|items| items.as_slice())
-                .unwrap_or(&[]);
-            if specifiers.is_empty() {
-                // Resolution is the only effect: host modules have no script body.
-                self.session.resolve_import(module, module_span, None)?;
-            }
-            for specifier in specifiers {
-                let local = specifier.local();
-                let export = match specifier {
-                    ImportSpecifier(specifier) => Some((
-                        specifier.imported.name().as_str(),
-                        specifier.imported.span(),
-                    )),
-                    ImportDefaultSpecifier(specifier) => Some(("default", specifier.span)),
-                    ImportNamespaceSpecifier(_) => None,
-                };
-                let import = self.session.resolve_import(module, module_span, export)?;
-                self.session.bind_import(local.name.as_str(), import);
-            }
-        }
-        Ok(())
-    }
-
-    fn collect_exports(&mut self, statements: &'ast [Statement<'ast>]) -> Result<(), CompileError> {
-        for statement in statements {
-            match statement {
-                Statement::ExportDeclaration(export) => match &export.declaration {
-                    Declaration::ClassDeclaration(class) => {
-                        if let Some(id) = &class.id {
-                            self.export_binding(
-                                id.name.as_str(),
-                                id.span,
-                                id.name.as_str(),
-                                id.span,
-                            )?;
-                        }
-                    }
-                    Declaration::FunctionDeclaration(function) => {
-                        if let Some(id) = &function.id {
-                            self.export_binding(
-                                id.name.as_str(),
-                                id.span,
-                                id.name.as_str(),
-                                id.span,
-                            )?;
-                        }
-                    }
-                    Declaration::VariableDeclaration(declaration) => {
-                        for declarator in &declaration.declarations {
-                            for_each_binding_name(&declarator.id, &mut |id| {
-                                self.export_binding(
-                                    id.name.as_str(),
-                                    id.span,
-                                    id.name.as_str(),
-                                    id.span,
-                                )
-                            })?;
-                        }
-                    }
-                    _ => {}
-                },
-                Statement::ExportNamedDeclaration(export) => {
-                    for specifier in &export.specifiers {
-                        self.export_binding(
-                            specifier.local.name().as_str(),
-                            specifier.local.span(),
-                            specifier.exported.name().as_str(),
-                            specifier.exported.span(),
-                        )?;
-                    }
-                }
-                Statement::ExportDefaultDeclaration(export) => {
-                    match &export.declaration {
-                        // Named declarations project onto the public name
-                        // `default`; the local id is not auto-exported.
-                        ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                            let Some(identifier) = function.id.as_ref() else {
-                                // An anonymous default function has no local
-                                // name to look up: it is initialized here, at
-                                // module entry, with the public name `default`.
-                                let binding = self.register_default_slot(export.span)?;
-                                let func_id = self.enqueue_named_function(
-                                    FunctionSource::Function(function),
-                                    "default",
-                                    "default".to_owned(),
-                                    function.span,
-                                )?;
-                                self.init_function_binding(binding, func_id)?;
-                                continue;
-                            };
-                            self.export_binding(
-                                identifier.name.as_str(),
-                                identifier.span,
-                                "default",
-                                export.span,
-                            )?;
-                        }
-                        ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                            if let Some(identifier) = &class.id {
-                                self.export_binding(
-                                    identifier.name.as_str(),
-                                    identifier.span,
-                                    "default",
-                                    export.span,
-                                )?;
-                            } else {
-                                self.register_default_slot(export.span)?;
-                            }
-                        }
-                        ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
-                            return Err(unsupported(
-                                self.source_text(),
-                                export.span,
-                                "TypeScript interface",
-                            ));
-                        }
-                        _ => {
-                            self.register_default_slot(export.span)?;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    /// Anonymous `export default` statements have no source identifier, so the
-    /// public slot is allocated here and filled when the statement executes.
-    fn register_default_slot(&mut self, span: Span) -> Result<BindingId, CompileError> {
-        let binding = self.alloc_binding();
-        self.session.insert_export("default", binding, span)?;
-        self.default_binding = Some(binding);
-        Ok(binding)
-    }
-
-    fn export_binding(
+    fn hoist_anonymous_default(
         &mut self,
-        local: &str,
-        local_span: Span,
-        public: &str,
-        public_span: Span,
+        statements: &'ast [Statement<'ast>],
     ) -> Result<(), CompileError> {
-        let binding = if let Some(import) = self.session.import(local) {
-            let key = (import.module, import.export);
-            if let Some(binding) = self.exported_imports.get(&key) {
-                *binding
-            } else {
-                let binding = self.alloc_binding();
-                let value = self.alloc_reg()?;
-                self.emit(Instr::GetImport {
-                    dst: self.slot(value),
-                    import,
-                });
-                self.emit(Instr::DeclareBinding { binding });
-                self.emit(Instr::SetBinding {
-                    binding,
-                    src: self.slot(value),
-                });
-                self.exported_imports.insert(key, binding);
-                binding
-            }
-        } else {
-            self.env.lookup(local).ok_or_else(|| {
-                CompileError::new(
-                    self.source_text(),
-                    local_span,
-                    format!("unknown export binding {local:?}"),
-                )
-            })?
+        let Some(&binding) = self.module.slots.get(DEFAULT_SLOT) else {
+            return Ok(());
         };
-        self.session.insert_export(public, binding, public_span)
+        self.default_binding = Some(binding);
+        for stmt in statements {
+            if let Statement::ExportDefaultDeclaration(export) = stmt {
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(function) =
+                    &export.declaration
+                {
+                    let id = self.enqueue_named_function(
+                        FunctionSource::Function(function),
+                        "default",
+                        "default".to_owned(),
+                        function.span,
+                    )?;
+                    self.init_function_binding(binding, id)?;
+                } else {
+                    self.emit(Instr::DeclareBinding { binding });
+                }
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn predeclare_function_body(
@@ -1164,6 +1118,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if unique.is_empty() {
             return Ok(());
         }
+        if self.module_declaration {
+            for binding in unique {
+                self.emit(Instr::DeclareBinding { binding });
+            }
+            return Ok(());
+        }
         let undefined = self.emit_undefined()?;
         let src = self.slot(undefined);
         for binding in unique {
@@ -1180,6 +1140,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         span: Span,
     ) -> Result<Option<BindingId>, CompileError> {
         let binding_kind = as_binding_kind(self.source_text(), kind, span)?;
+        if self.module_declaration
+            && let Some(&id) = self.module.slots.get(name)
+        {
+            return Ok(self.env.predeclare(&mut { id }, name, binding_kind));
+        }
         Ok(self
             .env
             .predeclare(self.session.binding_ids(), name, binding_kind))
@@ -1212,7 +1177,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 for_each_binding_name(&declarator.id, &mut |identifier| {
                     let (binding, _) =
                         self.declare(identifier.name.as_str(), declaration.kind, identifier.span)?;
-                    if !lexical {
+                    if !lexical && !self.is_script {
                         self.emit(Instr::DeclareBinding { binding });
                     }
                     Ok::<(), CompileError>(())
@@ -1244,7 +1209,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 self.env.clear_pending(binding);
             } else {
-                self.emit(Instr::DeclareBinding { binding });
+                if !self.is_script {
+                    self.emit(Instr::DeclareBinding { binding });
+                }
                 if let Some(expression) = &declarator.init {
                     let value = self.compile_named_expression(expression, name)?;
                     self.emit(Instr::SetBinding {
@@ -1414,6 +1381,48 @@ fn script_scan<'ast>(
     let mut functions = Vec::new();
     let vars = collect_list(source, statements, true, &mut functions)?;
     Ok(ScriptScan { vars, functions })
+}
+
+pub(crate) fn module_locals<'ast>(
+    source: &str,
+    statements: &'ast [Statement<'ast>],
+) -> Result<BTreeSet<String>, CompileError> {
+    let mut names: BTreeSet<_> = script_scan(source, statements)?.vars.into_keys().collect();
+    for stmt in statements {
+        let id = match local_declaration(stmt) {
+            Some(Declaration::VariableDeclaration(decl)) => {
+                for item in &decl.declarations {
+                    for_each_binding_name(&item.id, &mut |id| {
+                        names.insert(id.name.as_str().to_owned());
+                        Ok::<_, CompileError>(())
+                    })?;
+                }
+                continue;
+            }
+            Some(Declaration::ClassDeclaration(class)) => class.id.as_ref(),
+            _ => {
+                if let Statement::ExportDefaultDeclaration(export) = stmt {
+                    let id = match &export.declaration {
+                        ExportDefaultDeclarationKind::ClassDeclaration(class) => class.id.as_ref(),
+                        ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                            function.id.as_ref()
+                        }
+                        _ => None,
+                    };
+                    if id.is_none() {
+                        names.insert(crate::frontend::link::DEFAULT_SLOT.into());
+                    }
+                    id
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(id) = id {
+            names.insert(id.name.as_str().to_owned());
+        }
+    }
+    Ok(names)
 }
 
 fn collect_list<'ast>(
@@ -1680,7 +1689,7 @@ fn bind_for_header(
 }
 
 /// Visit only bound identifiers, in the order in which the pattern binds them.
-pub(super) fn for_each_binding_name<E>(
+pub(crate) fn for_each_binding_name<E>(
     pattern: &BindingPattern<'_>,
     visit: &mut impl FnMut(&BindingIdentifier<'_>) -> Result<(), E>,
 ) -> Result<(), E> {

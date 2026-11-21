@@ -64,7 +64,8 @@ impl Vm {
                 .class_prototypes
                 .insert(tag.to_owned(), self.host_classes[class].prototype);
         }
-        snapshot.script_env = self.script_env;
+        snapshot.module_envs = self.module_envs.clone();
+        snapshot.module_namespaces = self.module_namespaces.clone();
         for id in &live.objects {
             let object = match self.heap.get(*id)? {
                 Object::WeakMap { object, entries } => Object::WeakMap {
@@ -83,6 +84,11 @@ impl Vm {
                         .filter(|key| live.contains_weak_key(*key))
                         .collect(),
                 },
+                Object::Environment(env) if !env.uninitialized.is_empty() => {
+                    return Err(VmError::InvalidState(format!(
+                        "environment {id} has uninitialized module bindings"
+                    )));
+                }
                 object => object.clone(),
             };
             snapshot.objects.push(ObjectRecord { id: *id, object });
@@ -298,9 +304,15 @@ impl Vm {
         for continuation in continuations.values() {
             require_value_objects(&heap, continuation.values.iter())?;
         }
-        let script_env = load_script_env(&build, &heap, snapshot.script_env)?;
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
-        validate_preload_globals(&build, &heap, &builtins, script_env)?;
+        validate_source_modules(
+            &build,
+            &heap,
+            &builtins,
+            &snapshot.module_envs,
+            &snapshot.module_namespaces,
+            &snapshot.imports,
+        )?;
         let operations = load_operations(&bindings, &heap, snapshot.operations)?;
         let host_tasks = load_host_tasks(
             &bindings,
@@ -324,7 +336,8 @@ impl Vm {
                 module_states,
                 globals: snapshot.globals,
                 builtins,
-                script_env,
+                module_envs: snapshot.module_envs,
+                module_namespaces: snapshot.module_namespaces,
             },
         );
         // Recovery can append new notifications; the captured ones must stay first.
@@ -483,96 +496,204 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
     Ok(())
 }
 
-fn load_script_env(
-    build: &Build,
-    heap: &Heap,
-    script_env: Option<ObjectId>,
-) -> Result<Option<ObjectId>, VmError> {
-    let needs_env = build
-        .function(build.script)
-        .is_some_and(|function| function.needs_environment());
-    match (needs_env, script_env) {
-        (false, None) => Ok(None),
-        (false, Some(id)) => Err(VmError::InvalidSnapshot(format!(
-            "script does not use an environment, found {id}"
-        ))),
-        (true, None) => Err(VmError::InvalidSnapshot(
-            "script environment is missing".to_owned(),
-        )),
-        (true, Some(id)) => {
-            let environment = match heap.get(id) {
-                Ok(Object::Environment(environment)) => environment,
-                Ok(_) => {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "script environment {id} is not an environment"
-                    )));
-                }
-                Err(_) => {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "script environment {id} does not exist"
-                    )));
-                }
-            };
-            if environment.parent.is_some() {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "script environment {id} has a parent"
-                )));
-            }
-            for (name, binding) in &build.exports {
-                if !environment.bindings.contains_key(binding) {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "export {name:?} binding {binding} is missing"
-                    )));
-                }
-            }
-            Ok(Some(id))
-        }
-    }
-}
-
-fn validate_preload_globals(
+fn validate_source_modules(
     build: &Build,
     heap: &Heap,
     builtins: &BuiltinRoots,
-    script_env: Option<ObjectId>,
+    envs: &[Option<ObjectId>],
+    namespaces: &[ObjectId],
+    host_namespaces: &[ObjectId],
 ) -> Result<(), VmError> {
-    let Some(preload) = &build.preload else {
-        return Ok(());
-    };
-    let global = heap.get(builtins.get("globalThis"))?;
-    let mut common_env = None;
-    let mut closures = BTreeMap::new();
-    for (name, binding) in &preload.exports {
-        let error = |detail| VmError::InvalidSnapshot(format!("preload global {name:?}: {detail}"));
+    if envs.len() != build.modules.len() || namespaces.len() != build.modules.len() {
+        return Err(VmError::InvalidSnapshot(
+            "source module root count mismatch".to_owned(),
+        ));
+    }
+    if host_namespaces.iter().copied().chain(builtins.ids()).any(
+        |id| matches!(heap.get(id), Ok(Object::Plain(object)) if object.module_namespace.is_some()),
+    ) {
+        return Err(VmError::InvalidSnapshot(
+            "a host or builtin root aliases a source module namespace".to_owned(),
+        ));
+    }
+
+    // Identity tags also distinguish modules with identical (or empty) shape.
+    let mut sentinel = None;
+    for (id, object) in heap.iter() {
+        match object {
+            Object::Environment(env) => {
+                if !env.uninitialized.is_empty() {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "environment {id} has uninitialized module bindings"
+                    )));
+                }
+                if let Some(module) = env.module
+                    && envs.get(module as usize) != Some(&Some(id))
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "environment {id} is not the root for source module {module}"
+                    )));
+                }
+                if env.module_getter_sentinel
+                    && (env.module.is_some()
+                        || env.parent.is_some()
+                        || !env.bindings.is_empty()
+                        || sentinel.replace(id).is_some())
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "invalid module getter sentinel environment {id}"
+                    )));
+                }
+            }
+            Object::Plain(object) => {
+                if let Some(module) = object.module_namespace
+                    && namespaces.get(module as usize) != Some(&id)
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "namespace {id} is not the root for source module {module}"
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut getters = BTreeMap::new();
+    let mut uses_sentinel = false;
+    let mut validate_getter = |object: &Object,
+                               name: &str,
+                               export: &crate::bytecode::ModuleExport,
+                               attributes: crate::heap::Attributes,
+                               owner: &str| {
+        let invalid = |detail| VmError::InvalidSnapshot(format!("{owner} {name:?}: {detail}"));
         let Some(OwnProperty::Stored(
             Property::Accessor {
                 get: Some(id),
                 set: None,
             },
-            attrs,
-        )) = global.own_property(PropertyKeyRef::String(name))
+            actual_attributes,
+        )) = object.own_property(PropertyKeyRef::String(name))
         else {
-            return Err(error("missing getter-only own property"));
+            return Err(invalid("missing getter-only own property"));
         };
-        if attrs != crate::vm::PRELOAD_EXPORT_ATTRIBUTES {
-            return Err(error("invalid attributes"));
+        if actual_attributes != attributes {
+            return Err(invalid("invalid attributes"));
         }
-        let func_id = preload.getters[name];
         let getter = heap
             .function(*id)
-            .filter(|getter| getter.func_id == func_id)
-            .ok_or_else(|| error("wrong getter function"))?;
-        if *closures.entry(func_id).or_insert(*id) != *id {
-            return Err(error("aliases do not share a getter"));
+            .filter(|getter| {
+                getter.func_id == export.getter && getter.home.is_none() && getter.class.is_none()
+            })
+            .ok_or_else(|| invalid("wrong getter function"))?;
+        let capture = match crate::vm::module_getter_capture(export.target) {
+            Some(module) => envs[module as usize],
+            None => {
+                uses_sentinel = true;
+                sentinel
+            }
+        };
+        if capture != Some(getter.env) {
+            return Err(invalid("wrong getter environment"));
         }
-        if Some(getter.env) == script_env || *common_env.get_or_insert(getter.env) != getter.env {
-            return Err(error("wrong preload environment"));
+        if *getters.entry(export.target).or_insert(*id) != *id {
+            return Err(invalid("aliases do not share a getter"));
         }
-        if !matches!(heap.get(getter.env), Ok(Object::Environment(env))
-            if env.parent.is_none() && env.bindings.contains_key(binding))
+        Ok(())
+    };
+
+    for (index, module) in build.modules.iter().enumerate() {
+        let module_index = index as u32;
+        let env = envs[index];
+        if env.is_some() != build.module_needs_environment(module_index) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "wrong environment presence for source module {:?}",
+                module.id
+            )));
+        }
+        if let Some(id) = env {
+            let invalid = || {
+                VmError::InvalidSnapshot(format!(
+                    "invalid environment {id} for source module {:?}",
+                    module.id
+                ))
+            };
+            let Ok(Object::Environment(env)) = heap.get(id) else {
+                return Err(invalid());
+            };
+            if env.module != Some(module_index) || env.parent.is_some() {
+                return Err(invalid());
+            }
+            let declared: BTreeSet<_> = build.module_bindings(module_index).collect();
+            if declared
+                .iter()
+                .any(|binding| !env.bindings.contains_key(binding))
+            {
+                return Err(invalid());
+            }
+            // Evaluation can add captured block bindings to the same environment.
+            // Conditional blocks need not have run, unlike module declarations.
+            let evaluation = build
+                .function(module.evaluation)
+                .expect("validated evaluation");
+            let block_bindings: BTreeSet<_> = evaluation
+                .code
+                .iter()
+                .filter_map(|instr| match instr {
+                    crate::bytecode::Instr::DeclareBinding { binding } => Some(*binding),
+                    _ => None,
+                })
+                .collect();
+            if env
+                .bindings
+                .keys()
+                .any(|binding| !declared.contains(binding) && !block_bindings.contains(binding))
+            {
+                return Err(invalid());
+            }
+        }
+
+        let id = namespaces[index];
+        let owner = format!("namespace for source module {:?}", module.id);
+        let invalid = || VmError::InvalidSnapshot(format!("invalid {owner}: object {id}"));
+        let Ok(object @ Object::Plain(plain)) = heap.get(id) else {
+            return Err(invalid());
+        };
+        if plain.module_namespace != Some(module_index)
+            || plain.is_error
+            || object.prototype().is_some()
+            || object.is_extensible()
+            || plain.props.iter().count() != module.exports.len()
+            || plain.symbol_props.iter().next().is_some()
         {
-            return Err(error("missing top-level export binding"));
+            return Err(invalid());
         }
+        for (name, export) in &module.exports {
+            validate_getter(
+                object,
+                name,
+                export,
+                crate::vm::MODULE_EXPORT_ATTRIBUTES,
+                &owner,
+            )?;
+        }
+    }
+
+    if let Some(preload) = build.preload {
+        let global = heap.get(builtins.get("globalThis"))?;
+        for (name, export) in &build.modules[preload as usize].exports {
+            validate_getter(
+                global,
+                name,
+                export,
+                crate::vm::PRELOAD_EXPORT_ATTRIBUTES,
+                "preload global",
+            )?;
+        }
+    }
+    if sentinel.is_some() != uses_sentinel {
+        return Err(VmError::InvalidSnapshot(
+            "unexpected module getter sentinel environment".to_owned(),
+        ));
     }
     Ok(())
 }

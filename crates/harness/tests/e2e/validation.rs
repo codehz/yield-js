@@ -2,7 +2,7 @@
 
 use super::support::{RUN, Suspended, compile_main, count_delta, json_round_trip};
 use yield_harness::{TestHost, build};
-use yield_vm::bytecode::{Instr, Slot};
+use yield_vm::bytecode::{Instr, ModuleTarget, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
@@ -169,7 +169,12 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
     );
 
     let mut corrupt = build("function run() { return 1; }");
-    corrupt.functions[0].code[0] = Instr::Const {
+    let run = corrupt
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    run.code[0] = Instr::Const {
         dst: Slot::transient(u16::MAX),
         constant: 0,
     };
@@ -193,7 +198,12 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
     );
 
     let mut corrupt = build("function run() { return 1; }");
-    corrupt.functions[0].code[0] = Instr::Jump { target: u32::MAX };
+    let run = corrupt
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    run.code[0] = Instr::Jump { target: u32::MAX };
     corrupt.finalize();
     let error = Vm::new(corrupt, &mut host).expect_err("bad jump target");
     assert!(matches!(error, VmError::InvalidBuild(message) if message.contains("targets pc")));
@@ -306,10 +316,7 @@ export async function run() {
     bindings.insert(1, Value::number(1.0));
     snapshot.objects.push(ObjectRecord {
         id: env_id,
-        object: Object::Environment(EnvironmentObject {
-            parent: None,
-            bindings,
-        }),
+        object: Object::Environment(EnvironmentObject::new(None, bindings)),
     });
     snapshot.continuations[0].env = Some(env_id);
     let calls = s.host.count("wait");
@@ -685,7 +692,14 @@ export function run() {
 fn script_startup_validates_before_calling_the_host() {
     let mut host = TestHost::default();
     let mut invalid = build("import { inspect } from 'test'; inspect(1); export function run() {}");
-    *invalid.exports.get_mut("run").unwrap() = u32::MAX;
+    invalid.modules[invalid.entry as usize]
+        .exports
+        .get_mut("run")
+        .unwrap()
+        .target = ModuleTarget::Binding {
+        module: invalid.entry,
+        binding: u32::MAX,
+    };
     invalid.finalize();
     assert!(matches!(
         Vm::new(invalid, &mut host),
@@ -785,7 +799,8 @@ fn restore_rejects_a_pending_operation_with_a_different_import_binding() {
 fn build_deserialization_rejects_duplicate_export_names() {
     let build = build("export function run() {}");
     let json = serde_json::to_string(&build).unwrap();
-    let member = format!(r#""run":{}"#, build.exports["run"]);
+    let export = &build.modules[build.entry as usize].exports["run"];
+    let member = format!(r#""run":{}"#, serde_json::to_string(export).unwrap());
     let export_map = format!(r#""exports":{{{member}}}"#);
     assert!(json.contains(&export_map));
     // Duplicate the identical value so last-write-wins would pass the digest check.
@@ -833,29 +848,35 @@ export function dropEntry() { entry = 0; }
     assert_eq!(vm.get_export("total").unwrap(), Value::number(11.0));
 
     let snapshot = vm.snapshot(&[]).unwrap();
+    let entry = build.entry as usize;
     let mut missing = snapshot.clone();
-    missing.script_env = None;
+    missing.module_envs[entry] = None;
     assert!(matches!(
         Vm::restore(missing, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut incorrect = snapshot.clone();
-    incorrect.script_env = snapshot.roots.values().next().copied();
+    incorrect.module_envs[entry] = Some(snapshot.module_namespaces[entry]);
     assert!(matches!(
         Vm::restore(incorrect, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut absent_export = snapshot.clone();
-    let script = absent_export.script_env.unwrap();
+    let entry_env = absent_export.module_envs[entry].unwrap();
     let record = absent_export
         .objects
         .iter_mut()
-        .find(|record| record.id == script)
+        .find(|record| record.id == entry_env)
         .unwrap();
     let Object::Environment(env) = &mut record.object else {
-        panic!("not the script environment")
+        panic!("not the entry module environment")
     };
-    env.bindings.remove(&build.exports["run"]);
+    let ModuleTarget::Binding { module, binding } = build.modules[entry].exports["run"].target
+    else {
+        panic!("expected a local run binding");
+    };
+    assert_eq!(module, build.entry);
+    assert!(env.bindings.remove(&binding).is_some());
     assert!(matches!(
         Vm::restore(absent_export, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))

@@ -18,7 +18,7 @@ cargo test --workspace
 cargo run -p yield-harness
 ```
 
-`yield-harness` 编译并执行设计文档中的双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。宿主只通过显式导出的绑定（`export async function run`）进入脚本；宿主模块、类、原型、实例槽、payload、模块状态和 operation 都由 VM 持有，恢复只需要同一 Build、同一绑定声明和同一快照。输入是离线打包后的单个严格 ES 模块，VM 不加载或链接其他模块。
+`yield-harness` 编译并执行双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。编译器通过同步解析器静态链接严格 ES 模块；宿主只访问入口模块的公开导出。VM 执行和恢复均不需要源文件或解析器。
 
 ## 目录
 

@@ -8,8 +8,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Promise rejection notifications persist across snapshots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 53;
+// Source module environments and namespaces are indexed roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 54;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -187,7 +187,10 @@ pub struct Snapshot {
     pub class_prototypes: BTreeMap<String, ObjectId>,
     pub host_instances: Vec<HostInstanceRecord>,
     pub module_states: Vec<ModuleStateRecord>,
-    pub script_env: Option<ObjectId>,
+    /// Source module environments, in build module order.
+    pub module_envs: Vec<Option<ObjectId>>,
+    /// Source module namespaces, in build module order.
+    pub module_namespaces: Vec<ObjectId>,
     pub combines: BTreeMap<ObjectId, CombineState>,
     pub random_state: u64,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
@@ -219,7 +222,8 @@ impl Snapshot {
             module_states: Vec::new(),
             globals: BTreeMap::new(),
             roots: BTreeMap::new(),
-            script_env: None,
+            module_envs: Vec::new(),
+            module_namespaces: Vec::new(),
             combines: BTreeMap::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             symbols: BTreeMap::new(),

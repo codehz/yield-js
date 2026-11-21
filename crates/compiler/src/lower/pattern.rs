@@ -59,7 +59,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Some(binding) = self.lookup(name) {
             self.check_tdz(binding, name, id.span)?;
             Ok(Destination::AssignmentBinding(binding))
-        } else if self.session.names().read_only(name).is_some() {
+        } else if self.names().read_only(name).is_some() {
             Ok(Destination::AssignmentReadOnly)
         } else {
             Err(CompileError::new(

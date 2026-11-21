@@ -521,6 +521,8 @@ pub struct PlainObject {
     pub prototype: Option<ObjectId>,
     pub(super) extensible: bool,
     pub(crate) is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) module_namespace: Option<u32>,
 }
 
 impl PlainObject {
@@ -531,6 +533,7 @@ impl PlainObject {
             prototype,
             extensible: true,
             is_error: false,
+            module_namespace: None,
         }
     }
 
@@ -721,6 +724,24 @@ impl ClassElement {
 pub struct EnvironmentObject {
     pub parent: Option<ObjectId>,
     pub bindings: BTreeMap<BindingId, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<u32>,
+    #[serde(skip)]
+    pub(crate) uninitialized: BTreeSet<BindingId>,
+    #[serde(default)]
+    pub(crate) module_getter_sentinel: bool,
+}
+
+impl EnvironmentObject {
+    pub fn new(parent: Option<ObjectId>, bindings: BTreeMap<BindingId, Value>) -> Self {
+        Self {
+            parent,
+            bindings,
+            module: None,
+            uninitialized: BTreeSet::new(),
+            module_getter_sentinel: false,
+        }
+    }
 }
 
 /// One-shot `resolve` or `reject` passed to an executor or a thenable `then`.

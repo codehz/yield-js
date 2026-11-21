@@ -5,7 +5,7 @@ use crate::binding::{
     OperationToken, Resume,
 };
 use crate::builtin::BuiltinRoots;
-use crate::bytecode::{Build, ParamTarget};
+use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
@@ -101,7 +101,15 @@ const IMPORT_EXPORT_ATTRIBUTES: crate::heap::Attributes = crate::heap::Attribute
     configurable: false,
 };
 
-pub(crate) const PRELOAD_EXPORT_ATTRIBUTES: Attributes = IMPORT_EXPORT_ATTRIBUTES;
+pub(crate) const MODULE_EXPORT_ATTRIBUTES: Attributes = IMPORT_EXPORT_ATTRIBUTES;
+pub(crate) const PRELOAD_EXPORT_ATTRIBUTES: Attributes = MODULE_EXPORT_ATTRIBUTES;
+
+pub(crate) fn module_getter_capture(target: ModuleTarget) -> Option<u32> {
+    match target {
+        ModuleTarget::Binding { module, .. } => Some(module),
+        ModuleTarget::Namespace { .. } | ModuleTarget::Host(_) => None,
+    }
+}
 
 /// A pending operation as exposed to the host after a call or restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +151,8 @@ pub(crate) struct RestoredState {
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) builtins: BuiltinRoots,
-    pub(crate) script_env: Option<ObjectId>,
+    pub(crate) module_envs: Vec<Option<ObjectId>>,
+    pub(crate) module_namespaces: Vec<ObjectId>,
 }
 
 #[derive(Debug)]
@@ -177,8 +186,15 @@ pub struct Vm {
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
     pub(crate) builtins: BuiltinRoots,
     pub(crate) random_state: u64,
-    /// Live environment of the script, present exactly when the script needs one.
-    pub(crate) script_env: Option<ObjectId>,
+    pub(crate) module_envs: Vec<Option<ObjectId>>,
+    pub(crate) module_namespaces: Vec<ObjectId>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModuleEvaluation {
+    Pending,
+    Visiting,
+    Done,
 }
 
 impl Vm {
@@ -191,11 +207,20 @@ impl Vm {
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);
         vm.install_imports(&bindings, resolved)?;
-        if let Some(initializer) = vm.build.preload.as_ref().map(|preload| preload.initializer) {
-            let env = vm.run_script(host, initializer)?;
-            vm.install_preload_globals(env)?;
+        vm.instantiate_modules(host)?;
+        let mut states = vec![ModuleEvaluation::Pending; vm.build.modules.len()];
+        if let Some(preload) = vm.build.preload {
+            vm.evaluate_module(host, preload, &mut states)?;
+            vm.install_preload_globals(preload)?;
         }
-        vm.script_env = vm.run_script(host, vm.build.script)?;
+        vm.evaluate_module(host, vm.build.entry, &mut states)?;
+        for env in vm.module_envs.iter().flatten() {
+            if !vm.heap.environment(*env)?.uninitialized.is_empty() {
+                return Err(VmError::InvalidState(
+                    "module evaluation left uninitialized bindings".into(),
+                ));
+            }
+        }
         vm.run_until_idle(host)?;
         Ok(vm)
     }
@@ -225,7 +250,8 @@ impl Vm {
             active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
             random_state: crate::builtin::math::RANDOM_SEED,
-            script_env: None,
+            module_envs: Vec::new(),
+            module_namespaces: Vec::new(),
         }
     }
 
@@ -887,15 +913,19 @@ impl Vm {
 
     /// Reads the current value of a public module binding.
     pub fn get_export(&self, name: &str) -> Result<Value, VmError> {
-        let binding = *self
-            .build
+        let target = self.build.modules[self.build.entry as usize]
             .exports
             .get(name)
-            .ok_or_else(|| VmError::InvalidState(format!("unknown export {name:?}")))?;
-        let env = self
-            .script_env
-            .ok_or_else(|| VmError::InvalidState("script has no environment".to_owned()))?;
-        self.heap.get_binding(env, binding)
+            .ok_or_else(|| VmError::InvalidState(format!("unknown export {name:?}")))?
+            .target;
+        match target {
+            ModuleTarget::Binding { module, binding } => self
+                .heap
+                .get_module_binding(self.module_environment(module)?, binding)?
+                .ok_or_else(|| VmError::InvalidState(format!("export {name:?} is uninitialized"))),
+            ModuleTarget::Namespace { module } => self.module_namespace(module),
+            ModuleTarget::Host(import) => self.read_host_import(import),
+        }
     }
 
     pub fn start(
@@ -916,20 +946,143 @@ impl Vm {
         self.invoke(host, &ActiveRoots::EMPTY, &callee, args, &Value::UNDEFINED)?
             .into_result()
     }
-    fn install_preload_globals(&mut self, env: Option<ObjectId>) -> Result<(), VmError> {
-        let preload = self.build.preload.as_ref().expect("preload metadata");
-        if preload.getters.is_empty() {
-            return Ok(());
+
+    pub(crate) fn read_host_import(&self, import: ImportDecl) -> Result<Value, VmError> {
+        let module = self.imports.get(import.module as usize).ok_or_else(|| {
+            VmError::InvalidState(format!("import module {} does not exist", import.module))
+        })?;
+        let declared_module = self
+            .build
+            .imports
+            .keys()
+            .nth(import.module as usize)
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("import module {} is not declared", import.module))
+            })?;
+        if declared_module != &module.module {
+            return Err(VmError::InvalidState(format!(
+                "import module index {} is inconsistent",
+                import.module
+            )));
         }
-        let env = env.ok_or_else(|| VmError::InvalidState("missing preload environment".into()))?;
+        match import.export {
+            None => Ok(Value::object(module.namespace)),
+            Some(export) => module.values.get(export as usize).cloned().ok_or_else(|| {
+                VmError::InvalidState(format!("import export {export} does not exist"))
+            }),
+        }
+    }
+
+    pub(crate) fn module_environment(&self, module: u32) -> Result<ObjectId, VmError> {
+        self.module_envs
+            .get(module as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| VmError::InvalidState(format!("module {module} has no environment")))
+    }
+
+    pub(crate) fn module_namespace(&self, module: u32) -> Result<Value, VmError> {
+        self.module_namespaces
+            .get(module as usize)
+            .copied()
+            .map(Value::object)
+            .ok_or_else(|| VmError::InvalidState(format!("module {module} has no namespace")))
+    }
+
+    fn instantiate_modules(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        let count = self.build.modules.len();
+        self.module_envs.reserve(count);
+        self.module_namespaces.reserve(count);
+        for index in 0..count {
+            let module = index as u32;
+            let env = if self.build.module_needs_environment(module) {
+                let bindings = self.build.module_bindings(module);
+                let env = self
+                    .heap
+                    .alloc_environment(None, bindings.map(|id| (id, Value::UNDEFINED)).collect());
+                let environment = self.heap.environment_mut(env)?;
+                environment.module = Some(module);
+                environment
+                    .uninitialized
+                    .extend(environment.bindings.keys().copied());
+                Some(env)
+            } else {
+                None
+            };
+            self.module_envs.push(env);
+            self.module_namespaces
+                .push(self.heap.alloc_module_namespace(module));
+        }
+
+        let mut getters = BTreeMap::new();
+        let mut sentinel = None;
+        for (module, &namespace) in self.build.modules.iter().zip(&self.module_namespaces) {
+            for (name, export) in &module.exports {
+                let getter = match getters.entry(export.target) {
+                    std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let env = match module_getter_capture(export.target) {
+                            Some(module) => self.module_environment(module)?,
+                            None => match sentinel {
+                                Some(env) => env,
+                                None => {
+                                    let env = self.heap.alloc_environment(None, BTreeMap::new());
+                                    self.heap.environment_mut(env)?.module_getter_sentinel = true;
+                                    sentinel = Some(env);
+                                    env
+                                }
+                            },
+                        };
+                        *entry.insert(self.heap.alloc_function(export.getter, env))
+                    }
+                };
+                let descriptor = DescriptorUpdate {
+                    get: Some(Some(getter)),
+                    set: Some(None),
+                    enumerable: Some(MODULE_EXPORT_ATTRIBUTES.enumerable),
+                    configurable: Some(MODULE_EXPORT_ATTRIBUTES.configurable),
+                    ..DescriptorUpdate::default()
+                };
+                if !self
+                    .heap
+                    .apply_descriptor(namespace, name.as_str().into(), descriptor)?
+                {
+                    return Err(VmError::InvalidState(format!(
+                        "cannot install module export {name:?}"
+                    )));
+                }
+            }
+            self.heap.get_mut(namespace)?.prevent_extensions();
+        }
+
+        for index in 0..count {
+            let declaration = self.build.modules[index].declaration;
+            self.run_module_phase(host, index, declaration)?;
+        }
+        Ok(())
+    }
+
+    fn install_preload_globals(&mut self, preload: u32) -> Result<(), VmError> {
+        let namespace = self.module_namespaces[preload as usize];
         let global = self.builtins.get("globalThis");
-        let mut closures = BTreeMap::new();
-        for (name, &func_id) in &preload.getters {
-            let getter = *closures
-                .entry(func_id)
-                .or_insert_with(|| self.heap.alloc_function(func_id, env));
+        for name in self.build.modules[preload as usize].exports.keys() {
+            let Some(crate::heap::OwnProperty::Stored(
+                crate::heap::Property::Accessor {
+                    get: Some(getter),
+                    set: None,
+                },
+                _,
+            )) = self
+                .heap
+                .get(namespace)?
+                .own_property(crate::value::PropertyKeyRef::String(name))
+            else {
+                return Err(VmError::InvalidState(format!(
+                    "missing preload getter {name:?}"
+                )));
+            };
             let descriptor = DescriptorUpdate {
-                get: Some(Some(getter)),
+                get: Some(Some(*getter)),
                 set: Some(None),
                 enumerable: Some(PRELOAD_EXPORT_ATTRIBUTES.enumerable),
                 configurable: Some(PRELOAD_EXPORT_ATTRIBUTES.configurable),
@@ -947,15 +1100,44 @@ impl Vm {
         Ok(())
     }
 
-    fn run_script(
+    fn evaluate_module(
         &mut self,
         host: &mut dyn Host,
+        root: u32,
+        states: &mut [ModuleEvaluation],
+    ) -> Result<(), VmError> {
+        let root = root as usize;
+        if states[root] == ModuleEvaluation::Done {
+            return Ok(());
+        }
+        let mut stack = vec![(root, 0)];
+        states[root] = ModuleEvaluation::Visiting;
+        while let Some((index, next_dependency)) = stack.last_mut() {
+            let module = &self.build.modules[*index];
+            if let Some(&dependency) = module.dependencies.get(*next_dependency) {
+                *next_dependency += 1;
+                let dependency = dependency as usize;
+                if states[dependency] == ModuleEvaluation::Pending {
+                    states[dependency] = ModuleEvaluation::Visiting;
+                    stack.push((dependency, 0));
+                }
+            } else {
+                let index = *index;
+                self.run_module_phase(host, index, module.evaluation)?;
+                states[index] = ModuleEvaluation::Done;
+                stack.pop();
+            }
+        }
+        Ok(())
+    }
+
+    fn run_module_phase(
+        &mut self,
+        host: &mut dyn Host,
+        module: usize,
         func_id: u32,
-    ) -> Result<Option<ObjectId>, VmError> {
-        let index = self.function_index(func_id)?;
-        let prepared = self.build.functions[index]
-            .needs_environment()
-            .then(|| self.heap.alloc_environment(None, BTreeMap::new()));
+    ) -> Result<(), VmError> {
+        let prepared = self.module_envs[module];
         self.activate(
             host,
             &ActiveRoots::EMPTY,
@@ -966,7 +1148,7 @@ impl Vm {
             (&Value::UNDEFINED, &Value::UNDEFINED, None),
         )?
         .into_result()
-        .map(|_| prepared)
+        .map(|_| ())
     }
 
     /// Runs queued VM microtasks. Host timer/event delivery belongs to the
@@ -1415,7 +1597,7 @@ impl Vm {
             bind(param, Value::object(rest));
         }
         let needs_env = self.build.functions[function_index].needs_environment();
-        let env = if needs_env {
+        let env = if needs_env || prepared_env.is_some() {
             let env = match prepared_env {
                 Some(env) => env,
                 None => self.heap.alloc_environment(parent_env, BTreeMap::new()),
@@ -1424,10 +1606,6 @@ impl Vm {
                 self.heap.environment_mut(env)?.bindings.extend(bindings);
             }
             Some(env)
-        } else if prepared_env.is_some() {
-            return Err(VmError::InvalidState(
-                "prepared environment for a function that has none".to_owned(),
-            ));
         } else {
             None
         };
@@ -1468,7 +1646,8 @@ impl Vm {
             module_states,
             globals,
             builtins,
-            script_env,
+            module_envs,
+            module_namespaces,
         } = state;
         heap.promise_prototype = Some(builtins.get("promise.prototype"));
         heap.object_prototype = Some(builtins.get("object.prototype"));
@@ -1510,7 +1689,8 @@ impl Vm {
             active_array_joins: BTreeSet::new(),
             builtins,
             random_state: crate::builtin::math::RANDOM_SEED,
-            script_env,
+            module_envs,
+            module_namespaces,
         }
     }
 }

@@ -7,16 +7,16 @@ use std::collections::BTreeMap;
 use crate::env::Env;
 use yield_vm::BindingId;
 use yield_vm::bytecode::BUILTINS;
-use yield_vm::bytecode::ImportDecl;
+use yield_vm::bytecode::ModuleTarget;
 
 pub(crate) struct Tables<'a> {
-    pub(crate) imports: &'a BTreeMap<String, ImportDecl>,
-    pub(crate) preload: Option<&'a BTreeMap<String, BindingId>>,
+    pub(crate) imports: &'a BTreeMap<String, ModuleTarget>,
+    pub(crate) preload: Option<&'a BTreeMap<String, crate::frontend::link::Target>>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum ReadOnlyName<'name> {
-    Import(ImportDecl),
+    Import(ModuleTarget),
     Preload(&'name str),
 }
 
