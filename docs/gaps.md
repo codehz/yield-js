@@ -9,7 +9,6 @@
 `Value` 仍是 `Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。`RegExp` 实例与显式包装对象通过堆对象表示，不是新的 `Value` 变体。
 
 - 尚未提供部分 well-known Symbol（如 `Symbol.asyncIterator`）及其协议。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
-- 名称策略保留一个偏差：没有同名 preload 导出时，`typeof` 对被局部绑定遮蔽的宿主导入或顶层函数仍可能折叠为 `"function"`（`names.rs`）。
 
 ## 2. 合法输入的编译期限制
 

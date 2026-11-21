@@ -771,7 +771,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             };
             let func_id = self.enqueue_direct(function, &name, function.span)?;
             self.init_function_binding(binding, func_id)?;
-            self.session.record_top_level_function(name, binding);
         }
         Ok(())
     }

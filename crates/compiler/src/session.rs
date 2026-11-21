@@ -19,7 +19,6 @@ use crate::names::Tables;
 pub(crate) struct Session<'src> {
     pub(crate) source: &'src str,
     import_bindings: BTreeMap<String, ImportDecl>,
-    top_level_functions: BTreeMap<String, BindingId>,
     exports: BTreeMap<String, BindingId>,
     preload: Option<Preload>,
     constants: Vec<Constant>,
@@ -34,7 +33,6 @@ impl<'src> Session<'src> {
     pub(crate) fn new(source: &'src str, options: &CompileOptions) -> Self {
         Self {
             source,
-            top_level_functions: BTreeMap::new(),
             exports: BTreeMap::new(),
             preload: None,
             constants: Vec::new(),
@@ -98,13 +96,8 @@ impl<'src> Session<'src> {
     pub(crate) fn names(&self) -> Tables<'_> {
         Tables {
             imports: &self.import_bindings,
-            top_level_functions: &self.top_level_functions,
             preload: self.preload.as_ref().map(|preload| &preload.exports),
         }
-    }
-
-    pub(crate) fn record_top_level_function(&mut self, name: String, binding: BindingId) {
-        self.top_level_functions.insert(name, binding);
     }
 
     pub(crate) fn insert_export(
@@ -213,7 +206,6 @@ impl<'src> Session<'src> {
             getters,
         });
         self.import_bindings.clear();
-        self.top_level_functions.clear();
         self.source = main_source;
         Ok(())
     }

@@ -11,7 +11,6 @@ use yield_vm::bytecode::ImportDecl;
 
 pub(crate) struct Tables<'a> {
     pub(crate) imports: &'a BTreeMap<String, ImportDecl>,
-    pub(crate) top_level_functions: &'a BTreeMap<String, BindingId>,
     pub(crate) preload: Option<&'a BTreeMap<String, BindingId>>,
 }
 
@@ -79,28 +78,21 @@ impl Tables<'_> {
 
     /// `Some(folded)` when `typeof name` must not evaluate `name`.
     /// `None` means lower the operand and emit `UnaryOp::TypeOf`.
+    ///
+    /// Only a genuinely undeclared identifier folds, to `"undefined"`. A
+    /// declared identifier (local, host import, preload global, top-level
+    /// function, or builtin) evaluates like any other identifier: shadowing
+    /// must not fold to `"function"`, so `typeof` of a shadowed import or
+    /// top-level function reports the runtime value of the inner binding.
     pub(crate) fn typeof_fold(&self, env: &Env, name: &str) -> Option<&'static str> {
-        if self.has_preload(name) {
+        if env.lookup(name).is_some()
+            || self.read_only(name).is_some()
+            || name == "undefined"
+            || builtin_index(name).is_some()
+        {
             return None;
         }
-        let binding = env.lookup(name);
-        let known = name == "undefined"
-            || binding.is_some()
-            || self.imports.contains_key(name)
-            || self.top_level_functions.contains_key(name)
-            || builtin_index(name).is_some();
-        if !known {
-            return Some("undefined");
-        }
-        if self.imports.contains_key(name) && binding.is_some() {
-            return Some("function");
-        }
-        if let Some(function) = self.top_level_functions.get(name).copied()
-            && binding != Some(function)
-        {
-            return Some("function");
-        }
-        None
+        Some("undefined")
     }
 }
 
