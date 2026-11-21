@@ -28,7 +28,6 @@
 
 | 内建 | 限制与缺项 |
 | --- | --- |
-| `Function` | `Function` 可反射，但调用和构造均抛出 `TypeError`，不编译字符串；`toString` 返回带初始名字的占位文本，不暴露源码 |
 | `Array` | 缺少 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries` 等方法。`map` 等多数原型方法只接受数组接收者。不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
 | 错误构造器 | 缺少专用的 `Error.prototype.toString`；`stack` 是简化文本，不包含调用帧 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
