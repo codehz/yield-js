@@ -65,6 +65,15 @@ impl Host for TaskHost {
     fn bindings(&self) -> Arc<Bindings> {
         Arc::clone(&self.bindings)
     }
+
+    fn now_ms(&self) -> i64 {
+        0
+    }
+
+    fn time_zone(&self) -> &str {
+        "Etc/UTC"
+    }
+
     fn report_error(&mut self, error: JsValue) {
         match &mut self.errors {
             Some(errors) => errors.push(error),

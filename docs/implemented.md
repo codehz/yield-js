@@ -17,6 +17,7 @@
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy` / `toThrow`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
 `console` 宿主模块提供 `debug`、`error`、`info`、`log`、`warn`；每个方法将首个实参输出到宿主标准错误，不实现浏览器格式化或多参数格式替换。
 - `test` 的 `setTimeout` / `clearTimeout` 使用可取消后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 timer driver，只接受有限非负的 `u32` 整数毫秒。快照写剩余时长，恢复不计离线时间；`@advance` 按截止时间、同截止时按登记顺序投递，每次投递后排空微任务。
+- `Host` 提供有符号 Unix 毫秒与 IANA 时区标识，不纳入绑定指纹；测试宿主读取同一 `FakeClock`，并在超出 ECMAScript 日期范围前拒绝时钟变更。演示宿主使用系统时间与启动时读取的系统时区。
 - `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
 - 同步生成器 `function*` 与 async generator `async function*`（声明、表达式、对象与类的方法）在调用时初始化形参后立即返回生成器对象，正文只在 `next` 时执行；异步生成器的调用不分配结果 Promise。`GeneratorStart` 是独立的调用期边界，只捕获正文入口的活槽；每次 `yield` 生成一个 `GeneratorEntry`，分别给出 `next_pc` / `throw_pc` 的注入槽和 `return_pc`，`LoadGeneratorReturn` 只在该落点读取本次恢复传入的完成值，待完成值不进入全局状态。生成器函数不可构造，其实例原型是函数的 `prototype`（非对象时回退对应的共享生成器原型：同步与异步生成器共用各自的 `generator.prototype` / `asyncGenerator.prototype`，两者不互相继承）。
 - 同步与异步生成器的正文均可直接以 `for (;;)`、`while` 或 `do…while` 开始（前置空语句也不影响）。如果循环头紧邻 `GeneratorStart`，编译器为首次恢复生成独立的跳转入口，循环回边只跳到实际循环头。

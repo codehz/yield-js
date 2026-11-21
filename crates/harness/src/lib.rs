@@ -445,6 +445,7 @@ pub struct TestHost {
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
     clock: Arc<FakeClock>,
+    time_zone: String,
     errors: Vec<JsValue>,
     rejection_events: Vec<RejectionEvent>,
     gc_roots: Vec<yield_vm::Value>,
@@ -469,6 +470,7 @@ impl TestHost {
             counters,
             labels,
             clock,
+            time_zone: "Etc/UTC".into(),
             errors: Vec::new(),
             rejection_events: Vec::new(),
             gc_roots: Vec::new(),
@@ -502,6 +504,11 @@ impl TestHost {
         &self.clock
     }
 
+    /// Sets the local time zone to the supplied IANA identifier.
+    pub fn set_time_zone(&mut self, time_zone: impl Into<String>) {
+        self.time_zone = time_zone.into();
+    }
+
     pub fn advance(&mut self, vm: &mut Vm, ms: u64) -> Result<(), String> {
         Arc::clone(&self.clock).advance(vm, self, ms)
     }
@@ -531,6 +538,14 @@ impl TestHost {
 impl Host for TestHost {
     fn bindings(&self) -> Arc<Bindings> {
         self.bindings.clone()
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    fn time_zone(&self) -> &str {
+        &self.time_zone
     }
 
     fn gc_roots(&self) -> &[yield_vm::Value] {

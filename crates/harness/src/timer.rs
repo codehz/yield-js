@@ -8,6 +8,8 @@ use yield_vm::binding::{
 use yield_vm::host::Completion;
 use yield_vm::{Host, Vm, operation};
 
+const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
+
 #[derive(Default)]
 pub struct FakeClock(Mutex<ClockState>);
 
@@ -36,7 +38,14 @@ impl FakeClock {
         self.0.lock().unwrap().arm_count
     }
 
+    pub fn now_ms(&self) -> i64 {
+        self.0.lock().unwrap().now_ms as i64
+    }
+
     pub fn set_time(&self, now: u64) -> Result<(), HostFault> {
+        if now > MAX_DATE_MS {
+            return Err(HostFault::new("clock time outside ECMAScript Date range"));
+        }
         let mut state = self.0.lock().unwrap();
         if !state.deadlines.is_empty() {
             return Err(HostFault::new("cannot set time with active timers"));
@@ -117,12 +126,10 @@ impl FakeClock {
     }
 
     fn advance_target(&self, ms: u64) -> Result<u64, HostFault> {
-        self.0
-            .lock()
-            .unwrap()
-            .now_ms
-            .checked_add(ms)
-            .ok_or_else(|| HostFault::new("clock advance overflow"))
+        let now = self.0.lock().unwrap().now_ms;
+        now.checked_add(ms)
+            .filter(|&target| target <= MAX_DATE_MS)
+            .ok_or_else(|| HostFault::new("clock advance outside ECMAScript Date range"))
     }
 
     /// Removes one due registration at a time so its callback can affect the rest.

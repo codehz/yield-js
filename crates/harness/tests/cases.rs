@@ -68,16 +68,15 @@ fn case_advance_rejects_invalid_arguments_with_location() {
 }
 
 #[test]
-fn case_advance_reports_clock_overflow_with_location() {
-    let source = r#"// @advance 18446744073709551615
+fn case_advance_reports_date_limit_with_location() {
+    let source = r#"// @advance 8640000000000000
 // @advance 1
 // @returns 1
 export function run() { return 1; }
 "#;
     let error = yield_harness::run_case("advance_overflow.js", source).unwrap_err();
-    assert!(
-        error.starts_with("advance_overflow.js:2: @advance: "),
-        "{error}"
+    assert_eq!(
+        error,
+        "advance_overflow.js:2: @advance: clock advance outside ECMAScript Date range"
     );
-    assert!(error.contains("overflow"), "{error}");
 }

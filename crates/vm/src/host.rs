@@ -19,6 +19,12 @@ pub enum Completion {
 pub trait Host {
     fn bindings(&self) -> Arc<Bindings>;
 
+    /// Current Unix epoch milliseconds, within the ECMAScript Date range.
+    fn now_ms(&self) -> i64;
+
+    /// The host's local time zone as a valid IANA identifier.
+    fn time_zone(&self) -> &str;
+
     /// Long-lived same-VM values retained by the host. Read only when a host
     /// binding requests collection, not by `Vm::collect_garbage` or snapshots.
     fn gc_roots(&self) -> &[Value] {

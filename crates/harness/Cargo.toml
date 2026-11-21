@@ -8,3 +8,4 @@ license.workspace = true
 yield-compiler = { path = "../compiler" }
 yield-vm = { path = "../vm" }
 serde_json.workspace = true
+iana-time-zone = "0.1"

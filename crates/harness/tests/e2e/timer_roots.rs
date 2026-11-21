@@ -197,11 +197,20 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     use yield_harness::{FakeClock, Timer};
     use yield_vm::{Bindings, Host};
 
-    struct RepeatHost(Arc<Bindings>);
+    struct RepeatHost(Arc<Bindings>, Arc<FakeClock>);
     impl Host for RepeatHost {
         fn bindings(&self) -> Arc<Bindings> {
             Arc::clone(&self.0)
         }
+
+        fn now_ms(&self) -> i64 {
+            self.1.now_ms()
+        }
+
+        fn time_zone(&self) -> &str {
+            "Etc/UTC"
+        }
+
         fn report_error(&mut self, error: JsValue) {
             panic!("unexpected callback error: {error}");
         }
@@ -214,7 +223,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         services: [("clock", 1, Arc::clone(&clock))],
     }
     .unwrap();
-    let mut host = RepeatHost(Arc::new(bindings));
+    let mut host = RepeatHost(Arc::new(bindings), Arc::clone(&clock));
     let program = compile_main(
         r#"
         import { start, clearTimeout } from 'repeat_timer';

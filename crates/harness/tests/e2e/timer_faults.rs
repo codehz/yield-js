@@ -295,11 +295,19 @@ timer_contract!(
     Vec::from([extra])
 );
 
-struct ContractHost(Arc<Bindings>);
+struct ContractHost(Arc<Bindings>, Arc<FakeClock>);
 
 impl Host for ContractHost {
     fn bindings(&self) -> Arc<Bindings> {
         Arc::clone(&self.0)
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.1.now_ms()
+    }
+
+    fn time_zone(&self) -> &str {
+        "Etc/UTC"
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -310,7 +318,7 @@ impl Host for ContractHost {
 #[test]
 fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     let source_clock = Arc::new(FakeClock::default());
-    let mut source = ContractHost(Arc::new(original::bindings(&source_clock)));
+    let mut source = ContractHost(Arc::new(original::bindings(&source_clock)), source_clock);
     let build = compile_main(
         r#"
         import { schedule } from 'contract';
@@ -327,7 +335,10 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     drop(vm);
 
     let changed_clock = Arc::new(FakeClock::default());
-    let mut changed = ContractHost(Arc::new(extra_slot::bindings(&changed_clock)));
+    let mut changed = ContractHost(
+        Arc::new(extra_slot::bindings(&changed_clock)),
+        changed_clock,
+    );
     // Establish that the alternate binding really saves the extra argument.
     let mut alternate = Vm::new(build.clone(), &mut changed).unwrap();
     alternate.start(&mut changed, "run", vec![]).unwrap();
@@ -337,7 +348,10 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     drop(alternate);
 
     let rejected_clock = Arc::new(FakeClock::default());
-    let mut rejected = ContractHost(Arc::new(extra_slot::bindings(&rejected_clock)));
+    let mut rejected = ContractHost(
+        Arc::new(extra_slot::bindings(&rejected_clock)),
+        Arc::clone(&rejected_clock),
+    );
     let error = Vm::restore(snapshot.clone(), build.clone(), &mut rejected).unwrap_err();
     assert!(
         matches!(&error, VmError::InvalidSnapshot(message) if message.contains("binding fingerprint mismatch")),
@@ -347,7 +361,10 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     assert!(rejected_clock.registrations().is_empty());
 
     let restored_clock = Arc::new(FakeClock::default());
-    let mut reordered = ContractHost(Arc::new(reordered::bindings(&restored_clock)));
+    let mut reordered = ContractHost(
+        Arc::new(reordered::bindings(&restored_clock)),
+        Arc::clone(&restored_clock),
+    );
     assert_eq!(reordered.0.fingerprint(), snapshot.binding_fingerprint);
     let mut restored = Vm::restore(snapshot, build, &mut reordered).unwrap();
     assert!(restored_clock.registrations().is_empty());

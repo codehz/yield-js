@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use yield_compiler::{CompileOptions, MemoryResolver, compile};
 use yield_harness::{LabelRegistration, LabelService};
@@ -96,10 +97,13 @@ struct DemoHost {
     bindings: Arc<Bindings>,
     counters: Arc<DemoCounters>,
     labels: Arc<LabelService>,
+    time_zone: String,
 }
 
 impl DemoHost {
     fn new() -> Result<Self, String> {
+        let time_zone = iana_time_zone::get_timezone()
+            .map_err(|error| format!("failed to determine the system IANA time zone: {error}"))?;
         let counters = Arc::new(DemoCounters::default());
         let labels = Arc::new(LabelService::default());
         let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels))?;
@@ -107,6 +111,7 @@ impl DemoHost {
             bindings: Arc::new(bindings),
             counters,
             labels,
+            time_zone,
         })
     }
 
@@ -130,6 +135,17 @@ impl DemoHost {
 impl Host for DemoHost {
     fn bindings(&self) -> Arc<Bindings> {
         self.bindings.clone()
+    }
+
+    fn now_ms(&self) -> i64 {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(elapsed) => elapsed.as_millis() as i64,
+            Err(error) => -(error.duration().as_nanos().div_ceil(1_000_000) as i64),
+        }
+    }
+
+    fn time_zone(&self) -> &str {
+        &self.time_zone
     }
 
     fn report_error(&mut self, _error: JsValue) {}
@@ -204,6 +220,7 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let mut host = DemoHost::new()?;
     let resolver = MemoryResolver::new([("main.js", SOURCE)])?;
     let build: Build = compile("main.js", None, &resolver, &compile_options())?;
     let function = build.function_named("run").expect("demo entry function");
@@ -219,7 +236,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut host = DemoHost::new()?;
     let mut vm = Vm::new(build.clone(), &mut host)?;
     let result = vm.start(&mut host, "run", vec![JsValue::string("input")])?;
     vm.run_until_idle(&mut host)?;
