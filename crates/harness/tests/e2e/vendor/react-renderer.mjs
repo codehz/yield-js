@@ -3,6 +3,7 @@ import { clearTimeout, inspect, setTimeout } from "test";
 import * as console from "console";
 
 
+let updatePriority = 0;
 const hostConfig = {
   supportsMutation: true,
   createInstance(type, props) { return { type, props, children: [] }; },
@@ -29,9 +30,14 @@ const hostConfig = {
   noTimeout: -1,
   supportsMicrotasks: false,
   getCurrentEventPriority() { return 16; },
+  resolveUpdatePriority() { return 16; },
+  getCurrentUpdatePriority() { return updatePriority; },
+  setCurrentUpdatePriority(priority) { updatePriority = priority; },
+  maySuspendCommit() { return false; },
+  preloadInstance() { return true; },
 };
 
-export const renderer = ReactReconciler.default(hostConfig);
+export const renderer = ReactReconciler(hostConfig);
 export function render(element, container) {
   const root = renderer.createContainer(container, 0, null, false, null, "headless", console.error, null);
   renderer.updateContainer(element, root, null, null);

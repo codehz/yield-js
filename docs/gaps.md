@@ -71,38 +71,23 @@
 
 ## 8. 真实源码兼容性探针
 
-`crates/harness/tests/e2e/react_compat.rs` 用真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）和 `react-reconciler` 0.31.0 验证严格 ESM 子集与宿主边界。最终目标是让 `tests/e2e/vendor/react-renderer.mjs` 的自定义 renderer 做一次 headless 冒烟渲染；当前测试固定第一个编译阻断，阻断点移动时测试失败，而不是继续静默通过。
+`crates/harness/tests/e2e/react_compat.rs` 用真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）和 `react-reconciler` 0.31.0 验证严格 ESM 子集与宿主边界。探针现在编译并运行成功：`tests/e2e/vendor/react-renderer.mjs` 的自定义 renderer 完成一次 headless 渲染，`react_reconciler_custom_renderer_headless_smoke` 在推进调度器 timer 后断言容器提交了一个子节点。
 
-React 19 bundle 通过 preload 提供空实现 `reportError`，并将未实现的环境全局 `window`、`process` 设为 `undefined`，通过 `console` 宿主模块导入基础 `debug` / `error` / `info` / `log` / `warn` 接口；bundle 可以编译通过，没有遇到尚未实现的 ECMAScript 标准全局。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。该测试只证明编译通过，不证明运行时可加载。
+preload 负责探针需要的环境全局：
 
-### 8.1 React 19 运行时加载缺口
+- `console` 宿主模块与空的 `reportError`、`kEvents`；`window`、`process` 仍为 `undefined`。
+- `encodeURI` / `encodeURIComponent` / `decodeURI` / `decodeURIComponent` 的严格 UTF-8 实现。VM 仍不提供标准 URI 全局，畸形百分号或 UTF-8 序列抛 `URIError`。
+- 从 `test` 宿主模块重导出的 `setTimeout` / `clearTimeout`，复用同一 timer driver。
 
-`Vm::new` 会求值入口模块及所有静态导入。加载 `react-19.2.0-esm-sh.mjs` 时，esm.sh 的 CJS interop 辅助函数直接使用：
+探针同时关闭了以下框架缺口：
 
-- `Object.getOwnPropertyNames`
-- `Object.getOwnPropertySymbols`
+| 缺口 | 现状 |
+| --- | --- |
+| `Object.getOwnPropertyNames` / `Object.getOwnPropertySymbols` 缺失，esm.sh 的 CJS interop 读取导出失败 | 两项已实现，按自有键顺序过滤字符串键或 Symbol 键 |
+| async generator 函数缺少 `%AsyncGeneratorFunction.prototype%`，`Object.getPrototypeOf(Object.getPrototypeOf(async function*(){}).prototype)` 读到 `undefined` | 生成器与 async generator 函数现在各有函数原型，其 `.prototype` 指向共享实例原型 |
+| `for (let …)` / `for (const …)` 循环头没有每轮独立的 `let` / `const` 绑定，循环内创建的闭包共享最后一次迭代的值 | C 风格、`for…in`、`for…of`、`for await…of` 均按每轮环境执行 |
+| `Symbol.for` / `Symbol.keyFor` 被提取后裸调用会检查 `this` 并抛出 `TypeError` | 两个静态方法不再读取 `this`，与真实引擎一致 |
 
-当前 VM 未实现这两项。`var k = Object.getOwnPropertyNames; k(t)` 中 `k` 为 `undefined`，运行期抛出 `TypeError: value is not a function`。这是 React 运行时加载的第一个阻断，不是 React 逻辑错误。两项都属于框架应补齐的标准内建。
+`react-renderer.mjs` 自身还有一个夹具缺陷：它把默认导入当作命名空间使用（`ReactReconciler.default(hostConfig)`），并缺少 React 19 host config 要求的 `resolveUpdatePriority`、`getCurrentUpdatePriority` / `setCurrentUpdatePriority`、`maySuspendCommit`、`preloadInstance`。这些是夹具问题，不是引擎能力缺口；修复后 render 才能提交。
 
-### 8.2 React reconciler 编译缺口
-
-测试 `react_reconciler_custom_renderer_headless_smoke` 使用真实 React 19、`react-reconciler` 与原 renderer；首个阻断仍按编译器实际报告顺序固定。`typeof` 探测缺名会折叠可证明的条件并跳过不可达子树，但不推断可达的环境依赖：
-
-| 顺序 | 首个诊断 | 归属 | 位置与原因 |
-| --- | --- | --- | --- |
-| 1 | `unknown callee "encodeURIComponent"` | 框架 | `6:13754`；React 构造压缩错误 URL 时调用；`decodeURIComponent` 也未实现 |
-| 2 | `unknown callee "setTimeout"` | 宿主 | `6:8835`；unenv 的 `nextTick` fallback；`clearTimeout` 同样需要 |
-
-`performance`、`MessageChannel`、`AbortController` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。它们不属于此编译路径的实际可达依赖。额外 e2e 编译探针不再从 preload 导出 `window` / `process`，同时保留 `console`、`reportError` 与 `kEvents`；这不等于 renderer 可运行。实际可达的 timer 依赖仍须宿主提供，URI 编码 API 仍须框架实现。
-
-### 8.3 React reconciler 运行时缺口
-
-补齐 8.1 与 8.2 后，reconciler 顶层初始化还会执行：
-
-```js
-Gd = Object.getPrototypeOf(Object.getPrototypeOf(async function*(){}).prototype)
-```
-
-当前 VM 中 `Object.getPrototypeOf(async function*(){})` 是函数，但它的 `.prototype` 是 `undefined`；按 ECMAScript 应指向 `%AsyncGeneratorPrototype%`。外层 `Object.getPrototypeOf(undefined)` 因此抛出 `Object.getPrototypeOf cannot convert null or undefined to an object`。该原型链形状属于框架缺口。
-
-这些缺口全部关闭后，`react_reconciler_custom_renderer_headless_smoke` 才会进入 `Vm::new` 与 `vm.start`，并断言 headless 渲染提交一个子节点。移动测试中的首个阻断断言时，同步更新本节。
+`performance`、`MessageChannel`、`AbortController` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。额外 e2e 编译探针仍在不导出 `window` / `process` 的 preload 下编译整条 reconciler 图。
