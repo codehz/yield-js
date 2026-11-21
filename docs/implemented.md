@@ -76,7 +76,7 @@
 - 数组解构复用同步迭代协议：省略项只推进，不读取 `value`；rest 收集至耗尽。正常提前结束或模式求值抛错时关闭尚未耗尽的迭代器；若模式已抛错，保留原异常。默认值或目标中的 `await` 可快照恢复，继续使用同一迭代器、已缓存的 `next` 与耗尽状态。
 - `try/catch/finally`：异常表、catch 绑定、finally 正常/throw/return 完成状态、嵌套 finally、await 中的待完成状态。
 - VM 自有对象表和对象 ID；对象环、Promise 反应、续体与等待关系都按 ID 保存。
-- `Promise.resolve(p)` 与 `await p` 先读取真正 Promise 的 `constructor`，等于内建 `Promise` 时复用原 Promise，不读取 `then`。`constructor` getter 抛错会在调用点或 `await` 处同步进入脚本异常路径；成功准备的 `await` 始终经微任务恢复，即使输入已结算或不是 thenable。
+- `Promise.resolve(p)` 与 `await p` 先读取真正 Promise 的 `constructor`；前者在构造器与静态方法接收者相同时复用 `p`，后者始终与内建 `Promise` 比较。复用时不读取 `then`。`resolve` 和 `reject` 需要创建结果时使用接收构造器提供的决议函数或拒绝函数。`constructor` getter 抛错会在调用点或 `await` 处同步进入脚本异常路径；成功准备的 `await` 始终经微任务恢复。
 - Promise 决议（包括执行器的 `resolve` 和 async 返回值）不检查输入的 `constructor`，而是同步读取一次 `then`，包括真正 Promise 上覆写的 `then`；在微任务中以输入对象为接收者调用。`then` getter 或调用抛错进入拒绝路径，非可调用的 `then` 保留输入身份，直接自决议拒绝为 `TypeError`。
 - 内建包括 `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError`、`queueMicrotask`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）、`Symbol`（`Symbol()`、`Symbol.for` / `keyFor`，以及 `Symbol.iterator` / `Symbol.toPrimitive` / `Symbol.species`），以及原始数值全局 `NaN` 与 `Infinity`（作为运行期 `Value::Number` 提供，支持一元负号得到 `-Infinity`；不是编译期常量，也不进入快照根）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
 - `Symbol.hasInstance` 是固定静态属性，宿主成员声明可使用 `WellKnownSymbol::HasInstance` 对应同一身份。

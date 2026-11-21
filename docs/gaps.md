@@ -35,7 +35,7 @@
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥），不保证覆盖全部 Annex B 兼容语法。字符串方法仍查找相应的 Symbol 协议，但内建 `[Symbol.matchAll]` / `[Symbol.split]` 克隆匹配器时不使用 species；直接调用内建 `[Symbol.matchAll]` 也要求全局标志 |
 | `Map` / `Set` | 已覆盖基础集合操作和同步迭代；不提供较新的 `Map.groupBy` 或 `Set.prototype.union` 等集合运算 |
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
-| `Promise` | 静态方法仍只接受内建 `Promise` 接收者；组合子会读取其 `resolve` 处理输入，但不会用自定义构造器创建结果。 |
+| `Promise` | 组合子会读取接收者的 `resolve` 处理输入，但尚不会用自定义构造器创建结果。 |
 
 ## 5. 结构性缺口
 

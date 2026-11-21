@@ -1878,21 +1878,21 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match name {
             "resolve" => {
-                let value = args.first().cloned().unwrap_or(Value::UNDEFINED);
-                match self.promise_identity(host, roots, &value)? {
-                    Ok(Some(id)) => return Ok(Invocation::Value(Value::object(id))),
-                    Ok(None) => {}
-                    Err(error) => return Ok(Invocation::Thrown(error)),
+                if !matches!(receiver.view(), ValueRef::Object(_)) {
+                    return self.throw_type_error("incompatible Promise receiver");
                 }
-                let promise = self.heap.alloc_promise();
-                self.resolve_promise(host, roots, promise, value)?;
-                Ok(Invocation::Value(Value::object(promise)))
+                let value = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+                self.promise_resolve_with(host, roots, receiver, value)
             }
             "reject" => {
-                let reason = args.first().cloned().unwrap_or(Value::UNDEFINED);
-                let promise = self.heap.alloc_promise();
-                self.settle(promise, Settlement::Rejected(reason))?;
-                Ok(Invocation::Value(Value::object(promise)))
+                let reason = args.into_iter().next().unwrap_or(Value::UNDEFINED);
+                let roots = &roots.with(&receiver);
+                let (result, _, reject) =
+                    match self.new_promise_capability(host, &roots.with(&reason), receiver)? {
+                        Ok(capability) => capability,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                self.call_promise_capability(host, roots, result, &reject, reason)
             }
             "all" => self.combine(host, roots, receiver, CombineKind::All, args),
             "allSettled" => self.combine(host, roots, receiver, CombineKind::AllSettled, args),
@@ -2140,6 +2140,7 @@ impl Vm {
         species: &Value,
         value: Value,
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&species);
         if matches!(value.view(), ValueRef::Object(id) if self.heap.promise(id).is_ok()) {
             match self.read_property(host, roots, &value, PropertyKeyRef::String("constructor"))? {
                 Invocation::Value(constructor) if constructor == *species => {
@@ -2154,10 +2155,21 @@ impl Vm {
                 Ok(capability) => capability,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
+        self.call_promise_capability(host, roots, result, &resolve, value)
+    }
+
+    fn call_promise_capability(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        result: Value,
+        callback: &Value,
+        value: Value,
+    ) -> Result<Invocation, VmError> {
         match self.invoke(
             host,
             &roots.with(&result),
-            &resolve,
+            callback,
             vec![value],
             &Value::UNDEFINED,
         )? {

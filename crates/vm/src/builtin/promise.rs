@@ -6,7 +6,7 @@ pub(crate) mod members {
     use crate::heap::{Attributes, SPECIES_SYMBOL};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
-    use crate::value::{Value, ValueRef};
+    use crate::value::Value;
     use crate::vm::Vm;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
@@ -49,9 +49,6 @@ pub(crate) mod members {
             Ok(Invocation::Value(receiver.clone()))
         };
         resolve: 1 | reject: 1 | all: 1 | allSettled: 1 | race: 1 | any: 1 as key => |vm, host, roots, args, receiver| {
-            if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(ROOT)) {
-                return vm.throw_type_error("incompatible Promise receiver");
-            }
             vm.call_promise_static(host, roots, receiver, key, args)
         };
     }
