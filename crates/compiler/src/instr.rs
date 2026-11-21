@@ -92,6 +92,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::GetBuiltin { .. }
+        | Instr::GetTemplate { .. }
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
         | Instr::DeclareBinding { .. }
@@ -277,7 +278,8 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         | Instr::NewObject { dst }
         | Instr::NewRegExp { dst, .. }
         | Instr::GetBinding { dst, .. }
-        | Instr::GetBuiltin { dst, .. } => {
+        | Instr::GetBuiltin { dst, .. }
+        | Instr::GetTemplate { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::NewArray { dst, elements } => {
@@ -845,6 +847,10 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::GetBuiltin { dst, builtin } => Instr::GetBuiltin {
             dst: remap(dst),
             builtin,
+        },
+        Instr::GetTemplate { dst, template } => Instr::GetTemplate {
+            dst: remap(dst),
+            template,
         },
     }
 }

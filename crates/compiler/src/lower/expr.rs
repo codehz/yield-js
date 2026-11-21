@@ -367,6 +367,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit_function_value(func_id)
             }
             Expression::TemplateLiteral(template) => self.compile_template_literal(template),
+            Expression::TaggedTemplateExpression(tagged) => self.compile_tagged_template(tagged),
             Expression::ImportExpression(import) => Err(unsupported(
                 self.source_text(),
                 import.span,
@@ -406,6 +407,71 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return self.emit_yield_delegate(argument);
         }
         self.emit_yield(argument)
+    }
+
+    /// Lower ``tag`text${expr}` ``: evaluate the tag reference, load this call
+    /// site's cached frozen template object, then evaluate substitutions in
+    /// source order and call with the template object as the first argument.
+    fn compile_tagged_template(
+        &mut self,
+        expression: &'ast TaggedTemplateExpression<'ast>,
+    ) -> Result<Reg, CompileError> {
+        let mut tag = &expression.tag;
+        while let Expression::ParenthesizedExpression(paren) = tag {
+            tag = &paren.expression;
+        }
+        let (callee, receiver) = match tag {
+            Expression::Identifier(identifier) => {
+                (self.compile_named_callee(identifier, false)?, None)
+            }
+            tag => self.compile_callee_value(tag)?,
+        };
+        let template = self.compile_template_site(&expression.quasi)?;
+        let mut slots = Vec::with_capacity(expression.quasi.expressions.len() + 1);
+        slots.push(self.slot(template));
+        for value in &expression.quasi.expressions {
+            let value = self.compile_expression(value)?;
+            slots.push(self.slot(value));
+        }
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::CallValue {
+            dst: self.slot(dst),
+            callee: self.slot(callee),
+            args: CallArgs::Slots(slots),
+            receiver: receiver.map(|receiver| self.slot(receiver)),
+        });
+        Ok(dst)
+    }
+
+    fn compile_template_site(
+        &mut self,
+        template: &'ast TemplateLiteral<'ast>,
+    ) -> Result<Reg, CompileError> {
+        if template.quasis.len() != template.expressions.len() + 1 {
+            return Err(unsupported(
+                self.source_text(),
+                template.span,
+                "malformed template literal",
+            ));
+        }
+        let mut cooked = Vec::with_capacity(template.quasis.len());
+        let mut raw = Vec::with_capacity(template.quasis.len());
+        for element in &template.quasis {
+            raw.push(element.value.raw.as_str().into());
+            cooked.push(
+                element
+                    .value
+                    .cooked
+                    .map(|text| JsString::from_units(text.encode_utf16().collect())),
+            );
+        }
+        let template = self.session.add_template(cooked, raw)?;
+        let dst = self.alloc_reg()?;
+        self.emit(Instr::GetTemplate {
+            dst: self.slot(dst),
+            template,
+        });
+        Ok(dst)
     }
 
     /// Lower a non-tagged template literal by interleaving fixed text with
@@ -1108,37 +1174,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         let (callee, receiver) = if let Expression::Identifier(identifier) = callee {
-            let name = identifier.name.as_str();
-            let value = match self.names().callee(&self.env, name) {
-                Callee::Binding(binding) => {
-                    self.check_tdz(binding, name, identifier.span)?;
-                    let value = self.alloc_reg()?;
-                    self.emit_binding_read(value, binding);
-                    value
-                }
-                Callee::ReadOnly(read_only) => self.emit_read_only(read_only)?,
-                Callee::Builtin(index) => {
-                    let value = self.alloc_reg()?;
-                    self.emit(Instr::GetBuiltin {
-                        dst: self.slot(value),
-                        builtin: index as u32,
-                    });
-                    value
-                }
-                Callee::Unknown if expression.optional && name == "undefined" => {
-                    self.compile_identifier(identifier)?
-                }
-                Callee::Unknown if self.probed_missing(name) => self.emit_missing_global(name)?,
-                Callee::Unknown if self.is_probe() => self.emit_undefined()?,
-                Callee::Unknown => {
-                    return Err(CompileError::new(
-                        self.source_text(),
-                        identifier.span,
-                        format!("unknown callee {name:?}"),
-                    ));
-                }
-            };
-            (value, None)
+            (
+                self.compile_named_callee(identifier, expression.optional)?,
+                None,
+            )
         } else {
             // Parentheses end short-circuit propagation, but not the member reference.
             let boundary = matches!(expression.callee, Expression::ParenthesizedExpression(_))
@@ -1160,6 +1199,41 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             receiver: receiver.map(|receiver| self.slot(receiver)),
         });
         Ok(dst)
+    }
+
+    fn compile_named_callee(
+        &mut self,
+        identifier: &'ast IdentifierReference<'ast>,
+        optional: bool,
+    ) -> Result<Reg, CompileError> {
+        let name = identifier.name.as_str();
+        match self.names().callee(&self.env, name) {
+            Callee::Binding(binding) => {
+                self.check_tdz(binding, name, identifier.span)?;
+                let value = self.alloc_reg()?;
+                self.emit_binding_read(value, binding);
+                Ok(value)
+            }
+            Callee::ReadOnly(read_only) => self.emit_read_only(read_only),
+            Callee::Builtin(index) => {
+                let value = self.alloc_reg()?;
+                self.emit(Instr::GetBuiltin {
+                    dst: self.slot(value),
+                    builtin: index as u32,
+                });
+                Ok(value)
+            }
+            Callee::Unknown if optional && name == "undefined" => {
+                self.compile_identifier(identifier)
+            }
+            Callee::Unknown if self.probed_missing(name) => self.emit_missing_global(name),
+            Callee::Unknown if self.is_probe() => self.emit_undefined(),
+            Callee::Unknown => Err(CompileError::new(
+                self.source_text(),
+                identifier.span,
+                format!("unknown callee {name:?}"),
+            )),
+        }
     }
 
     fn compile_callee_value(

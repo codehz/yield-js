@@ -9,7 +9,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Binary arrays persist one byte sequence per buffer and a buffer reference per view.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 60;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 61;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -189,6 +189,8 @@ pub struct Snapshot {
     #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
+    /// Frozen template objects aligned with the build's template call sites.
+    pub templates: Vec<ObjectId>,
     /// VM-managed module namespaces corresponding to the sorted build manifest.
     pub imports: Vec<ObjectId>,
     /// Class tag to the VM-owned prototype saved with the object graph.
@@ -232,6 +234,7 @@ impl Snapshot {
             module_states: Vec::new(),
             globals: BTreeMap::new(),
             roots: BTreeMap::new(),
+            templates: Vec::new(),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
             combines: BTreeMap::new(),

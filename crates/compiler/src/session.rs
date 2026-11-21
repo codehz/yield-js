@@ -7,10 +7,11 @@
 use std::collections::BTreeMap;
 
 use oxc::span::Span;
-use yield_vm::BindingId;
 use yield_vm::bytecode::{
     Build, Constant, Function as BytecodeFunction, Instr, ModuleTarget, Slot, SourceModule,
+    TemplateSite,
 };
+use yield_vm::{BindingId, JsString};
 
 use crate::CompileOptions;
 use crate::error::CompileError;
@@ -18,6 +19,7 @@ use crate::error::CompileError;
 pub(crate) struct Session {
     constants: Vec<Constant>,
     string_constants: BTreeMap<yield_vm::JsString, u32>,
+    templates: Vec<TemplateSite>,
     functions: Vec<BytecodeFunction>,
     next_func_id: u32,
     next_binding_id: BindingId,
@@ -28,6 +30,7 @@ impl Session {
         Self {
             constants: Vec::new(),
             string_constants: BTreeMap::new(),
+            templates: Vec::new(),
             functions: Vec::new(),
             next_func_id: 1,
             next_binding_id: 0,
@@ -56,6 +59,17 @@ impl Session {
         let index = self.constants.len() as u32;
         self.constants.push(constant);
         index
+    }
+
+    pub(crate) fn add_template(
+        &mut self,
+        cooked: Vec<Option<JsString>>,
+        raw: Vec<JsString>,
+    ) -> Result<u32, CompileError> {
+        let index = u32::try_from(self.templates.len())
+            .map_err(|_| CompileError::internal("too many tagged-template call sites"))?;
+        self.templates.push(TemplateSite { cooked, raw });
+        Ok(index)
     }
 
     pub(crate) fn binding_ids(&mut self) -> &mut BindingId {
@@ -118,6 +132,7 @@ impl Session {
     ) -> Result<Build, CompileError> {
         let mut build = Build::new(
             self.constants,
+            self.templates,
             options.imports.clone(),
             self.functions,
             modules,

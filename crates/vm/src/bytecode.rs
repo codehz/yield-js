@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 45;
+pub const BYTECODE_VERSION: u32 = 46;
 
 pub use crate::builtin::BUILTINS;
 
@@ -74,6 +74,16 @@ pub enum Constant {
     String(JsString),
     #[serde(rename = "bigint")]
     BigInt(JsBigInt),
+}
+
+/// One tagged-template call site. The VM allocates the frozen cooked and raw
+/// arrays once per VM and keeps the object identity across snapshots.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemplateSite {
+    /// Cooked strings; `None` is a tagged template's invalid escape.
+    pub cooked: Vec<Option<JsString>>,
+    /// Source text chunks with escapes intact.
+    pub raw: Vec<JsString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -481,6 +491,11 @@ pub enum Instr {
         dst: Slot,
         builtin: u32,
     },
+    /// Loads the cached frozen template object for one tagged-template call site.
+    GetTemplate {
+        dst: Slot,
+        template: u32,
+    },
     /// Calls the intrinsic `Symbol.iterator` method and caches the result's `next` method.
     GetIterator {
         iterator: Slot,
@@ -725,6 +740,8 @@ pub struct Build {
     pub bytecode_version: u32,
     pub build_id: String,
     pub constants: Vec<Constant>,
+    /// Tagged-template call sites, indexed by `Instr::GetTemplate::template`.
+    pub templates: Vec<TemplateSite>,
     pub imports: BTreeMap<String, BTreeSet<String>>,
     pub functions: Vec<Function>,
     /// Linked source modules, indexed by module operands.
@@ -776,6 +793,7 @@ struct DigestInput<'a> {
     bytecode_version: u32,
     execution_revision: u32,
     constants: &'a [Constant],
+    templates: &'a [TemplateSite],
     imports: &'a BTreeMap<String, BTreeSet<String>>,
     functions: &'a [Function],
     modules: &'a [SourceModule],
@@ -786,6 +804,7 @@ struct DigestInput<'a> {
 impl Build {
     pub fn new(
         constants: Vec<Constant>,
+        templates: Vec<TemplateSite>,
         imports: BTreeMap<String, BTreeSet<String>>,
         functions: Vec<Function>,
         modules: Vec<SourceModule>,
@@ -796,6 +815,7 @@ impl Build {
             bytecode_version: BYTECODE_VERSION,
             build_id: String::new(),
             constants,
+            templates,
             imports,
             functions,
             modules,
@@ -816,6 +836,7 @@ impl Build {
             // instruction stream and snapshot record layout are unchanged.
             execution_revision: 12,
             constants: &self.constants,
+            templates: &self.templates,
             imports: &self.imports,
             functions: &self.functions,
             modules: &self.modules,
@@ -871,6 +892,13 @@ impl Build {
             }
             if !func_names.insert(function.name.as_str()) {
                 return Err(format!("duplicate function name {:?}", function.name));
+            }
+        }
+        for (index, site) in self.templates.iter().enumerate() {
+            if site.raw.is_empty() || site.cooked.len() != site.raw.len() {
+                return Err(format!(
+                    "template {index} has mismatched cooked and raw chunks"
+                ));
             }
         }
         let mut private_limits = BTreeMap::new();
@@ -1768,6 +1796,14 @@ impl Build {
                 Instr::GetBuiltin { dst, builtin } => {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
+                }
+                Instr::GetTemplate { dst, template } => {
+                    check_slot(*dst, "GetTemplate.dst")?;
+                    if *template as usize >= self.templates.len() {
+                        return Err(format!(
+                            "{location}: GetTemplate at pc {pc} references template {template}"
+                        ));
+                    }
                 }
             }
         }

@@ -234,6 +234,9 @@ impl Vm {
         for id in self.builtins.ids() {
             tracer.mark_object(id)?;
         }
+        for &id in &self.templates {
+            tracer.mark_object(id)?;
+        }
         if self.module_envs.len() != self.build.modules.len()
             || self.module_namespaces.len() != self.build.modules.len()
         {

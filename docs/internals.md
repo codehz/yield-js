@@ -51,6 +51,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 循环头 `let` / `const` 只有被嵌套函数读写时才保留在每轮环境；未捕获的绑定提升为帧槽，循环各轮复用同一槽。循环体内若有被嵌套函数读写的块级声明，保留空绑定表的每轮环境以提供新单元格；否则删除整组 `SaveEnv` / `NewIterationEnv` / `RestoreEnv`。
 - `finally` 是显式完成状态（种类 + payload），不是原生异常栈。`finally` 内的嵌套 `await` 必须保留该待完成状态。
 - 准备成功后，`Await` 总是经微任务队列恢复，即使是已 settled 的 promise。抛错的 `constructor` getter 直接转入脚本异常处理器，不挂起。
+- 标签模板对象在 VM 启动时按 `Build::templates` 的顺序全部创建，是 GC 与快照根；快照按位置保存对象 ID。恢复要求数量一致、ID 唯一，且每个对象是冻结数组、元素与构建记录一致、`raw` 属性为固定描述符并指向同样冻结的 raw 数组。`Instr::GetTemplate` 只读取该表，不分配。
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
 - 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
 
@@ -64,6 +65,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 | `bindings.rs` 的跨函数共享集合、`promote.rs` 的提升判定与 `elide_iteration_environments`、lowerer 的 `IterationEnvGroup`；删除环境指令时由 `compact_dead_instructions` 统一重映射跳转、异常表、await/yield 站点与 `generator_start` |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
+| 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |

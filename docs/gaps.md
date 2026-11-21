@@ -51,7 +51,6 @@
 
 - 完整 ECMAScript TDZ
 - 动态 `import()`、`eval`、`Function` 构造
-- 标签模板在编译期拒绝，报带行列的 `unsupported syntax: …`。
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`

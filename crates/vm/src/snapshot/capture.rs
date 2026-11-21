@@ -7,15 +7,15 @@ use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
-    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, AsyncCompletion, CombineKind, EnvRole,
-    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
-    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
-    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OwnProperty,
-    OwnedEdge, PrivateElement, PrivateMemberKind, PromiseCallback, PromiseState, Property,
-    REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, RejectionStatus, SEARCH_DESCRIPTION,
-    SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL,
-    WeakKey,
+    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, AsyncCompletion, Attributes, CombineKind,
+    EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, IntegrityLevel,
+    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object,
+    OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind, PromiseCallback, PromiseState,
+    Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, RejectionStatus,
+    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION,
+    TO_STRING_TAG_SYMBOL, WeakKey,
 };
 use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::host::Host;
@@ -125,6 +125,12 @@ impl Vm {
         snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
+        if self.templates.len() != self.build.templates.len() {
+            return Err(VmError::InvalidState(
+                "template object table does not match the build".to_owned(),
+            ));
+        }
+        snapshot.templates = self.templates.clone();
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
         snapshot.pending_rejection_notifications = self
             .pending_rejection_notifications
@@ -408,6 +414,7 @@ impl Vm {
             require_value_objects(&heap, continuation.values.iter())?;
         }
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
+        let templates = load_templates(&build, &heap, std::mem::take(&mut snapshot.templates))?;
         validate_source_modules(
             &build,
             &heap,
@@ -439,6 +446,7 @@ impl Vm {
                 module_states,
                 globals: snapshot.globals,
                 builtins,
+                templates,
                 module_envs: snapshot.module_envs,
                 module_namespaces: snapshot.module_namespaces,
             },
@@ -1409,6 +1417,105 @@ fn valid_native_target(bindings: &Bindings, target: crate::binding::NativeTarget
                 }
             }),
     }
+}
+
+/// Template objects are permanent roots: the snapshot must name exactly one
+/// frozen cooked array per build call site, in order, with a FIXED `raw`
+/// property that points at the matching frozen raw array.
+fn load_templates(
+    build: &Build,
+    heap: &Heap,
+    ids: Vec<ObjectId>,
+) -> Result<Vec<ObjectId>, VmError> {
+    if ids.len() != build.templates.len() {
+        return Err(VmError::InvalidSnapshot(format!(
+            "template count mismatch: snapshot {}, build {}",
+            ids.len(),
+            build.templates.len()
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for (index, (&id, site)) in ids.iter().zip(&build.templates).enumerate() {
+        let invalid = |detail: &str| {
+            VmError::InvalidSnapshot(format!("template {index} object {id}: {detail}"))
+        };
+        if !seen.insert(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "duplicate template object {id}"
+            )));
+        }
+        let Ok(object) = heap.get(id) else {
+            return Err(invalid("missing object"));
+        };
+        let Object::Array(array) = object else {
+            return Err(invalid("not an array"));
+        };
+        if !object.test_integrity_level(IntegrityLevel::Frozen) {
+            return Err(invalid("not frozen"));
+        }
+        if array.length != site.cooked.len() {
+            return Err(invalid("cooked array length mismatch"));
+        }
+        for (position, expected) in site.cooked.iter().enumerate() {
+            let Some(OwnProperty::Stored(Property::Data(value), attributes)) =
+                array.own_index(position)
+            else {
+                return Err(invalid("cooked element is not a data property"));
+            };
+            let valid = attributes.enumerable
+                && !attributes.writable
+                && !attributes.configurable
+                && matches!(
+                    (expected, value.view()),
+                    (None, ValueRef::Undefined) | (Some(_), ValueRef::String(_))
+                );
+            let matched = match (expected, value.view()) {
+                (None, ValueRef::Undefined) => true,
+                (Some(expected), ValueRef::String(actual)) => actual == expected,
+                _ => false,
+            };
+            if !valid || !matched {
+                return Err(invalid("cooked element value mismatch"));
+            }
+        }
+        let Some(raw_property) = object.own_property(PropertyKeyRef::String("raw")) else {
+            return Err(invalid("missing raw property"));
+        };
+        if raw_property.attributes() != Attributes::FIXED {
+            return Err(invalid("raw property is not fixed"));
+        }
+        let Some(ValueRef::Object(raw_id)) = raw_property.data_value().map(Value::view) else {
+            return Err(invalid("raw property is not an array"));
+        };
+        let Ok(raw_object) = heap.get(raw_id) else {
+            return Err(invalid("raw array is missing"));
+        };
+        let Object::Array(raw_array) = raw_object else {
+            return Err(invalid("raw property is not an array"));
+        };
+        if !raw_object.test_integrity_level(IntegrityLevel::Frozen) {
+            return Err(invalid("raw array is not frozen"));
+        }
+        if raw_array.length != site.raw.len() {
+            return Err(invalid("raw array length mismatch"));
+        }
+        for (position, expected) in site.raw.iter().enumerate() {
+            let Some(OwnProperty::Stored(Property::Data(value), attributes)) =
+                raw_array.own_index(position)
+            else {
+                return Err(invalid("raw element is not a data property"));
+            };
+            let valid = attributes.enumerable
+                && !attributes.writable
+                && !attributes.configurable
+                && matches!(value.view(), ValueRef::String(_));
+            let matched = matches!(value.view(), ValueRef::String(actual) if actual == expected);
+            if !valid || !matched {
+                return Err(invalid("raw element value mismatch"));
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn validate_native_targets(bindings: &Bindings, heap: &Heap) -> Result<(), VmError> {

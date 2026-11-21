@@ -11,7 +11,8 @@ use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::HostClassRecord;
 use crate::heap::{
-    Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob, RejectionStatus,
+    Attributes, DescriptorUpdate, Heap, IntegrityLevel, Object, PromiseState, ReactionJob,
+    RejectionStatus,
 };
 use crate::host::{Completion, Host};
 use crate::runtime::{
@@ -19,7 +20,7 @@ use crate::runtime::{
     Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::DeliveryTarget;
-use crate::value::{ContinuationId, ObjectId, Value, ValueRef};
+use crate::value::{ContinuationId, ObjectId, PropertyKey, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -151,6 +152,7 @@ pub(crate) struct RestoredState {
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) builtins: BuiltinRoots,
+    pub(crate) templates: Vec<ObjectId>,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
 }
@@ -185,6 +187,8 @@ pub struct Vm {
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
     pub(crate) builtins: BuiltinRoots,
+    /// Frozen tagged-template objects, indexed by `Instr::GetTemplate`.
+    pub(crate) templates: Vec<ObjectId>,
     pub(crate) random_state: u64,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
@@ -204,6 +208,7 @@ impl Vm {
         let resolved = Self::resolve_imports(&build, &bindings)?;
         let mut vm = Self::empty(build, bindings.clone());
         vm.init_builtins();
+        vm.install_templates();
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);
         vm.install_imports(&bindings, resolved)?;
@@ -249,10 +254,62 @@ impl Vm {
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
             builtins: BuiltinRoots::default(),
+            templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
         }
+    }
+
+    /// Allocates every tagged-template call site's frozen `cooked` array, its
+    /// frozen `raw` array, and the FIXED `raw` own property once per VM.
+    fn install_templates(&mut self) {
+        let mut templates = Vec::with_capacity(self.build.templates.len());
+        for site in &self.build.templates {
+            let cooked = site
+                .cooked
+                .iter()
+                .map(|text| match text {
+                    Some(text) => Value::string(text.clone()),
+                    None => Value::UNDEFINED,
+                })
+                .collect();
+            let raw = site
+                .raw
+                .iter()
+                .map(|text| Value::string(text.clone()))
+                .collect();
+            let cooked = self.heap.alloc_array(cooked);
+            let raw_array = self.heap.alloc_array(raw);
+            self.heap
+                .get_mut(raw_array)
+                .expect("new raw array")
+                .set_integrity_level(IntegrityLevel::Frozen);
+            self.heap
+                .define_data(
+                    cooked,
+                    PropertyKey::from("raw"),
+                    Value::object(raw_array),
+                    Attributes::FIXED,
+                )
+                .expect("template array accepts the raw property");
+            self.heap
+                .get_mut(cooked)
+                .expect("new cooked array")
+                .set_integrity_level(IntegrityLevel::Frozen);
+            templates.push(cooked);
+        }
+        self.templates = templates;
+    }
+
+    pub(crate) fn template_object(&self, template: u32) -> Result<Value, VmError> {
+        self.templates
+            .get(template as usize)
+            .copied()
+            .map(Value::object)
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("template call site {template} is not installed"))
+            })
     }
 
     pub(crate) fn resolve_imports(
@@ -1672,6 +1729,7 @@ impl Vm {
             module_states,
             globals,
             builtins,
+            templates,
             module_envs,
             module_namespaces,
         } = state;
@@ -1716,6 +1774,7 @@ impl Vm {
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             builtins,
+            templates,
             random_state: crate::builtin::math::RANDOM_SEED,
             module_envs,
             module_namespaces,

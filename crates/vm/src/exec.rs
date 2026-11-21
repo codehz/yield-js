@@ -1158,6 +1158,11 @@ impl Vm {
                 frame.write(dst, value)?;
                 Ok(Step::Next)
             }
+            Instr::GetTemplate { dst, template } => {
+                let value = self.template_object(template)?;
+                frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
             Instr::SetMember { object, key, src } => {
                 match self.write_member(
                     host,

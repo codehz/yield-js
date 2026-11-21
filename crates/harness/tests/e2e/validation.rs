@@ -997,3 +997,40 @@ fn imported_function_identity_survives_snapshot_restore() {
         "same function object identity"
     );
 }
+
+#[test]
+fn restore_rejects_invalid_template_objects() {
+    let build = build(
+        r#"
+import { wait } from "test";
+function tag(strings) {
+  return strings;
+}
+export async function run() {
+  const template = tag`a${1}b`;
+  await wait("a");
+  return template;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let result = vm.start(&mut host, "run", vec![]).expect("start run");
+    vm.run_until_idle(&mut host).expect("suspend run");
+    let snapshot = vm.snapshot(&[result]).expect("capture template");
+    assert_eq!(snapshot.templates.len(), 1);
+
+    let mut shortened = snapshot.clone();
+    shortened.templates.clear();
+    assert!(matches!(
+        Vm::restore(shortened, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("template count mismatch")
+    ));
+
+    let mut wrong = snapshot;
+    wrong.templates[0] = wrong.roots["array.prototype"];
+    assert!(matches!(
+        Vm::restore(wrong, build, &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("template 0")
+    ));
+}

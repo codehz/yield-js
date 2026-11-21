@@ -334,9 +334,45 @@ async function run() {
 }
 
 #[test]
+fn compiles_tagged_templates_as_call_sites() {
+    let build = compile(
+        "export function run(tag) { return tag`a${1}\\n`; }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(build.templates.len(), 1);
+    let site = &build.templates[0];
+    assert_eq!(site.raw.len(), 2);
+    assert_eq!(site.raw[0].to_utf8().unwrap(), "a");
+    assert_eq!(site.raw[1].to_utf8().unwrap(), "\\n");
+    assert_eq!(site.cooked.len(), 2);
+    assert_eq!(site.cooked[0].as_ref().unwrap().to_utf8().unwrap(), "a");
+    assert_eq!(site.cooked[1].as_ref().unwrap().to_utf8().unwrap(), "\n");
+    let run = build.function_named("run").unwrap();
+    assert!(
+        run.code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::GetTemplate { template: 0, .. }))
+    );
+    build.validate().unwrap();
+}
+
+#[test]
+fn compiles_invalid_tagged_escapes_without_cooked_text() {
+    let build = compile(
+        "export function run(tag) { return tag`\\unicode`; }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(build.templates[0].cooked, vec![None]);
+    assert_eq!(build.templates[0].raw[0].to_utf8().unwrap(), "\\unicode");
+    build.validate().unwrap();
+}
+
+#[test]
 fn rejects_unsupported_syntax_with_location() {
-    let error = compile("function run() { tag`value`; }", &CompileOptions::default())
-        .expect_err("tagged templates are outside the PoC subset");
+    let error = compile("function run() { debugger; }", &CompileOptions::default())
+        .expect_err("debugger statements are outside the PoC subset");
     assert!(error.message().contains("unsupported syntax"));
     assert_eq!(error.line(), 1);
     assert!(error.column() > 1);
@@ -2220,16 +2256,11 @@ export function run() {
     );
 
     let error = compile(
-        "export function run() { if (typeof Device == 'object') tag`unsupported`; }",
+        "export function run() { if (typeof Device == 'object') import('unsupported'); }",
         &CompileOptions::default(),
     )
     .expect_err("the probe pass must validate dead syntax");
-    assert!(
-        error
-            .message()
-            .contains("expression form outside the PoC subset"),
-        "{error}"
-    );
+    assert!(error.message().contains("dynamic import"), "{error}");
     assert_eq!((error.line(), error.column()), (1, 56));
 }
 
