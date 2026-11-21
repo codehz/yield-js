@@ -207,6 +207,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 let input = self.compile_expression(&expression.argument)?;
                 self.emit_await(input)
             }
+            Expression::YieldExpression(expression) => self.compile_yield(expression),
             Expression::CallExpression(expression) => self.compile_call(expression),
             Expression::ChainExpression(expression) => Ok(self.compile_chain(expression, false)?.0),
             Expression::AssignmentExpression(expression) => self.compile_assignment(expression),
@@ -267,6 +268,33 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "expression form outside the PoC subset",
             )),
         }
+    }
+
+    /// `yield` and `yield*`. The operand is evaluated exactly once, before the
+    /// suspension, so a resume never re-runs it.
+    fn compile_yield(
+        &mut self,
+        expression: &'ast YieldExpression<'ast>,
+    ) -> Result<Reg, CompileError> {
+        if !self.is_generator {
+            return Err(unsupported(
+                self.source_text(),
+                expression.span,
+                "yield outside a generator function",
+            ));
+        }
+        let argument = match &expression.argument {
+            Some(argument) => self.compile_expression(argument)?,
+            None => self.emit_undefined()?,
+        };
+        if expression.delegate {
+            return Err(unsupported(
+                self.source_text(),
+                expression.span,
+                "yield* delegation",
+            ));
+        }
+        self.emit_yield(argument)
     }
 
     /// Lower a non-tagged template literal by interleaving fixed text with

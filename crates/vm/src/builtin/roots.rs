@@ -190,6 +190,7 @@ impl Vm {
                 "function.prototype" => self.heap.function_prototype = Some(id),
                 "array.prototype" => self.heap.array_prototype = Some(id),
                 "promise.prototype" => self.heap.promise_prototype = Some(id),
+                "generator.prototype" => self.heap.generator_prototype = Some(id),
                 _ => {}
             }
         }

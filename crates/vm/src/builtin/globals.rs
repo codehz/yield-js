@@ -11,7 +11,7 @@ use crate::builtin::reflect::namespace as reflect_namespace;
 use crate::builtin::regexp_runtime as regexp;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::string;
-use crate::builtin::{error_family, queue_family, symbol_family};
+use crate::builtin::{error_family, generator, queue_family, symbol_family};
 use crate::error::VmError;
 use crate::exec;
 use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL};
@@ -113,13 +113,17 @@ fn owners() -> impl Iterator<Item = &'static Owner> {
 pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]> {
     owners()
         .flat_map(|owner| owner.groups.iter().copied())
-        .chain([exec::FUNCTION_INTRINSICS, ITERATOR_INTRINSICS])
+        .chain([
+            exec::FUNCTION_INTRINSICS,
+            ITERATOR_INTRINSICS,
+            generator::INTRINSICS,
+        ])
 }
 
 pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
     let (object, object_rest) = object_members::ROOTS.split_at(1);
     let (function, function_rest) = exec::FUNCTION_ROOTS.split_at(1);
-    [object, function, function_rest]
+    [object, function, function_rest, generator::ROOTS]
         .into_iter()
         .chain(owners().map(move |owner| {
             if owner.root == object_members::ROOT {
@@ -196,6 +200,7 @@ impl Vm {
                 install(self, &identity);
             }
         }
+        self.install_generator_methods();
         let global_this = self.builtins.get(GLOBAL_THIS);
         for (index, name) in BUILTINS.into_iter().enumerate() {
             let value = self.builtin_value(index as u32).expect("global builtin");

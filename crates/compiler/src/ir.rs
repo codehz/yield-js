@@ -33,6 +33,7 @@ pub(crate) struct LoweredFunction {
     pub(crate) is_async: bool,
     pub(crate) is_arrow: bool,
     pub(crate) is_method: bool,
+    pub(crate) is_generator: bool,
     pub(crate) length: u16,
     pub(crate) param_bindings: Vec<BindingId>,
     pub(crate) rest_binding: Option<BindingId>,
@@ -46,6 +47,31 @@ pub(crate) struct LoweredFunction {
     pub(crate) reg_count: u16,
     pub(crate) code: Vec<Instr>,
     pub(crate) awaits: Vec<AwaitSite>,
+    /// Where parameter initialization hands over to the generator body.
+    pub(crate) generator_start: Option<GeneratorStartSite>,
+    pub(crate) yields: Vec<YieldSite>,
     pub(crate) handlers: Vec<ExceptionHandler>,
     pub(crate) span: Span,
+}
+
+/// One lowered `yield`, before liveness decides `saved_slots`.
+///
+/// Each of the three externally injected completions has its own landing site.
+/// The return site reads its payload with `LoadGeneratorReturn` instead of a
+/// table destination, so no slot exists for it here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct YieldSite {
+    /// Register written before entering `next_pc`.
+    pub(crate) next: LogicalReg,
+    /// Register written before entering `throw_pc`.
+    pub(crate) thrown: LogicalReg,
+    pub(crate) next_pc: usize,
+    pub(crate) throw_pc: usize,
+    pub(crate) return_pc: usize,
+}
+
+/// Where a generator body starts in logical-register code.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GeneratorStartSite {
+    pub(crate) body_pc: usize,
 }

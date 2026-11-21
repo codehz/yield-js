@@ -5,7 +5,7 @@ use crate::builtin::is_callable_object;
 use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
-use crate::heap::{CollectionIteration, CollectionKind, push_value};
+use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::heap::{
     CombineKind, EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap,
     IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
@@ -92,6 +92,9 @@ impl Vm {
                 object => object.clone(),
             };
             snapshot.objects.push(ObjectRecord { id: *id, object });
+            if let Some(generator) = self.heap.generator(*id) {
+                snapshot.generators.insert(*id, generator.clone());
+            }
             if let Some(elements) = self.heap.private.get(id) {
                 snapshot.private_elements.extend(elements.iter().map(
                     |(&(brand, index), element)| PrivateRecord {
@@ -282,6 +285,7 @@ impl Vm {
         }
         validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
         heap.combines = snapshot.combines.clone();
+        heap.generators = load_generators(&build, &heap, snapshot.generators.clone())?;
         validate_symbol_tables(&snapshot)?;
         heap.restore_symbols(
             snapshot.symbols.clone(),
@@ -746,6 +750,65 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
         }
     }
     Ok(())
+}
+
+/// A restored generator must name a real generator function, a resume point its
+/// saved value count matches, and a frame state that could exist at a snapshot
+/// boundary. Executing generators have a native frame and cannot be restored.
+fn load_generators(
+    build: &Build,
+    heap: &Heap,
+    records: BTreeMap<ObjectId, crate::heap::GeneratorObject>,
+) -> Result<BTreeMap<ObjectId, crate::heap::GeneratorObject>, VmError> {
+    for (id, generator) in &records {
+        let invalid = |detail: &str| VmError::InvalidSnapshot(format!("generator {id} {detail}"));
+        if !matches!(heap.get(*id), Ok(Object::Plain(_))) {
+            return Err(invalid("is not an ordinary object"));
+        }
+        let function = build
+            .function(generator.func_id)
+            .filter(|function| function.is_generator)
+            .ok_or_else(|| invalid("references a non-generator function"))?;
+        match generator.status {
+            GeneratorStatus::Executing => {
+                return Err(invalid("was captured while executing"));
+            }
+            GeneratorStatus::Completed => {
+                if generator.env.is_some() || !generator.values.is_empty() {
+                    return Err(invalid("is completed but keeps a frame"));
+                }
+            }
+            GeneratorStatus::Start => {
+                let start = function
+                    .generator_start
+                    .as_ref()
+                    .ok_or_else(|| invalid("has no start entry"))?;
+                if start.saved_slots.len() != generator.values.len() {
+                    return Err(invalid("has the wrong number of start values"));
+                }
+            }
+            GeneratorStatus::Suspended(index) => {
+                let entry = function
+                    .generator_resumes
+                    .get(index as usize)
+                    .ok_or_else(|| invalid("has an invalid resume index"))?;
+                if entry.saved_slots.len() != generator.values.len() {
+                    return Err(invalid("has the wrong number of saved values"));
+                }
+            }
+        }
+        if !matches!(generator.status, GeneratorStatus::Completed)
+            && generator.env.is_some() != function.needs_environment()
+        {
+            return Err(invalid("has the wrong environment presence"));
+        }
+        if let Some(env) = generator.env {
+            require_environment(heap, *id, env, EnvRole::Closure)
+                .map_err(|_| invalid("references an invalid environment"))?;
+        }
+        require_value_objects(heap, generator.values.iter())?;
+    }
+    Ok(records)
 }
 
 fn validate_weak_key(heap: &Heap, owner: &str, id: ObjectId, key: WeakKey) -> Result<(), VmError> {

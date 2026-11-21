@@ -14,9 +14,9 @@ pub(crate) use object::{EnvRole, OwnedEdge, push_value, string_own_property};
 pub(crate) use store::{Heap, object_id};
 pub use types::{
     ArrayIterationKind, ArrayObject, BoundObject, BoxedPrimitive, CollectionIteration,
-    CollectionKind, CombineKind, CombineState, EnvironmentObject, FunctionObject, NativeObject,
-    Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    RejectionStatus, Resolution, WeakKey,
+    CollectionKind, CombineKind, CombineState, EnvironmentObject, FunctionObject, GeneratorObject,
+    GeneratorStatus, NativeObject, Object, PlainObject, PromiseCallback, PromiseObject,
+    PromiseState, Property, PropertyTable, RejectionStatus, Resolution, WeakKey,
 };
 pub(crate) use types::{
     Attributes, ClassElement, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,

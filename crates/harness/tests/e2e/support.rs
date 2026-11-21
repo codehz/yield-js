@@ -58,6 +58,12 @@ impl Suspended {
         Self { vm, host, result }
     }
 
+    /// The result promise, so callers can collect garbage or capture the VM.
+    #[track_caller]
+    pub(super) fn roots(&self) -> Vec<Value> {
+        vec![self.result.clone()]
+    }
+
     #[track_caller]
     pub(super) fn snapshot(&self) -> Snapshot {
         self.vm

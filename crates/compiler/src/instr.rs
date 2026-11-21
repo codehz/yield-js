@@ -90,6 +90,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
         | Instr::DeclareBinding { .. }
+        | Instr::Yield { .. }
+        | Instr::GeneratorStart
+        | Instr::LoadGeneratorReturn { .. }
         | Instr::Jump { .. }
         | Instr::BranchFalse { .. }
         | Instr::Return { .. } => false,
@@ -354,6 +357,13 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::DeclareBinding { .. } => {}
         Instr::Await { dst, input, .. } => {
             uses.insert(input.index);
+            defs.insert(dst.index);
+        }
+        Instr::Yield { input, .. } => {
+            uses.insert(input.index);
+        }
+        Instr::GeneratorStart => {}
+        Instr::LoadGeneratorReturn { dst } => {
             defs.insert(dst.index);
         }
         Instr::Jump { .. } => {}
@@ -764,6 +774,17 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             input: remap(input),
             resume,
         },
+        Instr::Yield {
+            input,
+            generator,
+            delegate,
+        } => Instr::Yield {
+            input: remap(input),
+            generator,
+            delegate,
+        },
+        Instr::GeneratorStart => Instr::GeneratorStart,
+        Instr::LoadGeneratorReturn { dst } => Instr::LoadGeneratorReturn { dst: remap(dst) },
         Instr::Jump { target } => Instr::Jump { target },
         Instr::BranchFalse { cond, target } => Instr::BranchFalse {
             cond: remap(cond),

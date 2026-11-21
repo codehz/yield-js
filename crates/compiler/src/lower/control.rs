@@ -11,7 +11,7 @@ use yield_vm::bytecode::{ExceptionHandler, Instr};
 use super::{Lowerer, for_each_binding_name};
 use crate::emit::Reg;
 use crate::error::CompileError;
-use crate::ir::AwaitSite;
+use crate::ir::{AwaitSite, YieldSite};
 
 #[derive(Clone, Copy)]
 pub(super) enum Completion {
@@ -80,6 +80,7 @@ pub(super) struct Control<'ast> {
     finalizers: Vec<Finalizer>,
     handlers: Vec<ExceptionHandler>,
     awaits: Vec<AwaitSite>,
+    yields: Vec<YieldSite>,
     seq: usize,
 }
 
@@ -92,6 +93,7 @@ impl<'ast> Control<'ast> {
             finalizers: Vec::new(),
             handlers: Vec::new(),
             awaits: Vec::new(),
+            yields: Vec::new(),
             seq: 0,
         }
     }
@@ -211,6 +213,10 @@ impl<'ast> Control<'ast> {
         std::mem::take(&mut self.awaits)
     }
 
+    pub(super) fn take_yields(&mut self) -> Vec<YieldSite> {
+        std::mem::take(&mut self.yields)
+    }
+
     pub(super) fn take_handlers(&mut self) -> Vec<ExceptionHandler> {
         std::mem::take(&mut self.handlers)
     }
@@ -306,6 +312,46 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
         self.route_completion(Completion::Return, Some(value))?;
         Ok(())
+    }
+
+    /// Emit one generator suspension and return the register its `next` value
+    /// lands in.
+    ///
+    /// The throw and return entries form a stub block before the operand, jumped
+    /// over on the normal path. That keeps `next_pc` the fall-through of `Yield`
+    /// while giving the throw completion a `Throw` the current handler can
+    /// catch, and the return completion an `emit_pending_return` that crosses
+    /// the current finalizer without entering a catch clause.
+    pub(super) fn emit_yield(&mut self, input: Reg) -> Result<Reg, CompileError> {
+        let next = self.alloc_reg()?;
+        let thrown = self.alloc_reg()?;
+        let skip = self.jump();
+        let throw_pc = self.pc();
+        self.emit(Instr::Throw {
+            src: self.slot(thrown),
+        });
+        let return_pc = self.pc();
+        let payload = self.alloc_reg()?;
+        self.emit(Instr::LoadGeneratorReturn {
+            dst: self.slot(payload),
+        });
+        self.emit_pending_return(payload)?;
+        let yield_pc = self.pc();
+        self.patch_jump(skip, yield_pc)?;
+        let generator = self.control.yields.len() as u32;
+        self.emit(Instr::Yield {
+            input: self.slot(input),
+            generator,
+            delegate: false,
+        });
+        self.control.yields.push(YieldSite {
+            next,
+            thrown,
+            next_pc: yield_pc + 1,
+            throw_pc,
+            return_pc,
+        });
+        Ok(next)
     }
 
     fn push_finalizer(&mut self) -> Result<(), CompileError> {
@@ -571,7 +617,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(end)
     }
 
-    fn emit_pending_return(&mut self, payload: Reg) -> Result<(), CompileError> {
+    pub(super) fn emit_pending_return(&mut self, payload: Reg) -> Result<(), CompileError> {
         if self.control.finalizers.last().is_some() {
             let (kind, outer_payload, entry) = {
                 let outer = self.control.finalizers.last().expect("outer finalizer");

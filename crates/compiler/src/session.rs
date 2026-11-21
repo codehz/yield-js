@@ -81,6 +81,7 @@ impl Session {
             is_async: false,
             is_arrow: false,
             is_method: true,
+            is_generator: false,
             length: 0,
             params: Vec::new(),
             rest_param: None,
@@ -92,6 +93,8 @@ impl Session {
             persistent_slots: 0,
             code: vec![read_target(slot, target), Instr::Return { src: slot }],
             resumes: Vec::new(),
+            generator_start: None,
+            generator_resumes: Vec::new(),
             handlers: Vec::new(),
         });
         Ok(func_id)

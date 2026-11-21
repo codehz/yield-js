@@ -1052,11 +1052,26 @@ fn rejects_gated_class_features() {
     for (source, feature) in [
         ("class C { x = arguments; }", "arguments"),
         ("class C { static { (() => arguments)(); } }", "arguments"),
-        ("class C { *m() {} }", "generator"),
+        ("class C { async *m() {} }", "async generator"),
     ] {
         let error = compile(source, &CompileOptions::default()).unwrap_err();
         assert!(error.message().contains(feature), "{error}");
     }
+}
+
+#[test]
+fn accepts_synchronous_generator_methods() {
+    let build = compile(
+        "class C { *m() { yield 1; } static *s() { yield 2; } }",
+        &CompileOptions::default(),
+    )
+    .expect("synchronous generator methods are supported");
+    let generators = build
+        .functions
+        .iter()
+        .filter(|function| function.is_generator)
+        .count();
+    assert_eq!(generators, 2);
 }
 
 #[test]
@@ -1698,4 +1713,241 @@ fn host_declaration_type_only_module_keeps_an_empty_manifest_entry() {
             .unwrap();
     assert!(options.imports["types"].is_empty());
     compile("export function run() {}", &options).unwrap();
+}
+
+fn compile_generator(source: &str) -> yield_vm::bytecode::Function {
+    let build = compile(source, &CompileOptions::default()).expect("source compiles");
+    build
+        .functions
+        .into_iter()
+        .find(|function| function.name == "run")
+        .expect("missing run")
+}
+
+#[test]
+fn generator_entries_retain_only_values_their_path_reads() {
+    let both = compile_generator(
+        r#"
+export function* run(a, b, c) {
+  try {
+    yield a;
+  } catch (error) {
+    return b;
+  }
+  return c;
+}
+"#,
+    );
+    assert!(both.is_generator);
+    let [entry] = both.generator_resumes.as_slice() else {
+        panic!("expected one generator entry");
+    };
+    let saved = entry.saved_slots.len();
+    assert_eq!(saved, 2, "the throw path keeps b and the next path keeps c");
+
+    // Each value is read on exactly one of the three resumed paths.
+    for (source, expected) in [
+        (
+            r#"
+export function* run(a, b, c) {
+  try {
+    yield a;
+  } catch (error) {
+    return 0;
+  }
+  return c;
+}
+"#,
+            1,
+        ),
+        (
+            r#"
+export function* run(a, b, c) {
+  try {
+    yield a;
+  } catch (error) {
+    return b;
+  }
+  return 0;
+}
+"#,
+            1,
+        ),
+        (
+            r#"
+export function* run(a, b, c) {
+  try {
+    yield a;
+  } catch (error) {
+    return 0;
+  }
+  return 0;
+}
+"#,
+            0,
+        ),
+    ] {
+        let function = compile_generator(source);
+        assert_eq!(
+            function.generator_resumes[0].saved_slots.len(),
+            expected,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn generator_entry_of_one_yield_keeps_a_slot_another_yield_injects() {
+    // `x` is the destination of the first resume and is read after the second
+    // suspension, so subtracting destinations from the joined set would drop it.
+    let subject = compile_generator(
+        r#"
+export function* run(a) {
+  const x = yield a;
+  try {
+    return x;
+  } finally {
+    yield 0;
+    a = x;
+  }
+}
+"#,
+    );
+    let baseline = compile_generator(
+        r#"
+export function* run(a) {
+  const x = yield a;
+  try {
+    return x;
+  } finally {
+    yield 0;
+    a = 0;
+  }
+}
+"#,
+    );
+    assert_eq!(subject.generator_resumes.len(), 2);
+    assert_eq!(baseline.generator_resumes.len(), 2);
+    let delta = subject.generator_resumes[1].saved_slots.len() as i64
+        - baseline.generator_resumes[1].saved_slots.len() as i64;
+    assert_eq!(delta, 1, "the finalizer reads a value declared before it");
+}
+
+#[test]
+fn generator_dead_parameter_is_not_saved() {
+    let with_dead = compile_generator(
+        r#"
+export function* run(a, dead) {
+  yield a;
+}
+"#,
+    );
+    let without_dead = compile_generator(
+        r#"
+export function* run(a) {
+  yield a;
+}
+"#,
+    );
+    assert_eq!(
+        with_dead.generator_resumes[0].saved_slots,
+        without_dead.generator_resumes[0].saved_slots
+    );
+    assert_eq!(with_dead.persistent_slots, without_dead.persistent_slots);
+}
+
+#[test]
+fn rejects_async_generator_with_location() {
+    let error = compile(
+        "const holder = { async *m() { yield 1; } };",
+        &CompileOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .message()
+            .contains("unsupported syntax: async generator"),
+        "{error}"
+    );
+    assert_eq!(error.line(), 1);
+    assert!(error.column() > 1);
+}
+
+#[test]
+fn build_loading_rejects_illegal_generator_tables() {
+    let source = r#"
+export function* run(a) {
+  try {
+    return a;
+  } finally {
+    yield 1;
+  }
+}
+"#;
+    let index = |build: &Build| {
+        build
+            .functions
+            .iter()
+            .position(|function| function.name == "run")
+            .expect("missing run")
+    };
+    type Mutation = fn(&mut yield_vm::Function);
+    let mutations: [(&str, Mutation); 4] = [
+        ("is not the instruction after its yield", |function| {
+            function.generator_resumes[0].next_pc += 1;
+        }),
+        ("does not read the return payload", |function| {
+            function.generator_resumes[0].return_pc = 0;
+        }),
+        ("saved_slots are not strictly ascending", |function| {
+            let saved = &mut function.generator_resumes[0].saved_slots;
+            saved.push(saved[0]);
+        }),
+        ("does not follow its start boundary", |function| {
+            function
+                .generator_start
+                .as_mut()
+                .expect("generator start")
+                .body_pc += 1;
+        }),
+    ];
+    for (message, mutate) in mutations {
+        let mut build = compile(source, &CompileOptions::default()).expect("source compiles");
+        let position = index(&build);
+        mutate(&mut build.functions[position]);
+        build.finalize();
+        let error = build.validate().expect_err(message);
+        assert!(error.contains(message), "{message}: {error}");
+    }
+}
+
+#[test]
+fn generator_resume_targets_participate_in_build_identity() {
+    let mut build = compile(
+        r#"
+export function* run(a) {
+  yield a;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .expect("source compiles");
+    let before = build.build_id.clone();
+    let position = build
+        .functions
+        .iter()
+        .position(|function| function.name == "run")
+        .expect("missing run");
+    let other = build
+        .functions
+        .iter()
+        .filter(|function| function.is_generator)
+        .count();
+    assert_eq!(other, 1, "only the body generator resumes");
+    build.functions[position].generator_resumes[0]
+        .throw_dst
+        .index += 1;
+    build.finalize();
+    assert_ne!(build.build_id, before);
+    assert_ne!(build.compute_id(), before);
 }

@@ -2,11 +2,11 @@
 
 当前实现由代码推导的覆盖范围清单。语法子集与未覆盖项见 [`docs/gaps.md`](gaps.md)。
 
-- 字节码 **40** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
+- 字节码 **41** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - `compile(entry, preload, resolver, options)` 用同步 `ModuleResolver` 链接可达源码；`MemoryResolver` 和 `FileResolver` 使用根相对规范 ID。`CompileOptions::from_dts` 从宿主声明文件（`.d.ts`）单独读出模块与值导出清单；无法解释的导出语法按位置拒绝。支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出。星号不传递 `default`；相同最终目标不冲突，不同目标的同名导出从命名空间排除，对该名字的显式请求报错。
 - VM 在执行任何模块体前创建全部模块环境和命名空间，并初始化提升函数和 `var`。依赖优先、按源码声明顺序求值；循环回边跳过，共享模块只执行一次。读取另一模块未初始化的词法绑定抛出可捕获的 `ReferenceError`。命名空间无原型、不可扩展，按导出名排序，通过只读 getter 提供活绑定。
-- 先求值 preload 的可达子图，再把 preload 根的链接导出安装为 `globalThis` 的只读活绑定；裸 preload 名只在不属于该子图的 entry 依赖中可用（包含 entry 本身）。模块之间不排空微任务。`Vm::get_export` 和 `Vm::start` 只使用 entry 的链接导出。快照 **54** 保存模块环境与命名空间根；恢复校验根、槽归属与 getter，不重跑初始化。
+- 先求值 preload 的可达子图，再把 preload 根的链接导出安装为 `globalThis` 的只读活绑定；裸 preload 名只在不属于该子图的 entry 依赖中可用（包含 entry 本身）。模块之间不排空微任务。`Vm::get_export` 和 `Vm::start` 只使用 entry 的链接导出。快照 **55** 保存模块环境与命名空间根；恢复校验根、槽归属与 getter，不重跑初始化。
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。Rust 宿主用 `#[host_module]`、`#[host_class]` / `#[methods]`、`#[host_state]` 和 `#[operation]` 声明绑定，`host_bindings!` 一次性链接，并在展开时按声明的 `dts` 文件校验每个声明的值名（缺名即编译错误，实现可更宽，纯类型声明不产生要求）。`#[function]` / `#[method]` 的 `async fn -> JsResult<HostStep>` 可用受限 CPS 语法表达 guest 调用续接，不创建 Rust Future。VM 链接期校验模块、导出种类，并把类原型、实例槽、payload、模块状态和 operation 全部保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。非零大小载荷必须声明 schema 与 codec，否则分配实例是 `HostFault`，避免恢复时静默丢失数据。带 `class` 的 `#[constructor]` 导出暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并；基类方法与访问器接受派生实例。payload 仍属于具体实例类。脚本类可继承宿主构造器：只对本次构造中与声明类匹配的宿主分配使用派生原型，不修改其他分配或构造器返回的替换对象。宿主接收者仍校验声明类标签；脚本私元素与宿主槽和 payload 独立，均可跨快照恢复。
@@ -18,6 +18,9 @@
 `console` 宿主模块提供 `debug`、`error`、`info`、`log`、`warn`；每个方法将首个实参输出到宿主标准错误，不实现浏览器格式化或多参数格式替换。
 - `test` 的 `setTimeout` / `clearTimeout` 使用可取消后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 timer driver，只接受有限非负的 `u32` 整数毫秒。快照写剩余时长，恢复不计离线时间；`@advance` 按截止时间、同截止时按登记顺序投递，每次投递后排空微任务。
 - `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
+- 同步生成器 `function*`（声明、表达式、对象与类的方法）在调用时初始化形参后立即返回生成器对象，正文只在 `next` 时执行。`GeneratorStart` 是独立的调用期边界，只捕获正文入口的活槽；每次 `yield` 生成一个 `GeneratorEntry`，分别给出 `next_pc` / `throw_pc` 的注入槽和 `return_pc`，`LoadGeneratorReturn` 只在该落点读取本次恢复传入的完成值，待完成值不进入全局状态。生成器函数不可构造，其实例原型是函数的 `prototype`（非对象时回退共享的生成器原型）。
+- 生成器对象是普通对象加一份暂停帧（状态、函数 ID、环境、按入口 `saved_slots` 排列的值）。`next` / `throw` / `return` 是共享生成器原型上的内建方法：恢复前取走保存状态并标记执行中，重入抛可捕获的 `TypeError`；`next` 同步返回 `{ value, done: false }`，正文返回或落底给出 `done: true`，未捕获异常使生成器完成并原样抛出；已完成状态不再持有帧。`[Symbol.iterator]` 返回 `this`，因此 `for…of`、数组展开等现有消费路径不需要生成器特判，`finally` 中的 `yield` 保留待完成的 `return`。
+- 生成器帧参与运行期 GC 与快照：暂停的环境和保存槽是强引用边，完成后释放；快照格式 **55** 保存普通对象身份、原型、状态、函数 ID、恢复表索引和按表排列的槽值，不写瞬时槽或运行时 PC。恢复在发布 VM 前拒绝执行中状态、非生成器函数、非法表索引和值数不符。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的槽分配为瞬时槽；挂起时丢弃瞬时槽，恢复时只重建指定持久槽。

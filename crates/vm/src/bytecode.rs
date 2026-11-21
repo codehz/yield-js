@@ -2,7 +2,7 @@
 //!
 //! The VM owns this module: the compiler depends on it, never the other way
 //! around. All operands are explicit slots. No implicit operand stack is
-//! persisted across an `Await`.
+//! persisted across an `Await` or a `Yield`.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 40;
+pub const BYTECODE_VERSION: u32 = 41;
 
 pub use crate::builtin::BUILTINS;
 
@@ -407,6 +407,30 @@ pub enum Instr {
         input: Slot,
         resume: u32,
     },
+    /// Suspends a synchronous generator, handing `input` to its consumer.
+    ///
+    /// The VM stores `generator_resumes[generator].saved_slots` and returns the
+    /// yielded value. Resuming enters `next_pc` (the fall-through here) or
+    /// `throw_pc` with the injected value already written, or `return_pc` with
+    /// a pending completion payload for `LoadGeneratorReturn`.
+    Yield {
+        input: Slot,
+        generator: u32,
+        /// `input` is already the delegate's own result object, handed back
+        /// unwrapped instead of being wrapped in a fresh iteration result.
+        delegate: bool,
+    },
+    /// Ends the invocation after a generator's parameters were initialized.
+    ///
+    /// The VM captures the environment and `generator_start.saved_slots` into a
+    /// new generator object and returns it. Control never falls through here.
+    GeneratorStart,
+    /// Reads the return payload of the current generator resume. Valid only as
+    /// the first instruction of a `GeneratorEntry::return_pc`, so the pending
+    /// completion value never lives in VM-global state.
+    LoadGeneratorReturn {
+        dst: Slot,
+    },
     Jump {
         target: u32,
     },
@@ -493,6 +517,35 @@ pub struct ResumeEntry {
     pub saved_slots: Vec<u16>,
 }
 
+/// Resume points of one synchronous `yield`.
+///
+/// A generator suspension is resumed from outside the VM with one of three
+/// completions. The entry supplies the destination each injected value lands
+/// in, so no result slot has to survive in the saved set. `return_pc` declares
+/// no destination: its first instruction consumes the pending payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratorEntry {
+    /// Always the instruction after the `Yield`.
+    pub next_pc: u32,
+    pub next_dst: Slot,
+    pub throw_pc: u32,
+    pub throw_dst: Slot,
+    pub return_pc: u32,
+    /// Strictly ascending persistent-slot indices. Values are stored in this
+    /// order in the generator object and snapshot.
+    pub saved_slots: Vec<u16>,
+}
+
+/// Where a generator's body starts once the call-time parameters are initialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratorStart {
+    /// First body instruction. Entered only by the first `next`, never by
+    /// falling out of [`Instr::GeneratorStart`].
+    pub body_pc: u32,
+    /// Strictly ascending persistent-slot indices live at `body_pc`.
+    pub saved_slots: Vec<u16>,
+}
+
 /// Static exception region. The VM writes the thrown value to `dst` and jumps
 /// to `target_pc`. Regions may nest; the innermost covering PC wins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +575,8 @@ pub struct Function {
     pub is_async: bool,
     pub is_arrow: bool,
     pub is_method: bool,
+    /// Synchronous generator. Mutually exclusive with `is_async`.
+    pub is_generator: bool,
     /// Number of positional parameters before the first default, excluding rest.
     pub length: u16,
     /// Positional parameter destinations in source order.
@@ -541,16 +596,20 @@ pub struct Function {
     pub persistent_slots: u16,
     pub code: Vec<Instr>,
     pub resumes: Vec<ResumeEntry>,
+    /// Present exactly for a synchronous generator.
+    pub generator_start: Option<GeneratorStart>,
+    /// One entry per `Yield`, indexed by `Instr::Yield::generator`.
+    pub generator_resumes: Vec<GeneratorEntry>,
     pub handlers: Vec<ExceptionHandler>,
 }
 
 impl Function {
     pub fn is_constructable(&self) -> bool {
-        !self.is_async && !self.is_arrow && !self.is_method
+        !self.is_async && !self.is_arrow && !self.is_method && !self.is_generator
     }
 
     pub(crate) fn is_accessor_method(&self) -> bool {
-        self.is_method && !self.is_async && !self.is_arrow
+        self.is_method && !self.is_async && !self.is_arrow && !self.is_generator
     }
 
     /// Whether this function allocates an invocation environment.
@@ -1047,6 +1106,26 @@ impl Build {
         }
         if function.resumes.len() > u32::MAX as usize {
             return Err(format!("{location}: too many resume entries"));
+        }
+        if function.is_generator && function.is_async {
+            return Err(format!("{location}: generator cannot be async"));
+        }
+        if function.is_generator && function.is_arrow {
+            return Err(format!("{location}: generator cannot be an arrow"));
+        }
+        if function.is_generator != function.generator_start.is_some() {
+            return Err(format!("{location}: invalid generator start table"));
+        }
+        if !function.is_generator && !function.generator_resumes.is_empty() {
+            return Err(format!(
+                "{location}: generator resume table on a non-generator"
+            ));
+        }
+        if function.is_generator && !function.resumes.is_empty() {
+            return Err(format!("{location}: generator cannot have await resumes"));
+        }
+        if function.generator_resumes.len() > u32::MAX as usize {
+            return Err(format!("{location}: too many generator resume entries"));
         }
 
         let check_slot = |slot: Slot, what: &str| -> Result<(), String> {
@@ -1567,6 +1646,31 @@ impl Build {
                         ));
                     }
                 }
+                Instr::Yield {
+                    input,
+                    generator,
+                    delegate: _,
+                } => {
+                    if !function.is_generator {
+                        return Err(format!("{location}: Yield in a non-generator function"));
+                    }
+                    check_slot(*input, "Yield.input")?;
+                    if *generator as usize >= function.generator_resumes.len() {
+                        return Err(format!(
+                            "{location}: Yield at pc {pc} references generator {generator}"
+                        ));
+                    }
+                }
+                Instr::GeneratorStart => {
+                    if !function.is_generator {
+                        return Err(format!(
+                            "{location}: GeneratorStart in a non-generator function"
+                        ));
+                    }
+                }
+                Instr::LoadGeneratorReturn { dst } => {
+                    check_slot(*dst, "LoadGeneratorReturn.dst")?;
+                }
                 Instr::Jump { target } => check_target(*target, "Jump")?,
                 Instr::BranchFalse { cond, target } => {
                     check_slot(*cond, "BranchFalse.cond")?;
@@ -1612,6 +1716,113 @@ impl Build {
             }
         }
 
+        let check_saved = |saved: &[u16], what: &str| -> Result<(), String> {
+            let mut previous = None;
+            for slot in saved {
+                if *slot >= function.persistent_slots {
+                    return Err(format!(
+                        "{location}: {what} saves persistent slot {slot}, size {}",
+                        function.persistent_slots
+                    ));
+                }
+                if previous.is_some_and(|prev| *slot <= prev) {
+                    return Err(format!(
+                        "{location}: {what} saved_slots are not strictly ascending"
+                    ));
+                }
+                previous = Some(*slot);
+            }
+            Ok(())
+        };
+        if let Some(start) = &function.generator_start {
+            let starts = function
+                .code
+                .iter()
+                .enumerate()
+                .filter(|(_, instruction)| matches!(instruction, Instr::GeneratorStart))
+                .map(|(pc, _)| pc)
+                .collect::<Vec<_>>();
+            let [start_pc] = starts.as_slice() else {
+                return Err(format!(
+                    "{location}: generator needs exactly one start boundary"
+                ));
+            };
+            if start.body_pc as usize != *start_pc + 1
+                || start.body_pc as usize >= function.code.len()
+            {
+                return Err(format!(
+                    "{location}: generator body pc {} does not follow its start boundary",
+                    start.body_pc
+                ));
+            }
+            if has_control_flow_target(function, start.body_pc) {
+                return Err(format!(
+                    "{location}: ordinary control flow enters generator body pc {}",
+                    start.body_pc
+                ));
+            }
+            check_saved(&start.saved_slots, "generator start")?;
+        }
+        let mut yield_pcs = vec![None; function.generator_resumes.len()];
+        for (pc, instruction) in function.code.iter().enumerate() {
+            if let Instr::Yield { generator, .. } = instruction
+                && let Some(slot) = yield_pcs.get_mut(*generator as usize)
+                && slot.replace(pc as u32).is_some()
+            {
+                return Err(format!(
+                    "{location}: generator {generator} is resumed from two yields"
+                ));
+            }
+        }
+        for (generator, entry) in function.generator_resumes.iter().enumerate() {
+            let Some(yield_pc) = yield_pcs[generator] else {
+                return Err(format!(
+                    "{location}: generator entry {generator} has no Yield"
+                ));
+            };
+            if entry.next_pc != yield_pc + 1 {
+                return Err(format!(
+                    "{location}: generator {generator} next pc {} is not the instruction after its yield",
+                    entry.next_pc
+                ));
+            }
+            for (pc, what) in [
+                (entry.next_pc, "next"),
+                (entry.throw_pc, "throw"),
+                (entry.return_pc, "return"),
+            ] {
+                if pc as usize >= function.code.len() {
+                    return Err(format!(
+                        "{location}: generator {generator} {what} pc {pc} is out of range"
+                    ));
+                }
+            }
+            check_slot(entry.next_dst, "next_dst")?;
+            check_slot(entry.throw_dst, "throw_dst")?;
+            for (pc, what) in [(entry.throw_pc, "throw"), (entry.return_pc, "return")] {
+                if has_control_flow_target(function, pc) {
+                    return Err(format!(
+                        "{location}: ordinary control flow enters generator {generator} {what} pc {pc}"
+                    ));
+                }
+                if pc > 0 && falls_through(&function.code[pc as usize - 1]) {
+                    return Err(format!(
+                        "{location}: generator {generator} {what} pc {pc} has a fall-through predecessor"
+                    ));
+                }
+            }
+            if !matches!(
+                function.code[entry.return_pc as usize],
+                Instr::LoadGeneratorReturn { .. }
+            ) {
+                return Err(format!(
+                    "{location}: generator {generator} return pc {} does not read the return payload",
+                    entry.return_pc
+                ));
+            }
+            check_saved(&entry.saved_slots, &format!("generator {generator}"))?;
+        }
+
         for (handler_id, handler) in function.handlers.iter().enumerate() {
             if handler.start_pc >= handler.end_pc {
                 return Err(format!(
@@ -1643,4 +1854,24 @@ impl Build {
 
         Ok(())
     }
+}
+
+/// Whether an ordinary edge names `target`: a jump, a conditional jump, or an
+/// exception landing. Externally injected generator entries must avoid all of them.
+fn has_control_flow_target(function: &Function, target: u32) -> bool {
+    function.code.iter().any(|instruction| match instruction {
+        Instr::Jump { target: slot } | Instr::BranchFalse { target: slot, .. } => *slot == target,
+        _ => false,
+    }) || function
+        .handlers
+        .iter()
+        .any(|handler| handler.target_pc == target)
+}
+
+/// Whether execution continues at the next instruction after `instruction`.
+fn falls_through(instruction: &Instr) -> bool {
+    !matches!(
+        instruction,
+        Instr::Jump { .. } | Instr::Return { .. } | Instr::Throw { .. } | Instr::GeneratorStart
+    )
 }

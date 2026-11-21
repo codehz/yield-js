@@ -2,6 +2,7 @@
 
 mod bindings;
 mod defaults;
+mod generator;
 mod host_tasks;
 mod liveness;
 mod module_graph;

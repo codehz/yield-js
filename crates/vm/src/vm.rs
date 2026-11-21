@@ -1146,6 +1146,7 @@ impl Vm {
             prepared,
             Vec::new(),
             (&Value::UNDEFINED, &Value::UNDEFINED, None),
+            None,
         )?
         .into_result()
         .map(|_| ())
@@ -1511,6 +1512,9 @@ impl Vm {
     ) -> Result<(), VmError> {
         match outcome {
             ExecOutcome::Suspended => Ok(()),
+            ExecOutcome::Yielded { .. } => Err(VmError::InvalidState(
+                "generator suspended inside an async activation".to_owned(),
+            )),
             ExecOutcome::Return(value) => self.resolve_promise(host, roots, promise, value),
             ExecOutcome::Thrown(value) => self.settle(promise, Settlement::Rejected(value)),
         }
@@ -1529,6 +1533,7 @@ impl Vm {
         args: Vec<Value>,
         receiver: &Value,
         (new_target, home): (&Value, Option<ObjectId>),
+        callee: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
         self.activate(
             host,
@@ -1538,6 +1543,7 @@ impl Vm {
             None,
             args,
             (receiver, new_target, home),
+            callee,
         )
     }
 
@@ -1554,6 +1560,7 @@ impl Vm {
         prepared_env: Option<ObjectId>,
         args: Vec<Value>,
         (receiver, new_target, home): (&Value, &Value, Option<ObjectId>),
+        callee: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
         let function_index = self.function_index(func_id)?;
         let is_async = self.build.functions[function_index].is_async;
@@ -1615,6 +1622,7 @@ impl Vm {
             env,
             async_promise,
         );
+        frame.callee = callee;
         for (slot, value) in slot_args {
             frame.write(slot, value)?;
         }
@@ -1627,6 +1635,9 @@ impl Vm {
             None => match outcome {
                 ExecOutcome::Suspended => Err(VmError::InvalidState(
                     "synchronous function suspended".to_owned(),
+                )),
+                ExecOutcome::Yielded { .. } => Err(VmError::InvalidState(
+                    "synchronous function yielded outside a generator resume".to_owned(),
                 )),
                 ExecOutcome::Return(value) => Ok(Invocation::Value(value)),
                 ExecOutcome::Thrown(value) => Ok(Invocation::Thrown(value)),

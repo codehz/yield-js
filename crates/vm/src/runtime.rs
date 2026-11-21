@@ -146,6 +146,12 @@ impl Invocation {
 pub(crate) enum ExecOutcome {
     Return(Value),
     Suspended,
+    /// A synchronous generator suspended. `delegate` means `value` is already
+    /// the delegate's own result object and is handed back unwrapped.
+    Yielded {
+        value: Value,
+        delegate: bool,
+    },
     Thrown(Value),
 }
 

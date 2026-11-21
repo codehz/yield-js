@@ -41,6 +41,13 @@ pub(crate) struct Frame {
     pub(crate) function: usize,
     pub(crate) pc: usize,
     pub(crate) env: Option<ObjectId>,
+    /// Payload of the generator `return` completion that rebuilt this frame.
+    /// Consumed by `LoadGeneratorReturn`, so it never becomes a slot operand.
+    pub(crate) generator_return: Option<Value>,
+    /// Generator object this frame belongs to, when running a generator body.
+    pub(crate) generator: Option<ObjectId>,
+    /// Callee function object. Only generators read it, for `.prototype`.
+    pub(crate) callee: Option<ObjectId>,
     transient: SlotFile,
     persistent: SlotFile,
     pub(crate) async_promise: Option<ObjectId>,
@@ -57,6 +64,9 @@ impl Frame {
             function: function_index,
             pc: 0,
             env,
+            generator_return: None,
+            generator: None,
+            callee: None,
             transient: SlotFile::new(function.transient_slots),
             persistent: SlotFile::new(function.persistent_slots),
             async_promise,
@@ -105,6 +115,9 @@ impl TraceRoots for Frame {
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         self.env.trace(tracer)?;
         self.async_promise.trace(tracer)?;
+        self.generator_return.trace(tracer)?;
+        self.generator.trace(tracer)?;
+        self.callee.trace(tracer)?;
         for value in self
             .transient
             .slots

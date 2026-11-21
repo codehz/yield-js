@@ -90,8 +90,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 ClassElement::MethodDefinition(method) => {
                     let feature = if !method.decorators.is_empty() {
                         Some("class method decorator")
-                    } else if method.value.generator {
-                        Some("generator")
+                    } else if method.value.generator && method.value.r#async {
+                        Some("async generator")
                     } else {
                         None
                     };

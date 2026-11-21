@@ -95,6 +95,34 @@ pub struct PromiseObject {
     pub(super) extensible: bool,
 }
 
+/// Where a synchronous generator currently is.
+///
+/// `Executing` is a transient state that never survives a snapshot boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorStatus {
+    /// Parameters are initialized; the body has not run yet.
+    Start,
+    /// Suspended at generator entry `index` of the function's resume table.
+    Suspended(u32),
+    /// A resume is running. Reentrant resumes must throw a script TypeError.
+    Executing,
+    /// The body finished, threw, or was closed. The frame is gone.
+    Completed,
+}
+
+/// Script-visible generator state. The object itself is an ordinary object with
+/// a plain property table and prototype; this record holds the suspended frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratorObject {
+    pub func_id: u32,
+    pub status: GeneratorStatus,
+    /// Invocation environment held by the suspended frame.
+    pub env: Option<ObjectId>,
+    /// Values in the resume entry's `saved_slots` order. Empty once completed.
+    pub values: Vec<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum NativeObject {

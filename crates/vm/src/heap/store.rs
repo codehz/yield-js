@@ -1,16 +1,17 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::object::{OwnedEdge, push_value};
+use super::object::{EnvRole, OwnedEdge, push_value};
 use super::types::{
     ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
-    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION,
-    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
-    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OrderedProperty,
-    OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
-    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
-    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
-    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
+    GeneratorObject, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
+    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
+    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
+    NativeObject, Object, OrderedProperty, OwnProperty, PlainObject, PrivateElement,
+    PrivateMemberKind, PromiseObject, PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION,
+    REPLACE_SYMBOL, RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
+    SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -31,6 +32,8 @@ pub(crate) struct Heap {
     pub(crate) symbol_registry: BTreeMap<JsString, SymbolId>,
     next_symbol_id: SymbolId,
     pub(crate) combines: BTreeMap<ObjectId, CombineState>,
+    /// Suspended generator frames keyed by their ordinary generator object.
+    pub(crate) generators: BTreeMap<ObjectId, GeneratorObject>,
     pub(crate) private: BTreeMap<ObjectId, PrivateElements>,
     /// Uncalled resolution objects. Capture conservatively rejects any id in
     /// this set that the tracer did not reach. At a GC safepoint, unreachable
@@ -41,6 +44,8 @@ pub(crate) struct Heap {
     pub(crate) function_prototype: Option<ObjectId>,
     /// Shared internal prototype of every Promise allocated by this heap.
     pub(crate) promise_prototype: Option<ObjectId>,
+    /// Shared internal prototype of a generator without its own `prototype`.
+    pub(crate) generator_prototype: Option<ObjectId>,
 }
 
 impl Heap {
@@ -66,12 +71,14 @@ impl Heap {
             symbol_registry: BTreeMap::new(),
             next_symbol_id: IS_CONCAT_SPREADABLE_SYMBOL + 1,
             combines: BTreeMap::new(),
+            generators: BTreeMap::new(),
             private: BTreeMap::new(),
             resolutions: BTreeSet::new(),
             object_prototype: None,
             array_prototype: None,
             function_prototype: None,
             promise_prototype: None,
+            generator_prototype: None,
         }
     }
 
@@ -93,6 +100,7 @@ impl Heap {
             true
         });
         self.combines.retain(|id, _| live.objects.contains(id));
+        self.generators.retain(|id, _| live.objects.contains(id));
         self.private.retain(|id, _| live.objects.contains(id));
         self.resolutions.retain(|id| live.objects.contains(id));
         self.symbols.retain(|id, _| live.symbols.contains(id));
@@ -178,6 +186,25 @@ impl Heap {
         }))
     }
 
+    /// Allocates an ordinary object that owns a suspended generator frame.
+    pub(crate) fn alloc_generator(
+        &mut self,
+        prototype: Option<ObjectId>,
+        generator: GeneratorObject,
+    ) -> ObjectId {
+        let id = self.alloc_plain_with(prototype);
+        self.generators.insert(id, generator);
+        id
+    }
+
+    pub(crate) fn generator(&self, id: ObjectId) -> Option<&GeneratorObject> {
+        self.generators.get(&id)
+    }
+
+    pub(crate) fn generator_mut(&mut self, id: ObjectId) -> Option<&mut GeneratorObject> {
+        self.generators.get_mut(&id)
+    }
+
     /// Object edges plus combine-state edges. This is the reachability list.
     pub(crate) fn write_edges(
         &self,
@@ -188,6 +215,17 @@ impl Heap {
         if let Some(state) = self.combines.get(&id) {
             push_value(out, &state.capability);
             for value in &state.results {
+                push_value(out, value);
+            }
+        }
+        if let Some(generator) = self.generators.get(&id) {
+            if let Some(env) = generator.env {
+                out.push(OwnedEdge::Environment {
+                    id: env,
+                    role: EnvRole::Closure,
+                });
+            }
+            for value in &generator.values {
                 push_value(out, value);
             }
         }

@@ -15,9 +15,9 @@ use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
-    NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property, ScriptClass,
-    ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id, string_own_property,
+    Attributes, BoundObject, ClassElement, DescriptorUpdate, GeneratorStatus, HAS_INSTANCE_SYMBOL,
+    ITERATOR_SYMBOL, NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property,
+    ScriptClass, ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -265,6 +265,7 @@ impl Vm {
 enum Step {
     Next,
     Suspend,
+    Yield { value: Value, delegate: bool },
     Return(Value),
     Throw(Value),
 }
@@ -306,6 +307,9 @@ impl Vm {
             match self.step(host, roots, &mut frame, instr)? {
                 Step::Next => {}
                 Step::Suspend => return Ok(ExecOutcome::Suspended),
+                Step::Yield { value, delegate } => {
+                    return Ok(ExecOutcome::Yielded { value, delegate });
+                }
                 Step::Return(value) => return Ok(ExecOutcome::Return(value)),
                 Step::Throw(value) => {
                     if !self.land_throw(&mut frame, pc, value.clone())? {
@@ -1193,6 +1197,21 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Await { input, resume, .. } => self.suspend(host, roots, frame, input, resume),
+            Instr::Yield {
+                input,
+                generator,
+                delegate,
+            } => self.suspend_generator(frame, input, generator, delegate),
+            Instr::GeneratorStart => self.start_generator(host, roots, frame),
+            Instr::LoadGeneratorReturn { dst } => {
+                let value = frame.generator_return.take().ok_or_else(|| {
+                    VmError::InvalidState(
+                        "generator return payload is missing for this resume".to_owned(),
+                    )
+                })?;
+                frame.write(dst, value)?;
+                Ok(Step::Next)
+            }
             Instr::Jump { target } => {
                 frame.pc = target as usize;
                 Ok(Step::Next)
@@ -2476,6 +2495,84 @@ impl Vm {
         Ok(Step::Suspend)
     }
 
+    /// Capture the suspended frame into the generator object that owns it.
+    ///
+    /// The object was marked `Executing` by the resume that built this frame, so
+    /// the three entry destinations are irrelevant here: every value the entry
+    /// needs that is not injected is in `saved_slots`.
+    fn suspend_generator(
+        &mut self,
+        frame: &Frame,
+        input: Slot,
+        generator: u32,
+        delegate: bool,
+    ) -> Result<Step, VmError> {
+        let value = frame.read(input)?;
+        let id = frame
+            .generator
+            .ok_or_else(|| VmError::InvalidState("Yield outside a generator frame".to_owned()))?;
+        let entry = self.build.functions[frame.function]
+            .generator_resumes
+            .get(generator as usize)
+            .cloned()
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("generator resume {generator} does not exist"))
+            })?;
+        let values = frame.read_saved(&entry.saved_slots)?;
+        let record = self
+            .heap
+            .generator_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("generator object {id} is missing")))?;
+        record.status = crate::heap::GeneratorStatus::Suspended(generator);
+        record.env = frame.env;
+        record.values = values;
+        Ok(Step::Yield { value, delegate })
+    }
+
+    /// Build the generator object the call returns, without running the body.
+    ///
+    /// The instance prototype is the function's `.prototype` when that is an
+    /// object and the shared generator prototype otherwise.
+    fn start_generator(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        frame: &mut Frame,
+    ) -> Result<Step, VmError> {
+        let function = &self.build.functions[frame.function];
+        let func_id = function.func_id;
+        let start = function.generator_start.clone().ok_or_else(|| {
+            VmError::InvalidState("GeneratorStart outside a generator".to_owned())
+        })?;
+        let values = frame.read_saved(&start.saved_slots)?;
+        let prototype = match frame.callee {
+            Some(callee) => {
+                let callee = Value::object(callee);
+                let roots = &roots.with(&callee);
+                let read =
+                    self.read_property(host, roots, &callee, PropertyKeyRef::String("prototype"))?;
+                match read {
+                    Invocation::Value(value) => match value.view() {
+                        ValueRef::Object(id) => Some(id),
+                        _ => self.heap.generator_prototype,
+                    },
+                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                }
+            }
+            None => self.heap.generator_prototype,
+        };
+        let id = self.heap.alloc_generator(
+            prototype.or(self.heap.generator_prototype),
+            crate::heap::GeneratorObject {
+                func_id,
+                status: crate::heap::GeneratorStatus::Start,
+                env: frame.env,
+                values,
+            },
+        );
+        Ok(Step::Return(Value::object(id)))
+    }
+
     fn schedule_resume(
         &mut self,
         continuation: crate::value::ContinuationId,
@@ -2556,4 +2653,186 @@ fn handler_landing(handlers: &[ExceptionHandler], pc: usize) -> Option<(Slot, u3
         }
     }
     selected.map(|handler| (handler.dst, handler.target_pc))
+}
+
+/// Which externally injected completion resumes a suspended generator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeneratorCompletion {
+    Next,
+    Throw,
+    Return,
+}
+
+impl Vm {
+    /// Resume (or start, or close) a generator object.
+    ///
+    /// The suspended frame is taken out of the object and the object is marked
+    /// `Executing` first, so a reentrant resume from inside the body throws a
+    /// script TypeError instead of observing a half-taken frame. Only the
+    /// persistent slots in the entry's `saved_slots` are restored; every other
+    /// slot keeps the "uninitialized" state it must have had at the suspension.
+    pub(crate) fn resume_generator(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+        completion: GeneratorCompletion,
+        argument: Value,
+    ) -> Result<Invocation, VmError> {
+        let id = match receiver.view() {
+            ValueRef::Object(id) => id,
+            _ => return self.throw_type_error("generator method called on a non-object"),
+        };
+        let Some(record) = self.heap.generator(id).cloned() else {
+            return self.throw_type_error("receiver is not a generator");
+        };
+        let function_index = self.function_index(record.func_id)?;
+        let function = &self.build.functions[function_index];
+        let start = function.generator_start.clone();
+        match record.status {
+            GeneratorStatus::Start => match completion {
+                GeneratorCompletion::Next => {
+                    let start = start.ok_or_else(|| {
+                        VmError::InvalidState(format!("{} is not a generator", record.func_id))
+                    })?;
+                    self.mark_generator_executing(id)?;
+                    let mut frame = Frame::new(
+                        function_index,
+                        &self.build.functions[function_index],
+                        record.env,
+                        None,
+                    );
+                    self.restore_saved(&mut frame, &start.saved_slots, &record.values)?;
+                    frame.pc = start.body_pc as usize;
+                    frame.generator = Some(id);
+                    let outcome = self.execute_frame(host, roots, frame)?;
+                    self.finish_generator(id, outcome)
+                }
+                // Nothing ran yet, so the body is never entered: the generator
+                // completes with the injected completion itself.
+                GeneratorCompletion::Throw => {
+                    self.complete_generator(id)?;
+                    Ok(Invocation::Thrown(argument))
+                }
+                GeneratorCompletion::Return => {
+                    self.complete_generator(id)?;
+                    self.iterator_result(argument, true)
+                }
+            },
+            GeneratorStatus::Suspended(index) => {
+                let entry = self.build.functions[function_index]
+                    .generator_resumes
+                    .get(index as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        VmError::InvalidState(format!("generator resume {index} does not exist"))
+                    })?;
+                self.mark_generator_executing(id)?;
+                let mut frame = Frame::new(
+                    function_index,
+                    &self.build.functions[function_index],
+                    record.env,
+                    None,
+                );
+                self.restore_saved(&mut frame, &entry.saved_slots, &record.values)?;
+                match completion {
+                    GeneratorCompletion::Next => {
+                        frame.write(entry.next_dst, argument)?;
+                        frame.pc = entry.next_pc as usize;
+                    }
+                    GeneratorCompletion::Throw => {
+                        frame.write(entry.throw_dst, argument)?;
+                        frame.pc = entry.throw_pc as usize;
+                    }
+                    GeneratorCompletion::Return => {
+                        frame.generator_return = Some(argument);
+                        frame.pc = entry.return_pc as usize;
+                    }
+                }
+                frame.generator = Some(id);
+                let outcome = self.execute_frame(host, roots, frame)?;
+                self.finish_generator(id, outcome)
+            }
+            GeneratorStatus::Executing => self.throw_type_error("generator is already executing"),
+            GeneratorStatus::Completed => match completion {
+                GeneratorCompletion::Next => self.iterator_result(Value::UNDEFINED, true),
+                GeneratorCompletion::Throw => Ok(Invocation::Thrown(argument)),
+                GeneratorCompletion::Return => self.iterator_result(argument, true),
+            },
+        }
+    }
+
+    fn mark_generator_executing(&mut self, id: ObjectId) -> Result<(), VmError> {
+        let record = self
+            .heap
+            .generator_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("generator object {id} is missing")))?;
+        record.status = GeneratorStatus::Executing;
+        Ok(())
+    }
+
+    /// Drop the suspended frame once the body can never run again.
+    fn complete_generator(&mut self, id: ObjectId) -> Result<(), VmError> {
+        let record = self
+            .heap
+            .generator_mut(id)
+            .ok_or_else(|| VmError::InvalidState(format!("generator object {id} is missing")))?;
+        record.status = GeneratorStatus::Completed;
+        record.env = None;
+        record.values.clear();
+        Ok(())
+    }
+
+    fn restore_saved(
+        &self,
+        frame: &mut Frame,
+        slots: &[u16],
+        values: &[Value],
+    ) -> Result<(), VmError> {
+        if slots.len() != values.len() {
+            return Err(VmError::InvalidState(format!(
+                "generator holds {} saved values, expected {}",
+                values.len(),
+                slots.len()
+            )));
+        }
+        for (slot, value) in slots.iter().zip(values) {
+            frame.write(
+                Slot {
+                    kind: SlotKind::Persistent,
+                    index: *slot,
+                },
+                value.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn finish_generator(
+        &mut self,
+        id: ObjectId,
+        outcome: ExecOutcome,
+    ) -> Result<Invocation, VmError> {
+        match outcome {
+            // The suspension already recorded itself in the generator object.
+            ExecOutcome::Yielded { value, delegate } => {
+                if delegate {
+                    Ok(Invocation::Value(value))
+                } else {
+                    self.iterator_result(value, false)
+                }
+            }
+            ExecOutcome::Return(value) => {
+                self.complete_generator(id)?;
+                self.iterator_result(value, true)
+            }
+            ExecOutcome::Thrown(value) => {
+                self.complete_generator(id)?;
+                Ok(Invocation::Thrown(value))
+            }
+            ExecOutcome::Suspended => Err(VmError::InvalidState(
+                "generator awaited inside a synchronous generator".to_owned(),
+            )),
+        }
+    }
 }

@@ -60,7 +60,9 @@ impl Vm {
         }
         let id = self.heap.alloc_function(func_id, env);
         let index = self.function_index(func_id)?;
-        let constructable = self.build.functions[index].is_constructable();
+        let function = &self.build.functions[index];
+        let constructable = function.is_constructable();
+        let generator = function.is_generator;
         self.install_script_metadata(id, func_id)?;
         if constructable {
             let prototype = self.heap.alloc_plain();
@@ -70,6 +72,17 @@ impl Vm {
                 Value::object(id),
                 Attributes::METHOD,
             )?;
+            self.heap.define_data(
+                id,
+                "prototype",
+                Value::object(prototype),
+                Attributes::FUNCTION_PROTOTYPE,
+            )?;
+        }
+        if generator {
+            // Instances inherit from this fresh object, which inherits the
+            // shared generator prototype that owns next/return/throw.
+            let prototype = self.heap.alloc_plain_with(self.heap.generator_prototype);
             self.heap.define_data(
                 id,
                 "prototype",
@@ -102,9 +115,9 @@ impl Vm {
                         "script function is not callable".to_owned(),
                     ));
                 }
-                let home = match callee.view() {
-                    ValueRef::Object(id) => self.heap.function(id).and_then(|f| f.home),
-                    _ => None,
+                let (callee_id, home) = match callee.view() {
+                    ValueRef::Object(id) => (Some(id), self.heap.function(id).and_then(|f| f.home)),
+                    _ => (None, None),
                 };
                 self.call_function(
                     host,
@@ -114,6 +127,7 @@ impl Vm {
                     args,
                     receiver,
                     (&Value::UNDEFINED, home),
+                    callee_id,
                 )
             }
             Some(Dispatch::Resolution(id)) => {
@@ -239,6 +253,7 @@ impl Vm {
                 args,
                 &Value::object(context),
                 (new_target, self.heap.function(class).and_then(|f| f.home)),
+                Some(class),
             )? {
                 Invocation::Value(value) if matches!(value.view(), ValueRef::Undefined) => {
                     self.derived_this(context)
@@ -300,6 +315,7 @@ impl Vm {
                     args,
                     &instance,
                     (new_target, home),
+                    None,
                 )? {
                     Invocation::Value(value) if !matches!(value.view(), ValueRef::Object(_)) => {
                         Ok(Invocation::Value(instance))

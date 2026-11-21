@@ -75,6 +75,7 @@ mod boolean;
 pub(crate) mod call;
 pub(crate) mod collections;
 pub(super) mod error_family;
+pub(crate) mod generator;
 pub(crate) mod globals;
 pub(crate) mod json;
 pub(crate) mod math;

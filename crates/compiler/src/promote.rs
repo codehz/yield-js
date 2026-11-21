@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use yield_vm::BindingId;
-use yield_vm::bytecode::{ExceptionHandler, Instr, ResumeEntry, Slot, SlotKind};
+use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry, Slot, SlotKind};
 
 use crate::analyze;
 use crate::bindings::BindingFacts;
@@ -39,12 +39,17 @@ pub(crate) fn promote(
     facts: &BindingFacts,
 ) -> Result<(), CompileError> {
     let resumes = resume_stubs(function);
+    let generators = generator_stubs(function);
+    let suspensions = analyze::Suspensions {
+        awaits: &resumes,
+        generators: &generators,
+    };
     let mut accepted: Vec<(BindingId, BTreeMap<usize, bool>)> = Vec::new();
     for (binding, owner) in &facts.owners {
         if *owner != function.func_id || facts.shared.contains(binding) {
             continue;
         }
-        if let Some(inits) = promotion_inits(function, &resumes, *binding)? {
+        if let Some(inits) = promotion_inits(function, suspensions, *binding)? {
             accepted.push((*binding, inits));
         }
     }
@@ -72,7 +77,7 @@ pub(crate) fn promote(
 /// `true` means the declaration already has a value and must self-move.
 fn promotion_inits(
     function: &LoweredFunction,
-    resumes: &[ResumeEntry],
+    suspensions: analyze::Suspensions<'_>,
     binding: BindingId,
 ) -> Result<Option<BTreeMap<usize, bool>>, CompileError> {
     let is_param = function.param_bindings.contains(&binding)
@@ -81,7 +86,7 @@ fn promotion_inits(
         || function.home_binding == Some(binding)
         || function.new_target_binding == Some(binding)
         || function.arguments_binding == Some(binding);
-    let incoming = declared_in(function, resumes, binding, is_param)?;
+    let incoming = declared_in(function, suspensions, binding, is_param)?;
     let mut inits = BTreeMap::new();
     for (pc, instruction) in function.code.iter().enumerate() {
         let Some(state) = incoming[pc] else {
@@ -115,7 +120,7 @@ fn promotion_inits(
 
 fn declared_in(
     function: &LoweredFunction,
-    resumes: &[ResumeEntry],
+    suspensions: analyze::Suspensions<'_>,
     binding: BindingId,
     entry_declared: bool,
 ) -> Result<Vec<Option<Declared>>, CompileError> {
@@ -137,7 +142,7 @@ fn declared_in(
         } else {
             before
         };
-        for successor in analyze::normal_successors(&function.code, resumes, pc)? {
+        for successor in analyze::normal_successors(&function.code, suspensions, pc)? {
             if note(&mut incoming, successor, after) {
                 work.push_back(successor);
             }
@@ -223,6 +228,21 @@ fn logical(reg: Reg) -> Slot {
         kind: SlotKind::Transient,
         index: reg,
     }
+}
+
+fn generator_stubs(function: &LoweredFunction) -> Vec<GeneratorEntry> {
+    function
+        .yields
+        .iter()
+        .map(|site| GeneratorEntry {
+            next_pc: site.next_pc as u32,
+            next_dst: logical(site.next),
+            throw_pc: site.throw_pc as u32,
+            throw_dst: logical(site.thrown),
+            return_pc: site.return_pc as u32,
+            saved_slots: Vec::new(),
+        })
+        .collect()
 }
 
 fn resume_stubs(function: &LoweredFunction) -> Vec<ResumeEntry> {

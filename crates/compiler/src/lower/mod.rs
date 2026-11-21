@@ -25,7 +25,7 @@ use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
 use crate::frontend::link::{DEFAULT_SLOT, Graph, Target};
-use crate::ir::LoweredFunction;
+use crate::ir::{GeneratorStartSite, LoweredFunction};
 use crate::names::Tables;
 use crate::promote;
 use crate::session::Session;
@@ -241,6 +241,20 @@ impl FunctionSource<'_> {
     fn is_arrow(self) -> bool {
         matches!(self, Self::Arrow(_))
     }
+
+    fn is_generator(self) -> bool {
+        match self {
+            Self::Function(function)
+            | Self::Method(function)
+            | Self::Constructor(function)
+            | Self::DerivedConstructor(function) => function.generator,
+            Self::Arrow(_)
+            | Self::Script(_)
+            | Self::DefaultConstructor(_)
+            | Self::ClassField(..)
+            | Self::ClassBlock(_) => false,
+        }
+    }
 }
 
 struct Task<'ast> {
@@ -266,6 +280,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     is_async: bool,
     is_arrow: bool,
     is_method: bool,
+    is_generator: bool,
     is_script: bool,
     module_declaration: bool,
     // In an explicit derived constructor and its arrows, the this binding
@@ -316,6 +331,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     | FunctionSource::ClassField(..)
                     | FunctionSource::ClassBlock(_)
             ),
+            is_generator: task.source.is_generator(),
             is_script: matches!(task.source, FunctionSource::Script(_)),
             module_declaration: false,
             derived_this: task.derived_this,
@@ -342,6 +358,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.install_this_binding(source);
         self.install_new_target_binding(source);
         let length = self.compile_parameters(source)?;
+        // Parameter initialization runs in the call; the body runs per resume.
+        let generator_start = if self.is_generator {
+            self.emit(Instr::GeneratorStart);
+            Some(GeneratorStartSite { body_pc: self.pc() })
+        } else {
+            None
+        };
         match source {
             FunctionSource::DefaultConstructor(_) => self.emit_implicit_return()?,
             FunctionSource::ClassField(..) | FunctionSource::ClassBlock(_)
@@ -445,6 +468,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_async: self.is_async,
             is_arrow: self.is_arrow,
             is_method: self.is_method,
+            is_generator: self.is_generator,
             length,
             param_bindings: self.param_bindings.clone(),
             rest_binding: self.rest_binding,
@@ -456,6 +480,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             reg_count: self.emit.reg_count(),
             code: self.emit.take_code(),
             awaits: self.control.take_awaits(),
+            generator_start,
+            yields: self.control.take_yields(),
             handlers: self.control.take_handlers(),
             span: self.span,
         })
@@ -523,8 +549,24 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             | FunctionSource::Method(function)
             | FunctionSource::Constructor(function)
             | FunctionSource::DerivedConstructor(function) => {
-                if function.generator {
-                    return Err(unsupported(self.source_text(), function.span, "generator"));
+                if function.generator && function.r#async {
+                    return Err(unsupported(
+                        self.source_text(),
+                        function.span,
+                        "async generator",
+                    ));
+                }
+                if function.generator
+                    && matches!(
+                        source,
+                        FunctionSource::Constructor(_) | FunctionSource::DerivedConstructor(_)
+                    )
+                {
+                    return Err(unsupported(
+                        self.source_text(),
+                        function.span,
+                        "generator constructor",
+                    ));
                 }
                 self.compile_parameter_list(&function.params)
             }
