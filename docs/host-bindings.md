@@ -128,6 +128,7 @@ impl Matcher {
 | `Function(expect: (JsValue) -> Instance<Matcher>)` | `export function expect(actual: unknown): Matcher;` |
 | `Instance<Matcher>`（无构造器导出） | `export interface Matcher { toBe(expected: unknown): void; toEqual(expected: unknown): void; }` |
 | `Constructor<Matcher>` | `export class Matcher { constructor(...); … }` |
+| 任意精度整数 `BigInt` | `bigint`（不生成 `number` 或 `unknown`） |
 | `JsValue` 参数或返回值 | `unknown`（未知类型，不做 `any` 宣传） |
 | 常量 `version: JsString` | `export const version: string;` |
 | `Symbol.iterator` 成员 | `[Symbol.iterator](): Iterator<…>;` |
@@ -139,6 +140,7 @@ impl Matcher {
 ### 5.1 `JsValue` 生命周期
 
 - `JsValue` 是 16 字节以内的可复制句柄，包含对象 ID 和 VM 代际。VM 在不同步调用、跨代恢复或跨 VM 使用时拒绝该句柄，报 `HostFault`，而不是抛出可捕获的脚本异常。
+- BigInt 的任意精度内容不放进定长句柄；`JsValue` 只引用 VM 持有的值，快照按规范十进制编码。
 - 宿主函数接收的实参、`this`、以及 `cx` 上读取到的值都是这种句柄。调用返回后句柄失效，但通过槽写入的值继续有效。
 - 句柄不暴露给宿主序列化；`HostValue`、`NativeKey`、`HostData` 投影全部删除。
 
@@ -147,6 +149,7 @@ impl Matcher {
 | JS 值 | 宿主可做什么 |
 | --- | --- |
 | `undefined`、`null`、布尔、数字、字符串 | 直接读取；字符串按 UTF-8 视图或 `&JsString` 访问，拒绝时抛 `TypeError` 或 `HostFault`（见 6.3） |
+| `bigint` | 用 `JsValue::bigint(&str)` 构造，解析失败按宿主错误处理；或用 `Inspect` 读取规范十进制文本。不映射为 Rust 浮点、JSON 数值或宿主自定义大整数模型 |
 | 对象、数组、函数、符号 | 只能作为句柄传递、比较身份、读取受控的自有数据；不能转成 Rust 结构 |
 | Promise、Proxy、绑定实例 | 同上；绑定实例可用 `Instance<T>` 提取 payload |
 | 宿主函数值 | 可由宿主读取并比较声明 ID，但不得据此在外部表里查状态 |
@@ -214,7 +217,7 @@ impl CallCx {
 ```
 
 - `CallCx` 在栈上，生命周期绑定本次调用；不能保存到 Rust 数据结构或在调用结束后使用。
-- `inspect` 提供只读视图：自有可枚举数据、数组长度、原型身份、`SameValue` 比较。它不触发 getter/Proxy，也不允许写入任意脚本对象。绑定要修改脚本可见状态时，返回值或写自己的槽。
+- `inspect` 提供只读视图：自有可枚举数据、数组长度、原型身份、`SameValue` 比较，以及 BigInt 的规范十进制文本。它不触发 getter/Proxy，也不允许写入任意脚本对象。绑定要修改脚本可见状态时，返回值或写自己的槽。
 - 绑定函数可以在调用内分配实例、读取堆元信息；但这些操作都在 VM 线程内同步完成，不执行用户脚本。
 
 ### 6.2 原型、方法与接收者
@@ -425,12 +428,13 @@ flowchart TB
 9. **流式 payload：暂缓。** 维持整段写入/读取接口；只有实测证明峰值内存构成问题时再改为流式 API。
 10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `Vm::start_recovered_operations` 启动。启动失败按对应 operation 的声明拒绝结算原 Promise，不回滚已恢复的 VM。
 11. **恢复资源限制：暂不由 VM 设通用上限。** 前提是快照仅来自可信本地存档；接入方须在读取/解析前限制文件大小。若快照转为导入、同步或其他不可信输入，必须重新评估解析前的大小、对象数、payload 大小和嵌套深度限制。
+12. **BigInt：纳入首版值域。** VM 使用自有任意精度整数表示；`JsValue` 仍为定长句柄，构建常量与快照按规范十进制字符串编码。宿主通过 `JsValue::bigint(&str)` 构造（解析失败按宿主错误处理）、通过 `Inspect` 读取文本，不在宿主侧引入第二套大整数模型。
 
 ## 16. 首版落地状态
 
 已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局、payload schema 与 operation 声明。
 
-脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
+脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。尚未实现：BigInt 值域、TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 
 Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。参数位置数（含可选位置）决定声明的 arity，完整签名进入绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 
