@@ -104,6 +104,7 @@ builtin_globals! {
     "Boolean" => Global::Owner(boolean_family::OWNER),
     GLOBAL_THIS => Global::Owner(Owner::new(GLOBAL_THIS, GLOBAL_THIS_ROOTS, &[], None)),
     "RegExp" => Global::Owner(regexp::OWNER),
+    "WeakSet" => Global::Owner(collections::WEAK_SET_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

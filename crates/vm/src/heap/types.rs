@@ -746,6 +746,61 @@ pub enum BoxedPrimitive {
     Symbol(SymbolId),
 }
 
+/// Identity stored without a strong edge by weak collections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WeakKey {
+    Object(ObjectId),
+    Symbol(SymbolId),
+}
+
+impl std::fmt::Display for WeakKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Object(id) => write!(f, "o:{id}"),
+            Self::Symbol(id) => write!(f, "s:{id}"),
+        }
+    }
+}
+
+impl Serialize for WeakKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for WeakKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct WeakKeyVisitor;
+
+        impl serde::de::Visitor<'_> for WeakKeyVisitor {
+            type Value = WeakKey;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a weak collection key (o:<id> or s:<id>)")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<WeakKey, E> {
+                let invalid = || E::custom("invalid weak collection key");
+                let (tag, digits) = text.split_once(':').ok_or_else(invalid)?;
+                if digits.is_empty()
+                    || (digits.len() > 1 && digits.starts_with('0'))
+                    || !digits.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(invalid());
+                }
+                let id = digits.parse().map_err(|_| invalid())?;
+                match tag {
+                    "o" => Ok(WeakKey::Object(id)),
+                    "s" => Ok(WeakKey::Symbol(id)),
+                    _ => Err(invalid()),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(WeakKeyVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -784,7 +839,11 @@ pub enum Object {
     },
     WeakMap {
         object: PlainObject,
-        entries: BTreeMap<ObjectId, Value>,
+        entries: BTreeMap<WeakKey, Value>,
+    },
+    WeakSet {
+        object: PlainObject,
+        entries: BTreeSet<WeakKey>,
     },
     CollectionIterator {
         object: PlainObject,
@@ -933,6 +992,16 @@ impl PartialEq for Object {
                     entries: a,
                 },
                 WeakMap {
+                    object: y,
+                    entries: b,
+                },
+            ) => x == y && a == b,
+            (
+                WeakSet {
+                    object: x,
+                    entries: a,
+                },
+                WeakSet {
                     object: y,
                     entries: b,
                 },

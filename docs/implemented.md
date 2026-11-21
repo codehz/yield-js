@@ -51,7 +51,7 @@
 - 成员读写、`in`、`delete` 和对应的 `Reflect` 方法使用这些 trap。`Object.keys`、`Object.getOwnPropertyDescriptors`、`hasOwnProperty`、对象展开/rest、`Object.assign`、`JSON.stringify` 和 `for…in` 也通过相应的属性操作访问代理。`for…in` 到达某一原型层时才记录这一层的键（代理层调用 `ownKeys`），处理尚未访问的字符串键时重新取描述符；恢复不会重新获取已到达层的键表。
 - `Array` 可调用或构造；数值长度创建稀疏数组，无效长度抛出可捕获的 `RangeError`。`isArray` 识别真实数组，`of` 和 `from` 创建稠密数组；`from` 优先使用同步迭代器，也可读取类数组对象。数组原型支持 `push` / `pop` / `shift` / `unshift` / `splice` / `slice` / `fill`、`map` / `filter` / `reduce` / `forEach` / `some` / `every`、`flat` / `flatMap` / `concat` 及 `indexOf` / `lastIndexOf` / `includes` / `find` / `findIndex`。`map` 和切片保留空洞，`flat` 跳过遍历层中的空洞。
 - `Map` 和 `Set` 必须用 `new` 构造，接受可选的同步可迭代对象。键和集合元素按 SameValueZero 比较。原型提供 `size` 访问器、增删查、`clear`、`forEach` 以及 `keys` / `values` / `entries` / `[Symbol.iterator]`。迭代和 `forEach` 都按插入顺序读取实时数据：跳过已删除的槽位，访问尚未读到的更新和追加项，删除后重新插入会排到末尾；已结束的迭代器不会被追加项重新激活。当前实现线性查找，并保留空槽以维持游标位置，不压缩删除留下的槽。
-- `WeakMap` 必须用 `new` 构造，接受可选的键值对同步可迭代对象。提供 `get`、`has`、`set`、`delete`，按对象身份比较键；四种方法均拒绝原始值键（含 Symbol），抛出 `TypeError`。不提供 `size` 或迭代。
+- `WeakMap` 和 `WeakSet` 必须用 `new` 构造，分别接受可选的键值对或成员同步可迭代对象。`WeakMap` 提供 `get` / `set` / `has` / `delete`，`WeakSet` 提供 `add` / `has` / `delete`。二者按身份接受对象和非注册 Symbol（包括 well-known Symbol）；无效键在写入时抛出 `TypeError`，读取返回 `undefined`，检查或删除返回 `false`。不提供 `size`、`clear` 或迭代。
 - `Object(value)` 和 `new Object(value)` 为字符串、数值、布尔值及 Symbol 创建新的包装对象；对象实参保留原身份，空值或无实参则创建普通对象。包装对象可像普通对象一样保存自有属性和内部原型，并继承各自原型上的 `valueOf` 和 `toString`；前者提取原始值，后者返回其文本。`Object.prototype.toString` 分别返回 `[object String]`、`[object Number]`、`[object Boolean]` 或 `[object Symbol]`。
 - `String()` 返回原始字符串；无实参返回空字符串。`new String(value)` 创建字符串包装对象。原始字符串及其包装对象的 `length` 和索引按 UTF-16 码元计算；包装对象的这些成员可用 `in` 和 `Reflect.has` 检查，不可写，严格赋值抛出可捕获的 `TypeError`。原始字符串的其余属性从共享的 `String.prototype` 查找。
 - `String.prototype` 提供 `charAt` / `charCodeAt` / `codePointAt` / `at`、`indexOf` / `lastIndexOf` / `includes` / `startsWith` / `endsWith`、`slice` / `substring`、`toUpperCase` / `toLowerCase`、`trim` / `trimStart` / `trimEnd`、`split` / `concat` / `repeat` / `padStart` / `padEnd` / `replace` / `replaceAll` / `match` / `matchAll` / `search`，以及 `toString` / `valueOf`。字符串分隔符直接使用；否则先查找 `Symbol.match` / `Symbol.matchAll` / `Symbol.replace` / `Symbol.search` / `Symbol.split` 协议并调用，缺失时按规范构造 `RegExp`。`replaceAll` 对非全局 RegExp 抛出 `TypeError`。
@@ -87,7 +87,7 @@
 - `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - 编译器接受溢出为无穷的数字字面量；`NaN` 和 `Infinity` 仍按作用域解析。字节码版本 **31** 的 Build 常量和快照值共用 JSON 数值编码：有限值保留数值形式和负零，非有限值用专用字符串标记，NaN 不保留 payload。宿主返回值、槽与异步操作的兑现值和拒绝原因均可包含非有限数。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。
-- `WeakMap` 构造器及其共享原型是追踪根。仅在 WeakMap 和键均已可达时追踪对应值，反复处理直至没有新增可达对象；条目本身不会强保留键。快照省略不可达键的条目，运行期 GC 原地删除这些条目；恢复拒绝条目中的悬空引用。
+- `WeakMap` 和 `WeakSet` 的构造器及共享原型是追踪根。只有 WeakMap 和键都可达时才追踪对应值，反复处理直至没有新增可达对象或 Symbol。WeakMap 键和 WeakSet 成员本身都不是强引用。快照省略不可达键的条目，运行期 GC 原地删除这些条目；恢复拒绝悬空键和注册 Symbol 键。快照格式 **48** 用 `o:<ID>` 和 `s:<ID>` 区分两种弱键，不迁移旧快照。
 - `Proxy` 构造器是快照根；代理到目标、handler 的边是强引用，handler 捕获的闭包环境沿普通堆边保存。保存和恢复直接处理记录，不通过 trap 查询代理。恢复拒绝缺失或类型不合法的代理引用。
 - 快照格式 **39** 保留 `Symbol.hasInstance` 的固定身份，并校验保留描述和注册表。快照保存包装对象的原始值、自有属性、原型和对象身份，以及共享内建根、绑定指纹、类原型映射、可达宿主实例的槽/payload 和模块状态。可达的 Symbol 包装对象保留被包装的 Symbol，即使没有其他引用；恢复拒绝悬空的 Symbol 引用。
 - 字节码格式 **31** 和快照格式 **39** 保留所有 UTF-16 码元。宿主与快照共用字符串编码：合法 Unicode 序列写作 JSON 字符串，含孤立代理时写作 `{"utf16":[...]}`；JS 字符串键映射以有序键值对写入，恢复拒绝重复键。

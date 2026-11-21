@@ -2,7 +2,7 @@
 
 use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
 use yield_poc::number;
-use yield_vm::heap::Property;
+use yield_vm::heap::{Property, WeakKey};
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
 
 #[test]
@@ -736,7 +736,7 @@ fn restore_rejects_dangling_weakmap_entries() {
     );
     let snapshot = s.snapshot();
     for (key, value) in [
-        (Some(u32::MAX), Value::Number(1.0)),
+        (Some(WeakKey::Object(u32::MAX)), Value::Number(1.0)),
         (None, Value::Object(u32::MAX)),
         (None, Value::Symbol(u32::MAX)),
     ] {

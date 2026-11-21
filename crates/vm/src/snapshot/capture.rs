@@ -12,7 +12,7 @@ use crate::heap::{
     NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind, PromiseState,
     Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
     SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
-    TO_PRIMITIVE_SYMBOL,
+    TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::host::Host;
 use crate::regexp::compile_pattern;
@@ -61,8 +61,16 @@ impl Vm {
                     object: object.clone(),
                     entries: entries
                         .iter()
-                        .filter(|(key, _)| live.objects.contains(key))
+                        .filter(|(key, _)| live.contains_weak_key(**key))
                         .map(|(&key, value)| (key, value.clone()))
+                        .collect(),
+                },
+                Object::WeakSet { object, entries } => Object::WeakSet {
+                    object: object.clone(),
+                    entries: entries
+                        .iter()
+                        .copied()
+                        .filter(|key| live.contains_weak_key(*key))
                         .collect(),
                 },
                 object => object.clone(),
@@ -569,6 +577,22 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
     Ok(())
 }
 
+fn validate_weak_key(heap: &Heap, owner: &str, id: ObjectId, key: WeakKey) -> Result<(), VmError> {
+    let valid = match key {
+        WeakKey::Object(target) => !matches!(
+            heap.get(target),
+            Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+        ),
+        WeakKey::Symbol(target) => heap.weak_key(&Value::Symbol(target)).is_some(),
+    };
+    if !valid {
+        return Err(VmError::InvalidSnapshot(format!(
+            "{owner} {id} has an invalid key {key}"
+        )));
+    }
+    Ok(())
+}
+
 fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
@@ -832,18 +856,19 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             )));
         }
         heap.write_edges(id, &mut edges)?;
-        if let Object::WeakMap { entries, .. } = heap.get(id)? {
-            for (key, value) in entries {
-                if matches!(
-                    heap.get(*key),
-                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
-                ) {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "WeakMap {id} has an invalid key {key}"
-                    )));
+        match heap.get(id)? {
+            Object::WeakMap { entries, .. } => {
+                for (&key, value) in entries {
+                    validate_weak_key(heap, "WeakMap", id, key)?;
+                    push_value(&mut edges, value);
                 }
-                push_value(&mut edges, value);
             }
+            Object::WeakSet { entries, .. } => {
+                for &key in entries {
+                    validate_weak_key(heap, "WeakSet", id, key)?;
+                }
+            }
+            _ => {}
         }
         for edge in edges.drain(..) {
             match edge {

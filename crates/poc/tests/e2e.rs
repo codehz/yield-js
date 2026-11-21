@@ -237,6 +237,161 @@ export function read() { return second.get(first.get(key1)).answer; }
 }
 
 #[test]
+fn gc_closes_symbol_ephemerons_without_retaining_weak_keys() {
+    use yield_poc::{TestHost, build, number};
+    use yield_vm::heap::WeakKey;
+    use yield_vm::{Object, Value, Vm, VmError};
+
+    let build = build(
+        r#"
+function setup() {
+  const a = Symbol('a');
+  const b = Symbol('b');
+  const backref = Symbol('backref');
+  const map = new WeakMap([[a, {}], [b, a], [backref, { key: backref }]]);
+  const set = new WeakSet([a]);
+  return [map, set, b, backref];
+}
+const stash = setup();
+export function take(i) { const value = stash[i]; delete stash[i]; return value; }
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let [
+        Value::Object(map),
+        Value::Object(set),
+        Value::Symbol(b),
+        Value::Symbol(backref),
+    ] = [0.0, 1.0, 2.0, 3.0].map(|i| vm.start(&mut host, "take", vec![number(i)]).unwrap())
+    else {
+        panic!("expected two collections and two symbols");
+    };
+    let roots = [Value::Object(map), Value::Object(set), Value::Symbol(b)];
+    vm.collect_garbage(&roots).unwrap();
+    let snapshot = vm.snapshot(&roots).unwrap();
+    let map_record = snapshot.objects.iter().find(|r| r.id == map).unwrap();
+    let Object::WeakMap { entries, .. } = &map_record.object else {
+        panic!("expected WeakMap");
+    };
+    assert_eq!(entries.len(), 2);
+    let Value::Symbol(a) = entries[&WeakKey::Symbol(b)] else {
+        panic!("expected symbol value");
+    };
+    assert!(a < b, "a must be visited before b unlocks it");
+    let Value::Object(value) = entries[&WeakKey::Symbol(a)] else {
+        panic!("expected object value");
+    };
+    assert!(snapshot.objects.iter().any(|r| r.id == value));
+    assert!(snapshot.symbols.contains_key(&a));
+    let set_record = snapshot.objects.iter().find(|r| r.id == set).unwrap();
+    let Object::WeakSet { entries, .. } = &set_record.object else {
+        panic!("expected WeakSet");
+    };
+    assert_eq!(entries.len(), 1);
+    assert!(entries.contains(&WeakKey::Symbol(a)));
+    assert!(matches!(
+        vm.collect_garbage(&[Value::Symbol(backref)]),
+        Err(VmError::InvalidState(message))
+            if message == format!("garbage collection references missing symbol {backref}")
+    ));
+
+    let roots = &roots[..2];
+    vm.collect_garbage(roots).unwrap();
+    let snapshot = vm.snapshot(roots).unwrap();
+    assert!(matches!(
+        &snapshot.objects.iter().find(|r| r.id == map).unwrap().object,
+        Object::WeakMap { entries, .. } if entries.is_empty()
+    ));
+    assert!(matches!(
+        &snapshot.objects.iter().find(|r| r.id == set).unwrap().object,
+        Object::WeakSet { entries, .. } if entries.is_empty()
+    ));
+    assert!(snapshot.objects.iter().all(|r| r.id != value));
+    assert!(vm.collect_garbage(&[Value::Object(value)]).is_err());
+    for id in [a, b] {
+        assert!(!snapshot.symbols.contains_key(&id));
+        assert!(matches!(
+            vm.collect_garbage(&[Value::Symbol(id)]),
+            Err(VmError::InvalidState(message))
+                if message == format!("garbage collection references missing symbol {id}")
+        ));
+    }
+}
+
+#[test]
+fn restore_rejects_missing_and_registered_symbol_keys_in_weak_collections() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::heap::WeakKey;
+    use yield_vm::{Object, Value, Vm, VmError};
+
+    let build = build(
+        r#"
+export const map = new WeakMap();
+export const set = new WeakSet();
+export const registered = Symbol.for('registered');
+"#,
+    );
+    let mut host = TestHost::default();
+    let vm = Vm::new(build.clone(), &mut host).unwrap();
+    let Value::Symbol(registered) = vm.get_export("registered").unwrap() else {
+        panic!("expected registered symbol");
+    };
+    let snapshot = vm.snapshot(&[]).unwrap();
+    for (export, owner) in [("map", "WeakMap"), ("set", "WeakSet")] {
+        let Value::Object(id) = vm.get_export(export).unwrap() else {
+            panic!("expected weak collection");
+        };
+        for key in [WeakKey::Symbol(u32::MAX), WeakKey::Symbol(registered)] {
+            let mut corrupt = snapshot.clone();
+            let record = corrupt.objects.iter_mut().find(|r| r.id == id).unwrap();
+            match &mut record.object {
+                Object::WeakMap { entries, .. } => {
+                    entries.insert(key, Value::Undefined);
+                }
+                Object::WeakSet { entries, .. } => {
+                    entries.insert(key);
+                }
+                _ => panic!("expected weak collection"),
+            }
+            assert!(matches!(
+                Vm::restore(corrupt, build.clone(), &mut host),
+                Err(VmError::InvalidSnapshot(message))
+                    if message == format!("{owner} {id} has an invalid key {key}")
+            ));
+        }
+    }
+}
+
+#[test]
+fn weak_key_json_preserves_tags_and_rejects_noncanonical_ids() {
+    use yield_vm::heap::WeakKey;
+
+    let object = WeakKey::Object(7);
+    let symbol = WeakKey::Symbol(7);
+    assert_ne!(object, symbol);
+    for (key, text) in [(object, "\"o:7\""), (symbol, "\"s:7\"")] {
+        assert_eq!(serde_json::to_string(&key).unwrap(), text);
+        assert_eq!(serde_json::from_str::<WeakKey>(text).unwrap(), key);
+    }
+    for invalid in [
+        "\"x:1\"",
+        "\"o:\"",
+        "\"s:01\"",
+        "\"o:+1\"",
+        "\"s:-1\"",
+        "\"o: 1\"",
+        "\"s:4294967296\"",
+        "1",
+    ] {
+        assert!(
+            serde_json::from_str::<WeakKey>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn gc_roots_registered_symbols_and_reclaims_unrooted_ordinary_symbols() {
     use yield_poc::{TestHost, build};
     use yield_vm::{Value, Vm, VmError};

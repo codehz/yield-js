@@ -1,6 +1,6 @@
 //! Object table. Strong edges are listed by [`Object::write_edges`] plus
 //! combine-state edges appended by [`Heap::write_edges`]. Snapshot capture and
-//! restore handle WeakMap entries separately as ephemerons.
+//! restore handle weak collection entries separately from strong edges.
 //!
 //! Script property tables store data or accessor properties. Only a missing
 //! key walks the prototype chain; environments and native handles are opaque.
@@ -15,7 +15,7 @@ pub(crate) use store::{Heap, object_id};
 pub use types::{
     ArrayObject, BoundObject, BoxedPrimitive, CollectionIteration, CollectionKind, CombineKind,
     CombineState, EnvironmentObject, FunctionObject, NativeObject, Object, PlainObject,
-    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, Resolution,
+    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, Resolution, WeakKey,
 };
 pub(crate) use types::{
     Attributes, ClassElement, DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,

@@ -9,7 +9,7 @@ use super::types::{
     OrderedProperty, OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject,
     PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION,
     SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, array_index,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -74,8 +74,14 @@ impl Heap {
             if !live.objects.contains(id) {
                 return false;
             }
-            if let Object::WeakMap { entries, .. } = object {
-                entries.retain(|key, _| live.objects.contains(key));
+            match object {
+                Object::WeakMap { entries, .. } => {
+                    entries.retain(|key, _| live.contains_weak_key(*key));
+                }
+                Object::WeakSet { entries, .. } => {
+                    entries.retain(|key| live.contains_weak_key(*key));
+                }
+                _ => {}
             }
             true
         });
@@ -94,6 +100,20 @@ impl Heap {
             .expect("object id space exhausted");
         self.objects.insert(id, object);
         id
+    }
+
+    pub(crate) fn weak_key(&self, value: &Value) -> Option<WeakKey> {
+        match value {
+            Value::Object(id) => Some(WeakKey::Object(*id)),
+            Value::Symbol(id) => {
+                let description = self.symbols.get(id)?;
+                let registered = description
+                    .as_ref()
+                    .and_then(|key| self.symbol_registry.get(key));
+                (registered != Some(id)).then_some(WeakKey::Symbol(*id))
+            }
+            _ => None,
+        }
     }
 
     /// A fresh `Symbol(desc)`. `None` and an empty string stay distinct.
@@ -597,6 +617,7 @@ impl Heap {
             | Object::Map { object: plain, .. }
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }
+            | Object::WeakSet { object: plain, .. }
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
             | Object::StringIterator { object: plain, .. }

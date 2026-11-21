@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::error::VmError;
 use crate::heap::{
     HAS_INSTANCE_SYMBOL, Heap, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, OwnedEdge,
-    REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
+    REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::runtime::{Continuation, HostInstance, HostSlot};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
@@ -19,6 +19,15 @@ pub(crate) struct LiveSet {
     pub(crate) objects: BTreeSet<ObjectId>,
     pub(crate) symbols: BTreeSet<SymbolId>,
     pub(crate) continuations_seen: BTreeSet<ContinuationId>,
+}
+
+impl LiveSet {
+    pub(crate) fn contains_weak_key(&self, key: WeakKey) -> bool {
+        match key {
+            WeakKey::Object(id) => self.objects.contains(&id),
+            WeakKey::Symbol(id) => self.symbols.contains(&id),
+        }
+    }
 }
 
 impl Vm {
@@ -218,22 +227,22 @@ impl<'a> Tracer<'a> {
     fn mark_ephemerons(&mut self) -> Result<(), VmError> {
         let heap = self.heap;
         loop {
-            // Values can reveal more keys (or more WeakMaps) through strong edges.
-            // A scan that queues no new objects cannot unlock more entries.
+            // Values can reveal more keys (or more WeakMaps), even without queuing objects.
+            let before = (self.live.objects.len(), self.live.symbols.len());
             for index in 0..self.weak_maps.len() {
                 let Object::WeakMap { entries, .. } = heap.get(self.weak_maps[index])? else {
                     unreachable!("only WeakMaps are deferred");
                 };
                 for (key, value) in entries {
-                    if self.live.objects.contains(key) {
+                    if self.live.contains_weak_key(*key) {
                         self.mark_value(value)?;
                     }
                 }
             }
-            if self.object_queue.is_empty() {
+            self.drain()?;
+            if before == (self.live.objects.len(), self.live.symbols.len()) {
                 return Ok(());
             }
-            self.drain()?;
         }
     }
 

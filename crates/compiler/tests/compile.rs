@@ -149,6 +149,7 @@ fn builtin_indices_preserve_bytecode_abi() {
         "Boolean",
         "globalThis",
         "RegExp",
+        "WeakSet",
     ];
     assert!(yield_vm::bytecode::BUILTINS.starts_with(&original));
 }

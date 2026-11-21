@@ -97,6 +97,7 @@ impl Object {
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
+            | Self::WeakSet { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -121,6 +122,7 @@ impl Object {
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
+            | Self::WeakSet { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -182,6 +184,7 @@ impl Object {
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
+            | Self::WeakSet { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -208,6 +211,7 @@ impl Object {
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
+            | Self::WeakSet { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -348,6 +352,7 @@ impl Object {
             | Self::Map { object: plain, .. }
             | Self::Set { object: plain, .. }
             | Self::WeakMap { object: plain, .. }
+            | Self::WeakSet { object: plain, .. }
             | Self::CollectionIterator { object: plain, .. }
             | Self::ArrayIterator { object: plain, .. }
             | Self::StringIterator { object: plain, .. }
@@ -372,6 +377,7 @@ impl Object {
             | Self::Map { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
+            | Self::WeakSet { object: o, .. }
             | Self::CollectionIterator { object: o, .. }
             | Self::ArrayIterator { object: o, .. }
             | Self::StringIterator { object: o, .. }
@@ -451,6 +457,7 @@ impl Object {
             | Self::Plain(_)
             | Self::RegExp { .. }
             | Self::WeakMap { .. }
+            | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}
             Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
             Self::Map { entries, .. } => {

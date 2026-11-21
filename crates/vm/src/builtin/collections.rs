@@ -33,9 +33,18 @@ enum WeakMapMethod {
     Delete,
 }
 
+#[derive(Clone, Copy)]
+enum WeakSetMethod {
+    Add,
+    Has,
+    Delete,
+}
+
 const MAP: IntrinsicKey = IntrinsicKey::new("Map", Slot::Global, "");
 const SET: IntrinsicKey = IntrinsicKey::new("Set", Slot::Global, "");
 const WEAK_MAP: IntrinsicKey = IntrinsicKey::new("WeakMap", Slot::Global, "");
+const WEAK_SET: IntrinsicKey = IntrinsicKey::new("WeakSet", Slot::Global, "");
+const INVALID_WEAK_KEY: &str = "weak collection key must be an object or non-registered symbol";
 
 pub(crate) const MAP_OWNER: Owner = Owner::new(
     "map",
@@ -70,9 +79,22 @@ pub(crate) const WEAK_MAP_OWNER: Owner = Owner::new(
     WEAK_MAP_ROOTS,
     &[WEAK_MAP_INTRINSICS],
     Some(|vm, _| {
-        vm.install_weakmap(
+        vm.install_weak_collection(
             vm.builtins.get("weakmap"),
             vm.builtins.get("weakmap.prototype"),
+            WEAK_MAP_INTRINSICS,
+        );
+    }),
+);
+pub(crate) const WEAK_SET_OWNER: Owner = Owner::new(
+    "weakset",
+    WEAK_SET_ROOTS,
+    &[WEAK_SET_INTRINSICS],
+    Some(|vm, _| {
+        vm.install_weak_collection(
+            vm.builtins.get("weakset"),
+            vm.builtins.get("weakset.prototype"),
+            WEAK_SET_INTRINSICS,
         );
     }),
 );
@@ -104,6 +126,19 @@ pub(crate) const WEAK_MAP_ROOTS: &[RootSpec] = &[
     .fixed("weakmap.prototype"),
     RootSpec::new(
         "weakmap.prototype",
+        RootKind::Plain,
+        Some("object.prototype"),
+    ),
+];
+const WEAK_SET_ROOTS: &[RootSpec] = &[
+    RootSpec::new(
+        "weakset",
+        RootKind::Native(WEAK_SET),
+        Some("function.prototype"),
+    )
+    .fixed("weakset.prototype"),
+    RootSpec::new(
+        "weakset.prototype",
         RootKind::Plain,
         Some("object.prototype"),
     ),
@@ -147,11 +182,11 @@ pub(crate) const SET_INTRINSICS: &[IntrinsicDef] = collection!(
     SET, "Set", "SetIterator", Set; "add" => Insert
 );
 
-macro_rules! weak_map_method {
-    ($name:literal, $method:ident) => {
+macro_rules! weak_method {
+    ($owner:literal, $dispatch:ident, $method_type:ident; $name:literal, $method:ident) => {
         IntrinsicDef::call(
-            IntrinsicKey::new("WeakMap", Slot::Prototype, $name),
-            |vm, _, args, receiver| vm.weakmap_method(WeakMapMethod::$method, receiver, &args),
+            IntrinsicKey::new($owner, Slot::Prototype, $name),
+            |vm, _, args, receiver| vm.$dispatch($method_type::$method, receiver, &args),
         )
     };
 }
@@ -162,10 +197,21 @@ pub(crate) const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[
         |vm, _, _, _| vm.throw_type_error("WeakMap requires new"),
         |vm, host, args, prototype| vm.construct_weakmap(host, &args, prototype),
     ),
-    weak_map_method!("get", Get),
-    weak_map_method!("set", Set),
-    weak_map_method!("has", Has),
-    weak_map_method!("delete", Delete),
+    weak_method!("WeakMap", weakmap_method, WeakMapMethod; "get", Get),
+    weak_method!("WeakMap", weakmap_method, WeakMapMethod; "set", Set),
+    weak_method!("WeakMap", weakmap_method, WeakMapMethod; "has", Has),
+    weak_method!("WeakMap", weakmap_method, WeakMapMethod; "delete", Delete),
+];
+
+const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        WEAK_SET,
+        |vm, _, _, _| vm.throw_type_error("WeakSet requires new"),
+        |vm, host, args, prototype| vm.construct_weakset(host, &args, prototype),
+    ),
+    weak_method!("WeakSet", weakset_method, WeakSetMethod; "add", Add),
+    weak_method!("WeakSet", weakset_method, WeakSetMethod; "has", Has),
+    weak_method!("WeakSet", weakset_method, WeakSetMethod; "delete", Delete),
 ];
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
@@ -283,9 +329,14 @@ impl Vm {
             .expect("collection prototype constructor");
     }
 
-    pub(crate) fn install_weakmap(&mut self, constructor: ObjectId, prototype: ObjectId) {
+    fn install_weak_collection(
+        &mut self,
+        constructor: ObjectId,
+        prototype: ObjectId,
+        intrinsics: &[IntrinsicDef],
+    ) {
         self.link_collection_prototype(constructor, prototype);
-        for def in WEAK_MAP_INTRINSICS {
+        for def in intrinsics {
             if def.key.slot == Slot::Global {
                 continue;
             }
@@ -297,7 +348,7 @@ impl Vm {
                     Value::Object(function),
                     Attributes::METHOD,
                 )
-                .expect("WeakMap method");
+                .expect("weak collection method");
         }
     }
 
@@ -325,11 +376,21 @@ impl Vm {
         let Value::Object(id) = *receiver else {
             return self.throw_type_error("incompatible WeakMap receiver");
         };
-        let Object::WeakMap { entries, .. } = self.heap.get_mut(id)? else {
+        if !matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
             return self.throw_type_error("incompatible WeakMap receiver");
+        }
+        let key = args.first().unwrap_or(&Value::Undefined);
+        let Some(key) = self.heap.weak_key(key) else {
+            return match method {
+                WeakMapMethod::Set => self.throw_type_error(INVALID_WEAK_KEY),
+                WeakMapMethod::Get => Ok(Invocation::Value(Value::Undefined)),
+                WeakMapMethod::Has | WeakMapMethod::Delete => {
+                    Ok(Invocation::Value(Value::Bool(false)))
+                }
+            };
         };
-        let Some(&Value::Object(key)) = args.first() else {
-            return self.throw_type_error("WeakMap key must be an object");
+        let Object::WeakMap { entries, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
         };
         Ok(Invocation::Value(match method {
             WeakMapMethod::Get => entries.get(&key).cloned().unwrap_or(Value::Undefined),
@@ -339,6 +400,54 @@ impl Vm {
             }
             WeakMapMethod::Has => Value::Bool(entries.contains_key(&key)),
             WeakMapMethod::Delete => Value::Bool(entries.remove(&key).is_some()),
+        }))
+    }
+
+    fn construct_weakset(
+        &mut self,
+        host: &mut dyn Host,
+        args: &[Value],
+        prototype: Option<ObjectId>,
+    ) -> Result<Invocation, VmError> {
+        let prototype = prototype.unwrap_or_else(|| self.builtins.get("weakset.prototype"));
+        let collection = Value::Object(self.heap.alloc(Object::WeakSet {
+            object: PlainObject::new(Some(prototype)),
+            entries: Default::default(),
+        }));
+        self.populate_collection(host, collection, args, "add")
+    }
+
+    fn weakset_method(
+        &mut self,
+        method: WeakSetMethod,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let Value::Object(id) = *receiver else {
+            return self.throw_type_error("incompatible WeakSet receiver");
+        };
+        if !matches!(self.heap.get(id)?, Object::WeakSet { .. }) {
+            return self.throw_type_error("incompatible WeakSet receiver");
+        }
+        let key = args.first().unwrap_or(&Value::Undefined);
+        let Some(key) = self.heap.weak_key(key) else {
+            return match method {
+                WeakSetMethod::Add => self.throw_type_error(INVALID_WEAK_KEY),
+                WeakSetMethod::Has | WeakSetMethod::Delete => {
+                    Ok(Invocation::Value(Value::Bool(false)))
+                }
+            };
+        };
+        let Object::WeakSet { entries, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(Invocation::Value(match method {
+            WeakSetMethod::Add => {
+                entries.insert(key);
+                receiver.clone()
+            }
+            WeakSetMethod::Has => Value::Bool(entries.contains(&key)),
+            WeakSetMethod::Delete => Value::Bool(entries.remove(&key)),
         }))
     }
 
