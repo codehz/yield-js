@@ -479,6 +479,63 @@ export async function run() {
 }
 
 #[test]
+fn gc_active_preserves_only_registered_external_roots() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Value, Vm, VmError};
+
+    let build = build(
+        r#"
+        import { gc } from "test";
+        export function make() { return { value: 42 }; }
+        export function collect() { return gc(); }
+    "#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let value = vm.start(&mut host, "make", vec![]).unwrap();
+    let Value::Object(id) = value else {
+        panic!("expected object")
+    };
+    let roots = [Value::Object(id)];
+    host.set_gc_roots(roots.to_vec());
+    vm.start(&mut host, "collect", vec![]).unwrap();
+    let snapshot = vm.snapshot(&roots).unwrap();
+    assert!(snapshot.objects.iter().any(|object| object.id == id));
+
+    host.set_gc_roots(vec![]);
+    vm.start(&mut host, "collect", vec![]).unwrap();
+    assert!(matches!(vm.snapshot(&roots), Err(VmError::InvalidState(_))));
+}
+
+#[test]
+fn gc_active_rejects_a_missing_root_without_sweeping() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Value, Vm, VmError};
+
+    let build = build(
+        r#"
+        import { gc } from "test";
+        export function make() { return {}; }
+        export function collect() {
+            try { return gc(); } catch (error) { return "caught"; }
+        }
+    "#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let value = vm.start(&mut host, "make", vec![]).unwrap();
+    host.set_gc_roots(vec![Value::Symbol(u32::MAX)]);
+    assert!(matches!(
+        vm.start(&mut host, "collect", vec![]),
+        Err(VmError::InvalidState(message))
+            if message == format!("garbage collection references missing symbol {}", u32::MAX)
+    ));
+    host.set_gc_roots(vec![]);
+    vm.snapshot(&[value])
+        .expect("failed collection must not sweep the unrooted object");
+}
+
+#[test]
 fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
     use yield_poc::{TestHost, build};
     use yield_vm::{PromiseState, Value, Vm, VmError};

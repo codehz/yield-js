@@ -41,8 +41,10 @@ pub(super) fn lower(signature: &Signature, block: &Block) -> syn::Result<TokenSt
     let mut scan = Scan::new(&cx_name, false);
     for (index, stmt) in block.stmts.iter().enumerate() {
         if let Some(call) = suspension(stmt, &cx_name)? {
-            for arg in call.args {
-                scan.visit_expr(arg);
+            if let Effect::Call(args) = call.effect {
+                for arg in args {
+                    scan.visit_expr(arg);
+                }
             }
             scan.finish()?;
             stages.push(Stage {
@@ -134,7 +136,16 @@ pub(super) fn lower(signature: &Signature, block: &Block) -> syn::Result<TokenSt
                     }
                 }
             }
-            let [callee_expr, receiver_expr, args_expr] = call.args;
+            let saved = quote!(::std::vec![#(#saved),*]);
+            let request = match call.effect {
+                Effect::Call([callee_expr, receiver_expr, args_expr]) => quote! {
+                    let #callee = #callee_expr;
+                    let #receiver = #receiver_expr;
+                    let #args = #args_expr;
+                    #cx_ident.request_call(#callee, #receiver, #args, #saved, #resume)
+                },
+                Effect::Gc => quote!(#cx_ident.request_gc(#saved, #resume)),
+            };
             let outcome_pat = call.output;
             // Keep user statements in a separate lexical block, so that even
             // local items (which closures need not capture) cannot leak past it.
@@ -149,10 +160,7 @@ pub(super) fn lower(signature: &Signature, block: &Block) -> syn::Result<TokenSt
                 };
                 {
                     #(#statements)*
-                    let #callee = #callee_expr;
-                    let #receiver = #receiver_expr;
-                    let #args = #args_expr;
-                    #cx_ident.request_call(#callee, #receiver, #args, ::std::vec![#(#saved),*], #resume)
+                    #request
                 }
             })
         } else if index == 0 {
@@ -197,8 +205,14 @@ enum Kind<'a> {
 
 #[derive(Clone, Copy)]
 struct Suspension<'a> {
-    args: [&'a Expr; 3],
+    effect: Effect<'a>,
     output: &'a PatIdent,
+}
+
+#[derive(Clone, Copy)]
+enum Effect<'a> {
+    Call([&'a Expr; 3]),
+    Gc,
 }
 
 fn suspension<'a>(stmt: &'a Stmt, cx: &str) -> syn::Result<Option<Suspension<'a>>> {
@@ -214,23 +228,34 @@ fn suspension<'a>(stmt: &'a Stmt, cx: &str) -> syn::Result<Option<Suspension<'a>
     let Expr::MethodCall(call) = &*awaited.base else {
         return Err(Error::new_spanned(
             awaited,
-            "expected `.await` on a call to the CallCx parameter's `.call` method",
+            "expected `.await` on the CallCx parameter's `.call` or `.gc` method",
         ));
     };
-    if call.method != "call" || !is_cx(&call.receiver, cx) || call.turbofish.is_some() {
+    if (call.method != "call" && call.method != "gc")
+        || !is_cx(&call.receiver, cx)
+        || call.turbofish.is_some()
+    {
         return Err(Error::new_spanned(
             awaited,
-            "expected `.await` on a call to the CallCx parameter's `.call` method",
+            "expected `.await` on the CallCx parameter's `.call` or `.gc` method",
         ));
     }
-    let mut args = call.args.iter();
-    let (Some(callee), Some(receiver), Some(argv), None) =
-        (args.next(), args.next(), args.next(), args.next())
-    else {
-        return Err(Error::new_spanned(
-            call,
-            "`cx.call` requires exactly three arguments: callee, receiver, and args",
-        ));
+    let effect = if call.method == "gc" {
+        if !call.args.is_empty() {
+            return Err(Error::new_spanned(call, "cx.gc requires no arguments"));
+        }
+        Effect::Gc
+    } else {
+        let mut args = call.args.iter();
+        let (Some(callee), Some(receiver), Some(argv), None) =
+            (args.next(), args.next(), args.next(), args.next())
+        else {
+            return Err(Error::new_spanned(
+                call,
+                "`cx.call` requires exactly three arguments: callee, receiver, and args",
+            ));
+        };
+        Effect::Call([callee, receiver, argv])
     };
     let Some(output) = plain_ident(&local.pat) else {
         return Err(Error::new_spanned(
@@ -249,10 +274,7 @@ fn suspension<'a>(stmt: &'a Stmt, cx: &str) -> syn::Result<Option<Suspension<'a>
         ));
     }
     reject_cx(output, cx)?;
-    Ok(Some(Suspension {
-        args: [callee, receiver, argv],
-        output,
-    }))
+    Ok(Some(Suspension { effect, output }))
 }
 
 fn plain_ident(pat: &Pat) -> Option<&PatIdent> {
@@ -430,7 +452,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_expr_await(&mut self, expr: &'ast syn::ExprAwait) {
-        self.fail(Error::new(expr.span(), "await is only supported as `let name = cx.call(callee, receiver, args).await;` at the top level"));
+        self.fail(Error::new(expr.span(), "await is only supported as `let name = cx.call(callee, receiver, args).await;` or `let name = cx.gc().await;` at the top level"));
     }
 
     fn visit_expr_async(&mut self, expr: &'ast syn::ExprAsync) {
@@ -613,7 +635,7 @@ mod tests {
     fn rejects_outcomes_that_need_to_cross_another_boundary() {
         let error = expand(syn::parse_quote!({
             let first = ctx.call(callee(), receiver(), arguments()).await;
-            let second = ctx.call(callee(), receiver(), arguments()).await;
+            let second = ctx.gc().await;
             finish(ctx, first, second)
         }))
         .unwrap_err();
@@ -622,7 +644,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_suspensions_and_continuation_constructs() {
-        let cases: [(Block, &str); 6] = [
+        let cases: [(Block, &str); 7] = [
             (
                 syn::parse_quote!({
                     if ready() {
@@ -642,6 +664,12 @@ mod tests {
                     let value = ctx.call(a, b).await;
                 }),
                 "exactly three",
+            ),
+            (
+                syn::parse_quote!({
+                    let value = ctx.gc(unexpected).await;
+                }),
+                "cx.gc requires no arguments",
             ),
             (
                 syn::parse_quote!({

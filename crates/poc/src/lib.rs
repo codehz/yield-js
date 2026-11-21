@@ -440,6 +440,15 @@ fn test_bindings(counters: Arc<Counters>) -> Result<Bindings, String> {
 mod test {
     use super::*;
 
+    #[function(name = "gc")]
+    async fn gc(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        let outcome = cx.gc().await;
+        match outcome {
+            GuestOutcome::Returned(value) => Ok(HostStep::Return(value)),
+            GuestOutcome::Thrown(value) => Err(cx.throw(value)),
+        }
+    }
+
     #[function(name = "inspect")]
     fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
         if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
