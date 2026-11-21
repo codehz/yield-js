@@ -604,6 +604,7 @@ impl Vm {
             }
             ValueRef::String(_) => "String",
             ValueRef::Number(_) => "Number",
+            ValueRef::BigInt(_) => "BigInt",
             ValueRef::Bool(_) => "Boolean",
             ValueRef::Symbol(_) => "Symbol",
         };
@@ -635,6 +636,7 @@ impl Vm {
             Object::Boxed { primitive, .. } => match primitive {
                 BoxedPrimitive::String(_) => "String",
                 BoxedPrimitive::Number(_) => "Number",
+                BoxedPrimitive::BigInt(_) => "BigInt",
                 BoxedPrimitive::Bool(_) => "Boolean",
                 BoxedPrimitive::Symbol(_) => "Symbol",
             },
@@ -922,6 +924,7 @@ impl Vm {
             ValueRef::Object(id) => return id,
             ValueRef::String(text) => BoxedPrimitive::String(text.clone()),
             ValueRef::Number(number) => BoxedPrimitive::Number(number),
+            ValueRef::BigInt(value) => BoxedPrimitive::BigInt(value.clone()),
             ValueRef::Bool(value) => BoxedPrimitive::Bool(value),
             ValueRef::Symbol(id) => BoxedPrimitive::Symbol(id),
             _ => unreachable!("ToObject requires a non-nullish operand"),
@@ -936,6 +939,7 @@ impl Vm {
         match value.view() {
             ValueRef::String(_) => Some(self.builtins.get("string.prototype")),
             ValueRef::Number(_) => Some(self.builtins.get("number.prototype")),
+            ValueRef::BigInt(_) => Some(self.builtins.get("bigint.prototype")),
             ValueRef::Bool(_) => Some(self.builtins.get("boolean.prototype")),
             ValueRef::Symbol(_) => Some(self.builtins.get("symbol.prototype")),
             _ => None,

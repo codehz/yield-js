@@ -97,6 +97,51 @@ export async function run() {
 }
 
 #[test]
+fn build_round_trips_bigint_constants() {
+    use yield_vm::{Build, Constant};
+
+    let build = yield_harness::build("export function run() { return 12345678901234567890n; }");
+    let constant = build
+        .constants
+        .iter()
+        .find_map(|constant| match constant {
+            Constant::BigInt(value) => Some(value),
+            _ => None,
+        })
+        .expect("BigInt constant");
+    assert_eq!(constant.to_decimal(), "12345678901234567890");
+
+    let json = serde_json::to_string(&build).unwrap();
+    let decoded: Build = serde_json::from_str(&json).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(decoded.build_id, build.build_id);
+    let decoded_constant = decoded
+        .constants
+        .iter()
+        .find_map(|constant| match constant {
+            Constant::BigInt(value) => Some(value),
+            _ => None,
+        })
+        .expect("round-tripped BigInt constant");
+    assert_eq!(decoded_constant, constant);
+}
+
+#[test]
+fn host_bigint_construction_requires_canonical_decimal() {
+    use yield_vm::JsValue;
+
+    let value = JsValue::bigint("12345678901234567890").expect("canonical BigInt");
+    assert!(value.is_bigint());
+    assert_eq!(
+        value.as_bigint().expect("BigInt view").to_decimal(),
+        "12345678901234567890"
+    );
+    assert!(JsValue::bigint("01").is_err());
+    assert!(JsValue::bigint("-0").is_err());
+    assert!(JsValue::bigint("+1").is_err());
+}
+
+#[test]
 fn build_round_trips_special_numbers() {
     use yield_vm::{Build, bytecode::Constant};
 

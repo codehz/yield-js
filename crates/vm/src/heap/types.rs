@@ -11,7 +11,7 @@ use crate::error::VmError;
 use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
 use crate::value::{
-    BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
+    BindingId, JsBigInt, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
 };
 
 /// Reserved well-known symbols. Ordinary symbols allocate after these IDs and
@@ -855,6 +855,7 @@ pub enum CollectionIteration {
 pub enum BoxedPrimitive {
     String(JsString),
     Number(#[serde(with = "crate::value::number_serde")] f64),
+    BigInt(JsBigInt),
     Bool(bool),
     Symbol(SymbolId),
 }

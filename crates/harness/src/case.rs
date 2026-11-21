@@ -628,6 +628,7 @@ fn format_value(value: &Value) -> String {
             .to_utf8()
             .map(|text| format!("{text:?}"))
             .unwrap_or_else(|_| format!("{value:?}")),
+        ValueRef::BigInt(value) => format!("{value}n"),
         ValueRef::Symbol(_) => "symbol".to_owned(),
         ValueRef::Object(_) => "object".to_owned(),
     }

@@ -121,7 +121,7 @@ impl Vm {
         let roots = &roots.with(&args);
         Ok(match args.first() {
             None => Invocation::Value(Value::number(0.0)),
-            Some(arg) => match self.coerce_number(host, roots, arg)? {
+            Some(arg) => match self.coerce_number_allow_bigint(host, roots, arg)? {
                 Ok(number) => Invocation::Value(Value::number(number)),
                 Err(error) => Invocation::Thrown(error),
             },

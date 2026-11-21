@@ -119,6 +119,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::NumericLiteral(literal) => {
                 self.emit_constant(Constant::Number(literal.value))
             }
+            Expression::BigIntLiteral(literal) => {
+                let value =
+                    yield_vm::JsBigInt::from_decimal(literal.value.as_str()).ok_or_else(|| {
+                        unsupported(self.source_text(), literal.span, "BigInt literal")
+                    })?;
+                self.emit_constant(Constant::BigInt(value))
+            }
             Expression::StringLiteral(literal) => {
                 let text = self.string_literal_text(literal)?;
                 self.emit_constant(Constant::String(text))
@@ -411,6 +418,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         } else if let PropertyKey::NumericLiteral(literal) = key {
             let mut buffer = ryu_js::Buffer::new();
             self.emit_constant(Constant::String(buffer.format(literal.value).into()))
+        } else if let PropertyKey::BigIntLiteral(literal) = key {
+            self.emit_constant(Constant::String(literal.value.as_str().into()))
         } else if let Some(name) = key.static_name().and_then(|name| name.into_cow_str()) {
             self.emit_constant(Constant::String(name.as_ref().into()))
         } else {
@@ -1306,20 +1315,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let numeric = self.alloc_reg()?;
         self.emit(Instr::Unary {
             dst: self.slot(numeric),
-            op: UnaryOp::Pos,
+            op: UnaryOp::ToNumeric,
             src: self.slot(old),
         });
-        let one = self.emit_constant(Constant::Number(1.0))?;
         let op = match expression.operator {
-            UpdateOperator::Increment => BinaryOp::Add,
-            UpdateOperator::Decrement => BinaryOp::Sub,
+            UpdateOperator::Increment => UnaryOp::Increment,
+            UpdateOperator::Decrement => UnaryOp::Decrement,
         };
         let updated = self.alloc_reg()?;
-        self.emit(Instr::Binary {
+        self.emit(Instr::Unary {
             dst: self.slot(updated),
             op,
-            lhs: self.slot(numeric),
-            rhs: self.slot(one),
+            src: self.slot(numeric),
         });
         match &target {
             Target::Binding(binding) => self.put_binding(*binding, updated),

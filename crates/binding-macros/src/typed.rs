@@ -1330,6 +1330,7 @@ fn member_key(opts: &HashMap<String, Meta>, span: Span) -> Result<((bool, String
                     | "Search"
                     | "Split"
                     | "HasInstance"
+                    | "ToStringTag"
             ) {
                 return Err(Error::new_spanned(
                     variant,

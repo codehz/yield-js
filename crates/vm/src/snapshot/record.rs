@@ -9,7 +9,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Date objects persist their time value.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 57;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 58;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

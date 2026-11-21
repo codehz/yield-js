@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::heap::{Attributes, Object, Property};
-use crate::value::{JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
+use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
 
 use super::schema::*;
@@ -45,6 +45,14 @@ impl JsValue {
         Self::constant(Value::string(value.into()))
     }
 
+    /// Construct a BigInt from its canonical decimal text.
+    pub fn bigint(text: &str) -> JsResult<Self> {
+        let value = JsBigInt::from_decimal(text).ok_or_else(|| {
+            JsError::Fault(HostFault::new("invalid BigInt decimal text".to_owned()))
+        })?;
+        Ok(Self::constant(Value::bigint(value)))
+    }
+
     fn constant(value: Value) -> Self {
         Self {
             value,
@@ -75,6 +83,10 @@ impl JsValue {
         matches!(self.value.view(), ValueRef::Symbol(_))
     }
 
+    pub fn is_bigint(&self) -> bool {
+        matches!(self.value.view(), ValueRef::BigInt(_))
+    }
+
     pub fn as_bool(&self) -> Option<bool> {
         match self.value.view() {
             ValueRef::Bool(value) => Some(value),
@@ -92,6 +104,13 @@ impl JsValue {
     pub fn as_string(&self) -> Option<&JsString> {
         match self.value.view() {
             ValueRef::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_bigint(&self) -> Option<&JsBigInt> {
+        match self.value.view() {
+            ValueRef::BigInt(value) => Some(value),
             _ => None,
         }
     }
@@ -128,6 +147,7 @@ impl fmt::Display for JsValue {
             ValueRef::Bool(value) => write!(formatter, "{value}"),
             ValueRef::Number(value) => write!(formatter, "{value}"),
             ValueRef::String(value) => write!(formatter, "{value:?}"),
+            ValueRef::BigInt(value) => write!(formatter, "{value}n"),
             ValueRef::Symbol(id) => write!(formatter, "symbol({id})"),
             ValueRef::Object(id) => write!(formatter, "object({id})"),
         }
@@ -834,6 +854,7 @@ pub enum InspectKind {
     Bool,
     Number,
     String,
+    BigInt,
     Symbol,
     Object,
 }
@@ -868,6 +889,7 @@ impl<'a> Inspect<'a> {
             ValueRef::Bool(_) => InspectKind::Bool,
             ValueRef::Number(_) => InspectKind::Number,
             ValueRef::String(_) => InspectKind::String,
+            ValueRef::BigInt(_) => InspectKind::BigInt,
             ValueRef::Symbol(_) => InspectKind::Symbol,
             ValueRef::Object(_) => InspectKind::Object,
         }
@@ -875,6 +897,10 @@ impl<'a> Inspect<'a> {
 
     pub fn value(&self) -> JsValue {
         self.value.clone()
+    }
+
+    pub fn bigint(&self) -> Option<&JsBigInt> {
+        self.value.as_bigint()
     }
 
     pub fn identity(&self) -> Option<u64> {

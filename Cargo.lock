@@ -1189,6 +1189,8 @@ dependencies = [
  "chrono-tz",
  "jiff",
  "jiff-tzdb",
+ "num-bigint",
+ "num-traits",
  "regress",
  "ryu-js",
  "serde",

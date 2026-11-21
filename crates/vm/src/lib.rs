@@ -93,7 +93,7 @@ pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host};
 pub use regexp::{RegExpFlags, validate_regexp};
 pub use snapshot::{SNAPSHOT_FORMAT_VERSION, Snapshot};
-pub use value::{BindingId, ContinuationId, JsString, ObjectId, Value, ValueRef};
+pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, ValueRef};
 pub use vm::{PendingOperationInfo, Vm};
 pub use yield_binding_macros::{
     host_bindings, host_class, host_module, host_state, methods, operation,

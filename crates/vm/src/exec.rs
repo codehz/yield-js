@@ -426,12 +426,14 @@ impl Vm {
                             ValueRef::Object(_),
                             ValueRef::String(_)
                             | ValueRef::Number(_)
+                            | ValueRef::BigInt(_)
                             | ValueRef::Bool(_)
                             | ValueRef::Symbol(_),
                         )
                         | (
                             ValueRef::String(_)
                             | ValueRef::Number(_)
+                            | ValueRef::BigInt(_)
                             | ValueRef::Bool(_)
                             | ValueRef::Symbol(_),
                             ValueRef::Object(_),
@@ -476,6 +478,9 @@ impl Vm {
                     Err(BinaryError::TypeError(message)) => {
                         return Ok(Step::Throw(self.type_error(message)?));
                     }
+                    Err(BinaryError::RangeError(message)) => {
+                        return Ok(Step::Throw(self.make_range_error(message)?));
+                    }
                     Err(BinaryError::Vm(error)) => return Err(error),
                 };
                 frame.write(dst, value)?;
@@ -492,7 +497,17 @@ impl Vm {
                 if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Symbol(_)) {
                     return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
                 }
-                frame.write(dst, self.unary(op, value))?;
+                let value = match self.unary(op, value) {
+                    Ok(value) => value,
+                    Err(BinaryError::TypeError(message)) => {
+                        return Ok(Step::Throw(self.type_error(message)?));
+                    }
+                    Err(BinaryError::RangeError(message)) => {
+                        return Ok(Step::Throw(self.make_range_error(message)?));
+                    }
+                    Err(BinaryError::Vm(error)) => return Err(error),
+                };
+                frame.write(dst, value)?;
                 Ok(Step::Next)
             }
             Instr::ToString { dst, src } => {
@@ -1462,6 +1477,27 @@ impl Vm {
         Ok(Ok(ops::to_js_string(&value)))
     }
 
+    /// `Number(value)` accepts BigInt by an explicit precision-losing conversion,
+    /// unlike arithmetic and `Number.prototype` methods.
+    pub(crate) fn coerce_number_allow_bigint(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Result<Result<f64, Value>, VmError> {
+        let value = match self.coerce_primitive(host, roots, value, Hint::Number)? {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
+        };
+        if let ValueRef::BigInt(value) = value.as_ref().view() {
+            return Ok(Ok(value.to_f64()));
+        }
+        if matches!(value.as_ref().view(), ValueRef::Symbol(_)) {
+            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+        }
+        Ok(Ok(ops::to_number(&value)?))
+    }
+
     pub(crate) fn coerce_number(
         &mut self,
         host: &mut dyn Host,
@@ -1474,6 +1510,9 @@ impl Vm {
         };
         if matches!(value.as_ref().view(), ValueRef::Symbol(_)) {
             return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+        }
+        if matches!(value.as_ref().view(), ValueRef::BigInt(_)) {
+            return Ok(Err(self.type_error(ops::BIGINT_TO_NUMBER)?));
         }
         Ok(Ok(ops::to_number(&value)?))
     }
@@ -2657,9 +2696,9 @@ impl Vm {
         self.react(promise, crate::heap::ReactionJob::Await(continuation))
     }
 
-    fn unary(&self, operator: UnaryOp, value: Value) -> Value {
+    fn unary(&self, operator: UnaryOp, value: Value) -> Result<Value, BinaryError> {
         if matches!(operator, UnaryOp::TypeOf) && self.is_callable(&value) {
-            return Value::string("function".into());
+            return Ok(Value::string("function".into()));
         }
         unary_op(operator, value)
     }
@@ -2675,6 +2714,7 @@ impl Vm {
             crate::bytecode::Constant::Bool(value) => Value::boolean(*value),
             crate::bytecode::Constant::Number(value) => Value::number(*value),
             crate::bytecode::Constant::String(value) => Value::string(value.clone()),
+            crate::bytecode::Constant::BigInt(value) => Value::bigint(value.clone()),
         })
     }
 

@@ -1,19 +1,34 @@
 //! Scalar JavaScript operations. Identity and heap layout stay out of this module.
 
+use std::cmp::Ordering;
+
+use num_bigint::BigInt;
+use num_traits::{FromPrimitive, Pow, ToPrimitive, Zero};
+
 use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
-use crate::value::{JsString, PropertyKeyRef, Value, ValueRef};
+pub(crate) use crate::value::is_js_whitespace;
+use crate::value::{JsBigInt, JsString, PropertyKeyRef, Value, ValueRef};
 
 pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
-    matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+    matches!(
+        operator,
+        UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot | UnaryOp::ToNumeric
+    )
 }
 
 pub(crate) const SYMBOL_TO_NUMBER: &str = "Cannot convert a Symbol value to a number";
 pub(crate) const SYMBOL_TO_STRING: &str = "Cannot convert a Symbol value to a string";
+pub(crate) const BIGINT_TO_NUMBER: &str = "Cannot convert a BigInt value to a number";
 const SYMBOL_TO_PRIMITIVE: &str = "Cannot convert a Symbol value to a string or a number";
+const MIXED_BIGINT: &str = "Cannot mix BigInt and other types, use explicit conversions";
+const BIGINT_UNSIGNED_SHIFT: &str = "BigInts have no unsigned right shift, use >> instead";
+const BIGINT_DIVISION_BY_ZERO: &str = "Division by zero";
+const BIGINT_NEGATIVE_EXPONENT: &str = "Exponent must be non-negative";
 
 pub(crate) enum BinaryError {
     TypeError(&'static str),
+    RangeError(&'static str),
     Vm(VmError),
 }
 
@@ -35,6 +50,121 @@ fn check_no_symbol(message: &'static str, values: &[&Value]) -> Result<(), Binar
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum NumericRef<'a> {
+    Number(f64),
+    BigInt(&'a BigInt),
+}
+
+fn numeric_ref(value: &Value) -> Result<NumericRef<'_>, BinaryError> {
+    Ok(match value.view() {
+        ValueRef::BigInt(value) => NumericRef::BigInt(value.as_bigint()),
+        ValueRef::Symbol(_) => return Err(BinaryError::TypeError(SYMBOL_TO_NUMBER)),
+        ValueRef::Object(_) => {
+            return Err(BinaryError::Vm(VmError::InvalidState(
+                "numeric conversion requires a primitive value".to_owned(),
+            )));
+        }
+        _ => NumericRef::Number(to_number(value)?),
+    })
+}
+
+fn bigint_value(value: BigInt) -> Value {
+    Value::bigint(JsBigInt::from_bigint(value))
+}
+
+fn bigint_shift(value: &BigInt, count: &BigInt, left: bool) -> Result<Value, BinaryError> {
+    let negative = count < &BigInt::zero();
+    let magnitude = if negative { -count } else { count.clone() };
+    let shift = magnitude.to_usize().ok_or_else(|| {
+        BinaryError::Vm(VmError::InvalidState(
+            "BigInt shift count is too large".to_owned(),
+        ))
+    })?;
+    let left = left != negative;
+    Ok(bigint_value(if left {
+        value << shift
+    } else {
+        value >> shift
+    }))
+}
+
+fn arithmetic(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
+    let left = numeric_ref(&lhs)?;
+    let right = numeric_ref(&rhs)?;
+    match (left, right) {
+        (NumericRef::Number(left), NumericRef::Number(right)) => {
+            Ok(Value::number(match operator {
+                BinaryOp::Add => left + right,
+                BinaryOp::Sub => left - right,
+                BinaryOp::Mul => left * right,
+                BinaryOp::Div => left / right,
+                BinaryOp::Rem => left % right,
+                BinaryOp::Exp => left.powf(right),
+                _ => unreachable!("arithmetic operator"),
+            }))
+        }
+        (NumericRef::BigInt(left), NumericRef::BigInt(right)) => Ok(bigint_value(match operator {
+            BinaryOp::Add => left + right,
+            BinaryOp::Sub => left - right,
+            BinaryOp::Mul => left * right,
+            BinaryOp::Div => {
+                if right.is_zero() {
+                    return Err(BinaryError::RangeError(BIGINT_DIVISION_BY_ZERO));
+                }
+                left / right
+            }
+            BinaryOp::Rem => {
+                if right.is_zero() {
+                    return Err(BinaryError::RangeError(BIGINT_DIVISION_BY_ZERO));
+                }
+                left % right
+            }
+            BinaryOp::Exp => {
+                if right < &BigInt::zero() {
+                    return Err(BinaryError::RangeError(BIGINT_NEGATIVE_EXPONENT));
+                }
+                let exponent = right.to_u64().ok_or_else(|| {
+                    BinaryError::Vm(VmError::InvalidState(
+                        "BigInt exponent is too large".to_owned(),
+                    ))
+                })?;
+                Pow::pow(left, exponent)
+            }
+            _ => unreachable!("arithmetic operator"),
+        })),
+        _ => Err(BinaryError::TypeError(MIXED_BIGINT)),
+    }
+}
+
+fn bitwise(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
+    let left = numeric_ref(&lhs)?;
+    let right = numeric_ref(&rhs)?;
+    match (left, right) {
+        (NumericRef::Number(left), NumericRef::Number(right)) => {
+            let left = number_to_uint32(left) as i32;
+            let right = number_to_uint32(right);
+            Ok(Value::number(match operator {
+                BinaryOp::BitAnd => (left & right as i32) as f64,
+                BinaryOp::BitOr => (left | right as i32) as f64,
+                BinaryOp::BitXor => (left ^ right as i32) as f64,
+                BinaryOp::Shl => left.wrapping_shl(right & 0x1f) as f64,
+                BinaryOp::Shr => left.wrapping_shr(right & 0x1f) as f64,
+                _ => unreachable!("bitwise operator"),
+            }))
+        }
+        (NumericRef::BigInt(left), NumericRef::BigInt(right)) => match operator {
+            BinaryOp::BitAnd => Ok(bigint_value(left & right)),
+            BinaryOp::BitOr => Ok(bigint_value(left | right)),
+            BinaryOp::BitXor => Ok(bigint_value(left ^ right)),
+            BinaryOp::Shl => bigint_shift(left, right, true),
+            BinaryOp::Shr => bigint_shift(left, right, false),
+            _ => unreachable!("bitwise operator"),
+        },
+        _ => Err(BinaryError::TypeError(MIXED_BIGINT)),
+    }
+}
+
 pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
     Ok(match operator {
         BinaryOp::Add => {
@@ -53,29 +183,11 @@ pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Va
                 }
                 Value::string(text)
             } else {
-                check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-                Value::number(to_number(&lhs)? + to_number(&rhs)?)
+                arithmetic(operator, lhs, rhs)?
             }
         }
-        BinaryOp::Sub => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number(to_number(&lhs)? - to_number(&rhs)?)
-        }
-        BinaryOp::Mul => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number(to_number(&lhs)? * to_number(&rhs)?)
-        }
-        BinaryOp::Div => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number(to_number(&lhs)? / to_number(&rhs)?)
-        }
-        BinaryOp::Rem => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number(to_number(&lhs)? % to_number(&rhs)?)
-        }
-        BinaryOp::Exp => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number(to_number(&lhs)?.powf(to_number(&rhs)?))
+        BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem | BinaryOp::Exp => {
+            arithmetic(operator, lhs, rhs)?
         }
         BinaryOp::Lt => relational(&lhs, &rhs, |ordering| ordering.is_lt())?,
         BinaryOp::Le => relational(&lhs, &rhs, |ordering| ordering.is_le())?,
@@ -85,42 +197,60 @@ pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Va
         BinaryOp::Ne => Value::boolean(!loose_equal(&lhs, &rhs)?),
         BinaryOp::StrictEq => Value::boolean(strict_equal(&lhs, &rhs)),
         BinaryOp::StrictNe => Value::boolean(!strict_equal(&lhs, &rhs)),
-        BinaryOp::BitAnd => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number((to_int32(&lhs)? & to_int32(&rhs)?) as f64)
-        }
-        BinaryOp::BitOr => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number((to_int32(&lhs)? | to_int32(&rhs)?) as f64)
-        }
-        BinaryOp::BitXor => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64)
-        }
-        BinaryOp::Shl => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number((to_int32(&lhs)?).wrapping_shl(to_uint32(&rhs)? & 0x1f) as f64)
-        }
-        BinaryOp::Shr => {
-            check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::number((to_int32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            bitwise(operator, lhs, rhs)?
         }
         BinaryOp::UShr => {
+            if matches!(lhs.view(), ValueRef::BigInt(_))
+                || matches!(rhs.view(), ValueRef::BigInt(_))
+            {
+                return Err(BinaryError::TypeError(BIGINT_UNSIGNED_SHIFT));
+            }
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
             Value::number((to_uint32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
     })
 }
 
-pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
-    match operator {
-        UnaryOp::Neg => Value::number(-to_number_lossy(&value)),
-        UnaryOp::Pos => Value::number(to_number_lossy(&value)),
+pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Result<Value, BinaryError> {
+    Ok(match operator {
+        UnaryOp::Neg => match value.view() {
+            ValueRef::BigInt(value) => bigint_value(-value.as_bigint()),
+            _ => Value::number(-to_number_lossy(&value)),
+        },
+        UnaryOp::Pos => match value.view() {
+            ValueRef::BigInt(_) => return Err(BinaryError::TypeError(BIGINT_TO_NUMBER)),
+            _ => Value::number(to_number_lossy(&value)),
+        },
         UnaryOp::Not => Value::boolean(!value.truthy()),
-        UnaryOp::BitNot => Value::number((!to_int32_lossy(&value)) as f64),
+        UnaryOp::BitNot => match value.view() {
+            ValueRef::BigInt(value) => bigint_value(!value.as_bigint()),
+            _ => Value::number((!to_int32_lossy(&value)) as f64),
+        },
         UnaryOp::TypeOf => Value::string(value.type_of().into()),
         UnaryOp::Void => Value::UNDEFINED,
-    }
+        UnaryOp::ToNumeric => match value.view() {
+            ValueRef::BigInt(_) => value,
+            ValueRef::Symbol(_) => return Err(BinaryError::TypeError(SYMBOL_TO_NUMBER)),
+            _ => Value::number(to_number_lossy(&value)),
+        },
+        UnaryOp::Increment | UnaryOp::Decrement => {
+            let delta = if matches!(operator, UnaryOp::Increment) {
+                1.0
+            } else {
+                -1.0
+            };
+            match value.view() {
+                ValueRef::Number(value) => Value::number(value + delta),
+                ValueRef::BigInt(value) => bigint_value(if delta > 0.0 {
+                    value.as_bigint() + 1
+                } else {
+                    value.as_bigint() - 1
+                }),
+                _ => return Err(BinaryError::TypeError(BIGINT_TO_NUMBER)),
+            }
+        }
+    })
 }
 
 pub(crate) fn canonical_index(key: &str) -> Option<usize> {
@@ -150,18 +280,53 @@ pub(crate) fn canonical_index_key(key: PropertyKeyRef<'_>) -> Option<usize> {
     }
 }
 
+fn compare_bigint_f64(big: &BigInt, number: f64) -> Option<Ordering> {
+    if number.is_nan() {
+        return None;
+    }
+    if number == f64::INFINITY {
+        return Some(Ordering::Less);
+    }
+    if number == f64::NEG_INFINITY {
+        return Some(Ordering::Greater);
+    }
+    let integer = BigInt::from_f64(number.trunc())?;
+    let ordering = big.cmp(&integer);
+    if ordering != Ordering::Equal {
+        return Some(ordering);
+    }
+    match number.fract().partial_cmp(&0.0)? {
+        Ordering::Greater => Some(Ordering::Less),
+        Ordering::Less => Some(Ordering::Greater),
+        Ordering::Equal => Some(Ordering::Equal),
+    }
+}
+
+fn bigint_equals_f64(big: &BigInt, number: f64) -> bool {
+    !number.is_nan()
+        && number.is_finite()
+        && number.fract() == 0.0
+        && BigInt::from_f64(number).is_some_and(|integer| &integer == big)
+}
+
 fn relational(
     lhs: &Value,
     rhs: &Value,
-    predicate: impl Fn(std::cmp::Ordering) -> bool,
+    predicate: impl Fn(Ordering) -> bool,
 ) -> Result<Value, BinaryError> {
     check_no_symbol(SYMBOL_TO_PRIMITIVE, &[lhs, rhs])?;
     if let (ValueRef::String(lhs), ValueRef::String(rhs)) = (lhs.view(), rhs.view()) {
         return Ok(Value::boolean(predicate(lhs.cmp(rhs))));
     }
-    let lhs = to_number_lossy(lhs);
-    let rhs = to_number_lossy(rhs);
-    Ok(Value::boolean(lhs.partial_cmp(&rhs).is_some_and(predicate)))
+    let ordering = match (numeric_ref(lhs)?, numeric_ref(rhs)?) {
+        (NumericRef::Number(lhs), NumericRef::Number(rhs)) => lhs.partial_cmp(&rhs),
+        (NumericRef::BigInt(lhs), NumericRef::BigInt(rhs)) => Some(lhs.cmp(rhs)),
+        (NumericRef::BigInt(lhs), NumericRef::Number(rhs)) => compare_bigint_f64(lhs, rhs),
+        (NumericRef::Number(lhs), NumericRef::BigInt(rhs)) => {
+            compare_bigint_f64(rhs, lhs).map(Ordering::reverse)
+        }
+    };
+    Ok(Value::boolean(ordering.is_some_and(predicate)))
 }
 
 pub(crate) fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
@@ -170,6 +335,7 @@ pub(crate) fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
         (ValueRef::Bool(lhs), ValueRef::Bool(rhs)) => lhs == rhs,
         (ValueRef::Number(lhs), ValueRef::Number(rhs)) => lhs == rhs,
         (ValueRef::String(lhs), ValueRef::String(rhs)) => lhs == rhs,
+        (ValueRef::BigInt(lhs), ValueRef::BigInt(rhs)) => lhs == rhs,
         (ValueRef::Symbol(lhs), ValueRef::Symbol(rhs)) => lhs == rhs,
         (ValueRef::Object(lhs), ValueRef::Object(rhs)) => lhs == rhs,
         _ => false,
@@ -185,12 +351,31 @@ pub(crate) fn same_value(lhs: &Value, rhs: &Value) -> bool {
     }
 }
 
+fn bigint_from_string(value: &JsString) -> Option<JsBigInt> {
+    value
+        .to_utf8()
+        .ok()
+        .and_then(|text| JsBigInt::from_js_string(&text))
+}
+
 fn loose_equal(lhs: &Value, rhs: &Value) -> Result<bool, VmError> {
     if strict_equal(lhs, rhs) {
         return Ok(true);
     }
     match (lhs.view(), rhs.view()) {
         (ValueRef::Null, ValueRef::Undefined) | (ValueRef::Undefined, ValueRef::Null) => Ok(true),
+        (ValueRef::BigInt(lhs), ValueRef::Number(rhs))
+        | (ValueRef::Number(rhs), ValueRef::BigInt(lhs)) => {
+            Ok(bigint_equals_f64(lhs.as_bigint(), rhs))
+        }
+        (ValueRef::BigInt(lhs), ValueRef::String(rhs)) => {
+            Ok(bigint_from_string(rhs).is_some_and(|rhs| lhs.as_bigint() == rhs.as_bigint()))
+        }
+        (ValueRef::BigInt(lhs), ValueRef::Bool(rhs))
+        | (ValueRef::Bool(rhs), ValueRef::BigInt(lhs)) => Ok(bigint_equals_f64(
+            lhs.as_bigint(),
+            if rhs { 1.0 } else { 0.0 },
+        )),
         (ValueRef::Number(_), ValueRef::String(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
         (ValueRef::String(_), ValueRef::Number(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
         (ValueRef::Bool(_), _) => loose_equal(&Value::number(to_number(lhs)?), rhs),
@@ -205,6 +390,7 @@ pub(crate) fn to_number(value: &Value) -> Result<f64, VmError> {
         ValueRef::Null => Ok(0.0),
         ValueRef::Bool(value) => Ok(if value { 1.0 } else { 0.0 }),
         ValueRef::Number(value) => Ok(value),
+        ValueRef::BigInt(_) => Err(VmError::InvalidState(BIGINT_TO_NUMBER.to_owned())),
         ValueRef::String(value) => match value.to_utf8() {
             Ok(text) => parse_js_number(&text),
             Err(_) => Ok(f64::NAN),
@@ -220,12 +406,6 @@ pub(crate) fn to_number(value: &Value) -> Result<f64, VmError> {
 
 fn to_number_lossy(value: &Value) -> f64 {
     to_number(value).unwrap_or(f64::NAN)
-}
-
-pub(crate) fn is_js_whitespace(ch: char) -> bool {
-    matches!(ch, '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
-        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
-        | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 fn parse_js_number(value: &str) -> Result<f64, VmError> {
@@ -353,6 +533,7 @@ pub(crate) fn to_js_string(value: &Value) -> JsString {
         ValueRef::Bool(value) => if value { "true" } else { "false" }.into(),
         ValueRef::Number(value) => ryu_js::Buffer::new().format(value).into(),
         ValueRef::String(value) => value.clone(),
+        ValueRef::BigInt(value) => value.to_decimal().into(),
         ValueRef::Symbol(_) => "Symbol()".into(),
         ValueRef::Object(_) => "[object Object]".into(),
     }

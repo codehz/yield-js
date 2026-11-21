@@ -54,7 +54,10 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::SetMember { .. } => true,
         Instr::Binary { op, .. } => !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe),
         Instr::Unary { op, .. } => {
-            matches!(*op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+            matches!(
+                *op,
+                UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot | UnaryOp::ToNumeric
+            )
         }
         Instr::ToString { .. }
         | Instr::ToPropertyKey { .. }

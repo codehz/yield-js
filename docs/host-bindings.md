@@ -434,7 +434,7 @@ flowchart TB
 
 已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局、payload schema 与 operation 声明。
 
-脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。尚未实现：BigInt 值域、TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
+脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。BigInt 值域已落地：`JsValue::bigint` / `as_bigint`、`Inspect::bigint` 和 `InspectKind::BigInt`，并以规范十进制在构建与快照中往返。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 
 Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；其余位置为 `JsValue`（必需）或 `Option<JsValue>`（省略为 `None`，显式 `undefined` 为 `Some`）。参数位置数（含可选位置）决定声明的 arity，完整签名进入绑定指纹。返回类型是 `JsResult<JsValue>`、`JsResult<()>` 或 `JsResult<Instance<T>>`。VM 内部调用协议不变；不匹配的旧绑定指纹按 `InvalidSnapshot` 拒绝，不迁移也不启动恢复工作。
 

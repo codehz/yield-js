@@ -297,6 +297,7 @@ fn render_value(value: &yield_vm::Value) -> String {
         yield_vm::ValueRef::Bool(value) => value.to_string(),
         yield_vm::ValueRef::Number(value) => value.to_string(),
         yield_vm::ValueRef::String(value) => format!("{value:?}"),
+        yield_vm::ValueRef::BigInt(value) => format!("{value}n"),
         yield_vm::ValueRef::Symbol(_) => "symbol".to_owned(),
         yield_vm::ValueRef::Object(_) => "object".to_owned(),
     }

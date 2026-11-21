@@ -10,9 +10,9 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::value::{BindingId, JsString};
+use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 43;
+pub const BYTECODE_VERSION: u32 = 44;
 
 pub use crate::builtin::BUILTINS;
 
@@ -72,6 +72,8 @@ pub enum Constant {
     Bool(bool),
     Number(#[serde(with = "crate::value::number_serde")] f64),
     String(JsString),
+    #[serde(rename = "bigint")]
+    BigInt(JsBigInt),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -116,6 +118,10 @@ pub enum UnaryOp {
     BitNot,
     TypeOf,
     Void,
+    /// ToNumeric: Number for most primitives, BigInt for BigInt.
+    ToNumeric,
+    Increment,
+    Decrement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,7 +792,7 @@ impl Build {
             bytecode_version: self.bytecode_version,
             // Reject artifacts from older builtin semantics even when their
             // instruction stream and snapshot record layout are unchanged.
-            execution_revision: 11,
+            execution_revision: 12,
             constants: &self.constants,
             imports: &self.imports,
             functions: &self.functions,

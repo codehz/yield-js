@@ -610,6 +610,11 @@ impl Vm {
             ValueRef::Number(value) if value.is_finite() => JsonValue::Number(value),
             ValueRef::Number(_) => JsonValue::Null,
             ValueRef::String(_) => JsonValue::String(value.into_string().expect("string value")),
+            ValueRef::BigInt(_) => {
+                return Ok(Err(
+                    self.type_error("Do not know how to serialize a BigInt")?
+                ));
+            }
             ValueRef::Object(_) if self.is_callable(&value) => return Ok(Ok(None)),
             ValueRef::Object(id)
                 if matches!(

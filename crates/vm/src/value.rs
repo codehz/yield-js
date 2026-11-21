@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use num_bigint::BigInt;
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
+
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -20,6 +23,7 @@ const OBJECT_TAG: u16 = 0xfffc;
 const EMPTY_STRING_TAG: u16 = 0xfffd;
 const LATIN1_TAG: u16 = 0xfffe;
 const WIDE_TAG: u16 = 0xffff;
+const BIGINT_TAG: u16 = 0xfff7;
 const PAYLOAD_MASK: u64 = 0x0000_ffff_ffff_ffff;
 
 // Invert the logical bits so zero is available for Option's niche, not +0.
@@ -77,11 +81,11 @@ enum StringStorageRef<'a> {
 }
 
 impl PackedWord {
-    fn from_arc<T>(tag: u16, data: Arc<Vec<T>>) -> Self {
+    fn from_arc<T>(tag: u16, data: Arc<T>) -> Self {
         let address = Arc::as_ptr(&data).expose_provenance() as u64;
         assert!(
             address <= PAYLOAD_MASK,
-            "string pointer exceeds 48-bit NaN-box payload"
+            "Arc pointer exceeds 48-bit NaN-box payload"
         );
         // Vec alignment rules out the all-one payload for the wide tag.
         let word = Self::tagged(tag, address);
@@ -90,18 +94,20 @@ impl PackedWord {
     }
 
     // The tag determines T. The payload is the checked, exposed address
-    // of the Vec returned by Arc::into_raw, not its elements or header.
-    fn string_ptr<T>(self) -> *const Vec<T> {
+    // returned by Arc::into_raw, not its elements or header.
+    fn arc_ptr<T>(self) -> *const T {
         ptr::with_exposed_provenance(self.payload() as usize)
     }
 
     fn clone_owner(self) -> Self {
-        // SAFETY: The tag selects the original Vec type and exposed address;
-        // the borrowing caller keeps a strong reference alive for the increment.
+        // SAFETY: The tag selects the original Arc payload type and exposed
+        // address; the borrowing caller keeps a strong reference alive for
+        // the increment.
         unsafe {
             match self.tag() {
-                LATIN1_TAG => Arc::increment_strong_count(self.string_ptr::<u8>()),
-                WIDE_TAG => Arc::increment_strong_count(self.string_ptr::<u16>()),
+                LATIN1_TAG => Arc::increment_strong_count(self.arc_ptr::<Vec<u8>>()),
+                WIDE_TAG => Arc::increment_strong_count(self.arc_ptr::<Vec<u16>>()),
+                BIGINT_TAG => Arc::increment_strong_count(self.arc_ptr::<BigInt>()),
                 _ => (),
             }
         }
@@ -109,12 +115,14 @@ impl PackedWord {
     }
 
     fn drop_owner(self) {
-        // SAFETY: The tag selects the original Vec type and exposed address.
-        // The dropping wrapper owns one live strong reference, consumed here.
+        // SAFETY: The tag selects the original Arc payload type and exposed
+        // address. The dropping wrapper owns one live strong reference,
+        // consumed here.
         unsafe {
             match self.tag() {
-                LATIN1_TAG => Arc::decrement_strong_count(self.string_ptr::<u8>()),
-                WIDE_TAG => Arc::decrement_strong_count(self.string_ptr::<u16>()),
+                LATIN1_TAG => Arc::decrement_strong_count(self.arc_ptr::<Vec<u8>>()),
+                WIDE_TAG => Arc::decrement_strong_count(self.arc_ptr::<Vec<u16>>()),
+                BIGINT_TAG => Arc::decrement_strong_count(self.arc_ptr::<BigInt>()),
                 _ => (),
             }
         }
@@ -152,8 +160,8 @@ impl JsString {
         unsafe {
             match self.0.tag() {
                 EMPTY_STRING_TAG => StringStorageRef::Empty,
-                LATIN1_TAG => StringStorageRef::Latin1(&*self.0.string_ptr::<u8>()),
-                WIDE_TAG => StringStorageRef::Wide(&*self.0.string_ptr::<u16>()),
+                LATIN1_TAG => StringStorageRef::Latin1(&*self.0.arc_ptr::<Vec<u8>>()),
+                WIDE_TAG => StringStorageRef::Wide(&*self.0.arc_ptr::<Vec<u16>>()),
                 _ => unreachable!(),
             }
         }
@@ -175,12 +183,162 @@ impl JsString {
         unsafe {
             match word.tag() {
                 EMPTY_STRING_TAG => StringStorage::Empty,
-                LATIN1_TAG => StringStorage::Latin1(Arc::from_raw(word.string_ptr::<u8>())),
-                WIDE_TAG => StringStorage::Wide(Arc::from_raw(word.string_ptr::<u16>())),
+                LATIN1_TAG => StringStorage::Latin1(Arc::from_raw(word.arc_ptr::<Vec<u8>>())),
+                WIDE_TAG => StringStorage::Wide(Arc::from_raw(word.arc_ptr::<Vec<u16>>())),
                 _ => unreachable!(),
             }
         }
     }
+}
+
+/// An arbitrary-precision JavaScript BigInt primitive.
+///
+/// The packed word points at an `Arc<BigInt>`; the numeric magnitude never
+/// lives inline in a `Value`. Values are immutable, so clones share storage.
+#[repr(transparent)]
+pub struct JsBigInt(PackedWord);
+
+const _: () = assert!(size_of::<JsBigInt>() == 8);
+
+impl Clone for JsBigInt {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_owner())
+    }
+}
+
+impl Drop for JsBigInt {
+    fn drop(&mut self) {
+        self.0.drop_owner();
+    }
+}
+
+impl fmt::Debug for JsBigInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("JsBigInt").field(self.as_bigint()).finish()
+    }
+}
+
+impl fmt::Display for JsBigInt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.as_bigint().to_str_radix(10))
+    }
+}
+
+impl PartialEq for JsBigInt {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bigint() == other.as_bigint()
+    }
+}
+
+impl Eq for JsBigInt {}
+
+impl PartialOrd for JsBigInt {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for JsBigInt {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_bigint().cmp(other.as_bigint())
+    }
+}
+
+impl Serialize for JsBigInt {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.as_bigint().to_str_radix(10))
+    }
+}
+
+impl<'de> Deserialize<'de> for JsBigInt {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        JsBigInt::from_decimal(&text)
+            .ok_or_else(|| <D::Error as serde::de::Error>::custom("invalid BigInt encoding"))
+    }
+}
+
+impl JsBigInt {
+    pub(crate) fn from_bigint(value: BigInt) -> Self {
+        Self(PackedWord::from_arc(BIGINT_TAG, Arc::new(value)))
+    }
+
+    pub(crate) fn from_i64(value: i64) -> Self {
+        Self::from_bigint(BigInt::from(value))
+    }
+
+    pub(crate) fn from_f64(value: f64) -> Option<Self> {
+        if !value.is_finite() || value.fract() != 0.0 {
+            return None;
+        }
+        BigInt::from_f64(value).map(Self::from_bigint)
+    }
+
+    /// Parse the canonical decimal form used by snapshots and build constants.
+    pub fn from_decimal(text: &str) -> Option<Self> {
+        let value: BigInt = text.parse().ok()?;
+        (value.to_str_radix(10) == text).then(|| Self::from_bigint(value))
+    }
+
+    /// Parse the string form accepted by `BigInt(value)`.
+    pub(crate) fn from_js_string(text: &str) -> Option<Self> {
+        let text = text.trim_matches(is_js_whitespace);
+        if text.is_empty() {
+            return Some(Self::from_i64(0));
+        }
+        let (negative, rest) = match text.as_bytes().first() {
+            Some(b'-') => (true, &text[1..]),
+            Some(b'+') => (false, &text[1..]),
+            _ => (false, text),
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        let (radix, digits) = if let Some(digits) =
+            rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X"))
+        {
+            (16, digits)
+        } else if let Some(digits) = rest.strip_prefix("0o").or_else(|| rest.strip_prefix("0O")) {
+            (8, digits)
+        } else if let Some(digits) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
+            (2, digits)
+        } else {
+            (10, rest)
+        };
+        if digits.is_empty() || !digits.chars().all(|digit| digit.is_digit(radix)) {
+            return None;
+        }
+        let value = BigInt::parse_bytes(digits.as_bytes(), radix)?;
+        Some(Self::from_bigint(if negative { -value } else { value }))
+    }
+
+    pub(crate) fn as_bigint(&self) -> &BigInt {
+        // SAFETY: BIGINT_TAG guarantees an Arc<BigInt> payload; self's strong
+        // reference keeps the allocation alive throughout the borrow.
+        unsafe { &*self.0.arc_ptr::<BigInt>() }
+    }
+
+    pub fn to_decimal(&self) -> String {
+        self.as_bigint().to_str_radix(10)
+    }
+
+    pub fn to_radix(&self, radix: u32) -> String {
+        self.as_bigint().to_str_radix(radix)
+    }
+
+    pub fn to_f64(&self) -> f64 {
+        self.as_bigint().to_f64().unwrap_or(f64::NAN)
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        self.as_bigint().is_zero()
+    }
+}
+
+pub(crate) fn is_js_whitespace(ch: char) -> bool {
+    matches!(ch, '\u{0009}'..='\u{000d}' | ' ' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 #[derive(Clone)]
@@ -565,6 +723,8 @@ pub enum ValueRef<'a> {
     Bool(bool),
     Number(#[serde(with = "number_serde")] f64),
     String(&'a JsString),
+    #[serde(rename = "bigint")]
+    BigInt(&'a JsBigInt),
     Symbol(SymbolId),
     Object(ObjectId),
 }
@@ -609,6 +769,8 @@ impl<'de> Deserialize<'de> for Value {
             Bool(bool),
             Number(#[serde(with = "number_serde")] f64),
             String(JsString),
+            #[serde(rename = "bigint")]
+            BigInt(JsBigInt),
             Symbol(SymbolId),
             Object(ObjectId),
         }
@@ -619,6 +781,7 @@ impl<'de> Deserialize<'de> for Value {
             WireValue::Bool(value) => Self::boolean(value),
             WireValue::Number(value) => Self::number(value),
             WireValue::String(value) => Self::string(value),
+            WireValue::BigInt(value) => Self::bigint(value),
             WireValue::Symbol(value) => Self::symbol(value),
             WireValue::Object(value) => Self::object(value),
         })
@@ -679,6 +842,10 @@ impl Value {
         Self(ManuallyDrop::new(value).0)
     }
 
+    pub fn bigint(value: JsBigInt) -> Self {
+        Self(ManuallyDrop::new(value).0)
+    }
+
     pub const fn symbol(value: SymbolId) -> Self {
         Self(PackedWord::tagged(SYMBOL_TAG, value as u64))
     }
@@ -701,6 +868,11 @@ impl Value {
                 // during which self retains ownership of the string's strong reference.
                 ValueRef::String(unsafe { &*ptr::from_ref(self).cast::<JsString>() })
             }
+            BIGINT_TAG => {
+                // SAFETY: The tag guarantees a JsBigInt word; self keeps its
+                // strong reference alive for the duration of the borrow.
+                ValueRef::BigInt(unsafe { &*ptr::from_ref(self).cast::<JsBigInt>() })
+            }
             _ => ValueRef::Number(f64::from_bits(self.0.bits())),
         }
     }
@@ -713,12 +885,21 @@ impl Value {
         }
     }
 
+    /// Transfer the BigInt payload if this value is a BigInt.
+    pub fn into_bigint(self) -> Option<JsBigInt> {
+        match self.0.tag() {
+            BIGINT_TAG => Some(JsBigInt(ManuallyDrop::new(self).0)),
+            _ => None,
+        }
+    }
+
     pub fn truthy(&self) -> bool {
         match self.view() {
             ValueRef::Undefined | ValueRef::Null => false,
             ValueRef::Bool(value) => value,
             ValueRef::Number(value) => value != 0.0 && !value.is_nan(),
             ValueRef::String(value) => !value.is_empty(),
+            ValueRef::BigInt(value) => !value.is_zero(),
             ValueRef::Symbol(_) | ValueRef::Object(_) => true,
         }
     }
@@ -730,6 +911,7 @@ impl Value {
             ValueRef::Bool(_) => "boolean",
             ValueRef::Number(_) => "number",
             ValueRef::String(_) => "string",
+            ValueRef::BigInt(_) => "bigint",
             ValueRef::Symbol(_) => "symbol",
         }
     }

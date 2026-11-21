@@ -1,4 +1,5 @@
 use crate::builtin::array;
+use crate::builtin::bigint;
 use crate::builtin::boolean::members as boolean_family;
 use crate::builtin::collections;
 use crate::builtin::date;
@@ -103,6 +104,7 @@ builtin_globals! {
     "WeakSet" => Global::Owner(collections::WEAK_SET_OWNER),
     "Function" => Global::Owner(Owner::new("function", &[], &[], None)),
     "Date" => Global::Owner(date::OWNER),
+    bigint::members::NAME => Global::Owner(bigint::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -212,7 +214,8 @@ impl Vm {
         self.install_generator_methods();
         self.install_async_generator_methods();
         let global_this = self.builtins.get(GLOBAL_THIS);
-        for (index, name) in BUILTINS.into_iter().enumerate() {
+        for (index, name) in BUILTINS.iter().enumerate() {
+            let name: &str = name;
             let value = self.builtin_value(index as u32).expect("global builtin");
             self.heap
                 .define_data(global_this, name, value, Attributes::ORDINARY)
