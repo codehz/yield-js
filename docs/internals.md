@@ -61,6 +61,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | --- | --- |
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
+| 绑定逃逸 / 循环头环境省略 | `bindings.rs` 的跨函数共享集合、`promote.rs` 的提升判定、lowerer 的迭代环境分组元数据；删除环境指令时还要统一重映射跳转、异常表、恢复表与生成器表 PC |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
