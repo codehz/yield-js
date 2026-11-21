@@ -6,6 +6,7 @@
 //! A thenable's `then` is read synchronously, but called in a microtask.
 
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Object, PromiseState};
 use crate::host::Host;
 use crate::runtime::{Invocation, Microtask, Settlement};
@@ -28,6 +29,7 @@ impl Vm {
     pub(crate) fn resolve_promise(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         result: ObjectId,
         value: Value,
     ) -> Result<(), VmError> {
@@ -38,7 +40,7 @@ impl Vm {
             let error = self.type_error("Cannot resolve a promise with itself")?;
             return self.settle(result, Settlement::Rejected(error));
         }
-        let input = self.classify_resolution(host, value)?;
+        let input = self.classify_resolution(host, &roots.with(&result), value)?;
         self.resolve_input(result, input)
     }
 
@@ -47,6 +49,7 @@ impl Vm {
     pub(crate) fn promise_identity(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
         let Value::Object(id) = *value else {
@@ -55,7 +58,7 @@ impl Vm {
         if !matches!(self.heap.get(id)?, Object::Promise(_)) {
             return Ok(Ok(None));
         }
-        match self.read_property(host, value, PropertyKeyRef::String("constructor"))? {
+        match self.read_property(host, roots, value, PropertyKeyRef::String("constructor"))? {
             Invocation::Value(Value::Object(constructor))
                 if constructor == self.builtins.get("promise") =>
             {
@@ -69,6 +72,7 @@ impl Vm {
     fn classify_resolution(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ResolutionInput, VmError> {
         let Value::Object(id) = value else {
@@ -79,7 +83,7 @@ impl Vm {
             object => matches!(object, Object::Promise(_)),
         };
         Ok(
-            match self.read_property(host, &value, PropertyKeyRef::String("then"))? {
+            match self.read_property(host, roots, &value, PropertyKeyRef::String("then"))? {
                 // The intrinsic then only installs reactions in this subset.
                 // Keep the direct adoption link for snapshots.
                 Invocation::Value(then) if promise && self.is_intrinsic_promise_then(&then) => {
@@ -125,19 +129,21 @@ impl Vm {
     pub(crate) fn run_assimilate(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         result: ObjectId,
-        receiver: Value,
-        then: Value,
+        receiver: &Value,
+        then: &Value,
     ) -> Result<(), VmError> {
         let (resolve_id, reject_id) = self.alloc_capability_pair(result)?;
         let invocation = self.invoke(
             host,
-            &then,
+            &roots.with(&reject_id),
+            then,
             vec![Value::Object(resolve_id), Value::Object(reject_id)],
-            &receiver,
+            receiver,
         )?;
         if let Invocation::Thrown(error) = invocation {
-            self.capability_call(host, reject_id, error)?;
+            self.capability_call(host, roots, reject_id, error)?;
         }
         Ok(())
     }
@@ -145,14 +151,15 @@ impl Vm {
     pub(crate) fn prepare_await(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         input: Value,
     ) -> Result<Result<AwaitPrepared, Value>, VmError> {
-        match self.promise_identity(host, &input)? {
+        match self.promise_identity(host, roots, &input)? {
             Ok(Some(id)) => return Ok(Ok(AwaitPrepared::Promise(id))),
             Ok(None) => {}
             Err(error) => return Ok(Err(error)),
         }
-        match self.classify_resolution(host, input)? {
+        match self.classify_resolution(host, roots, input)? {
             ResolutionInput::Plain(value) => Ok(Ok(AwaitPrepared::Plain(value))),
             input => {
                 let promise = self.heap.alloc_promise();
@@ -165,8 +172,9 @@ impl Vm {
     pub(crate) fn run_adopt(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         result: ObjectId,
-        settlement: Settlement,
+        settlement: &Settlement,
     ) -> Result<(), VmError> {
         let promise = self.heap.promise_mut(result)?;
         promise.locked = false;
@@ -175,8 +183,12 @@ impl Vm {
             return Ok(());
         }
         match settlement {
-            Settlement::Rejected(reason) => self.settle(result, Settlement::Rejected(reason)),
-            Settlement::Fulfilled(value) => self.resolve_promise(host, result, value),
+            Settlement::Rejected(reason) => {
+                self.settle(result, Settlement::Rejected(reason.clone()))
+            }
+            Settlement::Fulfilled(value) => {
+                self.resolve_promise(host, roots, result, value.clone())
+            }
         }
     }
 }

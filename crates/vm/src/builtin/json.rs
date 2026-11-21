@@ -1,6 +1,7 @@
 //! JSON parsing and serialization for the VM's JSON builtin.
 
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
@@ -9,16 +10,26 @@ use crate::vm::Vm;
 
 #[yield_binding_macros::builtin_global(name = "JSON", root = "json")]
 pub(crate) mod namespace {
-    use super::{Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
     #[function(name = "parse")]
-    fn parse(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        vm.json_parse(host, args)
+    fn parse(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.json_parse(host, roots, args)
     }
 
     #[function(name = "stringify")]
-    fn stringify(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        vm.json_stringify(host, args)
+    fn stringify(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.json_stringify(host, roots, args)
     }
 }
 
@@ -349,11 +360,18 @@ struct Serialize<'a> {
 }
 
 impl Vm {
-    fn json_parse(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        let text = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(text) => text,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
+    fn json_parse(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let text =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(text) => text,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
         let units = text.to_utf16();
         let mut parser = Parser {
             text: &units,
@@ -390,7 +408,8 @@ impl Vm {
             Attributes::ORDINARY,
         )?;
         let root = JsString::new();
-        match self.revive(host, reviver, holder, &root)? {
+        let roots = &roots.with(&holder);
+        match self.revive(host, roots, reviver, holder, &root)? {
             Ok(()) => self.read_data(holder, &root),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
@@ -399,13 +418,15 @@ impl Vm {
     fn json_stringify(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let value = args.first().cloned().unwrap_or(Value::Undefined);
         let replacer = args.get(1);
         let listed = match replacer {
             Some(Value::Object(id)) if matches!(self.heap.get(*id)?, Object::Array(_)) => {
-                match self.json_property_list(host, *id)? {
+                match self.json_property_list(host, roots, *id)? {
                     Ok(keys) => Some(keys),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -413,7 +434,7 @@ impl Vm {
             _ => None,
         };
         let function = replacer.filter(|value| self.is_callable(value));
-        let gap = match self.json_gap(host, args.get(2).unwrap_or(&Value::Undefined))? {
+        let gap = match self.json_gap(host, roots, args.get(2).unwrap_or(&Value::Undefined))? {
             Ok(gap) => gap,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -430,7 +451,7 @@ impl Vm {
             stack: Vec::new(),
             path: "$".to_owned(),
         };
-        match self.serialize_property(host, &mut state, holder, &JsString::new())? {
+        match self.serialize_property(host, roots, &mut state, holder, &JsString::new())? {
             Ok(None) => Ok(Invocation::Value(Value::Undefined)),
             Ok(Some(tree)) => {
                 let mut output = Vec::new();
@@ -446,6 +467,7 @@ impl Vm {
     fn json_gap(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         space: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
         let space = match space {
@@ -458,12 +480,12 @@ impl Vm {
                     }
                 ) =>
             {
-                match self.coerce_string(host, space)? {
+                match self.coerce_string(host, roots, space)? {
                     Ok(text) => Value::String(text),
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            Value::Object(_) => match self.coerce_number(host, space)? {
+            Value::Object(_) => match self.coerce_number(host, roots, space)? {
                 Ok(number) => Value::Number(number),
                 Err(error) => return Ok(Err(error)),
             },
@@ -483,6 +505,7 @@ impl Vm {
     fn json_property_list(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
         let length = match self.heap.get(id)? {
@@ -494,6 +517,7 @@ impl Vm {
             let name = JsString::from(index.to_string());
             let item = match self.read_property(
                 host,
+                roots,
                 &Value::Object(id),
                 PropertyKeyRef::JsString(&name),
             )? {
@@ -515,15 +539,18 @@ impl Vm {
     fn serialize_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         holder: ObjectId,
         key: &JsString,
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
+        let roots = &roots.with(&holder);
         if state.stack.len() > MAX_DEPTH {
             return self.type_error("Maximum JSON nesting exceeded").map(Err);
         }
         let mut value = match self.read_property(
             host,
+            roots,
             &Value::Object(holder),
             PropertyKeyRef::JsString(key),
         )? {
@@ -532,14 +559,20 @@ impl Vm {
         };
         if let Value::Object(id) = &value {
             let receiver = Value::Object(*id);
-            let method =
-                match self.read_property(host, &receiver, PropertyKeyRef::String("toJSON"))? {
-                    Invocation::Value(method) => method,
-                    Invocation::Thrown(error) => return Ok(Err(error)),
-                };
+            let roots = &roots.with(&receiver);
+            let method = match self.read_property(
+                host,
+                roots,
+                &receiver,
+                PropertyKeyRef::String("toJSON"),
+            )? {
+                Invocation::Value(method) => method,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            };
             if self.is_callable(&method) {
                 value = match self.invoke(
                     host,
+                    roots,
                     &method,
                     vec![Value::String(key.clone())],
                     &receiver,
@@ -552,6 +585,7 @@ impl Vm {
         if let Some(replacer) = state.replacer.cloned() {
             value = match self.invoke(
                 host,
+                roots,
                 &replacer,
                 vec![Value::String(key.clone()), value],
                 &Value::Object(holder),
@@ -560,12 +594,13 @@ impl Vm {
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
         }
-        self.serialize_value(host, state, value)
+        self.serialize_value(host, roots, state, value)
     }
 
     fn serialize_value(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         value: Value,
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
@@ -586,12 +621,12 @@ impl Vm {
                     Object::Array(_)
                 ) =>
             {
-                match self.serialize_array(host, state, id)? {
+                match self.serialize_array(host, roots, state, id)? {
                     Ok(value) => value,
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            Value::Object(id) => match self.serialize_object(host, state, id)? {
+            Value::Object(id) => match self.serialize_object(host, roots, state, id)? {
                 Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             },
@@ -603,9 +638,11 @@ impl Vm {
     fn serialize_array(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
     ) -> Result<Result<JsonValue, Value>, VmError> {
+        let roots = &roots.with(&id);
         if let Some(error) = self.cycle(state, id)? {
             return Ok(Err(error));
         }
@@ -616,13 +653,14 @@ impl Vm {
             _ => {
                 let length = match self.read_property(
                     host,
+                    roots,
                     &Value::Object(id),
                     PropertyKeyRef::String("length"),
                 )? {
                     Invocation::Value(value) => value,
                     Invocation::Thrown(error) => return Ok(Err(error)),
                 };
-                match self.coerce_number(host, &length)? {
+                match self.coerce_number(host, roots, &length)? {
                     Ok(length) => length.clamp(0.0, 9_007_199_254_740_991.0) as usize,
                     Err(error) => return Ok(Err(error)),
                 }
@@ -638,7 +676,7 @@ impl Vm {
                 values.push(JsonValue::Null);
                 continue;
             }
-            match self.serialize_property(host, state, id, &key)? {
+            match self.serialize_property(host, roots, state, id, &key)? {
                 Ok(Some(value)) => values.push(value),
                 Ok(None) => values.push(JsonValue::Null),
                 Err(error) => return Ok(Err(error)),
@@ -652,9 +690,11 @@ impl Vm {
     fn serialize_object(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
     ) -> Result<Result<JsonValue, Value>, VmError> {
+        let roots = &roots.with(&id);
         if let Some(error) = self.cycle(state, id)? {
             return Ok(Err(error));
         }
@@ -662,7 +702,7 @@ impl Vm {
         let keys = if let Some(properties) = state.properties {
             properties.to_vec()
         } else {
-            match self.enumerable_string_keys(host, id)? {
+            match self.enumerable_string_keys(host, roots, id)? {
                 Ok(keys) => keys,
                 Err(error) => return Ok(Err(error)),
             }
@@ -674,7 +714,7 @@ impl Vm {
                 "{saved}.{}",
                 key.to_utf8().unwrap_or_else(|_| "<surrogate>".into())
             );
-            match self.serialize_property(host, state, id, &key)? {
+            match self.serialize_property(host, roots, state, id, &key)? {
                 Ok(Some(value)) => values.push((key, value)),
                 Ok(None) => {}
                 Err(error) => return Ok(Err(error)),
@@ -700,15 +740,19 @@ impl Vm {
     fn revive(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         reviver: &Value,
         holder: ObjectId,
         key: &JsString,
     ) -> Result<Result<(), Value>, VmError> {
+        let root_view = (holder, reviver);
+        let roots = &roots.with(&root_view);
         let initial = match self.read_data(holder, key)? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
         if let Value::Object(id) = initial {
+            let roots = &roots.with(&id);
             let nested = match self.heap.get(id)? {
                 Object::Array(array) => (0..array.length)
                     .map(|index| JsString::from(index.to_string()))
@@ -727,7 +771,7 @@ impl Vm {
                 return self.type_error("Maximum JSON nesting exceeded").map(Err);
             }
             for name in nested {
-                if let Err(error) = self.revive(host, reviver, id, &name)? {
+                if let Err(error) = self.revive(host, roots, reviver, id, &name)? {
                     return Ok(Err(error));
                 }
             }
@@ -738,6 +782,7 @@ impl Vm {
         };
         let replaced = match self.invoke(
             host,
+            roots,
             reviver,
             vec![Value::String(key.clone()), value],
             &Value::Object(holder),

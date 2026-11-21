@@ -3,6 +3,7 @@
 
 use crate::bytecode::{Function, Slot, SlotKind};
 use crate::error::VmError;
+use crate::gc::{TraceRoots, Tracer};
 use crate::value::{ObjectId, Value};
 
 struct SlotFile {
@@ -97,5 +98,22 @@ impl Frame {
             SlotKind::Transient => &mut self.transient,
             SlotKind::Persistent => &mut self.persistent,
         }
+    }
+}
+
+impl TraceRoots for Frame {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        self.env.trace(tracer)?;
+        self.async_promise.trace(tracer)?;
+        for value in self
+            .transient
+            .slots
+            .iter()
+            .chain(&self.persistent.slots)
+            .flatten()
+        {
+            value.trace(tracer)?;
+        }
+        Ok(())
     }
 }

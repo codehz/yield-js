@@ -13,6 +13,7 @@ use crate::bytecode::{
 };
 use crate::error::VmError;
 use crate::frame::Frame;
+use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
     NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property, ScriptClass,
@@ -45,8 +46,13 @@ pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
     FUNCTION_CALL,
     FUNCTION_APPLY,
     FUNCTION_BIND,
-    IntrinsicDef::call(FUNCTION_HAS_INSTANCE, |vm, host, args, receiver| {
-        vm.ordinary_has_instance(host, args.first().unwrap_or(&Value::Undefined), receiver)
+    IntrinsicDef::call(FUNCTION_HAS_INSTANCE, |vm, host, roots, args, receiver| {
+        vm.ordinary_has_instance(
+            host,
+            roots,
+            args.first().unwrap_or(&Value::Undefined),
+            receiver,
+        )
     }),
     IntrinsicDef::call(
         IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
@@ -82,6 +88,7 @@ impl Vm {
     fn function_call(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -90,12 +97,13 @@ impl Vm {
         }
         let mut args = args.into_iter();
         let this_arg = args.next().unwrap_or(Value::Undefined);
-        self.invoke(host, receiver, args.collect(), &this_arg)
+        self.invoke(host, roots, receiver, args.collect(), &this_arg)
     }
 
     fn function_apply(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -106,17 +114,21 @@ impl Vm {
         let this_arg = args.next().unwrap_or(Value::Undefined);
         let args = match args.next() {
             None | Some(Value::Undefined | Value::Null) => Vec::new(),
-            Some(list) => match self.arguments_from_array_like(host, &list)? {
-                Ok(values) => values,
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            },
+            Some(list) => {
+                let live = (receiver, &this_arg, &list);
+                match self.arguments_from_array_like(host, &roots.with(&live), &list)? {
+                    Ok(values) => values,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
+            }
         };
-        self.invoke(host, receiver, args, &this_arg)
+        self.invoke(host, roots, receiver, args, &this_arg)
     }
 
     fn function_bind(
         &mut self,
         _: &mut dyn Host,
+        _: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -137,6 +149,7 @@ impl Vm {
     fn function_to_string(
         &mut self,
         _: &mut dyn Host,
+        _: &ActiveRoots<'_>,
         _: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -179,6 +192,7 @@ impl Vm {
     pub(crate) fn execute_frame(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         mut frame: Frame,
     ) -> Result<ExecOutcome, VmError> {
         loop {
@@ -191,7 +205,7 @@ impl Vm {
             };
             let pc = frame.pc;
             frame.pc += 1;
-            match self.step(host, &mut frame, instr)? {
+            match self.step(host, roots, &mut frame, instr)? {
                 Step::Next => {}
                 Step::Suspend => return Ok(ExecOutcome::Suspended),
                 Step::Return(value) => return Ok(ExecOutcome::Return(value)),
@@ -207,17 +221,17 @@ impl Vm {
     pub(crate) fn resume_continuation(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         continuation_id: crate::value::ContinuationId,
-        settlement: Settlement,
+        settlement: &Settlement,
     ) -> Result<(), VmError> {
-        let continuation = self.continuations.remove(&continuation_id).ok_or_else(|| {
+        let continuation = self.continuations.get(&continuation_id).ok_or_else(|| {
             VmError::InvalidState(format!("continuation {continuation_id} does not exist"))
         })?;
         let function_index = self.function_index(continuation.func_id)?;
         let resume_entry = self.build.functions[function_index]
             .resumes
             .get(continuation.resume_id as usize)
-            .cloned()
             .ok_or_else(|| {
                 VmError::InvalidState(format!("resume {} does not exist", continuation.resume_id))
             })?;
@@ -240,7 +254,7 @@ impl Vm {
             .saved_slots
             .iter()
             .copied()
-            .zip(continuation.values)
+            .zip(continuation.values.iter().cloned())
         {
             frame.write(
                 Slot {
@@ -252,24 +266,28 @@ impl Vm {
         }
         match settlement {
             Settlement::Fulfilled(value) => {
-                frame.write(resume_entry.fulfill_dst, value)?;
+                frame.write(resume_entry.fulfill_dst, value.clone())?;
                 frame.pc = resume_entry.fulfill_pc as usize;
             }
             Settlement::Rejected(value) => {
-                frame.write(resume_entry.reject_dst, value)?;
+                frame.write(resume_entry.reject_dst, value.clone())?;
                 frame.pc = resume_entry.reject_pc as usize;
             }
         }
-        let outcome = self.execute_frame(host, frame)?;
-        self.settle_outcome(host, async_promise, outcome)
+        let outcome = self.execute_frame(host, roots, frame)?;
+        self.settle_outcome(host, roots, async_promise, outcome)
     }
 
     fn step(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: Instr,
     ) -> Result<Step, VmError> {
+        // Reentrant calls borrow the initialized slots; destination writes
+        // happen after the last use of this view in each instruction.
+        let frame_roots = &roots.with(&*frame);
         match instr {
             Instr::Const { dst, constant } => {
                 frame.write(dst, self.constant(constant)?)?;
@@ -309,9 +327,20 @@ impl Vm {
                             op,
                             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
                         );
-                    for value in [&mut lhs, &mut rhs] {
+                    for left in [true, false] {
+                        let (value, other) = if left {
+                            (&mut lhs, &rhs)
+                        } else {
+                            (&mut rhs, &lhs)
+                        };
                         if matches!(value, Value::Object(_)) {
-                            match self.primitive_from_object(host, value, hint)? {
+                            // The first coercion may produce a fresh symbol.
+                            match self.primitive_from_object(
+                                host,
+                                &frame_roots.with(other),
+                                value,
+                                hint,
+                            )? {
                                 Invocation::Value(primitive) => *value = primitive,
                                 Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                             }
@@ -334,7 +363,7 @@ impl Vm {
             Instr::Unary { dst, op, src } => {
                 let mut value = frame.read(src)?;
                 if ops::unary_coerces(op) && matches!(value, Value::Object(_)) {
-                    match self.primitive_from_object(host, &value, Hint::Number)? {
+                    match self.primitive_from_object(host, frame_roots, &value, Hint::Number)? {
                         Invocation::Value(primitive) => value = primitive,
                         Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                     }
@@ -346,7 +375,7 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::ToString { dst, src } => {
-                let invocation = self.string_value(host, frame.read_ref(src)?)?;
+                let invocation = self.string_value(host, frame_roots, frame.read_ref(src)?)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::ToPropertyKey { dst, src, object } => {
@@ -357,11 +386,12 @@ impl Vm {
                         self.type_error("property access on a non-object")?,
                     ));
                 }
-                let value = match self.coerce_property_key(host, frame.read_ref(src)?)? {
-                    Ok(PropertyKey::String(key)) => Value::String(key),
-                    Ok(PropertyKey::Symbol(id)) => Value::Symbol(id),
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
+                let value =
+                    match self.coerce_property_key(host, frame_roots, frame.read_ref(src)?)? {
+                        Ok(PropertyKey::String(key)) => Value::String(key),
+                        Ok(PropertyKey::Symbol(id)) => Value::Symbol(id),
+                        Err(error) => return Ok(Step::Throw(error)),
+                    };
                 frame.write(dst, value)?;
                 Ok(Step::Next)
             }
@@ -402,11 +432,11 @@ impl Vm {
                 callee,
                 args,
                 receiver,
-            } => self.call_value(host, frame, dst, callee, args, receiver),
+            } => self.call_value(host, roots, frame, dst, callee, args, receiver),
             Instr::Construct { dst, callee, args } => {
                 let args = self.read_call_args(frame, &args)?;
                 let callee = frame.read(callee)?;
-                let invocation = self.construct_with(host, &callee, args, &callee)?;
+                let invocation = self.construct_with(host, frame_roots, &callee, args, &callee)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::SetHome { function, home } => {
@@ -449,13 +479,18 @@ impl Vm {
                 let Value::Object(base) = frame.read(base)? else {
                     return Ok(Step::Throw(self.type_error("super base is null")?));
                 };
-                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
                     Ok(key) => key,
                     Err(error) => return Ok(Step::Throw(error)),
                 };
                 let receiver = frame.read_ref(receiver)?;
-                let result =
-                    self.read_property_with_receiver(host, base, receiver, key.borrowed())?;
+                let result = self.read_property_with_receiver(
+                    host,
+                    frame_roots,
+                    base,
+                    receiver,
+                    key.borrowed(),
+                )?;
                 store_invocation(frame, dst, result)
             }
             Instr::SetSuper {
@@ -467,12 +502,13 @@ impl Vm {
                 let Value::Object(base) = frame.read(base)? else {
                     return Ok(Step::Throw(self.type_error("super base is null")?));
                 };
-                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
                     Ok(key) => key,
                     Err(error) => return Ok(Step::Throw(error)),
                 };
                 let result = self.set_property(
                     host,
+                    frame_roots,
                     base,
                     frame.read_ref(receiver)?,
                     key,
@@ -502,8 +538,13 @@ impl Vm {
             } => {
                 let context = object_id(frame.read_ref(context)?, "super construction context")?;
                 let args = self.read_call_args(frame, &args)?;
-                let invocation =
-                    self.super_construct(host, context, frame.read_ref(callee)?, args)?;
+                let invocation = self.super_construct(
+                    host,
+                    frame_roots,
+                    context,
+                    frame.read_ref(callee)?,
+                    args,
+                )?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
@@ -571,6 +612,7 @@ impl Vm {
                             let parent_id = object_id(&parent, "class heritage")?;
                             match self.read_property(
                                 host,
+                                frame_roots,
                                 &parent,
                                 PropertyKeyRef::String("prototype"),
                             )? {
@@ -689,7 +731,7 @@ impl Vm {
             }
             Instr::RunClassStatic { class } => {
                 let class = object_id(frame.read_ref(class)?, "static initialization target")?;
-                match self.initialize_class_elements(host, class, class, true)? {
+                match self.initialize_class_elements(host, frame_roots, class, class, true)? {
                     Some(error) => Ok(Step::Throw(error)),
                     None => Ok(Step::Next),
                 }
@@ -719,7 +761,8 @@ impl Vm {
             } => {
                 let brand = object_id(frame.read_ref(brand)?, "private brand")?;
                 self.check_private_lexical(brand, lexical, index)?;
-                let value = self.get_private(host, frame.read_ref(object)?, brand, index)?;
+                let value =
+                    self.get_private(host, frame_roots, frame.read_ref(object)?, brand, index)?;
                 store_invocation(frame, dst, value)
             }
             Instr::SetPrivate {
@@ -733,6 +776,7 @@ impl Vm {
                 self.check_private_lexical(brand, lexical, index)?;
                 match self.set_private(
                     host,
+                    frame_roots,
                     frame.read_ref(object)?,
                     brand,
                     index,
@@ -798,19 +842,27 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::GetMember { dst, object, key } => {
-                let invocation =
-                    self.read_member(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
+                let invocation = self.read_member(
+                    host,
+                    frame_roots,
+                    frame.read_ref(object)?,
+                    frame.read_ref(key)?,
+                )?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::GetDestructuredMember { dst, object, key } => {
                 let key = converted_property_key(frame.read_ref(key)?)?;
                 let invocation =
-                    self.read_destructured_member(host, frame.read_ref(object)?, key)?;
+                    self.read_destructured_member(host, frame_roots, frame.read_ref(object)?, key)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::HasProperty { dst, object, key } => {
-                let invocation =
-                    self.has_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
+                let invocation = self.has_property(
+                    host,
+                    frame_roots,
+                    frame.read_ref(object)?,
+                    frame.read_ref(key)?,
+                )?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::InstanceOf {
@@ -818,13 +870,21 @@ impl Vm {
                 value,
                 constructor,
             } => {
-                let invocation =
-                    self.instance_of(host, frame.read_ref(value)?, frame.read_ref(constructor)?)?;
+                let invocation = self.instance_of(
+                    host,
+                    frame_roots,
+                    frame.read_ref(value)?,
+                    frame.read_ref(constructor)?,
+                )?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::DeleteMember { dst, object, key } => {
-                let invocation =
-                    self.delete_property(host, frame.read_ref(object)?, frame.read_ref(key)?)?;
+                let invocation = self.delete_property(
+                    host,
+                    frame_roots,
+                    frame.read_ref(object)?,
+                    frame.read_ref(key)?,
+                )?;
                 if matches!(invocation, Invocation::Value(Value::Bool(false))) {
                     return Ok(Step::Throw(
                         self.type_error("cannot delete a non-configurable property")?,
@@ -843,7 +903,7 @@ impl Vm {
                 iterator,
             } => {
                 let iterator = object_id(frame.read_ref(iterator)?, "for-in cursor")?;
-                let key = match self.for_in_next(host, iterator)? {
+                let key = match self.for_in_next(host, frame_roots, iterator)? {
                     Ok(key) => key,
                     Err(error) => return Ok(Step::Throw(error)),
                 };
@@ -857,7 +917,7 @@ impl Vm {
                 iterable,
             } => {
                 let (value, next_method) =
-                    match self.get_iterator(host, frame.read_ref(iterable)?)? {
+                    match self.get_iterator(host, frame_roots, frame.read_ref(iterable)?)? {
                         Ok(record) => record,
                         Err(error) => return Ok(Step::Throw(error)),
                     };
@@ -873,6 +933,7 @@ impl Vm {
             } => {
                 let item = match self.iterator_step(
                     host,
+                    frame_roots,
                     frame.read_ref(iterator)?,
                     frame.read_ref(next)?,
                 )? {
@@ -890,6 +951,7 @@ impl Vm {
             } => {
                 let done_value = match self.iterator_step_result(
                     host,
+                    frame_roots,
                     frame.read_ref(iterator)?,
                     frame.read_ref(next)?,
                 )? {
@@ -903,7 +965,7 @@ impl Vm {
                 iterator,
                 preserve_throw,
             } => {
-                let invocation = self.close_iterator(host, &frame.read(iterator)?)?;
+                let invocation = self.close_iterator(host, frame_roots, &frame.read(iterator)?)?;
                 match invocation {
                     Invocation::Thrown(value) if !preserve_throw => Ok(Step::Throw(value)),
                     _ => Ok(Step::Next),
@@ -917,6 +979,7 @@ impl Vm {
             Instr::SetMember { object, key, src } => {
                 match self.write_member(
                     host,
+                    frame_roots,
                     &frame.read(object)?,
                     &frame.read(key)?,
                     frame.read(src)?,
@@ -931,7 +994,7 @@ impl Vm {
                 src,
                 kind,
             } => {
-                let key = match self.coerce_property_key(host, frame.read_ref(key)?)? {
+                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
                     Ok(key) => key,
                     Err(error) => return Ok(Step::Throw(error)),
                 };
@@ -942,6 +1005,7 @@ impl Vm {
                 let target = object_id(frame.read_ref(target)?, "spread target must be an object")?;
                 match self.copy_data_properties(
                     host,
+                    frame_roots,
                     target,
                     frame.read_ref(source)?,
                     &BTreeSet::new(),
@@ -970,7 +1034,7 @@ impl Vm {
                     .map(|slot| converted_property_key(frame.read_ref(slot)?))
                     .collect::<Result<BTreeSet<_>, _>>()?;
                 let target = self.heap.alloc_plain();
-                match self.copy_data_properties(host, target, source, &excluded)? {
+                match self.copy_data_properties(host, frame_roots, target, source, &excluded)? {
                     Invocation::Value(_) => frame.write(dst, Value::Object(target))?,
                     Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                 }
@@ -997,7 +1061,7 @@ impl Vm {
                 self.heap.declare_binding(env, binding)?;
                 Ok(Step::Next)
             }
-            Instr::Await { input, resume, .. } => self.suspend(host, frame, input, resume),
+            Instr::Await { input, resume, .. } => self.suspend(host, roots, frame, input, resume),
             Instr::Jump { target } => {
                 frame.pc = target as usize;
                 Ok(Step::Next)
@@ -1019,9 +1083,14 @@ impl Vm {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     fn call_value(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         dst: Slot,
         callee: Slot,
@@ -1034,7 +1103,7 @@ impl Vm {
             Some(slot) => frame.read(slot)?,
             None => Value::Undefined,
         };
-        let invocation = self.invoke(host, &callee, args, &receiver)?;
+        let invocation = self.invoke(host, &roots.with(frame), &callee, args, &receiver)?;
         store_invocation(frame, dst, invocation)
     }
 
@@ -1055,33 +1124,42 @@ impl Vm {
     pub(crate) fn get_iterator(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterable: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
+        let roots = &roots.with(iterable);
         let method = if matches!(iterable, Value::Object(_) | Value::String(_)) {
-            match self.read_property(host, iterable, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))? {
+            match self.read_property(
+                host,
+                roots,
+                iterable,
+                PropertyKeyRef::Symbol(ITERATOR_SYMBOL),
+            )? {
                 Invocation::Value(method) => method,
                 Invocation::Thrown(error) => return Ok(Err(error)),
             }
         } else {
             return Ok(Err(self.type_error("value is not iterable")?));
         };
-        self.get_iterator_from_method(host, iterable, &method)
+        self.get_iterator_from_method(host, roots, iterable, &method)
     }
 
     pub(crate) fn get_iterator_from_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterable: &Value,
         method: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
-        let result = self.invoke(host, method, Vec::new(), iterable)?;
+        let result = self.invoke(host, roots, method, Vec::new(), iterable)?;
         let iterator =
             self.require_iterator_object(result, "Symbol.iterator must return an object")?;
         let iterator = match iterator {
             Invocation::Value(iterator) => iterator,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        match self.read_property(host, &iterator, PropertyKeyRef::String("next"))? {
+        let roots = &roots.with(&iterator);
+        match self.read_property(host, roots, &iterator, PropertyKeyRef::String("next"))? {
             Invocation::Value(next) => Ok(Ok((iterator, next))),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
@@ -1091,14 +1169,16 @@ impl Vm {
     pub(crate) fn iterator_step(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
-        let result = match self.iterator_step_result(host, iterator, next)? {
+        let result = match self.iterator_step_result(host, roots, iterator, next)? {
             Ok(Some(result)) => result,
             other => return Ok(other),
         };
-        match self.read_property(host, &result, PropertyKeyRef::String("value"))? {
+        let roots = &roots.with(&result);
+        match self.read_property(host, roots, &result, PropertyKeyRef::String("value"))? {
             Invocation::Value(value) => Ok(Ok(Some(value))),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
@@ -1107,16 +1187,18 @@ impl Vm {
     fn iterator_step_result(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
-        let result = self.invoke(host, next, Vec::new(), iterator)?;
+        let result = self.invoke(host, roots, next, Vec::new(), iterator)?;
         let result =
             match self.require_iterator_object(result, "iterator next must return an object")? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
-        match self.read_property(host, &result, PropertyKeyRef::String("done"))? {
+        let roots = &roots.with(&result);
+        match self.read_property(host, roots, &result, PropertyKeyRef::String("done"))? {
             Invocation::Value(done) if done.truthy() => Ok(Ok(None)),
             Invocation::Value(_) => Ok(Ok(Some(result))),
             Invocation::Thrown(error) => Ok(Err(error)),
@@ -1136,29 +1218,33 @@ impl Vm {
     pub(crate) fn close_iterator(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterator: &Value,
     ) -> Result<Invocation, VmError> {
         // Valid bytecode produced by the compiler only supplies a GetIterator result.
         if !matches!(iterator, Value::Object(_)) {
             return self.throw_type_error("iterator must be an object");
         }
-        let method = match self.read_property(host, iterator, PropertyKeyRef::String("return"))? {
-            Invocation::Value(Value::Undefined | Value::Null) => {
-                return Ok(Invocation::Value(Value::Undefined));
-            }
-            Invocation::Value(method) => method,
-            thrown => return Ok(thrown),
-        };
-        let invocation = self.invoke(host, &method, Vec::new(), iterator)?;
+        let roots = &roots.with(iterator);
+        let method =
+            match self.read_property(host, roots, iterator, PropertyKeyRef::String("return"))? {
+                Invocation::Value(Value::Undefined | Value::Null) => {
+                    return Ok(Invocation::Value(Value::Undefined));
+                }
+                Invocation::Value(method) => method,
+                thrown => return Ok(thrown),
+            };
+        let invocation = self.invoke(host, roots, &method, Vec::new(), iterator)?;
         self.require_iterator_object(invocation, "iterator return must return an object")
     }
 
     pub(crate) fn string_value(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Invocation, VmError> {
-        Ok(match self.coerce_string(host, value)? {
+        Ok(match self.coerce_string(host, roots, value)? {
             Ok(string) => Invocation::Value(Value::String(string)),
             Err(error) => Invocation::Thrown(error),
         })
@@ -1167,9 +1253,10 @@ impl Vm {
     pub(crate) fn coerce_string(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
-        let value = match self.coerce_primitive(host, value, Hint::String)? {
+        let value = match self.coerce_primitive(host, roots, value, Hint::String)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
@@ -1182,9 +1269,10 @@ impl Vm {
     pub(crate) fn coerce_number(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<f64, Value>, VmError> {
-        let value = match self.coerce_primitive(host, value, Hint::Number)? {
+        let value = match self.coerce_primitive(host, roots, value, Hint::Number)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
@@ -1197,9 +1285,10 @@ impl Vm {
     pub(crate) fn coerce_property_key(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<PropertyKey, Value>, VmError> {
-        let value = match self.coerce_primitive(host, value, Hint::String)? {
+        let value = match self.coerce_primitive(host, roots, value, Hint::String)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
@@ -1212,29 +1301,40 @@ impl Vm {
     fn coerce_primitive<'a>(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &'a Value,
         hint: Hint,
     ) -> Result<Result<Cow<'a, Value>, Value>, VmError> {
         if !matches!(value, Value::Object(_)) {
             return Ok(Ok(Cow::Borrowed(value)));
         }
-        Ok(match self.primitive_from_object(host, value, hint)? {
-            Invocation::Value(value) => Ok(Cow::Owned(value)),
-            Invocation::Thrown(error) => Err(error),
-        })
+        Ok(
+            match self.primitive_from_object(host, roots, value, hint)? {
+                Invocation::Value(value) => Ok(Cow::Owned(value)),
+                Invocation::Thrown(error) => Err(error),
+            },
+        )
     }
 
     fn primitive_from_object(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         hint: Hint,
     ) -> Result<Invocation, VmError> {
-        match self.read_property(host, value, PropertyKeyRef::Symbol(TO_PRIMITIVE_SYMBOL))? {
+        let roots = &roots.with(value);
+        match self.read_property(
+            host,
+            roots,
+            value,
+            PropertyKeyRef::Symbol(TO_PRIMITIVE_SYMBOL),
+        )? {
             Invocation::Value(Value::Undefined | Value::Null) => {}
             Invocation::Value(method) => {
                 let result = self.invoke(
                     host,
+                    roots,
                     &method,
                     vec![Value::String(hint.as_str().into())],
                     value,
@@ -1253,14 +1353,15 @@ impl Vm {
             _ => ["valueOf", "toString"],
         };
         for name in methods {
-            let method = match self.read_property(host, value, PropertyKeyRef::String(name))? {
-                Invocation::Value(method) => method,
-                thrown @ Invocation::Thrown(_) => return Ok(thrown),
-            };
+            let method =
+                match self.read_property(host, roots, value, PropertyKeyRef::String(name))? {
+                    Invocation::Value(method) => method,
+                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                };
             if !self.is_callable(&method) {
                 continue;
             }
-            match self.invoke(host, &method, Vec::new(), value)? {
+            match self.invoke(host, roots, &method, Vec::new(), value)? {
                 Invocation::Value(Value::Object(_)) => {}
                 Invocation::Value(primitive) => return Ok(Invocation::Value(primitive)),
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -1283,6 +1384,7 @@ impl Vm {
     pub(crate) fn read_member(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
@@ -1291,35 +1393,38 @@ impl Vm {
         }
         match key {
             Value::String(key) => {
-                return self.read_property(host, object, PropertyKeyRef::JsString(key));
+                return self.read_property(host, roots, object, PropertyKeyRef::JsString(key));
             }
             Value::Symbol(id) => {
-                return self.read_property(host, object, PropertyKeyRef::Symbol(*id));
+                return self.read_property(host, roots, object, PropertyKeyRef::Symbol(*id));
             }
             _ => {}
         }
-        let key = match self.coerce_property_key(host, key)? {
+        let roots = &roots.with(object);
+        let key = match self.coerce_property_key(host, roots, key)? {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        self.read_property(host, object, key.borrowed())
+        self.read_property(host, roots, object, key.borrowed())
     }
 
     fn read_destructured_member(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
         if matches!(object, Value::Null | Value::Undefined) {
             return self.throw_type_error("Cannot destructure null or undefined");
         }
-        self.read_property(host, object, key)
+        self.read_property(host, roots, object, key)
     }
 
     pub(crate) fn read_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
@@ -1334,17 +1439,18 @@ impl Vm {
             }
         }
         if let Some(prototype) = self.primitive_prototype(object) {
-            return self.read_property_with_receiver(host, prototype, object, key);
+            return self.read_property_with_receiver(host, roots, prototype, object, key);
         }
         let Value::Object(id) = *object else {
             return self.throw_type_error("property access on a non-object");
         };
-        self.read_property_with_receiver(host, id, object, key)
+        self.read_property_with_receiver(host, roots, id, object, key)
     }
 
     pub(crate) fn read_property_with_receiver(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
         key: PropertyKeyRef<'_>,
@@ -1367,14 +1473,14 @@ impl Vm {
                 target, handler, ..
             } = *object
             {
-                return self.proxy_get(host, target, handler, key, receiver);
+                return self.proxy_get(host, roots, target, handler, key, receiver);
             }
             if self.has_own_function_metadata(id, key)? {
                 let name = if key.is_str("name") { "name" } else { "length" };
                 return Ok(Invocation::Value(self.function_metadata(id, name)?));
             }
             if let Some(property) = object.own_property(key) {
-                return self.read_property_value(host, receiver, property.into_owned());
+                return self.read_property_value(host, roots, receiver, property.into_owned());
             }
             current = object.prototype();
         }
@@ -1387,6 +1493,7 @@ impl Vm {
     pub(crate) fn read_array_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: usize,
     ) -> Result<Invocation, VmError> {
@@ -1395,22 +1502,28 @@ impl Vm {
         };
         let receiver = Value::Object(id);
         if let Some(property) = array.own_index(index).map(OwnProperty::into_owned) {
-            self.read_property_value(host, &receiver, property)
+            self.read_property_value(host, roots, &receiver, property)
         } else {
-            self.read_property(host, &receiver, PropertyKeyRef::String(&index.to_string()))
+            self.read_property(
+                host,
+                roots,
+                &receiver,
+                PropertyKeyRef::String(&index.to_string()),
+            )
         }
     }
 
     fn read_property_value(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         property: Property,
     ) -> Result<Invocation, VmError> {
         match property {
             Property::Data(value) => Ok(Invocation::Value(value)),
             Property::Accessor { get: Some(get), .. } => {
-                self.invoke(host, &Value::Object(get), Vec::new(), receiver)
+                self.invoke(host, roots, &Value::Object(get), Vec::new(), receiver)
             }
             Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::Undefined)),
         }
@@ -1419,24 +1532,27 @@ impl Vm {
     fn instance_of(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
     ) -> Result<Invocation, VmError> {
-        self.has_instance(host, value, constructor, false)
+        self.has_instance(host, roots, value, constructor, false)
     }
 
     fn ordinary_has_instance(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
     ) -> Result<Invocation, VmError> {
-        self.has_instance(host, value, constructor, true)
+        self.has_instance(host, roots, value, constructor, true)
     }
 
     fn has_instance(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
         mut ordinary: bool,
@@ -1449,12 +1565,15 @@ impl Vm {
                 self.throw_type_error("right-hand side of 'instanceof' is not an object")
             };
         };
+        let live = (value, constructor);
+        let roots = &roots.with(&live);
         let mut remaining = self.heap.object_count();
         loop {
             let receiver = Value::Object(target);
             if !ordinary {
                 let hook = match self.read_property(
                     host,
+                    &roots.with(&receiver),
                     &receiver,
                     PropertyKeyRef::Symbol(HAS_INSTANCE_SYMBOL),
                 )? {
@@ -1477,7 +1596,7 @@ impl Vm {
                     );
                     if !ordinary {
                         return Ok(
-                            match self.invoke(host, &hook, vec![value.clone()], &receiver)? {
+                            match self.invoke(host, roots, &hook, vec![value.clone()], &receiver)? {
                                 Invocation::Value(result) => {
                                     Invocation::Value(Value::Bool(result.truthy()))
                                 }
@@ -1514,6 +1633,7 @@ impl Vm {
         };
         let prototype = match self.read_property(
             host,
+            roots,
             &Value::Object(target),
             PropertyKeyRef::String("prototype"),
         )? {
@@ -1537,22 +1657,25 @@ impl Vm {
     fn has_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
         let Value::Object(id) = *object else {
             return self.throw_type_error("right-hand side of 'in' is not an object");
         };
-        let key = match self.coerce_property_key(host, key)? {
+        let roots = &roots.with(object);
+        let key = match self.coerce_property_key(host, roots, key)? {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        self.has_property_key(host, id, key.borrowed())
+        self.has_property_key(host, roots, id, key.borrowed())
     }
 
     pub(crate) fn has_property_key(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
@@ -1563,7 +1686,7 @@ impl Vm {
                 target, handler, ..
             } = *object
             {
-                return self.proxy_presence(host, target, handler, key, false);
+                return self.proxy_presence(host, roots, target, handler, key, false);
             }
             if self.has_own_function_metadata(id, key)? || object.own_property(key).is_some() {
                 return Ok(Invocation::Value(Value::Bool(true)));
@@ -1578,18 +1701,20 @@ impl Vm {
     pub(crate) fn delete_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: &Value,
         key: &Value,
     ) -> Result<Invocation, VmError> {
         if matches!(target, Value::Null | Value::Undefined) {
             return self.throw_type_error("cannot delete a property of null or undefined");
         }
+        let roots = &roots.with(target);
         let coerced;
         let key = match key {
             Value::String(key) => PropertyKeyRef::JsString(key),
             Value::Symbol(id) => PropertyKeyRef::Symbol(*id),
             _ => {
-                coerced = match self.coerce_property_key(host, key)? {
+                coerced = match self.coerce_property_key(host, roots, key)? {
                     Ok(key) => key,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
@@ -1601,7 +1726,7 @@ impl Vm {
                 target, handler, ..
             } = *self.heap.get(id)?
         {
-            return self.proxy_presence(host, target, handler, key, true);
+            return self.proxy_presence(host, roots, target, handler, key, true);
         }
         let deleted = match (target, key) {
             (Value::Object(id), key) if self.has_own_function_metadata(*id, key)? => false,
@@ -1692,6 +1817,7 @@ impl Vm {
     fn write_member(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
         value: Value,
@@ -1699,7 +1825,8 @@ impl Vm {
         if matches!(object, Value::Null | Value::Undefined) {
             return self.throw_type_error("property write on a non-object");
         }
-        let key = match self.coerce_property_key(host, key)? {
+        let roots = &roots.with(object);
+        let key = match self.coerce_property_key(host, &roots.with(&value), key)? {
             Ok(key) => key,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -1718,12 +1845,17 @@ impl Vm {
                     .expect("non-nullish primitive")
             }
         };
-        self.set_property(host, id, object, key, value, true)
+        self.set_property(host, roots, id, object, key, value, true)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     pub(crate) fn set_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
         key: PropertyKey,
@@ -1749,7 +1881,15 @@ impl Vm {
                 target, handler, ..
             } = *object
             {
-                return self.proxy_set(host, (target, handler), receiver, key, value, strict);
+                return self.proxy_set(
+                    host,
+                    roots,
+                    (target, handler),
+                    receiver,
+                    key,
+                    value,
+                    strict,
+                );
             }
             if self.has_own_function_metadata(id, key.borrowed())? {
                 return reject(self, "Cannot assign to read only function metadata");
@@ -1762,7 +1902,7 @@ impl Vm {
         }
         match property.as_ref().and_then(OwnProperty::setter) {
             Some(Some(set)) => {
-                return match self.invoke(host, &Value::Object(set), vec![value], receiver)? {
+                return match self.invoke(host, roots, &Value::Object(set), vec![value], receiver)? {
                     Invocation::Value(_) => Ok(success),
                     thrown @ Invocation::Thrown(_) => Ok(thrown),
                 };
@@ -1788,7 +1928,8 @@ impl Vm {
             return reject(self, "Cannot overwrite receiver function metadata");
         }
         if matches!(self.heap.get(id)?, Object::Proxy { .. }) {
-            let exists = match self.own_descriptor(host, id, key.borrowed())? {
+            let live = (&key, &value, receiver);
+            let exists = match self.own_descriptor(host, &roots.with(&live), id, key.borrowed())? {
                 Err(error) => return Ok(Invocation::Thrown(error)),
                 Ok(Some((property, attrs)))
                     if !attrs.writable || !matches!(property, Property::Data(_)) =>
@@ -1804,7 +1945,7 @@ impl Vm {
                 configurable: (!exists).then_some(true),
                 ..DescriptorUpdate::default()
             };
-            return match self.try_apply_property_update(host, id, key, update)? {
+            return match self.try_apply_property_update(host, roots, id, key, update)? {
                 Ok(true) => Ok(success),
                 Ok(false) => reject(self, "Cannot define receiver property"),
                 Err(error) => Ok(Invocation::Thrown(error)),
@@ -1835,7 +1976,7 @@ impl Vm {
                     value: Some(value),
                     ..DescriptorUpdate::default()
                 };
-                return match self.try_apply_property_update(host, id, key, update)? {
+                return match self.try_apply_property_update(host, roots, id, key, update)? {
                     Ok(true) => Ok(success),
                     Ok(false) => reject(self, "Cannot define property"),
                     Err(error) => Ok(Invocation::Thrown(error)),
@@ -1855,28 +1996,36 @@ impl Vm {
     fn copy_data_properties(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         source: &Value,
         excluded: &BTreeSet<PropertyKeyRef<'_>>,
     ) -> Result<Invocation, VmError> {
+        let live = (target, source);
+        let roots = &roots.with(&live);
         match source {
             Value::Object(id) => {
                 // Capture the order once; an earlier getter may delete a later key
                 // or change its enumerability before it is visited.
-                let keys = match self.own_keys(host, *id, false)? {
+                let keys = match self.own_keys(host, roots, *id, false)? {
                     Ok(keys) => keys,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
-                for key in keys {
+                let mut keys = keys.into_iter();
+                while let Some(key) = keys.next() {
                     if excluded.contains(&key.borrowed()) {
                         continue;
                     }
-                    match self.own_descriptor(host, *id, key.borrowed())? {
+                    // A getter can delete keys from the source. Keep the
+                    // current key and the unvisited snapshot keys alive.
+                    let live = (keys.as_slice(), &key);
+                    let key_roots = &roots.with(&live);
+                    match self.own_descriptor(host, key_roots, *id, key.borrowed())? {
                         Ok(Some((_, attrs))) if attrs.enumerable => {}
                         Ok(_) => continue,
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     }
-                    match self.read_property(host, source, key.borrowed())? {
+                    match self.read_property(host, key_roots, source, key.borrowed())? {
                         Invocation::Value(value) => {
                             self.heap
                                 .define_property(target, key, Property::Data(value))?;
@@ -2004,10 +2153,13 @@ impl Vm {
     pub(crate) fn initialize_class_elements(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         class: ObjectId,
         receiver: ObjectId,
         is_static: bool,
     ) -> Result<Option<Value>, VmError> {
+        let live = (class, receiver);
+        let roots = &roots.with(&live);
         let record = self
             .heap
             .function(class)
@@ -2048,6 +2200,7 @@ impl Vm {
             let value = if let Some(closure) = closure {
                 match self.invoke(
                     host,
+                    &roots.with(&key),
                     &Value::Object(closure),
                     Vec::new(),
                     &Value::Object(receiver),
@@ -2073,7 +2226,7 @@ impl Vm {
                     ..Default::default()
                 };
                 if let Invocation::Thrown(error) =
-                    self.apply_property_update(host, receiver, key, update)?
+                    self.apply_property_update(host, roots, receiver, key, update)?
                 {
                     return Ok(Some(error));
                 }
@@ -2174,6 +2327,7 @@ impl Vm {
     fn suspend(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         frame: &Frame,
         input: Slot,
         resume: u32,
@@ -2189,7 +2343,7 @@ impl Vm {
             .cloned()
             .ok_or_else(|| VmError::InvalidState(format!("resume {resume} does not exist")))?;
         let values = frame.read_saved(&resume_entry.saved_slots)?;
-        let prepared = match self.prepare_await(host, input_value)? {
+        let prepared = match self.prepare_await(host, &roots.with(frame), input_value)? {
             Ok(prepared) => prepared,
             Err(error) => return Ok(Step::Throw(error)),
         };

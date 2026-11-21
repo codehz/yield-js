@@ -23,10 +23,10 @@ macro_rules! symbol_methods {
 }
 
 symbol_methods! {
-    Prototype "valueOf" => |vm, _, _, receiver| vm.symbol_method(receiver, "valueOf"),
-    Prototype "toString" => |vm, _, _, receiver| vm.symbol_method(receiver, "toString"),
-    Static "for" => |vm, host, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, args), args),
-    Static "keyFor" => |vm, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args),
+    Prototype "valueOf" => |vm, _, _, _, receiver| vm.symbol_method(receiver, "valueOf"),
+    Prototype "toString" => |vm, _, _, _, receiver| vm.symbol_method(receiver, "toString"),
+    Static "for" => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args),
+    Static "keyFor" => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args),
 }
 
 pub(crate) const OWNER: Owner = Owner::new(
@@ -37,10 +37,10 @@ pub(crate) const OWNER: Owner = Owner::new(
     ],
     &[
         &[
-            IntrinsicDef::call(CONSTRUCTOR, |vm, host, args, _| {
-                vm.symbol_constructor(host, args)
+            IntrinsicDef::call(CONSTRUCTOR, |vm, host, roots, args, _| {
+                vm.symbol_constructor(host, roots, args)
             }),
-            IntrinsicDef::call(DESCRIPTION, |vm, _, _, receiver| {
+            IntrinsicDef::call(DESCRIPTION, |vm, _, _, _, receiver| {
                 vm.symbol_method(receiver, "get description")
             }),
         ],

@@ -4,6 +4,7 @@
 use crate::builtin::globals::Owner;
 use crate::builtin::{ROOT_FUNCTION_PROTOTYPE, ROOT_PROXY, RootKind, RootSpec};
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, PlainObject, Property};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -16,8 +17,8 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
 
 pub(crate) const PROXY_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     CONSTRUCTOR,
-    |vm, _, _, _| vm.throw_type_error("Proxy requires new"),
-    |vm, _, args, _| vm.construct_proxy(&args),
+    |vm, _, _, _, _| vm.throw_type_error("Proxy requires new"),
+    |vm, _, _, args, _| vm.construct_proxy(&args),
 )
 .without_new_target_prototype()];
 
@@ -67,14 +68,21 @@ impl Vm {
     fn proxy_trap(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         handler: ObjectId,
         name: &str,
         args: Vec<Value>,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
         let handler = Value::Object(handler);
-        match self.read_property(host, &handler, PropertyKeyRef::String(name))? {
+        let trap = self.read_property(
+            host,
+            &roots.with(&(&handler, &args)),
+            &handler,
+            PropertyKeyRef::String(name),
+        )?;
+        match trap {
             Invocation::Value(Value::Undefined | Value::Null) => Ok(Ok(None)),
-            Invocation::Value(method) => match self.invoke(host, &method, args, &handler)? {
+            Invocation::Value(method) => match self.invoke(host, roots, &method, args, &handler)? {
                 Invocation::Value(value) => Ok(Ok(Some(value))),
                 Invocation::Thrown(error) => Ok(Err(error)),
             },
@@ -85,23 +93,30 @@ impl Vm {
     pub(crate) fn proxy_get(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
         key: PropertyKeyRef<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        let root_view = (target, handler, key, receiver);
+        let roots = &roots.with(&root_view);
         let result = self.proxy_trap(
             host,
+            roots,
             handler,
             "get",
             vec![Value::Object(target), key_value(key), receiver.clone()],
         )?;
         let value = match result {
-            Ok(None) => return self.read_property_with_receiver(host, target, receiver, key),
+            Ok(None) => {
+                return self.read_property_with_receiver(host, roots, target, receiver, key);
+            }
             Ok(Some(value)) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        match self.own_descriptor(host, target, key)? {
+        let roots = &roots.with(&value);
+        match self.own_descriptor(host, roots, target, key)? {
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some((property, attrs))) if !attrs.configurable => {
                 let valid = match property {
@@ -118,9 +133,14 @@ impl Vm {
         Ok(Invocation::Value(value))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     pub(crate) fn proxy_set(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         proxy: (ObjectId, ObjectId),
         receiver: &Value,
         key: PropertyKey,
@@ -128,8 +148,13 @@ impl Vm {
         strict: bool,
     ) -> Result<Invocation, VmError> {
         let (target, handler) = proxy;
+        let proxy_view = (proxy, receiver);
+        let roots = &roots.with(&proxy_view);
+        let inputs = (&key, &value);
+        let trap_roots = &roots.with(&inputs);
         match self.proxy_trap(
             host,
+            trap_roots,
             handler,
             "set",
             vec![
@@ -139,7 +164,9 @@ impl Vm {
                 receiver.clone(),
             ],
         )? {
-            Ok(None) => return self.set_property(host, target, receiver, key, value, strict),
+            Ok(None) => {
+                return self.set_property(host, roots, target, receiver, key, value, strict);
+            }
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some(result)) if !result.truthy() => {
                 return if strict {
@@ -150,7 +177,7 @@ impl Vm {
             }
             _ => {}
         }
-        match self.own_descriptor(host, target, key.borrowed())? {
+        match self.own_descriptor(host, trap_roots, target, key.borrowed())? {
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some((property, attrs))) if !attrs.configurable => {
                 let valid = match property {
@@ -170,14 +197,18 @@ impl Vm {
     pub(crate) fn proxy_presence(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
         key: PropertyKeyRef<'_>,
         delete: bool,
     ) -> Result<Invocation, VmError> {
+        let root_view = (target, handler, key);
+        let roots = &roots.with(&root_view);
         let name = if delete { "deleteProperty" } else { "has" };
         let flag = match self.proxy_trap(
             host,
+            roots,
             handler,
             name,
             vec![Value::Object(target), key_value(key)],
@@ -185,16 +216,16 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some(value)) => value.truthy(),
             Ok(None) if delete => {
-                return self.delete_property(host, &Value::Object(target), &key_value(key));
+                return self.delete_property(host, roots, &Value::Object(target), &key_value(key));
             }
-            Ok(None) => return self.has_property_key(host, target, key),
+            Ok(None) => return self.has_property_key(host, roots, target, key),
         };
         if flag == delete {
             let extensible = self
                 .heap
                 .get(self.heap.proxy_target(target)?)?
                 .is_extensible();
-            match self.own_descriptor(host, target, key)? {
+            match self.own_descriptor(host, roots, target, key)? {
                 Err(error) => return Ok(Invocation::Thrown(error)),
                 Ok(Some((_, attrs))) if !attrs.configurable || !extensible => return self.throw_type_error("Proxy trap contradicts a protected own property"),
                 Ok(None) if delete && !extensible => return self.throw_type_error("Proxy deleteProperty trap cannot report success for a missing property on a non-extensible target"),
@@ -207,52 +238,65 @@ impl Vm {
     pub(crate) fn own_keys(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         include_metadata: bool,
     ) -> Result<Result<Vec<PropertyKey>, Value>, VmError> {
+        let roots = &roots.with(&id);
         let Object::Proxy {
             target, handler, ..
         } = *self.heap.get(id)?
         else {
             return Ok(Ok(self.heap.get(id)?.own_keys(include_metadata).collect()));
         };
-        let Some(result) =
-            unwrap_script!(self.proxy_trap(host, handler, "ownKeys", vec![Value::Object(target)]))
-        else {
-            return self.own_keys(host, target, include_metadata);
+        let Some(result) = unwrap_script!(self.proxy_trap(
+            host,
+            roots,
+            handler,
+            "ownKeys",
+            vec![Value::Object(target)]
+        )) else {
+            return self.own_keys(host, roots, target, include_metadata);
         };
         if !matches!(result, Value::Object(_)) {
             return Ok(Err(
                 self.type_error("Proxy ownKeys trap must return an object")?
             ));
         }
-        let length = match self.read_property(host, &result, PropertyKeyRef::String("length"))? {
-            Invocation::Value(value) => value,
-            Invocation::Thrown(error) => return Ok(Err(error)),
-        };
+        let root_view = (target, &result);
+        let roots = &roots.with(&root_view);
+        let length =
+            match self.read_property(host, roots, &result, PropertyKeyRef::String("length"))? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            };
         let mut keys = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         let iterable = if length == Value::Undefined {
             match self.read_property(
                 host,
+                roots,
                 &result,
                 PropertyKeyRef::Symbol(crate::heap::ITERATOR_SYMBOL),
             )? {
                 Invocation::Value(Value::Undefined | Value::Null) => None,
                 Invocation::Value(method) => Some(unwrap_script!(
-                    self.get_iterator_from_method(host, &result, &method)
+                    self.get_iterator_from_method(host, roots, &result, &method)
                 )),
                 Invocation::Thrown(error) => return Ok(Err(error)),
             }
         } else {
             None
         };
-        let length = unwrap_script!(self.coerce_number(host, &length))
+        let roots = &roots.with(&iterable);
+        let length = unwrap_script!(self.coerce_number(host, roots, &length))
             .clamp(0.0, 9_007_199_254_740_991.0) as u64;
         let mut index = 0;
         loop {
+            let roots = &roots.with(&keys);
             let entry = if let Some((iterator, next)) = &iterable {
-                let Some(value) = unwrap_script!(self.iterator_step(host, iterator, next)) else {
+                let Some(value) = unwrap_script!(self.iterator_step(host, roots, iterator, next))
+                else {
                     break;
                 };
                 Invocation::Value(value)
@@ -260,8 +304,12 @@ impl Vm {
                 if index >= length {
                     break;
                 }
-                let entry =
-                    self.read_property(host, &result, PropertyKeyRef::String(&index.to_string()))?;
+                let entry = self.read_property(
+                    host,
+                    roots,
+                    &result,
+                    PropertyKeyRef::String(&index.to_string()),
+                )?;
                 index += 1;
                 entry
             };
@@ -273,14 +321,14 @@ impl Vm {
                     let error =
                         self.type_error("Proxy ownKeys entries must be strings or symbols")?;
                     if let Some((iterator, _)) = &iterable {
-                        self.close_iterator(host, iterator)?;
+                        self.close_iterator(host, &roots.with(&error), iterator)?;
                     }
                     return Ok(Err(error));
                 }
             };
             if !seen.insert(key.clone()) {
                 if let Some((iterator, _)) = &iterable {
-                    self.close_iterator(host, iterator)?;
+                    self.close_iterator(host, roots, iterator)?;
                 }
                 return Ok(Err(
                     self.type_error("Proxy ownKeys trap returned a duplicate key")?
@@ -292,16 +340,19 @@ impl Vm {
             .heap
             .get(self.heap.proxy_target(target)?)?
             .is_extensible();
-        let target_keys = unwrap_script!(self.own_keys(host, target, false));
+        let roots = &roots.with(&keys);
+        let target_keys = unwrap_script!(self.own_keys(host, roots, target, false));
         if !extensible && target_keys.len() != keys.len() {
             return Ok(Err(self.type_error(
                 "Proxy ownKeys trap changed keys of a non-extensible target",
             )?));
         }
-        for key in target_keys {
-            let descriptor = unwrap_script!(self.own_descriptor(host, target, key.borrowed()));
+        let roots = &roots.with(&target_keys);
+        for key in &target_keys {
+            let descriptor =
+                unwrap_script!(self.own_descriptor(host, roots, target, key.borrowed()));
             if (!extensible || descriptor.is_some_and(|(_, attrs)| !attrs.configurable))
-                && !seen.contains(&key)
+                && !seen.contains(key)
             {
                 return Ok(Err(
                     self.type_error("Proxy ownKeys trap omitted a protected key")?
@@ -314,22 +365,26 @@ impl Vm {
     pub(crate) fn enumerable_string_keys(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
+        let roots = &roots.with(&id);
         let ordinary = !matches!(self.heap.get(id)?, Object::Proxy { .. });
-        let keys = unwrap_script!(self.own_keys(host, id, ordinary));
+        let keys = unwrap_script!(self.own_keys(host, roots, id, ordinary));
         let mut names = Vec::new();
-        for key in keys {
+        let roots = &roots.with(&keys);
+        for key in &keys {
             if let PropertyKey::String(key) = key
                 && (ordinary
                     || unwrap_script!(self.own_descriptor(
                         host,
+                        roots,
                         id,
-                        PropertyKeyRef::JsString(&key)
+                        PropertyKeyRef::JsString(key)
                     ))
                     .is_some_and(|(_, attrs)| attrs.enumerable))
             {
-                names.push(key);
+                names.push(key.clone());
             }
         }
         Ok(Ok(names))
@@ -338,9 +393,12 @@ impl Vm {
     pub(crate) fn own_descriptor(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<Result<Option<(Property, Attributes)>, Value>, VmError> {
+        let root_view = (id, key);
+        let roots = &roots.with(&root_view);
         let Object::Proxy {
             target, handler, ..
         } = *self.heap.get(id)?
@@ -353,18 +411,20 @@ impl Vm {
         };
         let Some(result) = unwrap_script!(self.proxy_trap(
             host,
+            roots,
             handler,
             "getOwnPropertyDescriptor",
             vec![Value::Object(target), key_value(key)]
         )) else {
-            return self.own_descriptor(host, target, key);
+            return self.own_descriptor(host, roots, target, key);
         };
         if !matches!(result, Value::Undefined | Value::Object(_)) {
             return Ok(Err(self.type_error(
                 "Proxy descriptor trap must return an object or undefined",
             )?));
         }
-        let current = unwrap_script!(self.own_descriptor(host, target, key));
+        let roots = &roots.with(&result);
+        let current = unwrap_script!(self.own_descriptor(host, roots, target, key));
         let extensible = self
             .heap
             .get(self.heap.proxy_target(target)?)?
@@ -381,7 +441,12 @@ impl Vm {
                 Ok(Ok(None))
             };
         }
-        let update = unwrap_script!(self.read_property_descriptor(host, &result));
+        let current_property = current.as_ref().map(|(property, _)| property);
+        let update = unwrap_script!(self.read_property_descriptor(
+            host,
+            &roots.with(&current_property),
+            &result
+        ));
         let Some((property, attrs)) = update.complete(true, None) else {
             unreachable!()
         };
@@ -424,8 +489,10 @@ impl Vm {
     pub(crate) fn for_in_next(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         iterator: ObjectId,
     ) -> Result<Result<Option<JsString>, Value>, VmError> {
+        let roots = &roots.with(&iterator);
         loop {
             let Object::ForInIterator {
                 current,
@@ -452,6 +519,7 @@ impl Vm {
                     }
                     let Some((_, attrs)) = unwrap_script!(self.own_descriptor(
                         host,
+                        roots,
                         id,
                         PropertyKeyRef::JsString(&key)
                     )) else {
@@ -479,7 +547,7 @@ impl Vm {
             } else {
                 // Snapshot each level's keys on first reaching it, but recheck
                 // its descriptors as keys are visited (including after await).
-                let keys = unwrap_script!(self.own_keys(host, id, false))
+                let keys = unwrap_script!(self.own_keys(host, roots, id, false))
                     .into_iter()
                     .filter_map(|key| match key {
                         PropertyKey::String(key) => Some(key),

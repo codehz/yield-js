@@ -256,19 +256,43 @@ impl<'a> CallCx<'a> {
         saved: Vec<JsValue>,
         resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
     ) -> JsResult<HostStep> {
-        let unpack = |value: JsValue| {
-            self.check_value(&value)?;
-            Ok(value.value)
-        };
         Ok(HostStep::Call(GuestCall::new(
             self.epoch,
             self.call,
-            unpack(callee)?,
-            unpack(receiver)?,
-            args.into_iter().map(unpack).collect::<JsResult<_>>()?,
-            saved.into_iter().map(unpack).collect::<JsResult<_>>()?,
+            self.unpack(callee)?,
+            self.unpack(receiver)?,
+            args.into_iter()
+                .map(|value| self.unpack(value))
+                .collect::<JsResult<_>>()?,
+            saved
+                .into_iter()
+                .map(|value| self.unpack(value))
+                .collect::<JsResult<_>>()?,
             resume,
         )))
+    }
+
+    /// Request synchronous collection after this context ends, without running
+    /// microtasks. Resumes with the number of removed objects, the original
+    /// `this`, and `saved` as positional arguments. A tracing error aborts the
+    /// call without resuming.
+    pub fn request_gc(
+        &mut self,
+        saved: Vec<JsValue>,
+        resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
+    ) -> JsResult<HostStep> {
+        let saved = saved
+            .into_iter()
+            .map(|value| self.unpack(value))
+            .collect::<JsResult<_>>()?;
+        Ok(HostStep::CollectGarbage(GcRequest::new(
+            self.epoch, self.call, saved, resume,
+        )))
+    }
+
+    fn unpack(&self, value: JsValue) -> JsResult<Value> {
+        self.check_value(&value)?;
+        Ok(value.value)
     }
 
     pub fn bindings(&self) -> &Bindings {

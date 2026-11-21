@@ -3,6 +3,7 @@
 use crate::builtin::globals::Owner;
 use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, CollectionIteration, CollectionKind, DescriptorUpdate, ITERATOR_SYMBOL, Object,
     PlainObject,
@@ -152,8 +153,8 @@ macro_rules! collection {
         &[
             IntrinsicDef::constructor(
                 $key,
-                |vm, _, _, _| vm.throw_type_error("Map and Set require new"),
-                |vm, host, args, prototype| vm.construct_collection(host, CollectionKind::$kind, &args, prototype),
+                |vm, _, _, _, _| vm.throw_type_error("Map and Set require new"),
+                |vm, host, roots, args, prototype| vm.construct_collection(host, roots, CollectionKind::$kind, &args, prototype),
             ),
             $(collection!(@method $owner, $kind, Prototype, $name, $method),)*
             collection!(@method $owner, $kind, Prototype, "has", Has),
@@ -163,14 +164,14 @@ macro_rules! collection {
             collection!(@method $owner, $kind, Prototype, "forEach", ForEach),
             collection!(@method $owner, $kind, Prototype, "values", Iterate(Values)),
             collection!(@method $owner, $kind, Prototype, "entries", Iterate(Entries)),
-            IntrinsicDef::call(IntrinsicKey::new($iterator, Slot::Prototype, "next"), |vm, _, _, receiver| {
+            IntrinsicDef::call(IntrinsicKey::new($iterator, Slot::Prototype, "next"), |vm, _, _, _, receiver| {
                 vm.collection_next(CollectionKind::$kind, receiver)
             }),
         ]
     };
     (@method $owner:literal, $kind:ident, $slot:ident, $name:literal, $method:expr) => {
-        IntrinsicDef::call(IntrinsicKey::new($owner, Slot::$slot, $name), |vm, host, args, receiver| {
-            vm.collection_method(host, CollectionKind::$kind, $method, receiver, &args)
+        IntrinsicDef::call(IntrinsicKey::new($owner, Slot::$slot, $name), |vm, host, roots, args, receiver| {
+            vm.collection_method(host, roots, CollectionKind::$kind, $method, receiver, &args)
         })
     };
 }
@@ -186,7 +187,7 @@ macro_rules! weak_method {
     ($owner:literal, $dispatch:ident, $method_type:ident; $name:literal, $method:ident) => {
         IntrinsicDef::call(
             IntrinsicKey::new($owner, Slot::Prototype, $name),
-            |vm, _, args, receiver| vm.$dispatch($method_type::$method, receiver, &args),
+            |vm, _, _, args, receiver| vm.$dispatch($method_type::$method, receiver, &args),
         )
     };
 }
@@ -194,8 +195,8 @@ macro_rules! weak_method {
 pub(crate) const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         WEAK_MAP,
-        |vm, _, _, _| vm.throw_type_error("WeakMap requires new"),
-        |vm, host, args, prototype| vm.construct_weakmap(host, &args, prototype),
+        |vm, _, _, _, _| vm.throw_type_error("WeakMap requires new"),
+        |vm, host, roots, args, prototype| vm.construct_weakmap(host, roots, &args, prototype),
     ),
     weak_method!("WeakMap", weakmap_method, WeakMapMethod; "get", Get),
     weak_method!("WeakMap", weakmap_method, WeakMapMethod; "set", Set),
@@ -206,8 +207,8 @@ pub(crate) const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[
 const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         WEAK_SET,
-        |vm, _, _, _| vm.throw_type_error("WeakSet requires new"),
-        |vm, host, args, prototype| vm.construct_weakset(host, &args, prototype),
+        |vm, _, _, _, _| vm.throw_type_error("WeakSet requires new"),
+        |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
     ),
     weak_method!("WeakSet", weakset_method, WeakSetMethod; "add", Add),
     weak_method!("WeakSet", weakset_method, WeakSetMethod; "has", Has),
@@ -355,6 +356,7 @@ impl Vm {
     fn construct_weakmap(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
@@ -364,7 +366,7 @@ impl Vm {
             object,
             entries: Default::default(),
         }));
-        self.populate_collection(host, collection, args, "set")
+        self.populate_collection(host, roots, collection, args, "set")
     }
 
     fn weakmap_method(
@@ -406,6 +408,7 @@ impl Vm {
     fn construct_weakset(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
@@ -414,7 +417,7 @@ impl Vm {
             object: PlainObject::new(Some(prototype)),
             entries: Default::default(),
         }));
-        self.populate_collection(host, collection, args, "add")
+        self.populate_collection(host, roots, collection, args, "add")
     }
 
     fn weakset_method(
@@ -454,6 +457,7 @@ impl Vm {
     fn construct_collection(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -473,45 +477,61 @@ impl Vm {
                 elements: Vec::new(),
             },
         }));
-        self.populate_collection(host, collection, args, adder_name)
+        self.populate_collection(host, roots, collection, args, adder_name)
     }
 
     fn populate_collection(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         collection: Value,
         args: &[Value],
         adder_name: &str,
     ) -> Result<Invocation, VmError> {
+        let root_view = (&collection, args);
+        let roots = &roots.with(&root_view);
         let Some(iterable) = args
             .first()
             .filter(|v| !matches!(v, Value::Null | Value::Undefined))
         else {
             return Ok(Invocation::Value(collection));
         };
-        let adder =
-            match self.read_property(host, &collection, PropertyKeyRef::String(adder_name))? {
-                Invocation::Value(value) if self.is_callable(&value) => value,
-                Invocation::Value(_) => {
-                    return self.throw_type_error("collection adder is not callable");
-                }
-                thrown => return Ok(thrown),
-            };
-        let (iterator, next) = match self.get_iterator(host, iterable)? {
+        let adder = match self.read_property(
+            host,
+            roots,
+            &collection,
+            PropertyKeyRef::String(adder_name),
+        )? {
+            Invocation::Value(value) if self.is_callable(&value) => value,
+            Invocation::Value(_) => {
+                return self.throw_type_error("collection adder is not callable");
+            }
+            thrown => return Ok(thrown),
+        };
+        let roots = &roots.with(&adder);
+        let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
             Ok(pair) => pair,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         loop {
-            let item = match self.iterator_step(host, &iterator, &next)? {
+            let root_view = (&iterator, &next);
+            let roots = &roots.with(&root_view);
+            let item = match self.iterator_step(host, roots, &iterator, &next)? {
                 Ok(Some(item)) => item,
                 Ok(None) => return Ok(Invocation::Value(collection)),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            let outcome =
-                self.collection_add_item(host, adder_name == "set", &collection, &adder, item)?;
-            if matches!(outcome, Invocation::Thrown(_)) {
+            let outcome = self.collection_add_item(
+                host,
+                roots,
+                adder_name == "set",
+                &collection,
+                &adder,
+                item,
+            )?;
+            if let Invocation::Thrown(error) = &outcome {
                 // IteratorClose preserves the original throw over a return-method throw.
-                self.close_iterator(host, &iterator)?;
+                self.close_iterator(host, &roots.with(&error), &iterator)?;
                 return Ok(outcome);
             }
         }
@@ -520,6 +540,7 @@ impl Vm {
     fn collection_add_item(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         entry_pairs: bool,
         collection: &Value,
         adder: &Value,
@@ -531,7 +552,9 @@ impl Vm {
             }
             let mut pair = Vec::with_capacity(2);
             for name in ["0", "1"] {
-                match self.read_property(host, &item, PropertyKeyRef::String(name))? {
+                let root_view = (&item, &pair);
+                let roots = &roots.with(&root_view);
+                match self.read_property(host, roots, &item, PropertyKeyRef::String(name))? {
                     Invocation::Value(value) => pair.push(value),
                     thrown => return Ok(thrown),
                 }
@@ -540,17 +563,20 @@ impl Vm {
         } else {
             vec![item]
         };
-        self.invoke(host, adder, args, collection)
+        self.invoke(host, roots, adder, args, collection)
     }
 
     fn collection_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         method: CollectionMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
         use CollectionMethod::*;
         let invalid = "incompatible collection receiver";
         let Value::Object(id) = *receiver else {
@@ -585,7 +611,8 @@ impl Vm {
                 }
                 let mut index = 0;
                 while let Some((k, v)) = self.collection_pair(id, &mut index)? {
-                    let result = self.invoke(host, key, vec![v, k, receiver.clone()], second)?;
+                    let result =
+                        self.invoke(host, roots, key, vec![v, k, receiver.clone()], second)?;
                     if matches!(result, Invocation::Thrown(_)) {
                         return Ok(result);
                     }

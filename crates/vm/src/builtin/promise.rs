@@ -19,10 +19,10 @@ pub(crate) mod members {
     pub(crate) const GLOBAL: &[IntrinsicDef] = &[
         IntrinsicDef::constructor(
             CONSTRUCTOR,
-            |vm, _, _, _| vm.throw_type_error("Promise constructor requires new"),
-            |vm, host, args, prototype| vm.construct_promise(host, args, prototype),
+            |vm, _, _, _, _| vm.throw_type_error("Promise constructor requires new"),
+            |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
         ),
-        IntrinsicDef::call(SPECIES, |_, _, _, receiver| {
+        IntrinsicDef::call(SPECIES, |_, _, _, _, receiver| {
             Ok(Invocation::Value(receiver.clone()))
         }),
     ];
@@ -54,23 +54,23 @@ pub(crate) mod members {
     }
 
     static_calls! {
-        resolve | reject | all | allSettled | race | any as key => |vm, host, args, receiver| {
+        resolve | reject | all | allSettled | race | any as key => |vm, host, roots, args, receiver| {
             if !matches!(receiver, Value::Object(id) if *id == vm.builtins.get(ROOT)) {
                 return vm.throw_type_error("incompatible Promise receiver");
             }
-            vm.call_promise_static(host, receiver, key, args)
+            vm.call_promise_static(host, roots, receiver, key, args)
         };
     }
 
     prototype_calls! {
-        then | catch | finally as key => |vm, host, args, receiver| {
+        then | catch | finally as key => |vm, host, roots, args, receiver| {
             let Value::Object(id) = receiver else {
                 return vm.throw_type_error("incompatible Promise receiver");
             };
             if vm.heap.get(*id)?.as_promise().is_none() {
                 return vm.throw_type_error("incompatible Promise receiver");
             }
-            vm.call_promise_method(host, *id, key, args)
+            vm.call_promise_method(host, roots, *id, key, args)
         };
     }
 }

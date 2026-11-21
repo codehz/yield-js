@@ -4,6 +4,7 @@
 use crate::builtin::globals::Owner;
 use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -17,7 +18,9 @@ macro_rules! array_operation {
     ($slot:ident, $name:literal) => {
         IntrinsicDef::call(
             IntrinsicKey::new("Array", Slot::$slot, $name),
-            |vm, host, args, receiver| vm.array_operation(host, $name, receiver, args),
+            |vm, host, roots, args, receiver| {
+                vm.array_operation(host, roots, $name, receiver, args)
+            },
         )
     };
 }
@@ -63,8 +66,8 @@ pub(crate) const ARRAY_ROOTS: &[RootSpec] = &[
 pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         ARRAY_CONSTRUCTOR,
-        |vm, _, args, _| vm.construct_array(args),
-        |vm, _, args, prototype| {
+        |vm, _, _, args, _| vm.construct_array(args),
+        |vm, _, _, args, prototype| {
             let result = vm.construct_array(args)?;
             vm.with_result_prototype(result, prototype)
         },
@@ -95,16 +98,18 @@ pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
     array_operation!(Prototype, "flatMap"),
     IntrinsicDef::call(
         IntrinsicKey::new("Array", Slot::Prototype, "join"),
-        |vm, host, args, receiver| vm.array_join(host, receiver, &args),
+        |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args),
     ),
     IntrinsicDef::call(
         IntrinsicKey::new("Array", Slot::Prototype, "toString"),
-        |vm, host, _, receiver| vm.array_to_string(host, receiver),
+        |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver),
     ),
-    IntrinsicDef::call(ARRAY_VALUES, |vm, _, _, receiver| vm.array_values(receiver)),
+    IntrinsicDef::call(ARRAY_VALUES, |vm, _, _, _, receiver| {
+        vm.array_values(receiver)
+    }),
     IntrinsicDef::call(
         IntrinsicKey::new("ArrayIterator", Slot::Prototype, "next"),
-        |vm, host, _, receiver| vm.array_iterator_next(host, receiver),
+        |vm, host, roots, _, receiver| vm.array_iterator_next(host, roots, receiver),
     ),
 ];
 
@@ -249,6 +254,7 @@ impl Vm {
     fn array_operation(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         name: &str,
         receiver: &Value,
         args: Vec<Value>,
@@ -269,7 +275,7 @@ impl Vm {
                 };
                 return Ok(Invocation::Value(Value::Bool(is_array)));
             }
-            "from" => return invocation(self.array_from(host, &args)),
+            "from" => return invocation(self.array_from(host, roots, &args)),
             _ => {}
         }
         let Some(len) = self.array_length(receiver)? else {
@@ -278,9 +284,12 @@ impl Vm {
         let Value::Object(id) = *receiver else {
             unreachable!()
         };
+        let root_view = (receiver, &args);
+        let roots = &roots.with(&root_view);
         let mut array = ArrayAccess {
             vm: self,
             host,
+            roots,
             id,
             len,
         };
@@ -293,7 +302,13 @@ impl Vm {
         })
     }
 
-    fn array_from(&mut self, host: &mut dyn Host, args: &[Value]) -> Completion<Value> {
+    fn array_from(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Completion<Value> {
+        let roots = &roots.with(&args);
         let items = arg(args, 0);
         let mapper = arg(args, 1);
         let mapping = !matches!(mapper, Value::Undefined);
@@ -306,6 +321,7 @@ impl Vm {
         let method = match items {
             Value::Object(_) | Value::String(_) => script!(completion(self.read_property(
                 host,
+                roots,
                 items,
                 PropertyKeyRef::Symbol(ITERATOR_SYMBOL)
             ))),
@@ -313,15 +329,21 @@ impl Vm {
         };
         let mut values = Vec::new();
         if !matches!(method, Value::Null | Value::Undefined) {
-            let (iter, next) = script!(self.get_iterator_from_method(host, items, &method));
-            while let Some(mut value) = script!(self.iterator_step(host, &iter, &next)) {
+            let (iter, next) = script!(self.get_iterator_from_method(host, roots, items, &method));
+            let root_view = (&iter, &next);
+            let roots = &roots.with(&root_view);
+            while let Some(mut value) =
+                script!(self.iterator_step(host, &roots.with(&values), &iter, &next))
+            {
+                let roots = &roots.with(&values);
                 if values.len() == MAX_LENGTH {
-                    self.close_iterator(host, &iter)?;
+                    self.close_iterator(host, roots, &iter)?;
                     return Ok(Err(self.make_range_error("invalid array length")?));
                 }
                 if mapping {
                     value = match self.invoke(
                         host,
+                        roots,
                         mapper,
                         vec![value, number(values.len())],
                         arg(args, 2),
@@ -329,7 +351,8 @@ impl Vm {
                         Invocation::Value(value) => value,
                         Invocation::Thrown(error) => {
                             // IteratorClose preserves the original throw.
-                            self.close_iterator(host, &iter)?;
+                            let roots = &roots.with(&error);
+                            self.close_iterator(host, roots, &iter)?;
                             return Ok(Err(error));
                         }
                     };
@@ -339,22 +362,28 @@ impl Vm {
         } else if matches!(items, Value::Object(_)) {
             let length = script!(completion(self.read_property(
                 host,
+                roots,
                 items,
                 PropertyKeyRef::String("length")
             )));
-            let length = script!(self.coerce_number(host, &length)).trunc().max(0.0);
+            let length = script!(self.coerce_number(host, roots, &length))
+                .trunc()
+                .max(0.0);
             if length > MAX_LENGTH as f64 {
                 return Ok(Err(self.make_range_error("invalid array length")?));
             }
             for index in 0..length as usize {
+                let roots = &roots.with(&values);
                 let mut value = script!(completion(self.read_property(
                     host,
+                    roots,
                     items,
                     PropertyKeyRef::String(&index.to_string())
                 )));
                 if mapping {
                     value = script!(completion(self.invoke(
                         host,
+                        roots,
                         mapper,
                         vec![value, number(index)],
                         arg(args, 2)
@@ -367,18 +396,45 @@ impl Vm {
     }
 }
 
+struct FlattenRoots<'a>(&'a [(ObjectId, std::ops::Range<usize>, f64)]);
+
+impl crate::gc::TraceRoots for FlattenRoots<'_> {
+    fn trace(&self, tracer: &mut crate::gc::Tracer<'_>) -> Result<(), VmError> {
+        for (id, _, _) in self.0 {
+            crate::gc::TraceRoots::trace(id, tracer)?;
+        }
+        Ok(())
+    }
+}
+
 struct ArrayAccess<'a> {
     vm: &'a mut Vm,
     host: &'a mut dyn Host,
+    roots: &'a ActiveRoots<'a>,
     id: ObjectId,
     // Snapshot once: callbacks and property hooks can mutate the live array.
     len: usize,
 }
 
 impl ArrayAccess<'_> {
+    fn with_roots<T>(
+        &mut self,
+        view: &dyn crate::gc::TraceRoots,
+        f: impl FnOnce(&mut ArrayAccess<'_>) -> T,
+    ) -> T {
+        let roots = &self.roots.with(view);
+        f(&mut ArrayAccess {
+            vm: self.vm,
+            host: self.host,
+            roots,
+            id: self.id,
+            len: self.len,
+        })
+    }
     fn get(&mut self, id: ObjectId, index: usize) -> Completion<Value> {
         completion(self.vm.read_property(
             self.host,
+            self.roots,
             &Value::Object(id),
             PropertyKeyRef::String(&index.to_string()),
         ))
@@ -387,6 +443,7 @@ impl ArrayAccess<'_> {
     fn present(&mut self, id: ObjectId, index: usize) -> Completion<bool> {
         completion(self.vm.has_property_key(
             self.host,
+            self.roots,
             id,
             PropertyKeyRef::String(&index.to_string()),
         ))
@@ -394,13 +451,14 @@ impl ArrayAccess<'_> {
     }
 
     fn integer(&mut self, value: &Value) -> Completion<f64> {
-        let n = script!(self.vm.coerce_number(self.host, value));
+        let n = script!(self.vm.coerce_number(self.host, self.roots, value));
         Ok(Ok(if n.is_nan() { 0.0 } else { n.trunc() }))
     }
 
     fn set(&mut self, key: String, value: Value) -> Completion<Value> {
         completion(self.vm.set_property(
             self.host,
+            self.roots,
             self.id,
             &Value::Object(self.id),
             PropertyKey::String(key.into()),
@@ -470,30 +528,34 @@ impl ArrayAccess<'_> {
             "splice" => Value::Object(script!(self.copy_range(start, count))),
             _ => number(new_len),
         };
-        if inserts.len() < count {
-            for index in start + count..len {
-                script!(self.move_index(index, index - count + inserts.len()));
+        script!(self.with_roots(&value, |array| -> Completion<()> {
+            if inserts.len() < count {
+                for index in start + count..len {
+                    script!(array.move_index(index, index - count + inserts.len()));
+                }
+                for index in (new_len..len).rev() {
+                    script!(array.delete(index));
+                }
+            } else if inserts.len() > count {
+                for index in (start + count..len).rev() {
+                    script!(array.move_index(index, index - count + inserts.len()));
+                }
             }
-            for index in (new_len..len).rev() {
-                script!(self.delete(index));
+            for (index, value) in inserts.iter().enumerate() {
+                script!(array.set((start + index).to_string(), value.clone()));
             }
-        } else if inserts.len() > count {
-            for index in (start + count..len).rev() {
-                script!(self.move_index(index, index - count + inserts.len()));
-            }
-        }
-        for (index, value) in inserts.iter().enumerate() {
-            script!(self.set((start + index).to_string(), value.clone()));
-        }
-        script!(self.set("length".to_owned(), number(new_len)));
+            script!(array.set("length".to_owned(), number(new_len)));
+            Ok(Ok(()))
+        }));
         Ok(Ok(value))
     }
 
     fn copy_range(&mut self, start: usize, count: usize) -> Completion<ObjectId> {
         let result = self.vm.sparse_array(count)?;
         for i in 0..count {
-            if script!(self.present(self.id, start + i)) {
-                let value = script!(self.get(self.id, start + i));
+            if script!(self.with_roots(&result, |array| array.present(array.id, start + i))) {
+                let value =
+                    script!(self.with_roots(&result, |array| array.get(array.id, start + i)));
                 self.define(result, i, value)?;
             }
         }
@@ -583,14 +645,18 @@ impl ArrayAccess<'_> {
         let visit_holes = matches!(name, "find" | "findIndex");
         let source = Value::Object(self.id);
         for index in 0..self.len {
-            if !visit_holes && !script!(self.present(self.id, index)) {
+            let view = (result, &accumulator);
+            if !visit_holes
+                && !script!(self.with_roots(&view, |array| array.present(array.id, index)))
+            {
                 continue;
             }
-            let value = script!(self.get(self.id, index));
+            let value = script!(self.with_roots(&view, |array| array.get(array.id, index)));
             if name == "reduce" {
                 accumulator = Some(match accumulator {
                     Some(acc) => script!(completion(self.vm.invoke(
                         self.host,
+                        self.roots,
                         mapper,
                         vec![acc, value, number(index), source.clone()],
                         &Value::Undefined
@@ -601,8 +667,10 @@ impl ArrayAccess<'_> {
             }
             let preserve_value = matches!(name, "filter" | "find");
             let saved = preserve_value.then(|| value.clone());
+            let callback_view = (result, &saved);
             let mapped = script!(completion(self.vm.invoke(
                 self.host,
+                &self.roots.with(&callback_view),
                 mapper,
                 vec![value, number(index), source.clone()],
                 arg(args, 1)
@@ -648,8 +716,9 @@ impl ArrayAccess<'_> {
                         return Ok(Err(self.vm.make_range_error("invalid array length")?));
                     }
                     for index in 0..len {
-                        if script!(self.present(id, index)) {
-                            let item = script!(self.get(id, index));
+                        if script!(self.with_roots(&result, |array| array.present(id, index))) {
+                            let item =
+                                script!(self.with_roots(&result, |array| array.get(id, index)));
                             self.define(result, output + index, item)?;
                         }
                     }
@@ -665,11 +734,12 @@ impl ArrayAccess<'_> {
         } else {
             let depth = match arg(args, 0) {
                 Value::Undefined => 1.0,
-                value => script!(self.integer(value)),
+                value => script!(self.with_roots(&result, |array| array.integer(value))),
             };
             for index in 0..self.len {
-                if script!(self.present(self.id, index)) {
-                    let item = script!(self.get(self.id, index));
+                if script!(self.with_roots(&result, |array| array.present(array.id, index))) {
+                    let item =
+                        script!(self.with_roots(&result, |array| array.get(array.id, index)));
                     script!(self.flatten_value(result, &mut output, item, depth));
                 }
             }
@@ -711,9 +781,11 @@ impl ArrayAccess<'_> {
                     return Ok(Ok(()));
                 };
                 if let Some(index) = indices.next() {
-                    if script!(self.present(*id, index)) {
-                        value = script!(self.get(*id, index));
-                        depth = *inner_depth;
+                    let (id, inner_depth) = (*id, *inner_depth);
+                    let view = (result, FlattenRoots(&stack));
+                    if script!(self.with_roots(&view, |array| array.present(id, index))) {
+                        value = script!(self.with_roots(&view, |array| array.get(id, index)));
+                        depth = inner_depth;
                         break;
                     }
                 } else {

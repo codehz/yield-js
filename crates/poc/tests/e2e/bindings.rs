@@ -357,6 +357,13 @@ mod guest_call_fixture {
             Ok(())
         }
 
+        #[function(name = "stashGc")]
+        fn stash_gc(cx: &mut CallCx<'_>) -> JsResult<()> {
+            let request = cx.request_gc(vec![], unexpected_resume)?;
+            *cx.service::<Stash>("stash").unwrap().lock().unwrap() = Some(request);
+            Ok(())
+        }
+
         #[function(name = "replay")]
         fn replay(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
             Ok(cx
@@ -469,6 +476,22 @@ fn guest_call_cannot_be_replayed() {
         matches!(result, Err(VmError::HostFault(message)) if message.contains("GuestCall used outside the call"))
     );
     assert_eq!(runs, 0);
+}
+
+#[test]
+fn gc_request_cannot_be_replayed() {
+    let (result, _) = guest_call_fixture::run(
+        r#"
+        import { stashGc, replay } from 'guest';
+        export function run() {
+            stashGc();
+            return replay();
+        }
+    "#,
+    );
+    assert!(
+        matches!(result, Err(VmError::HostFault(message)) if message.contains("GcRequest used outside the call"))
+    );
 }
 
 #[test]

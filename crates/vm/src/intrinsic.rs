@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::binding::NativeTarget;
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value};
@@ -50,9 +51,15 @@ impl IntrinsicKey {
     }
 }
 
-type Call = fn(&mut Vm, &mut dyn Host, Vec<Value>, &Value) -> Result<Invocation, VmError>;
-type Construct =
-    fn(&mut Vm, &mut dyn Host, Vec<Value>, Option<ObjectId>) -> Result<Invocation, VmError>;
+type Call =
+    fn(&mut Vm, &mut dyn Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+type Construct = fn(
+    &mut Vm,
+    &mut dyn Host,
+    &ActiveRoots<'_>,
+    Vec<Value>,
+    Option<ObjectId>,
+) -> Result<Invocation, VmError>;
 
 pub(crate) struct IntrinsicDef {
     pub key: IntrinsicKey,

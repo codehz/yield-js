@@ -330,6 +330,7 @@ pub struct TestHost {
     counters: Arc<Counters>,
     operations: BTreeMap<String, OperationToken>,
     errors: Vec<JsValue>,
+    gc_roots: Vec<yield_vm::Value>,
     pub reject_restore_operation: bool,
     pub reject_native: bool,
 }
@@ -349,6 +350,7 @@ impl TestHost {
             counters,
             operations: BTreeMap::new(),
             errors: Vec::new(),
+            gc_roots: Vec::new(),
             reject_restore_operation: false,
             reject_native: false,
         }
@@ -360,6 +362,12 @@ impl TestHost {
 
     pub fn errors(&self) -> &[JsValue] {
         &self.errors
+    }
+
+    /// Replaces the values kept alive by guest-triggered GC. The values must
+    /// belong to the VM this host is about to run.
+    pub fn set_gc_roots(&mut self, roots: Vec<yield_vm::Value>) {
+        self.gc_roots = roots;
     }
 
     pub fn pending_labels(&self) -> Vec<String> {
@@ -389,6 +397,10 @@ impl TestHost {
 impl Host for TestHost {
     fn bindings(&self) -> Arc<Bindings> {
         self.bindings.clone()
+    }
+
+    fn gc_roots(&self) -> &[yield_vm::Value] {
+        &self.gc_roots
     }
 
     fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {

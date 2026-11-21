@@ -1,6 +1,7 @@
 //! Math uses the VM's numeric coercion and owns no script-visible constructor.
 
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::ops::number_to_uint32;
 use crate::runtime::Invocation;
@@ -13,7 +14,7 @@ pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub(crate) mod namespace {
     use std::f64::consts;
 
-    use super::{Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
     #[constant(name = "E")]
     const E: f64 = consts::E;
@@ -33,8 +34,13 @@ pub(crate) mod namespace {
     const SQRT2: f64 = consts::SQRT_2;
 
     #[function(name = "abs")]
-    fn abs(vm: &mut Vm, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
-        match vm.coerce_number(host, args.first().unwrap_or(&Value::Undefined))? {
+    fn abs(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        match vm.coerce_number(host, roots, args.first().unwrap_or(&Value::Undefined))? {
             Ok(number) => Ok(Invocation::Value(Value::Number(number.abs()))),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
@@ -48,10 +54,11 @@ pub(crate) mod namespace {
     fn dispatch(
         vm: &mut Vm,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         member: &'static str,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.call_math_method(host, member, args)
+        vm.call_math_method(host, roots, member, args)
     }
 }
 
@@ -59,9 +66,11 @@ impl Vm {
     fn call_math_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let result = match method {
             "random" => self.next_random(),
             "max" | "min" | "hypot" => {
@@ -74,7 +83,7 @@ impl Vm {
                 let mut saw_infinity = false;
                 // Even NaN and infinity cannot short-circuit later coercions.
                 for arg in args {
-                    match self.coerce_number(host, arg)? {
+                    match self.coerce_number(host, roots, arg)? {
                         Ok(number) if method == "hypot" && !number.is_finite() => {
                             saw_nan |= number.is_nan();
                             saw_infinity |= number.is_infinite();
@@ -92,15 +101,21 @@ impl Vm {
                 }
             }
             _ => {
-                let x = match self.coerce_number(host, args.first().unwrap_or(&Value::Undefined))? {
+                let x = match self.coerce_number(
+                    host,
+                    roots,
+                    args.first().unwrap_or(&Value::Undefined),
+                )? {
                     Ok(number) => number,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 match method {
                     "atan2" | "imul" | "pow" => {
-                        let y = match self
-                            .coerce_number(host, args.get(1).unwrap_or(&Value::Undefined))?
-                        {
+                        let y = match self.coerce_number(
+                            host,
+                            roots,
+                            args.get(1).unwrap_or(&Value::Undefined),
+                        )? {
                             Ok(number) => number,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };

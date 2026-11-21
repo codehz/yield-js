@@ -9,6 +9,7 @@ use crate::builtin::{
     RootSpec,
 };
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, BoxedPrimitive, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
     PlainObject, REPLACE_SYMBOL, SEARCH_SYMBOL, SPLIT_SYMBOL,
@@ -62,7 +63,7 @@ enum StringStatic {
 
 #[yield_binding_macros::builtin_global(name = "String", root = "string", kind = "constructor")]
 pub(crate) mod members {
-    use super::{Host, Invocation, StringMethod, StringStatic, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, StringMethod, StringStatic, Value, Vm, VmError};
 
     #[methods(
         charAt = StringMethod::CharAt,
@@ -97,11 +98,14 @@ pub(crate) mod members {
     fn call_method(
         vm: &mut Vm,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         key: StringMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.call_string_method(host, key, receiver, args)
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
+        vm.call_string_method(host, roots, key, receiver, args)
     }
 
     #[functions(
@@ -112,10 +116,12 @@ pub(crate) mod members {
     fn call_static(
         vm: &mut Vm,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         key: StringStatic,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.call_string_static(host, key, args)
+        let roots = &roots.with(&args);
+        vm.call_string_static(host, roots, key, args)
     }
 }
 
@@ -126,19 +132,19 @@ const ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("StringIterator", Slot::Pr
 pub(crate) const STRING_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         CONSTRUCTOR,
-        |vm, host, args, _| vm.call_string(host, &args),
-        |vm, host, args, prototype| {
-            let result = match vm.call_string(host, &args)? {
+        |vm, host, roots, args, _| vm.call_string(host, roots, &args),
+        |vm, host, roots, args, prototype| {
+            let result = match vm.call_string(host, roots, &args)? {
                 Invocation::Value(value) => vm.construct_object(&[value])?,
                 thrown => thrown,
             };
             vm.with_result_prototype(result, prototype)
         },
     ),
-    IntrinsicDef::call(ITERATOR, |vm, host, _, receiver| {
-        vm.string_iterator(host, receiver)
+    IntrinsicDef::call(ITERATOR, |vm, host, roots, _, receiver| {
+        vm.string_iterator(host, roots, receiver)
     }),
-    IntrinsicDef::call(ITERATOR_NEXT, |vm, _, _, receiver| {
+    IntrinsicDef::call(ITERATOR_NEXT, |vm, _, _, _, receiver| {
         vm.string_iterator_next(receiver)
     }),
 ];
@@ -244,12 +250,14 @@ impl Vm {
     fn string_iterator(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&receiver);
         if matches!(receiver, Value::Null | Value::Undefined) {
             return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
         }
-        let string = match self.coerce_string(host, receiver)? {
+        let string = match self.coerce_string(host, roots, receiver)? {
             Ok(string) => string,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -292,20 +300,29 @@ impl Vm {
         self.iterator_result(Value::String(value), false)
     }
 
-    fn call_string(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+    fn call_string(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let Some(value) = args.first() else {
             return Ok(Invocation::Value(Value::String(JsString::default())));
         };
-        self.string_value(host, value)
+        self.string_value(host, roots, value)
     }
 
     fn call_string_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
         if matches!(method, StringMethod::ToString | StringMethod::ValueOf) {
             return self.string_primitive(receiver);
         }
@@ -320,38 +337,39 @@ impl Vm {
                 | StringMethod::Replace
                 | StringMethod::ReplaceAll
                 | StringMethod::Split
-        ) && let Some(result) = self.string_pattern_method(host, method, receiver, args)?
+        ) && let Some(result) =
+            self.string_pattern_method(host, roots, method, receiver, args)?
         {
             return Ok(result);
         }
-        let text = match self.coerce_string(host, receiver)? {
+        let text = match self.coerce_string(host, roots, receiver)? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         match method {
-            StringMethod::CharAt => self.char_at(&text, host, arg(args, 0)),
-            StringMethod::CharCodeAt => self.char_code_at(&text, host, arg(args, 0)),
-            StringMethod::CodePointAt => self.code_point_at(&text, host, arg(args, 0)),
-            StringMethod::At => self.string_at(&text, host, arg(args, 0)),
-            StringMethod::IndexOf => self.index_of(&text, host, args, false),
-            StringMethod::LastIndexOf => self.index_of(&text, host, args, true),
-            StringMethod::Includes => self.string_includes(&text, host, args),
-            StringMethod::StartsWith => self.string_affix(&text, host, args, true),
-            StringMethod::EndsWith => self.string_affix(&text, host, args, false),
-            StringMethod::Slice => self.string_slice(&text, host, args),
-            StringMethod::Substring => self.string_substring(&text, host, args),
+            StringMethod::CharAt => self.char_at(&text, host, roots, arg(args, 0)),
+            StringMethod::CharCodeAt => self.char_code_at(&text, host, roots, arg(args, 0)),
+            StringMethod::CodePointAt => self.code_point_at(&text, host, roots, arg(args, 0)),
+            StringMethod::At => self.string_at(&text, host, roots, arg(args, 0)),
+            StringMethod::IndexOf => self.index_of(&text, host, roots, args, false),
+            StringMethod::LastIndexOf => self.index_of(&text, host, roots, args, true),
+            StringMethod::Includes => self.string_includes(&text, host, roots, args),
+            StringMethod::StartsWith => self.string_affix(&text, host, roots, args, true),
+            StringMethod::EndsWith => self.string_affix(&text, host, roots, args, false),
+            StringMethod::Slice => self.string_slice(&text, host, roots, args),
+            StringMethod::Substring => self.string_substring(&text, host, roots, args),
             StringMethod::ToUpperCase => string_case(&text, true),
             StringMethod::ToLowerCase => string_case(&text, false),
             StringMethod::Trim => string_trim(&text, true, true),
             StringMethod::TrimStart => string_trim(&text, true, false),
             StringMethod::TrimEnd => string_trim(&text, false, true),
-            StringMethod::Split => self.string_split(&text, host, args),
-            StringMethod::Concat => self.string_concat(&text, host, args),
-            StringMethod::Repeat => self.string_repeat(&text, host, arg(args, 0)),
-            StringMethod::PadStart => self.string_pad(&text, host, args, true),
-            StringMethod::PadEnd => self.string_pad(&text, host, args, false),
-            StringMethod::Replace => self.string_replace(&text, host, args),
-            StringMethod::ReplaceAll => self.string_replace_all(&text, host, args),
+            StringMethod::Split => self.string_split(&text, host, roots, args),
+            StringMethod::Concat => self.string_concat(&text, host, roots, args),
+            StringMethod::Repeat => self.string_repeat(&text, host, roots, arg(args, 0)),
+            StringMethod::PadStart => self.string_pad(&text, host, roots, args, true),
+            StringMethod::PadEnd => self.string_pad(&text, host, roots, args, false),
+            StringMethod::Replace => self.string_replace(&text, host, roots, args),
+            StringMethod::ReplaceAll => self.string_replace_all(&text, host, roots, args),
             StringMethod::Match
             | StringMethod::MatchAll
             | StringMethod::Search
@@ -363,13 +381,15 @@ impl Vm {
     fn call_string_static(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: StringStatic,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         match method {
-            StringStatic::FromCharCode => self.string_from_char_code(host, args),
-            StringStatic::FromCodePoint => self.string_from_code_point(host, args),
-            StringStatic::Raw => self.string_raw(host, args),
+            StringStatic::FromCharCode => self.string_from_char_code(host, roots, args),
+            StringStatic::FromCodePoint => self.string_from_code_point(host, roots, args),
+            StringStatic::Raw => self.string_raw(host, roots, args),
         }
     }
 
@@ -395,9 +415,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let unit = match self.relative_index(host, index, utf16_len(text), false)? {
+        let unit = match self.relative_index(host, roots, index, utf16_len(text), false)? {
             Ok(index) => index.and_then(|index| utf16_unit(text, index)),
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -410,9 +431,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let index = match self.relative_index(host, index, utf16_len(text), false)? {
+        let index = match self.relative_index(host, roots, index, utf16_len(text), false)? {
             Ok(index) => index,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -426,9 +448,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let index = match self.relative_index(host, index, utf16_len(text), false)? {
+        let index = match self.relative_index(host, roots, index, utf16_len(text), false)? {
             Ok(index) => index,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -444,9 +467,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
-        let index = match self.relative_index(host, index, utf16_len(text), true)? {
+        let index = match self.relative_index(host, roots, index, utf16_len(text), true)? {
             Ok(index) => index,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -462,17 +486,19 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         last: bool,
     ) -> Result<Invocation, VmError> {
-        let needle = match self.coerce_string(host, arg(args, 0))? {
+        let roots = &roots.with(&args);
+        let needle = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(needle) => needle,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let length = utf16_len(text);
         let start = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.integer_index(host, value, last)? {
+                match self.integer_index(host, roots, value, last)? {
                     Ok(value) => value,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -492,13 +518,15 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let needle = match self.coerce_string(host, arg(args, 0))? {
+        let roots = &roots.with(&args);
+        let needle = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(needle) => needle,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let start = match self.clamp_index(host, arg(args, 1), utf16_len(text))? {
+        let start = match self.clamp_index(host, roots, arg(args, 1), utf16_len(text))? {
             Ok(start) => start,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -511,10 +539,12 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
     ) -> Result<Invocation, VmError> {
-        let search = match self.coerce_string(host, arg(args, 0))? {
+        let roots = &roots.with(&args);
+        let search = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(search) => search,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -524,7 +554,7 @@ impl Vm {
         } else {
             match args.get(1) {
                 Some(value) if !matches!(value, Value::Undefined) => {
-                    match self.clamp_index(host, value, length)? {
+                    match self.clamp_index(host, roots, value, length)? {
                         Ok(end) => end,
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     }
@@ -533,7 +563,7 @@ impl Vm {
             }
         };
         let matched = if start {
-            let offset = match self.clamp_index(host, arg(args, 1), length)? {
+            let offset = match self.clamp_index(host, roots, arg(args, 1), length)? {
                 Ok(offset) => offset,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -548,8 +578,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let length = utf16_len(text) as f64;
         let clamp = |index: f64| {
             (if index < 0.0 {
@@ -558,13 +590,13 @@ impl Vm {
                 index.min(length)
             }) as usize
         };
-        let start = match self.integer_index(host, arg(args, 0), false)? {
+        let start = match self.integer_index(host, roots, arg(args, 0), false)? {
             Ok(start) => clamp(start),
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let end = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.integer_index(host, value, false)? {
+                match self.integer_index(host, roots, value, false)? {
                     Ok(end) => clamp(end),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -582,16 +614,18 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let length = utf16_len(text) as f64;
-        let start = match self.integer_index(host, arg(args, 0), false)? {
+        let start = match self.integer_index(host, roots, arg(args, 0), false)? {
             Ok(start) => start.clamp(0.0, length) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let end = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.integer_index(host, value, false)? {
+                match self.integer_index(host, roots, value, false)? {
                     Ok(end) => end.clamp(0.0, length) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -612,11 +646,13 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let limit = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.coerce_number(host, value)? {
+                match self.coerce_number(host, roots, value)? {
                     Ok(number) => crate::ops::number_to_uint32(number) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -630,7 +666,7 @@ impl Vm {
         match args.first() {
             None | Some(Value::Undefined) => parts.push(Value::String(text.to_owned())),
             Some(separator) => {
-                let separator = match self.coerce_string(host, separator)? {
+                let separator = match self.coerce_string(host, roots, separator)? {
                     Ok(separator) => separator,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
@@ -661,14 +697,16 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let mut parts = Vec::with_capacity(args.len() + 1);
         parts.push(text.to_owned());
         let mut length = text.len();
         let mut last_unit = text.units().next_back();
         for arg in args {
-            match self.coerce_string(host, arg)? {
+            match self.coerce_string(host, roots, arg)? {
                 Ok(part) => {
                     let saves_pair = matches!(last_unit, Some(0xd800..=0xdbff))
                         && matches!(part.units().next(), Some(0xdc00..=0xdfff));
@@ -704,9 +742,10 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         count: &Value,
     ) -> Result<Invocation, VmError> {
-        let count = match self.integer_index(host, count, false)? {
+        let count = match self.integer_index(host, roots, count, false)? {
             Ok(count) => count,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -741,16 +780,18 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
     ) -> Result<Invocation, VmError> {
-        let target = match self.integer_index(host, arg(args, 0), false)? {
+        let roots = &roots.with(&args);
+        let target = match self.integer_index(host, roots, arg(args, 0), false)? {
             Ok(target) => target.max(0.0) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let fill = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.coerce_string(host, value)? {
+                match self.coerce_string(host, roots, value)? {
                     Ok(fill) => fill,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -808,9 +849,11 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let search = match self.coerce_string(host, arg(args, 0))? {
+        let roots = &roots.with(&args);
+        let search = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(search) => search,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -823,6 +866,7 @@ impl Vm {
             Some(value) if self.is_callable(value) => {
                 match self.invoke(
                     host,
+                    roots,
                     value,
                     vec![
                         Value::String(matched),
@@ -831,14 +875,14 @@ impl Vm {
                     ],
                     &Value::Undefined,
                 )? {
-                    Invocation::Value(value) => match self.coerce_string(host, &value)? {
+                    Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {
                         Ok(value) => value,
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     },
                     thrown @ Invocation::Thrown(_) => return Ok(thrown),
                 }
             }
-            Some(value) => match self.coerce_string(host, value)? {
+            Some(value) => match self.coerce_string(host, roots, value)? {
                 Ok(pattern) => substitute(&pattern, text, &matched, position),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             },
@@ -855,10 +899,13 @@ impl Vm {
     fn string_pattern_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Option<Invocation>, VmError> {
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
         let search = args.first().cloned().unwrap_or(Value::Undefined);
         let (symbol, requires_global, builtin) = match method {
             StringMethod::Match => (MATCH_SYMBOL, false, Some(RegExpMethod::Match)),
@@ -870,16 +917,20 @@ impl Vm {
             _ => return Ok(None),
         };
         if requires_global {
-            match self.is_regexp(host, &search)? {
+            match self.is_regexp(host, roots, &search)? {
                 Ok(true) => {
-                    let flags =
-                        match self.read_property(host, &search, PropertyKeyRef::String("flags"))? {
-                            Invocation::Value(value) => value,
-                            Invocation::Thrown(error) => {
-                                return Ok(Some(Invocation::Thrown(error)));
-                            }
-                        };
-                    let flags = match self.coerce_string(host, &flags)? {
+                    let flags = match self.read_property(
+                        host,
+                        roots,
+                        &search,
+                        PropertyKeyRef::String("flags"),
+                    )? {
+                        Invocation::Value(value) => value,
+                        Invocation::Thrown(error) => {
+                            return Ok(Some(Invocation::Thrown(error)));
+                        }
+                    };
+                    let flags = match self.coerce_string(host, roots, &flags)? {
                         Ok(flags) => flags,
                         Err(error) => return Ok(Some(Invocation::Thrown(error))),
                     };
@@ -896,7 +947,7 @@ impl Vm {
         let protocol = if matches!(search, Value::Undefined | Value::Null) {
             Value::Undefined
         } else {
-            match self.get_method(host, &search, symbol)? {
+            match self.get_method(host, roots, &search, symbol)? {
                 Ok(method) => method,
                 Err(error) => return Ok(Some(Invocation::Thrown(error))),
             }
@@ -910,7 +961,9 @@ impl Vm {
                 StringMethod::Split => vec![this, args.get(1).cloned().unwrap_or(Value::Undefined)],
                 _ => vec![this],
             };
-            return Ok(Some(self.invoke(host, &protocol, call_args, &search)?));
+            return Ok(Some(
+                self.invoke(host, roots, &protocol, call_args, &search)?,
+            ));
         }
         let Some(builtin) = builtin else {
             return Ok(None);
@@ -920,12 +973,13 @@ impl Vm {
         } else {
             Value::Undefined
         };
-        let created = self.construct_regexp(host, &[search.clone(), flags], None, false)?;
+        let created = self.construct_regexp(host, roots, &[search.clone(), flags], None, false)?;
         let Invocation::Value(Value::Object(id)) = created else {
             return Ok(Some(created));
         };
         Ok(Some(self.call_regexp_method(
             host,
+            roots,
             builtin,
             &Value::Object(id),
             std::slice::from_ref(receiver),
@@ -935,10 +989,12 @@ impl Vm {
     fn get_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         symbol: SymbolId,
     ) -> Result<Result<Value, Value>, VmError> {
-        match self.read_property(host, value, PropertyKeyRef::Symbol(symbol))? {
+        let roots = &roots.with(&value);
+        match self.read_property(host, roots, value, PropertyKeyRef::Symbol(symbol))? {
             Invocation::Value(Value::Undefined | Value::Null) => Ok(Ok(Value::Undefined)),
             Invocation::Value(method) => Ok(Ok(method)),
             Invocation::Thrown(error) => Ok(Err(error)),
@@ -948,15 +1004,18 @@ impl Vm {
     fn is_regexp(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<bool, Value>, VmError> {
+        let roots = &roots.with(&value);
         let Value::Object(id) = *value else {
             return Ok(Ok(false));
         };
-        let matcher = match self.read_property(host, value, PropertyKeyRef::Symbol(MATCH_SYMBOL))? {
-            Invocation::Value(matcher) => matcher,
-            Invocation::Thrown(error) => return Ok(Err(error)),
-        };
+        let matcher =
+            match self.read_property(host, roots, value, PropertyKeyRef::Symbol(MATCH_SYMBOL))? {
+                Invocation::Value(matcher) => matcher,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            };
         if !matches!(matcher, Value::Undefined) {
             return Ok(Ok(true));
         }
@@ -967,9 +1026,11 @@ impl Vm {
         &mut self,
         text: &JsString,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let search = match self.coerce_string(host, arg(args, 0))? {
+        let roots = &roots.with(&args);
+        let search = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(search) => search,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -978,7 +1039,7 @@ impl Vm {
         let pattern = if functional {
             JsString::default()
         } else {
-            match self.coerce_string(host, &replacement_arg)? {
+            match self.coerce_string(host, roots, &replacement_arg)? {
                 Ok(pattern) => pattern,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
@@ -996,6 +1057,7 @@ impl Vm {
             let replacement = if functional {
                 match self.invoke(
                     host,
+                    roots,
                     &replacement_arg,
                     vec![
                         Value::String(search.clone()),
@@ -1004,7 +1066,7 @@ impl Vm {
                     ],
                     &Value::Undefined,
                 )? {
-                    Invocation::Value(value) => match self.coerce_string(host, &value)? {
+                    Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {
                         Ok(value) => value,
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     },
@@ -1040,11 +1102,13 @@ impl Vm {
     fn string_from_char_code(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let mut units = Vec::with_capacity(args.len());
         for arg in args {
-            let number = match self.coerce_number(host, arg)? {
+            let number = match self.coerce_number(host, roots, arg)? {
                 Ok(number) => number,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -1058,11 +1122,13 @@ impl Vm {
     fn string_from_code_point(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let mut out = Vec::with_capacity(args.len());
         for arg in args {
-            let number = match self.coerce_number(host, arg)? {
+            let number = match self.coerce_number(host, roots, arg)? {
                 Ok(number) => number,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -1083,9 +1149,15 @@ impl Vm {
         Ok(Invocation::Value(Value::String(JsString::from_units(out))))
     }
 
-    fn string_raw(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+    fn string_raw(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let template = arg(args, 0);
-        let raw = match self.read_member(host, template, &Value::String("raw".into()))? {
+        let raw = match self.read_member(host, roots, template, &Value::String("raw".into()))? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
@@ -1093,11 +1165,13 @@ impl Vm {
             return self.throw_type_error("String.raw requires a raw array");
         };
         let raw_object = Value::Object(raw_id);
-        let length = match self.read_member(host, &raw_object, &Value::String("length".into()))? {
-            Invocation::Value(value) => value,
-            thrown @ Invocation::Thrown(_) => return Ok(thrown),
-        };
-        let length = match self.coerce_number(host, &length)? {
+        let roots = &roots.with(&raw_object);
+        let length =
+            match self.read_member(host, roots, &raw_object, &Value::String("length".into()))? {
+                Invocation::Value(value) => value,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            };
+        let length = match self.coerce_number(host, roots, &length)? {
             Ok(length) => crate::ops::number_to_uint32(length) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -1105,11 +1179,11 @@ impl Vm {
         let mut segment_index = 0;
         while segment_index < length {
             let key = Value::String(segment_index.to_string().into());
-            let segment = match self.read_member(host, &raw_object, &key)? {
+            let segment = match self.read_member(host, roots, &raw_object, &key)? {
                 Invocation::Value(value) => value,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
-            match self.coerce_string(host, &segment)? {
+            match self.coerce_string(host, roots, &segment)? {
                 Ok(part) => out.push_str(&part),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
@@ -1117,7 +1191,7 @@ impl Vm {
             if segment_index < length
                 && let Some(substitution) = args.get(segment_index)
             {
-                match self.coerce_string(host, substitution)? {
+                match self.coerce_string(host, roots, substitution)? {
                     Ok(part) => out.push_str(&part),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -1129,11 +1203,13 @@ impl Vm {
     fn relative_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
         relative: bool,
     ) -> Result<Result<Option<usize>, Value>, VmError> {
-        let number = match self.integer_index(host, value, false)? {
+        let roots = &roots.with(&value);
+        let number = match self.integer_index(host, roots, value, false)? {
             Ok(number) => number,
             Err(thrown) => return Ok(Err(thrown)),
         };
@@ -1155,10 +1231,12 @@ impl Vm {
     fn integer_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         infinity: bool,
     ) -> Result<Result<f64, Value>, VmError> {
-        let number = match self.coerce_number(host, value)? {
+        let roots = &roots.with(&value);
+        let number = match self.coerce_number(host, roots, value)? {
             Ok(number) => number,
             Err(error) => return Ok(Err(error)),
         };
@@ -1172,10 +1250,12 @@ impl Vm {
     fn clamp_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
     ) -> Result<Result<usize, Value>, VmError> {
-        match self.integer_index(host, value, false)? {
+        let roots = &roots.with(&value);
+        match self.integer_index(host, roots, value, false)? {
             Ok(index) => Ok(Ok(index.clamp(0.0, length as f64) as usize)),
             Err(error) => Ok(Err(error)),
         }

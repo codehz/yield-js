@@ -101,9 +101,10 @@ pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<HostStep>;
 pub enum HostStep {
     Return(JsValue),
     Call(GuestCall),
+    CollectGarbage(GcRequest),
 }
 
-/// A script call's completion, rewrapped for the resume context.
+/// A host effect's completion, rewrapped for the resume context.
 #[derive(Debug)]
 pub enum GuestOutcome {
     Returned(JsValue),
@@ -159,6 +160,35 @@ impl GuestCall {
             self.saved,
             self.resume,
         ))
+    }
+}
+
+/// An opaque collection request valid only as a result of the step that created it.
+#[derive(Debug)]
+pub struct GcRequest {
+    epoch: u32,
+    call: u64,
+    saved: Vec<Value>,
+    resume: GuestResume,
+}
+
+impl GcRequest {
+    pub(crate) fn new(epoch: u32, call: u64, saved: Vec<Value>, resume: GuestResume) -> Self {
+        Self {
+            epoch,
+            call,
+            saved,
+            resume,
+        }
+    }
+
+    pub(crate) fn into_parts(self, cx: CallCx<'_>) -> Result<(Vec<Value>, GuestResume), HostFault> {
+        if self.epoch != cx.epoch || self.call != cx.call {
+            return Err(HostFault::new(
+                "GcRequest used outside the call that produced it",
+            ));
+        }
+        Ok((self.saved, self.resume))
     }
 }
 

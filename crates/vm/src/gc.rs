@@ -11,7 +11,7 @@ use crate::heap::{
     REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::runtime::{Continuation, HostInstance, HostSlot};
-use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
+use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
 use crate::vm::Vm;
 
 #[derive(Default)]
@@ -29,6 +29,110 @@ impl LiveSet {
         }
     }
 }
+
+/// Borrowed views of VM values that are live on the synchronous Rust stack.
+/// Adding a view doesn't enumerate or copy any roots; only a collection walks it.
+pub(crate) struct ActiveRoots<'a>(Option<(&'a ActiveRoots<'a>, &'a dyn TraceRoots)>);
+
+impl ActiveRoots<'_> {
+    pub(crate) const EMPTY: Self = Self(None);
+
+    pub(crate) fn with<'a>(&'a self, view: &'a dyn TraceRoots) -> ActiveRoots<'a> {
+        ActiveRoots(Some((self, view)))
+    }
+
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        let mut current = self;
+        while let Some((parent, view)) = current.0 {
+            view.trace(tracer)?;
+            current = parent;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) trait TraceRoots {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError>;
+}
+
+impl TraceRoots for Value {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        tracer.mark_value(self)
+    }
+}
+
+impl TraceRoots for ObjectId {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        tracer.mark_object(*self)
+    }
+}
+
+impl TraceRoots for PropertyKey {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        self.borrowed().trace(tracer)
+    }
+}
+
+impl TraceRoots for PropertyKeyRef<'_> {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        if let Self::Symbol(id) = *self {
+            tracer.mark_value(&Value::Symbol(id))?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: TraceRoots + ?Sized> TraceRoots for &T {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        (**self).trace(tracer)
+    }
+}
+
+impl<T: TraceRoots> TraceRoots for Option<T> {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        if let Some(value) = self {
+            value.trace(tracer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: TraceRoots> TraceRoots for [T] {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        for value in self {
+            value.trace(tracer)?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: TraceRoots, const N: usize> TraceRoots for [T; N] {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        self.as_slice().trace(tracer)
+    }
+}
+
+impl<T: TraceRoots> TraceRoots for Vec<T> {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        self.as_slice().trace(tracer)
+    }
+}
+
+macro_rules! trace_tuple {
+    ($($ty:ident $value:ident),+) => {
+        impl<$($ty: TraceRoots),+> TraceRoots for ($($ty,)+) {
+            fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+                let ($($value,)+) = self;
+                $($value.trace(tracer)?;)+
+                Ok(())
+            }
+        }
+    };
+}
+
+trace_tuple!(A a, B b);
+trace_tuple!(A a, B b, C c);
+trace_tuple!(A a, B b, C c, D d);
 
 impl Vm {
     /// Collects unreachable heap objects, returning the number removed.
@@ -49,7 +153,23 @@ impl Vm {
                 "garbage collection requires a drained microtask queue".to_owned(),
             ));
         }
-        let live = self.trace_roots(roots)?;
+        self.collect_with_roots(roots, None)
+    }
+
+    pub(crate) fn collect_active(
+        &mut self,
+        roots: &[Value],
+        active: &ActiveRoots<'_>,
+    ) -> Result<usize, VmError> {
+        self.collect_with_roots(roots, Some(active))
+    }
+
+    fn collect_with_roots(
+        &mut self,
+        roots: &[Value],
+        active: Option<&ActiveRoots<'_>>,
+    ) -> Result<usize, VmError> {
+        let live = self.trace_with_roots(roots, active)?;
         for id in &live.symbols {
             if !self.heap.symbols.contains_key(id) {
                 return Err(VmError::InvalidState(format!(
@@ -67,9 +187,21 @@ impl Vm {
     }
 
     pub(crate) fn trace_roots(&self, roots: &[Value]) -> Result<LiveSet, VmError> {
+        self.trace_with_roots(roots, None)
+    }
+
+    fn trace_with_roots(
+        &self,
+        roots: &[Value],
+        active: Option<&ActiveRoots<'_>>,
+    ) -> Result<LiveSet, VmError> {
         let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
-        for root in roots {
-            tracer.mark_value(root)?;
+        roots.trace(&mut tracer)?;
+        if let Some(active) = active {
+            active.trace(&mut tracer)?;
+            for job in &self.microtasks {
+                job.trace(&mut tracer)?;
+            }
         }
         for value in self.globals.values() {
             tracer.mark_value(value)?;
@@ -98,6 +230,8 @@ impl Vm {
         match (script_needs_env, self.script_env) {
             (true, Some(id)) => tracer.mark_object(id)?,
             (false, None) => {}
+            // During initialization the script environment is owned by its frame.
+            (true, None) if active.is_some() => {}
             (true, None) => {
                 return Err(VmError::InvalidState(
                     "script environment is missing".to_owned(),
@@ -109,8 +243,6 @@ impl Vm {
                 )));
             }
         }
-        tracer.drain()?;
-        tracer.mark_ephemerons()?;
         tracer.live.symbols.extend([
             ITERATOR_SYMBOL,
             TO_PRIMITIVE_SYMBOL,
@@ -126,11 +258,13 @@ impl Vm {
             .live
             .symbols
             .extend(self.heap.symbol_registry.values().copied());
+        tracer.drain()?;
+        tracer.mark_ephemerons()?;
         Ok(tracer.live)
     }
 }
 
-struct Tracer<'a> {
+pub(crate) struct Tracer<'a> {
     heap: &'a Heap,
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
     host_instances: &'a BTreeMap<ObjectId, HostInstance>,
@@ -195,9 +329,17 @@ impl<'a> Tracer<'a> {
     }
 
     fn mark_continuation(&mut self, promise: ObjectId, id: ContinuationId) -> Result<(), VmError> {
+        self.mark_pending_continuation(id).map_err(|_| {
+            VmError::InvalidState(format!(
+                "Promise {promise} references missing continuation {id}"
+            ))
+        })
+    }
+
+    pub(crate) fn mark_pending_continuation(&mut self, id: ContinuationId) -> Result<(), VmError> {
         if !self.continuations.contains_key(&id) {
             return Err(VmError::InvalidState(format!(
-                "Promise {promise} references missing continuation {id}"
+                "continuation {id} does not exist"
             )));
         }
         if self.live.continuations_seen.insert(id) {

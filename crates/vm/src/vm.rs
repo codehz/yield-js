@@ -7,6 +7,7 @@ use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
+use crate::gc::ActiveRoots;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, Object, PromiseState, ReactionJob};
 use crate::host::{Completion, Host};
@@ -281,6 +282,7 @@ impl Vm {
     pub(crate) fn call_host(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         target: NativeTarget,
         args: Vec<Value>,
         receiver: &Value,
@@ -346,6 +348,9 @@ impl Vm {
                     .map(|class| (class, prototype)),
                 _ => None,
             };
+        let prototype = construction.and_then(|context| context.prototype);
+        let context = (receiver, prototype);
+        let roots = &roots.with(&context);
         let mut next_args = args;
         let mut pending: Option<(GuestResume, Invocation)> = None;
         loop {
@@ -389,11 +394,20 @@ impl Vm {
                 }
                 Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
                 Ok(HostStep::Call(request)) => request,
+                Ok(HostStep::CollectGarbage(request)) => {
+                    let (saved, resume) = request
+                        .into_parts(cx)
+                        .map_err(|fault| VmError::HostFault(fault.0))?;
+                    let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
+                    pending = Some((resume, Invocation::Value(Value::Number(removed as f64))));
+                    next_args = saved;
+                    continue;
+                }
             };
             let (callee, guest_this, args, saved, resume) = request
                 .into_parts(cx)
                 .map_err(|fault| VmError::HostFault(fault.0))?;
-            let outcome = self.invoke(host, &callee, args, &guest_this)?;
+            let outcome = self.invoke(host, &roots.with(&saved), &callee, args, &guest_this)?;
             pending = Some((resume, outcome));
             next_args = saved;
         }
@@ -609,7 +623,7 @@ impl Vm {
                     .map_err(|error| VmError::Host(error.0))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.invoke(host, &callee, args, &Value::Undefined)?
+        self.invoke(host, &ActiveRoots::EMPTY, &callee, args, &Value::Undefined)?
             .into_result()
     }
     fn install_preload_globals(&mut self, env: Option<ObjectId>) -> Result<(), VmError> {
@@ -654,6 +668,7 @@ impl Vm {
             .then(|| self.heap.alloc_environment(None, BTreeMap::new()));
         self.activate(
             host,
+            &ActiveRoots::EMPTY,
             func_id,
             None,
             prepared,
@@ -668,35 +683,44 @@ impl Vm {
     /// host; it should call this after completing an operation.
     pub fn run_until_idle(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
         while let Some(task) = self.microtasks.pop_front() {
+            let roots = &ActiveRoots::EMPTY.with(&task);
             match task {
                 Microtask::Resume {
                     continuation,
-                    settlement,
-                } => self.resume_continuation(host, continuation, settlement)?,
+                    ref settlement,
+                } => {
+                    let result = self.resume_continuation(host, roots, continuation, settlement);
+                    self.continuations.remove(&continuation);
+                    result?;
+                }
                 Microtask::CallHandler {
-                    handler,
-                    argument,
-                    capability,
+                    ref handler,
+                    ref argument,
+                    ref capability,
                     rejected,
-                } => self.run_call_handler(host, handler, argument, capability, rejected)?,
+                } => self.run_call_handler(host, roots, handler, argument, capability, rejected)?,
                 Microtask::Assimilate {
                     result,
-                    receiver,
-                    then,
-                } => self.run_assimilate(host, result, receiver, then)?,
+                    ref receiver,
+                    ref then,
+                } => self.run_assimilate(host, roots, result, receiver, then)?,
                 Microtask::BeginAdopt { result, source } => {
                     self.react(source, ReactionJob::Adopt { result })?
                 }
-                Microtask::Adopt { result, settlement } => {
-                    self.run_adopt(host, result, settlement)?
-                }
+                Microtask::Adopt {
+                    result,
+                    ref settlement,
+                } => self.run_adopt(host, roots, result, settlement)?,
                 Microtask::Combine {
                     result,
                     index,
                     kind,
                     settlement,
                 } => self.run_combine(result, index, kind, settlement)?,
-                Microtask::Call { function, args } => self.run_queue_call(host, function, args)?,
+                Microtask::Call {
+                    ref function,
+                    ref args,
+                } => self.run_queue_call(host, roots, function, args)?,
             }
         }
         Ok(())
@@ -932,19 +956,25 @@ impl Vm {
     pub(crate) fn settle_outcome(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         promise: ObjectId,
         outcome: ExecOutcome,
     ) -> Result<(), VmError> {
         match outcome {
             ExecOutcome::Suspended => Ok(()),
-            ExecOutcome::Return(value) => self.resolve_promise(host, promise, value),
+            ExecOutcome::Return(value) => self.resolve_promise(host, roots, promise, value),
             ExecOutcome::Thrown(value) => self.settle(promise, Settlement::Rejected(value)),
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     pub(crate) fn call_function(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         func_id: u32,
         parent_env: Option<ObjectId>,
         args: Vec<Value>,
@@ -953,6 +983,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         self.activate(
             host,
+            roots,
             func_id,
             parent_env,
             None,
@@ -961,9 +992,14 @@ impl Vm {
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     fn activate(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         func_id: u32,
         parent_env: Option<ObjectId>,
         prepared_env: Option<ObjectId>,
@@ -1037,10 +1073,10 @@ impl Vm {
         for (slot, value) in slot_args {
             frame.write(slot, value)?;
         }
-        let outcome = self.execute_frame(host, frame)?;
+        let outcome = self.execute_frame(host, roots, frame)?;
         match async_promise {
             Some(promise) => {
-                self.settle_outcome(host, promise, outcome)?;
+                self.settle_outcome(host, roots, promise, outcome)?;
                 Ok(Invocation::Value(Value::Object(promise)))
             }
             None => match outcome {

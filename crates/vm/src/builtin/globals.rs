@@ -67,7 +67,7 @@ const ITERATOR_IDENTITY: IntrinsicKey =
     IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "identity");
 const ITERATOR_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
     ITERATOR_IDENTITY,
-    |_, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
+    |_, _, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
 )];
 const GLOBAL_THIS: &str = "globalThis";
 const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(

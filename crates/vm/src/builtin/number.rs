@@ -7,6 +7,7 @@ use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_NUMBER_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, RootKind, RootSpec,
 };
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -19,27 +20,32 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[yield_binding_macros::builtin_global(name = "Number", root = "number", kind = "constructor")]
 pub(crate) mod members {
-    use super::{Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
     #[functions(isFinite, isInteger, isNaN, isSafeInteger, parseFloat, parseInt)]
     fn call_static(
         vm: &mut Vm,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         key: &str,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.call_number_static(host, key, args)
+        let roots = &roots.with(&args);
+        vm.call_number_static(host, roots, key, args)
     }
 
     #[methods(toString, valueOf, toFixed, toExponential, toPrecision, toLocaleString)]
     fn call_method(
         vm: &mut Vm,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         key: &str,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.call_number_method(host, key, receiver, args)
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
+        vm.call_number_method(host, roots, key, receiver, args)
     }
 
     #[constant(name = "EPSILON")]
@@ -64,9 +70,9 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Number", Slot::Global, "");
 
 pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     CONSTRUCTOR,
-    |vm, host, args, _| vm.call_number(host, &args),
-    |vm, host, args, prototype| {
-        let result = match vm.call_number(host, &args)? {
+    |vm, host, roots, args, _| vm.call_number(host, roots, &args),
+    |vm, host, roots, args, prototype| {
+        let result = match vm.call_number(host, roots, &args)? {
             Invocation::Value(value) => vm.construct_object(&[value])?,
             thrown => thrown,
         };
@@ -124,10 +130,16 @@ impl Vm {
         members::install_members(self, constructor, prototype);
     }
 
-    fn call_number(&mut self, host: &mut dyn Host, args: &[Value]) -> Result<Invocation, VmError> {
+    fn call_number(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         Ok(match args.first() {
             None => Invocation::Value(Value::Number(0.0)),
-            Some(arg) => match self.coerce_number(host, arg)? {
+            Some(arg) => match self.coerce_number(host, roots, arg)? {
                 Ok(number) => Invocation::Value(Value::Number(number)),
                 Err(error) => Invocation::Thrown(error),
             },
@@ -137,13 +149,15 @@ impl Vm {
     fn call_number_static(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let arg = args.first().unwrap_or(&Value::Undefined);
         let value = match method {
             "parseFloat" | "parseInt" => {
-                let text = match self.coerce_string(host, arg)? {
+                let text = match self.coerce_string(host, roots, arg)? {
                     Ok(text) => text,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
@@ -157,7 +171,7 @@ impl Vm {
                 } else {
                     let radix = match args.get(1) {
                         None => 0,
-                        Some(value) => match self.coerce_number(host, value)? {
+                        Some(value) => match self.coerce_number(host, roots, value)? {
                             Ok(number) => ops::number_to_uint32(number) as i32,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         },
@@ -182,10 +196,13 @@ impl Vm {
     fn call_number_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: &str,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
         let number = match receiver {
             Value::Number(number) => Some(*number),
             Value::Object(id) => match self.heap.get(*id)? {
@@ -213,7 +230,7 @@ impl Vm {
         let digits = if omitted {
             if method == "toString" { 10.0 } else { 0.0 }
         } else {
-            match self.coerce_number(host, arg)? {
+            match self.coerce_number(host, roots, arg)? {
                 Ok(n) if n.is_nan() => 0.0,
                 Ok(n) => n.trunc(),
                 Err(error) => return Ok(Invocation::Thrown(error)),

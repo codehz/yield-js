@@ -20,9 +20,11 @@ macro_rules! error_class {
                 ],
                 &[&[IntrinsicDef::constructor(
                     KEY,
-                    |vm, host, args, _| vm.construct_error(host, $name, PROTOTYPE, args),
-                    |vm, host, args, prototype| {
-                        let result = vm.construct_error(host, $name, PROTOTYPE, args)?;
+                    |vm, host, roots, args, _| {
+                        vm.construct_error(host, roots, $name, PROTOTYPE, args)
+                    },
+                    |vm, host, roots, args, prototype| {
+                        let result = vm.construct_error(host, roots, $name, PROTOTYPE, args)?;
                         vm.with_result_prototype(result, prototype)
                     },
                 )]],

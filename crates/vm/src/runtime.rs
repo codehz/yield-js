@@ -5,6 +5,7 @@ use std::any::Any;
 
 use crate::binding::{ClassId, Recovery};
 use crate::error::VmError;
+use crate::gc::{TraceRoots, Tracer};
 use crate::heap::{CombineKind, PromiseState};
 use crate::value::{ContinuationId, ObjectId, Value};
 
@@ -160,4 +161,46 @@ pub(crate) enum Microtask {
         function: Value,
         args: Vec<Value>,
     },
+}
+
+impl TraceRoots for Settlement {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        match self {
+            Self::Fulfilled(value) | Self::Rejected(value) => value.trace(tracer),
+        }
+    }
+}
+
+impl TraceRoots for Microtask {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        match self {
+            Self::Resume {
+                continuation,
+                settlement,
+            } => {
+                tracer.mark_pending_continuation(*continuation)?;
+                settlement.trace(tracer)
+            }
+            Self::CallHandler {
+                handler,
+                argument,
+                capability,
+                rejected: _,
+            } => (handler, argument, capability).trace(tracer),
+            Self::Assimilate {
+                result,
+                receiver,
+                then,
+            } => (result, receiver, then).trace(tracer),
+            Self::BeginAdopt { result, source } => (result, source).trace(tracer),
+            Self::Adopt { result, settlement }
+            | Self::Combine {
+                result,
+                index: _,
+                kind: _,
+                settlement,
+            } => (result, settlement).trace(tracer),
+            Self::Call { function, args } => (function, args).trace(tracer),
+        }
+    }
 }

@@ -527,17 +527,19 @@ fn parse_builtin_marker(
             (Item::Const(item), "constant") => BuiltinMemberAction::Constant(item.ident.clone()),
             (Item::Fn(item), "function") => {
                 let ident = &item.sig.ident;
+                let context = builtin_call_context(item, 2);
                 BuiltinMemberAction::Handler(
-                    quote!(|vm, host, args, _| self::#ident(vm, host, &args)),
+                    quote!(|vm, host, roots, args, _| self::#ident(vm, #context &args)),
                 )
             }
             (Item::Fn(item), "functions" | "methods") => {
                 let ident = &item.sig.ident;
                 let key = mapped.map_or_else(|| quote!(#member), |path| quote!(#path));
+                let context = builtin_call_context(item, if prototype { 4 } else { 3 });
                 BuiltinMemberAction::Handler(if prototype {
-                    quote!(|vm, host, args, receiver| self::#ident(vm, host, #key, receiver, &args))
+                    quote!(|vm, host, roots, args, receiver| self::#ident(vm, #context #key, receiver, &args))
                 } else {
-                    quote!(|vm, host, args, _| self::#ident(vm, host, #key, &args))
+                    quote!(|vm, host, roots, args, _| self::#ident(vm, #context #key, &args))
                 })
             }
             (_, "constant") => {
@@ -556,6 +558,15 @@ fn parse_builtin_marker(
         actions.push((member, action));
     }
     Ok(Some((prototype, cfg, actions)))
+}
+
+fn builtin_call_context(item: &syn::ItemFn, hostless_arity: usize) -> TokenStream {
+    // Host-bearing implementations take both host and roots between VM and member arguments.
+    if item.sig.inputs.len() == hostless_arity {
+        quote!()
+    } else {
+        quote!(host, roots,)
+    }
 }
 
 type BuiltinMarkerMembers = (bool, Vec<Attribute>, Vec<(LitStr, BuiltinMemberAction)>);
@@ -1563,7 +1574,7 @@ mod tests {
                     static_calls! { create => create_handler; }
                     #[cfg(feature = "example")]
                     prototype_calls! {
-                        then | r#match as key => |vm, host, args, receiver| method(vm, host, args, receiver, key);
+                        then | r#match as key => |vm, host, roots, args, receiver| method(vm, host, roots, args, receiver, key);
                         other => other_handler;
                     }
                 }

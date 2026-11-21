@@ -4,6 +4,7 @@ use std::collections::btree_map::Entry;
 
 use crate::bytecode::PrivateDefinition;
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{
     ClassElement, Object, PrivateElement, PrivateMember, PrivateMemberKind, ScriptClass,
 };
@@ -133,6 +134,7 @@ impl Vm {
     pub(crate) fn get_private(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,
         index: u32,
@@ -155,7 +157,7 @@ impl Vm {
         match class.source.private[&index].kind {
             PrivateMemberKind::Method(method) => Ok(Invocation::Value(Value::Object(method))),
             PrivateMemberKind::Accessor { get: Some(get), .. } => {
-                self.invoke(host, &Value::Object(get), Vec::new(), receiver)
+                self.invoke(host, roots, &Value::Object(get), Vec::new(), receiver)
             }
             _ => self.throw_type_error("private member has no getter"),
         }
@@ -164,6 +166,7 @@ impl Vm {
     pub(crate) fn set_private(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,
         index: u32,
@@ -192,7 +195,7 @@ impl Vm {
         }
         match kind {
             Some(PrivateMemberKind::Accessor { set: Some(set), .. }) => {
-                self.invoke(host, &Value::Object(set), vec![value], receiver)
+                self.invoke(host, roots, &Value::Object(set), vec![value], receiver)
             }
             _ => self.throw_type_error("private member is not writable"),
         }

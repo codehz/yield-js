@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::binding::{Bindings, HostFault, JsValue, OperationStart};
+use crate::value::Value;
 
 /// How a host operation completed. Values are produced outside a call, so
 /// they must be constants; host code cannot mint object handles after the
@@ -19,6 +20,12 @@ pub enum Completion {
 /// [`crate::Vm::complete_operation`].
 pub trait Host {
     fn bindings(&self) -> Arc<Bindings>;
+
+    /// Long-lived same-VM values retained by the host. Read only when a host
+    /// binding requests collection, not by `Vm::collect_garbage` or snapshots.
+    fn gc_roots(&self) -> &[Value] {
+        &[]
+    }
 
     /// Called synchronously after the VM records a new operation. The host may
     /// hand `start.state` to a platform service. It must not re-enter the VM.

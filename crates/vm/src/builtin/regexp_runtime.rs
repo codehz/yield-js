@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use crate::builtin::globals::Owner;
 use crate::builtin::{RootKind, RootSpec};
 use crate::error::VmError;
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -74,8 +75,8 @@ macro_rules! regexp_method {
     ($slot:ident, $name:literal, $method:ident) => {
         IntrinsicDef::call(
             IntrinsicKey::new("RegExp", Slot::$slot, $name),
-            |vm, host, args, receiver| {
-                vm.call_regexp_method(host, RegExpMethod::$method, receiver, &args)
+            |vm, host, roots, args, receiver| {
+                vm.call_regexp_method(host, roots, RegExpMethod::$method, receiver, &args)
             },
         )
     };
@@ -84,8 +85,10 @@ macro_rules! regexp_method {
 pub(crate) const REGEXP_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         REGEXP,
-        |vm, host, args, _| vm.construct_regexp(host, &args, None, true),
-        |vm, host, args, prototype| vm.construct_regexp(host, &args, prototype, false),
+        |vm, host, roots, args, _| vm.construct_regexp(host, roots, &args, None, true),
+        |vm, host, roots, args, prototype| {
+            vm.construct_regexp(host, roots, &args, prototype, false)
+        },
     ),
     regexp_method!(Prototype, "exec", Exec),
     regexp_method!(Prototype, "test", Test),
@@ -108,7 +111,7 @@ pub(crate) const REGEXP_INTRINSICS: &[IntrinsicDef] = &[
     regexp_method!(PrototypeSymbol, "split", Split),
     IntrinsicDef::call(
         IntrinsicKey::new("RegExpStringIterator", Slot::Prototype, "next"),
-        |vm, host, _, receiver| vm.regexp_string_iterator_next(host, receiver),
+        |vm, host, roots, _, receiver| vm.regexp_string_iterator_next(host, roots, receiver),
     ),
 ];
 
@@ -229,10 +232,12 @@ impl Vm {
     pub(crate) fn construct_regexp(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
         called: bool,
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let pattern = args.first().unwrap_or(&Value::Undefined);
         let flags_arg = args.get(1).unwrap_or(&Value::Undefined);
         let regexp = match pattern {
@@ -243,7 +248,7 @@ impl Vm {
             _ => None,
         };
         if called && regexp.is_some() && matches!(flags_arg, Value::Undefined) {
-            match self.read_property(host, pattern, PropertyKeyRef::String("constructor"))? {
+            match self.read_property(host, roots, pattern, PropertyKeyRef::String("constructor"))? {
                 Invocation::Value(Value::Object(id)) if id == self.builtins.get("regexp") => {
                     return Ok(Invocation::Value(pattern.clone()));
                 }
@@ -260,7 +265,7 @@ impl Vm {
                 let source = if matches!(pattern, Value::Undefined) {
                     JsString::new()
                 } else {
-                    match self.coerce_string(host, pattern)? {
+                    match self.coerce_string(host, roots, pattern)? {
                         Ok(source) => source,
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     }
@@ -271,7 +276,7 @@ impl Vm {
         let flags_text = if matches!(flags_arg, Value::Undefined) {
             inherited_flags.map_or_else(JsString::new, |flags| flags.as_string().into())
         } else {
-            match self.coerce_string(host, flags_arg)? {
+            match self.coerce_string(host, roots, flags_arg)? {
                 Ok(flags) => flags,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
@@ -300,10 +305,13 @@ impl Vm {
     pub(crate) fn call_regexp_method(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         method: RegExpMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let root_view = (receiver, args);
+        let roots = &roots.with(&root_view);
         if matches!(method, RegExpMethod::Escape) {
             let Some(Value::String(input)) = args.first() else {
                 return self.throw_type_error("RegExp.escape requires a string argument");
@@ -315,11 +323,11 @@ impl Vm {
         };
         match method {
             RegExpMethod::ToString => {
-                let source = match self.regexp_string_property(host, receiver, "source")? {
+                let source = match self.regexp_string_property(host, roots, receiver, "source")? {
                     Ok(source) => source,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
-                let flags = match self.regexp_string_property(host, receiver, "flags")? {
+                let flags = match self.regexp_string_property(host, roots, receiver, "flags")? {
                     Ok(flags) => flags,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
@@ -341,7 +349,7 @@ impl Vm {
                     ("unicodeSets", 'v'),
                     ("sticky", 'y'),
                 ] {
-                    match self.read_property(host, receiver, PropertyKeyRef::String(key))? {
+                    match self.read_property(host, roots, receiver, PropertyKeyRef::String(key))? {
                         Invocation::Value(value) => {
                             if value.truthy() {
                                 flags.push(flag);
@@ -355,16 +363,17 @@ impl Vm {
             RegExpMethod::Test => {
                 return self.regexp_test(
                     host,
+                    roots,
                     receiver,
                     id,
                     args.first().unwrap_or(&Value::Undefined),
                 );
             }
-            RegExpMethod::Match => return self.regexp_symbol_match(host, id, args),
-            RegExpMethod::MatchAll => return self.regexp_symbol_match_all(host, id, args),
-            RegExpMethod::Replace => return self.regexp_symbol_replace(host, id, args),
-            RegExpMethod::Search => return self.regexp_symbol_search(host, id, args),
-            RegExpMethod::Split => return self.regexp_symbol_split(host, id, args),
+            RegExpMethod::Match => return self.regexp_symbol_match(host, roots, id, args),
+            RegExpMethod::MatchAll => return self.regexp_symbol_match_all(host, roots, id, args),
+            RegExpMethod::Replace => return self.regexp_symbol_replace(host, roots, id, args),
+            RegExpMethod::Search => return self.regexp_symbol_search(host, roots, id, args),
+            RegExpMethod::Split => return self.regexp_symbol_split(host, roots, id, args),
             _ => {}
         }
         let Object::RegExp { source, flags, .. } = self.heap.get(id)? else {
@@ -382,11 +391,11 @@ impl Vm {
         let value = match method {
             RegExpMethod::Exec => {
                 let argument = args.first().unwrap_or(&Value::Undefined);
-                let input = match self.coerce_string(host, argument)? {
+                let input = match self.coerce_string(host, roots, argument)? {
                     Ok(input) => input,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
-                return self.regexp_match(host, id, input);
+                return self.regexp_match(host, roots, id, input);
             }
             RegExpMethod::Source => Value::String(escaped_source(source)),
             RegExpMethod::Global => Value::Bool(flags.global),
@@ -412,22 +421,25 @@ impl Vm {
     fn regexp_symbol_match(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let receiver = Value::Object(id);
-        let string = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let flags = match self.regexp_flags(host, &receiver)? {
+        let string =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        let flags = match self.regexp_flags(host, roots, &receiver)? {
             Ok(flags) => flags,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if !flags_contains(&flags, b'g') {
-            return self.regexp_exec(host, &receiver, id, string);
+            return self.regexp_exec(host, roots, &receiver, id, string);
         }
-        if let Err(error) = self.regexp_set_last_index(host, id, 0.0)? {
+        if let Err(error) = self.regexp_set_last_index(host, roots, id, 0.0)? {
             return Ok(Invocation::Thrown(error));
         }
         let unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
@@ -436,6 +448,7 @@ impl Vm {
         loop {
             match self.regexp_exec_with_encoded(
                 host,
+                roots,
                 &receiver,
                 id,
                 string.clone(),
@@ -443,8 +456,8 @@ impl Vm {
             )? {
                 Invocation::Value(Value::Null) => break,
                 Invocation::Value(Value::Object(array)) => {
-                    let matched = match self.regexp_capture(host, array, 0)? {
-                        Ok(value) => match self.coerce_string(host, &value)? {
+                    let matched = match self.regexp_capture(host, roots, array, 0)? {
+                        Ok(value) => match self.coerce_string(host, roots, &value)? {
                             Ok(matched) => matched,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         },
@@ -452,12 +465,12 @@ impl Vm {
                     };
                     results.push(Value::String(matched.clone()));
                     if matched.is_empty() {
-                        let last_index = match self.regexp_last_index(host, id)? {
+                        let last_index = match self.regexp_last_index(host, roots, id)? {
                             Ok(index) => index,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };
                         let next = advance_string_index(&string, last_index, unicode) as f64;
-                        if let Err(error) = self.regexp_set_last_index(host, id, next)? {
+                        if let Err(error) = self.regexp_set_last_index(host, roots, id, next)? {
                             return Ok(Invocation::Thrown(error));
                         }
                     }
@@ -477,15 +490,18 @@ impl Vm {
     fn regexp_symbol_match_all(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let receiver = Value::Object(id);
-        let string = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let flags = match self.regexp_flags(host, &receiver)? {
+        let string =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        let flags = match self.regexp_flags(host, roots, &receiver)? {
             Ok(flags) => flags,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -494,6 +510,7 @@ impl Vm {
         }
         let created = self.construct_regexp(
             host,
+            roots,
             &[receiver.clone(), Value::String(flags.clone())],
             None,
             false,
@@ -501,13 +518,18 @@ impl Vm {
         let Invocation::Value(Value::Object(matcher)) = created else {
             return Ok(created);
         };
-        let last_index =
-            match self.read_property(host, &receiver, PropertyKeyRef::String("lastIndex"))? {
-                Invocation::Value(value) => value,
-                thrown @ Invocation::Thrown(_) => return Ok(thrown),
-            };
+        let last_index = match self.read_property(
+            host,
+            &roots.with(&matcher),
+            &receiver,
+            PropertyKeyRef::String("lastIndex"),
+        )? {
+            Invocation::Value(value) => value,
+            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        };
         if let thrown @ Invocation::Thrown(_) = self.set_property(
             host,
+            roots,
             matcher,
             &Value::Object(matcher),
             PropertyKey::String("lastIndex".into()),
@@ -531,8 +553,10 @@ impl Vm {
     fn regexp_string_iterator_next(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&receiver);
         let invalid = "RegExpStringIterator.next requires a RegExp string iterator";
         let Value::Object(id) = *receiver else {
             return self.throw_type_error(invalid);
@@ -554,7 +578,7 @@ impl Vm {
             return self.iterator_result(Value::Undefined, true);
         }
         let matcher = Value::Object(regexp);
-        match self.regexp_exec(host, &matcher, regexp, string.clone())? {
+        match self.regexp_exec(host, roots, &matcher, regexp, string.clone())? {
             Invocation::Value(Value::Null) => {
                 let Object::RegExpStringIterator { done, .. } = self.heap.get_mut(id)? else {
                     unreachable!("iterator kind does not change");
@@ -563,21 +587,22 @@ impl Vm {
                 self.iterator_result(Value::Undefined, true)
             }
             Invocation::Value(result @ Value::Object(array)) => {
+                let roots = &roots.with(&array);
                 if global {
-                    let matched = match self.regexp_capture(host, array, 0)? {
-                        Ok(value) => match self.coerce_string(host, &value)? {
+                    let matched = match self.regexp_capture(host, roots, array, 0)? {
+                        Ok(value) => match self.coerce_string(host, roots, &value)? {
                             Ok(matched) => matched,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         },
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     };
                     if matched.is_empty() {
-                        let last_index = match self.regexp_last_index(host, regexp)? {
+                        let last_index = match self.regexp_last_index(host, roots, regexp)? {
                             Ok(index) => index,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };
                         let next = advance_string_index(&string, last_index, full_unicode) as f64;
-                        if let Err(error) = self.regexp_set_last_index(host, regexp, next)? {
+                        if let Err(error) = self.regexp_set_last_index(host, roots, regexp, next)? {
                             return Ok(Invocation::Thrown(error));
                         }
                     }
@@ -594,25 +619,28 @@ impl Vm {
     fn regexp_symbol_replace(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let receiver = Value::Object(id);
-        let string = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
+        let string =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
         let replace_value = args.get(1).cloned().unwrap_or(Value::Undefined);
         let functional = self.is_callable(&replace_value);
         let replacement = if functional {
             JsString::default()
         } else {
-            match self.coerce_string(host, &replace_value)? {
+            match self.coerce_string(host, roots, &replace_value)? {
                 Ok(replacement) => replacement,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             }
         };
-        let flags = match self.regexp_flags(host, &receiver)? {
+        let flags = match self.regexp_flags(host, roots, &receiver)? {
             Ok(flags) => flags,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -620,13 +648,14 @@ impl Vm {
         let unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
         let mut results = Vec::new();
         if global {
-            if let Err(error) = self.regexp_set_last_index(host, id, 0.0)? {
+            if let Err(error) = self.regexp_set_last_index(host, roots, id, 0.0)? {
                 return Ok(Invocation::Thrown(error));
             }
             let encoded = encode_input_with_flags(&string, &flags).into_owned();
             loop {
                 match self.regexp_exec_with_encoded(
                     host,
+                    &roots.with(&results),
                     &receiver,
                     id,
                     string.clone(),
@@ -635,20 +664,21 @@ impl Vm {
                     Invocation::Value(Value::Null) => break,
                     Invocation::Value(Value::Object(array)) => {
                         results.push(Value::Object(array));
-                        let matched = match self.regexp_capture(host, array, 0)? {
-                            Ok(value) => match self.coerce_string(host, &value)? {
+                        let roots = &roots.with(&results);
+                        let matched = match self.regexp_capture(host, roots, array, 0)? {
+                            Ok(value) => match self.coerce_string(host, roots, &value)? {
                                 Ok(matched) => matched,
                                 Err(error) => return Ok(Invocation::Thrown(error)),
                             },
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };
                         if matched.is_empty() {
-                            let last_index = match self.regexp_last_index(host, id)? {
+                            let last_index = match self.regexp_last_index(host, roots, id)? {
                                 Ok(index) => index,
                                 Err(error) => return Ok(Invocation::Thrown(error)),
                             };
                             let next = advance_string_index(&string, last_index, unicode) as f64;
-                            if let Err(error) = self.regexp_set_last_index(host, id, next)? {
+                            if let Err(error) = self.regexp_set_last_index(host, roots, id, next)? {
                                 return Ok(Invocation::Thrown(error));
                             }
                         }
@@ -660,7 +690,7 @@ impl Vm {
                 }
             }
         } else {
-            match self.regexp_exec(host, &receiver, id, string.clone())? {
+            match self.regexp_exec(host, roots, &receiver, id, string.clone())? {
                 Invocation::Value(Value::Null) => {
                     return Ok(Invocation::Value(Value::String(string)));
                 }
@@ -676,6 +706,7 @@ impl Vm {
         }
         match self.regexp_replace_results(
             host,
+            roots,
             &string,
             results,
             functional,
@@ -690,38 +721,42 @@ impl Vm {
     fn regexp_symbol_search(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let receiver = Value::Object(id);
-        let string = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let previous = match self.regexp_last_index(host, id)? {
+        let string =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        let previous = match self.regexp_last_index(host, roots, id)? {
             Ok(index) => index,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if previous.to_bits() != 0.0f64.to_bits()
-            && let Err(error) = self.regexp_set_last_index(host, id, 0.0)?
+            && let Err(error) = self.regexp_set_last_index(host, roots, id, 0.0)?
         {
             return Ok(Invocation::Thrown(error));
         }
-        let result = self.regexp_exec(host, &receiver, id, string)?;
-        let current = match self.regexp_last_index(host, id)? {
+        let result = self.regexp_exec(host, roots, &receiver, id, string)?;
+        let roots = &roots.with(&result);
+        let current = match self.regexp_last_index(host, roots, id)? {
             Ok(index) => index,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if current.to_bits() != previous.to_bits()
-            && let Err(error) = self.regexp_set_last_index(host, id, previous)?
+            && let Err(error) = self.regexp_set_last_index(host, roots, id, previous)?
         {
             return Ok(Invocation::Thrown(error));
         }
         match result {
             Invocation::Value(Value::Null) => Ok(Invocation::Value(Value::Number(-1.0))),
             Invocation::Value(Value::Object(array)) => {
-                match self.regexp_element(host, array, "index")? {
-                    Ok(value) => match self.coerce_number(host, &value)? {
+                match self.regexp_element(host, roots, array, "index")? {
+                    Ok(value) => match self.coerce_number(host, roots, &value)? {
                         Ok(number) => Ok(Invocation::Value(Value::Number(to_integer(number)))),
                         Err(error) => Ok(Invocation::Thrown(error)),
                     },
@@ -738,24 +773,27 @@ impl Vm {
     fn regexp_symbol_split(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
         let receiver = Value::Object(id);
-        let string = match self.coerce_string(host, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(string) => string,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
+        let string =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(string) => string,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
         let limit = match args.get(1) {
             Some(value) if !matches!(value, Value::Undefined) => {
-                match self.coerce_number(host, value)? {
+                match self.coerce_number(host, roots, value)? {
                     Ok(number) => crate::ops::number_to_uint32(number) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
             }
             _ => u32::MAX as usize,
         };
-        let flags = match self.regexp_flags(host, &receiver)? {
+        let flags = match self.regexp_flags(host, roots, &receiver)? {
             Ok(flags) => flags,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -766,6 +804,7 @@ impl Vm {
         }
         let created = self.construct_regexp(
             host,
+            roots,
             &[receiver.clone(), Value::String(splitter_flags)],
             None,
             false,
@@ -773,6 +812,7 @@ impl Vm {
         let Invocation::Value(Value::Object(splitter)) = created else {
             return Ok(created);
         };
+        let roots = &roots.with(&splitter);
         let size = string.unit_len();
         let encoded = encode_input_with_flags(&string, &flags).into_owned();
         let mut parts = Vec::new();
@@ -782,6 +822,7 @@ impl Vm {
         if size == 0 {
             match self.regexp_exec_with_encoded(
                 host,
+                roots,
                 &Value::Object(splitter),
                 splitter,
                 string.clone(),
@@ -797,11 +838,15 @@ impl Vm {
         let mut start = 0usize;
         let mut cursor = 0usize;
         while cursor < size {
-            if let Err(error) = self.regexp_set_last_index(host, splitter, cursor as f64)? {
+            let step_roots = &roots.with(&parts);
+            if let Err(error) =
+                self.regexp_set_last_index(host, step_roots, splitter, cursor as f64)?
+            {
                 return Ok(Invocation::Thrown(error));
             }
             let result = self.regexp_exec_with_encoded(
                 host,
+                step_roots,
                 &Value::Object(splitter),
                 splitter,
                 string.clone(),
@@ -814,15 +859,17 @@ impl Vm {
                 cursor = advance_string_index(&string, cursor as f64, unicode);
                 continue;
             };
-            let index = match self.regexp_element(host, array, "index")? {
-                Ok(value) => match self.coerce_number(host, &value)? {
+            let roots = &roots.with(&array);
+            let capture_roots = &roots.with(&parts);
+            let index = match self.regexp_element(host, &roots.with(&parts), array, "index")? {
+                Ok(value) => match self.coerce_number(host, capture_roots, &value)? {
                     Ok(number) => to_integer(number).max(0.0) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 },
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-            let end = match self.regexp_capture(host, array, 0)? {
-                Ok(value) => match self.coerce_string(host, &value)? {
+            let end = match self.regexp_capture(host, capture_roots, array, 0)? {
+                Ok(value) => match self.coerce_string(host, capture_roots, &value)? {
                     Ok(matched) => (index + matched.unit_len()).min(size),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 },
@@ -844,15 +891,15 @@ impl Vm {
             last = end;
             start = end;
             cursor = end;
-            let count = match self.regexp_element(host, array, "length")? {
-                Ok(value) => match self.coerce_number(host, &value)? {
+            let count = match self.regexp_element(host, &roots.with(&parts), array, "length")? {
+                Ok(value) => match self.coerce_number(host, roots, &value)? {
                     Ok(number) => to_integer(number).clamp(0.0, u32::MAX as f64) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 },
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
             for index in 1..count {
-                let value = match self.regexp_capture(host, array, index)? {
+                let value = match self.regexp_capture(host, &roots.with(&parts), array, index)? {
                     Ok(value) => value,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
@@ -868,9 +915,14 @@ impl Vm {
         self.array_result(parts)
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit active roots at a guest call boundary"
+    )]
     fn regexp_replace_results(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         string: &JsString,
         results: Vec<Value>,
         functional: bool,
@@ -880,19 +932,22 @@ impl Vm {
         let length = string.unit_len();
         let mut out = Vec::new();
         let mut next = 0usize;
-        for result in results {
+        let root_view = (&results, replace_value);
+        let roots = &roots.with(&root_view);
+        for result in &results {
             let Value::Object(array) = result else {
                 continue;
             };
-            let index = match self.regexp_element(host, array, "index")? {
-                Ok(value) => match self.coerce_number(host, &value)? {
+            let roots = &roots.with(array);
+            let index = match self.regexp_element(host, roots, *array, "index")? {
+                Ok(value) => match self.coerce_number(host, roots, &value)? {
                     Ok(number) => to_integer(number),
                     Err(error) => return Ok(Err(error)),
                 },
                 Err(error) => return Ok(Err(error)),
             };
-            let matched = match self.regexp_capture(host, array, 0)? {
-                Ok(value) => match self.coerce_string(host, &value)? {
+            let matched = match self.regexp_capture(host, roots, *array, 0)? {
+                Ok(value) => match self.coerce_string(host, roots, &value)? {
                     Ok(matched) => matched,
                     Err(error) => return Ok(Err(error)),
                 },
@@ -906,8 +961,8 @@ impl Vm {
                 index as usize
             };
             let tail = (position + matched.unit_len()).min(length);
-            let count = match self.regexp_element(host, array, "length")? {
-                Ok(value) => match self.coerce_number(host, &value)? {
+            let count = match self.regexp_element(host, roots, *array, "length")? {
+                Ok(value) => match self.coerce_number(host, roots, &value)? {
                     Ok(number) => to_integer(number).clamp(0.0, u32::MAX as f64) as usize,
                     Err(error) => return Ok(Err(error)),
                 },
@@ -915,15 +970,16 @@ impl Vm {
             };
             let mut captures = Vec::new();
             for index in 1..count {
-                match self.regexp_capture(host, array, index)? {
+                match self.regexp_capture(host, &roots.with(&captures), *array, index)? {
                     Ok(value) => captures.push(value),
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            let groups = match self.regexp_element(host, array, "groups")? {
-                Ok(value) => value,
-                Err(error) => return Ok(Err(error)),
-            };
+            let groups =
+                match self.regexp_element(host, &roots.with(&captures), *array, "groups")? {
+                    Ok(value) => value,
+                    Err(error) => return Ok(Err(error)),
+                };
             let start = next.min(position);
             out.extend(string.units().skip(start).take(position - start));
             if functional {
@@ -935,18 +991,21 @@ impl Vm {
                 if !matches!(groups, Value::Undefined) {
                     argv.push(groups.clone());
                 }
-                let value = match self.invoke(host, replace_value, argv, &Value::Undefined)? {
-                    Invocation::Value(value) => value,
-                    thrown @ Invocation::Thrown(_) => match thrown {
-                        Invocation::Thrown(error) => return Ok(Err(error)),
-                        _ => unreachable!(),
-                    },
-                };
-                match self.coerce_string(host, &value)? {
+                let value =
+                    match self.invoke(host, roots, replace_value, argv, &Value::Undefined)? {
+                        Invocation::Value(value) => value,
+                        thrown @ Invocation::Thrown(_) => match thrown {
+                            Invocation::Thrown(error) => return Ok(Err(error)),
+                            _ => unreachable!(),
+                        },
+                    };
+                match self.coerce_string(host, roots, &value)? {
                     Ok(value) => out.extend(value.units()),
                     Err(error) => return Ok(Err(error)),
                 }
             } else {
+                let view = (&captures, &groups);
+                let roots = &roots.with(&view);
                 let parts = Substitution {
                     string,
                     matched: &matched,
@@ -954,7 +1013,7 @@ impl Vm {
                     captures: &captures,
                     named: &groups,
                 };
-                match self.regexp_substitution(host, replacement, &parts)? {
+                match self.regexp_substitution(host, roots, replacement, &parts)? {
                     Ok(value) => out.extend(value.units()),
                     Err(error) => return Ok(Err(error)),
                 }
@@ -968,6 +1027,7 @@ impl Vm {
     fn regexp_substitution(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         replaced: &JsString,
         parts: &Substitution<'_>,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -1019,7 +1079,7 @@ impl Vm {
                     }
                     if number >= 1 && number <= captures.len() {
                         if !matches!(captures[number - 1], Value::Undefined) {
-                            match self.coerce_string(host, &captures[number - 1])? {
+                            match self.coerce_string(host, roots, &captures[number - 1])? {
                                 Ok(value) => out.extend(value.units()),
                                 Err(error) => return Ok(Err(error)),
                             }
@@ -1054,13 +1114,17 @@ impl Vm {
                             .take_while(|&unit| unit != u16::from(b'>'))
                             .collect(),
                     );
-                    let value =
-                        match self.read_property(host, named, PropertyKeyRef::JsString(&key))? {
-                            Invocation::Value(value) => value,
-                            Invocation::Thrown(error) => return Ok(Err(error)),
-                        };
+                    let value = match self.read_property(
+                        host,
+                        roots,
+                        named,
+                        PropertyKeyRef::JsString(&key),
+                    )? {
+                        Invocation::Value(value) => value,
+                        Invocation::Thrown(error) => return Ok(Err(error)),
+                    };
                     if !matches!(value, Value::Undefined) {
-                        match self.coerce_string(host, &value)? {
+                        match self.coerce_string(host, roots, &value)? {
                             Ok(value) => out.extend(value.units()),
                             Err(error) => return Ok(Err(error)),
                         }
@@ -1075,29 +1139,34 @@ impl Vm {
     fn regexp_flags(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
-        let flags = match self.read_property(host, receiver, PropertyKeyRef::String("flags"))? {
-            Invocation::Value(value) => value,
-            Invocation::Thrown(error) => return Ok(Err(error)),
-        };
-        self.coerce_string(host, &flags)
+        let roots = &roots.with(&receiver);
+        let flags =
+            match self.read_property(host, roots, receiver, PropertyKeyRef::String("flags"))? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            };
+        self.coerce_string(host, roots, &flags)
     }
 
     fn regexp_last_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<f64, Value>, VmError> {
         let value = match self.read_property(
             host,
+            roots,
             &Value::Object(id),
             PropertyKeyRef::String("lastIndex"),
         )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        match self.coerce_number(host, &value)? {
+        match self.coerce_number(host, roots, &value)? {
             Ok(number) => Ok(Ok(to_integer(number))),
             Err(error) => Ok(Err(error)),
         }
@@ -1106,11 +1175,13 @@ impl Vm {
     fn regexp_set_last_index(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         value: f64,
     ) -> Result<Result<(), Value>, VmError> {
         match self.set_property(
             host,
+            roots,
             id,
             &Value::Object(id),
             PropertyKey::String("lastIndex".into()),
@@ -1126,10 +1197,16 @@ impl Vm {
     fn regexp_element(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         array: ObjectId,
         key: &str,
     ) -> Result<Result<Value, Value>, VmError> {
-        match self.read_property(host, &Value::Object(array), PropertyKeyRef::String(key))? {
+        match self.read_property(
+            host,
+            roots,
+            &Value::Object(array),
+            PropertyKeyRef::String(key),
+        )? {
             Invocation::Value(value) => Ok(Ok(value)),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
@@ -1138,20 +1215,23 @@ impl Vm {
     fn regexp_capture(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         array: ObjectId,
         index: usize,
     ) -> Result<Result<Value, Value>, VmError> {
-        self.regexp_element(host, array, &index.to_string())
+        self.regexp_element(host, roots, array, &index.to_string())
     }
 
     fn regexp_string_property(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         key: &str,
     ) -> Result<Result<JsString, Value>, VmError> {
-        match self.read_property(host, receiver, PropertyKeyRef::String(key))? {
-            Invocation::Value(value) => self.coerce_string(host, &value),
+        let roots = &roots.with(&receiver);
+        match self.read_property(host, roots, receiver, PropertyKeyRef::String(key))? {
+            Invocation::Value(value) => self.coerce_string(host, roots, &value),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
     }
@@ -1159,15 +1239,18 @@ impl Vm {
     fn regexp_test(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
         input: &Value,
     ) -> Result<Invocation, VmError> {
-        let input = match self.coerce_string(host, input)? {
+        let root_view = (receiver, input);
+        let roots = &roots.with(&root_view);
+        let input = match self.coerce_string(host, roots, input)? {
             Ok(input) => input,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        match self.regexp_exec(host, receiver, id, input)? {
+        match self.regexp_exec(host, roots, receiver, id, input)? {
             Invocation::Value(result) => Ok(Invocation::Value(Value::Bool(result != Value::Null))),
             thrown @ Invocation::Thrown(_) => Ok(thrown),
         }
@@ -1176,27 +1259,32 @@ impl Vm {
     fn regexp_exec(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
         input: JsString,
     ) -> Result<Invocation, VmError> {
-        self.regexp_exec_with_encoded(host, receiver, id, input, None)
+        let roots = &roots.with(&receiver);
+        self.regexp_exec_with_encoded(host, roots, receiver, id, input, None)
     }
 
     fn regexp_exec_with_encoded(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
         input: JsString,
         encoded: Option<&[u16]>,
     ) -> Result<Invocation, VmError> {
-        let exec = match self.read_property(host, receiver, PropertyKeyRef::String("exec"))? {
-            Invocation::Value(value) => value,
-            thrown @ Invocation::Thrown(_) => return Ok(thrown),
-        };
+        let roots = &roots.with(&receiver);
+        let exec =
+            match self.read_property(host, roots, receiver, PropertyKeyRef::String("exec"))? {
+                Invocation::Value(value) => value,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            };
         if self.is_callable(&exec) {
-            return match self.invoke(host, &exec, vec![Value::String(input)], receiver)? {
+            return match self.invoke(host, roots, &exec, vec![Value::String(input)], receiver)? {
                 result @ (Invocation::Value(Value::Null | Value::Object(_))
                 | Invocation::Thrown(_)) => Ok(result),
                 Invocation::Value(_) => {
@@ -1207,37 +1295,44 @@ impl Vm {
         if !matches!(self.heap.get(id)?, Object::RegExp { .. }) {
             return self.throw_type_error("RegExpExec requires a RegExp receiver or callable exec");
         }
-        self.regexp_match_with_encoded(host, id, input, encoded)
+        self.regexp_match_with_encoded(host, roots, id, input, encoded)
     }
 
     fn regexp_match(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,
     ) -> Result<Invocation, VmError> {
-        self.regexp_match_with_encoded(host, id, input, None)
+        self.regexp_match_with_encoded(host, roots, id, input, None)
     }
 
     fn regexp_match_with_encoded(
         &mut self,
         host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,
         encoded: Option<&[u16]>,
     ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&id);
         let Object::RegExp { flags, .. } = self.heap.get(id)? else {
             unreachable!("RegExp receiver was checked before coercion");
         };
         let flags = *flags;
         let stateful = flags.global || flags.sticky;
         let receiver = Value::Object(id);
-        let last_index =
-            match self.read_property(host, &receiver, PropertyKeyRef::String("lastIndex"))? {
-                Invocation::Value(value) => value,
-                thrown @ Invocation::Thrown(_) => return Ok(thrown),
-            };
-        let last_index = match self.coerce_number(host, &last_index)? {
+        let last_index = match self.read_property(
+            host,
+            roots,
+            &receiver,
+            PropertyKeyRef::String("lastIndex"),
+        )? {
+            Invocation::Value(value) => value,
+            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        };
+        let last_index = match self.coerce_number(host, roots, &last_index)? {
             Ok(number) => number.clamp(0.0, 9_007_199_254_740_991.0) as usize,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -1265,6 +1360,7 @@ impl Vm {
             let next = matched.as_ref().map_or(0, |m| m.end());
             let write = self.set_property(
                 host,
+                roots,
                 id,
                 &receiver,
                 "lastIndex".into(),

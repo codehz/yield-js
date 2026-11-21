@@ -80,10 +80,10 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    Bindings, ClassId, ConstKind, ConstValue, ExportId, GuestCall, GuestOutcome, HostClass,
-    HostFault, HostModuleState, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
-    MethodId, NativeTarget, Operation, OperationStart, OperationToken, Recovery, SlotDecl, This,
-    WellKnownSymbol,
+    Bindings, ClassId, ConstKind, ConstValue, ExportId, GcRequest, GuestCall, GuestOutcome,
+    HostClass, HostFault, HostModuleState, HostStep, Instance, JsError, JsResult, JsValue,
+    MemberName, MethodId, NativeTarget, Operation, OperationStart, OperationToken, Recovery,
+    SlotDecl, This, WellKnownSymbol,
 };
 pub use bytecode::{
     Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,

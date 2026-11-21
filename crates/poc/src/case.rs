@@ -1,5 +1,5 @@
 use yield_compiler::compile;
-use yield_vm::{Completion, JsString, JsValue, PromiseState, Snapshot, Value, Vm};
+use yield_vm::{Completion, Host, JsString, JsValue, PromiseState, Snapshot, Value, Vm};
 
 use crate::{TestHost, compile_options};
 
@@ -32,6 +32,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let result = vm
         .start(&mut host, "run", args)
         .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
+    host.set_gc_roots(vec![result]);
     vm.run_until_idle(&mut host)
         .map_err(|error| format!("{name}: drain: {error}"))?;
 
@@ -43,7 +44,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line
                 ));
             }
-            Directive::Restore => restore(name, step.line, &mut vm, &build, &mut host, &result)?,
+            Directive::Restore => restore(name, step.line, &mut vm, &build, &mut host)?,
             Directive::Fulfill(id, value) => {
                 complete(
                     name,
@@ -70,13 +71,29 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                 assert_pending(name, step.line, &host, &expected)?;
             }
             Directive::Returns(expected) => {
-                assert_value(name, step.line, "@returns", &expected, &result)?;
+                assert_value(name, step.line, "@returns", &expected, &host.gc_roots()[0])?;
             }
             Directive::Fulfilled(expected) => {
-                assert_settled(name, step.line, "@fulfilled", &vm, &result, true, &expected)?;
+                assert_settled(
+                    name,
+                    step.line,
+                    "@fulfilled",
+                    &vm,
+                    &host.gc_roots()[0],
+                    true,
+                    &expected,
+                )?;
             }
             Directive::Rejected(expected) => {
-                assert_settled(name, step.line, "@rejected", &vm, &result, false, &expected)?;
+                assert_settled(
+                    name,
+                    step.line,
+                    "@rejected",
+                    &vm,
+                    &host.gc_roots()[0],
+                    false,
+                    &expected,
+                )?;
             }
             Directive::Uncaught(expected) => {
                 assert_uncaught(name, step.line, &expected, host.errors())?;
@@ -420,10 +437,9 @@ fn restore(
     vm: &mut Vm,
     build: &yield_vm::bytecode::Build,
     host: &mut TestHost,
-    result: &Value,
 ) -> Result<(), String> {
     let snapshot = vm
-        .snapshot(std::slice::from_ref(result))
+        .snapshot(host.gc_roots())
         .map_err(|error| located(name, line, "@restore", error))?;
     // Round-trip the codec. Restoring the in-memory snapshot would skip it.
     let json = snapshot
@@ -433,6 +449,8 @@ fn restore(
         Snapshot::from_json(&json).map_err(|error| located(name, line, "@restore", error))?;
     *vm = Vm::restore(snapshot, build.clone(), host)
         .map_err(|error| located(name, line, "@restore", error))?;
+    // The snapshot includes the host's root graph and restore preserves its
+    // object and symbol IDs, so the retained values now refer to that graph.
     vm.start_recovered_operations(host)
         .map_err(|error| located(name, line, "@restore", error))?;
     vm.run_until_idle(host)
