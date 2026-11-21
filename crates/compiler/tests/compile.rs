@@ -890,6 +890,54 @@ fn rejects_duplicate_public_names() {
 }
 
 #[test]
+fn registers_default_exports_and_rejects_their_misuses() {
+    // `export { x as default }` keeps the live binding.
+    let build = compile(
+        "let x = 1;\nexport { x as default, x as alias };",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(build.exports["default"], build.exports["alias"]);
+    // A named default function projects the local binding; the name itself is
+    // not auto-exported.
+    let build = compile(
+        "export default function f() {}\nfunction run() {}",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(build.exports.contains_key("default"));
+    assert!(!build.exports.contains_key("f"));
+    // A named default class shares one binding with the exported local name.
+    let build = compile(
+        "export default class C {}\nexport { C };",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(build.exports["default"], build.exports["C"]);
+    // A second default is rejected at its source location.
+    let error = compile(
+        "let x;\nexport { x as default };\nexport default 2;",
+        &CompileOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.message().contains("multiple default exports"),
+        "{error}"
+    );
+    assert_eq!(error.line(), 2, "{error}");
+    // An unknown local binding is still rejected, under any public name.
+    let error = compile(
+        "export default 1;\nexport { missing as x };",
+        &CompileOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.message().contains("unknown export binding"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_unsupported_module_syntax() {
     for (statement, feature) in [
         ("await 1;", "top-level await"),
@@ -897,8 +945,6 @@ fn rejects_unsupported_module_syntax() {
         ("import 'dep';", "unknown host module"),
         ("import('dep');", "dynamic import"),
         ("import.meta;", "import.meta"),
-        ("export default 1;", "default export"),
-        ("let x; export { x as default };", "default export"),
         ("export { x } from 'dep';", "re-export"),
         ("export * from 'dep';", "re-export"),
         ("export * as ns from 'dep';", "re-export"),

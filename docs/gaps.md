@@ -47,7 +47,7 @@
 - 完整 ECMAScript TDZ、每轮循环独立绑定
 - generator、async generator、`for await…of`、顶层 `await`、动态 `import()`、`eval`、`Function` 构造
 - 标签模板：仍由离线构建降级。`class` 由 VM 原生执行，不再离线降级。
-- 严格 ESM 支持本地命名导出（含本地宿主导入绑定）和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性、默认导出和带模块来源的再导出在编译期拒绝。
+- 严格 ESM 支持本地命名导出（含本地宿主导入绑定）和清单中的静态宿主模块；不查找或加载 JS 文件。`import.meta`、导入属性和带模块来源的再导出在编译期拒绝。
 - `debugger`、`using` / `await using`：不在首版语法表
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
@@ -62,9 +62,9 @@
 - `for…in` / `for…of` 循环头的变量声明只能有一个声明项（其中可以解构多个绑定），且在严格 ESM 中不能带初始化器。
 - 数组、对象解构赋值模式只能配 `=`；复合及逻辑赋值要求简单赋值目标，自增减也要求有效的赋值目标。
 - 模块顶层及仅嵌套在其中的箭头函数不能使用 `new.target`。普通函数有自己的 `new.target`，嵌套箭头函数可捕获它。
-- 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。合法的 `export default function () {}` 不在此例之内，但该子集不支持默认导出。
+- 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。合法的 `export default function () {}`（含 `async`）已支持。
 - 严格模式下不能使用 `with`，也不能删除裸标识符（包括加括号的标识符）。
 
 ## 8. 真实源码兼容性探针
 
-`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。当前结果：编译失败，首个诊断为 `unsupported syntax: default export`，位于第 7 行第 9121 列。测试按此钉住；若某天能编过或诊断变化，测试变红，届时把探针升级为真实执行用例并同步刷新本文与 `implemented.md`。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。
+`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。默认导出（`export { Je as default, … }` 等）已支持，bundle 不再因默认导出失败；当前首个诊断为 `unknown callee "reportError"`，位于第 7 行第 4256 列——bundle 读取浏览器全局 `reportError`，它不是局部绑定、宿主导入或内建，名字解析在编译期拒绝。测试按此钉住，并用最小输入（`function probe(){ reportError('x'); }`）确认原因；若某天能编过或诊断变化，测试变红，届时把探针升级为真实执行用例并同步刷新本文与 `implemented.md`。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。

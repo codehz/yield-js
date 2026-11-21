@@ -155,11 +155,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::ForOfStatement(statement) => self.compile_for_of(statement),
             Statement::LabeledStatement(statement) => self.compile_labeled(statement),
             Statement::ExportNamedDeclaration(_) => Ok(()),
-            Statement::ExportDefaultDeclaration(export) => Err(unsupported(
-                self.source_text(),
-                export.span,
-                "default export",
-            )),
+            Statement::ExportDefaultDeclaration(export) => self.compile_export_default(export),
             Statement::ExportFromDeclaration(export) => {
                 Err(unsupported(self.source_text(), export.span, "re-export"))
             }
@@ -204,6 +200,79 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 "top-level/module statement",
             )),
         }
+    }
+
+    /// `export default <expression>` and anonymous declaration forms. The
+    /// public slot was registered during export collection; this evaluates the
+    /// value once at the original statement position.
+    fn compile_export_default(
+        &mut self,
+        export: &'ast ExportDefaultDeclaration<'ast>,
+    ) -> Result<(), CompileError> {
+        match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(_) => {
+                // A named default function was hoisted and initialized at
+                // module entry; an anonymous one was initialized during export
+                // collection. Neither runs here.
+                return Ok(());
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) if class.id.is_some() => {
+                // The public name aliases the local class binding, so
+                // initializing that binding at the statement publishes the
+                // default as well.
+                self.compile_class_declaration(class)?;
+                return Ok(());
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                return Err(unsupported(
+                    self.source_text(),
+                    export.span,
+                    "TypeScript interface",
+                ));
+            }
+            _ => {}
+        };
+        let Some(binding) = self.default_binding else {
+            return Err(CompileError::internal(
+                "internal compiler error: default export slot was not registered",
+            ));
+        };
+        let value = match &export.declaration {
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                // A named class initializes its local binding here, exactly as
+                // an ordinary class declaration would; the public slot then
+                // mirrors that value. An anonymous class is compiled here as
+                // an expression named "default".
+                match &class.id {
+                    Some(identifier) => {
+                        self.compile_class_declaration(class)?;
+                        let name = identifier.name.as_str();
+                        let local = self.lookup(name).ok_or_else(|| {
+                            CompileError::internal(format!(
+                                "internal compiler error: default class {name:?} was not declared"
+                            ))
+                        })?;
+                        let value = self.alloc_reg()?;
+                        self.emit_binding_read(value, local);
+                        value
+                    }
+                    None => self.compile_class(class, "default", None)?,
+                }
+            }
+            _ => {
+                let expression = export
+                    .declaration
+                    .as_expression()
+                    .expect("expression form checked at export collection");
+                self.compile_named_expression(expression, "default")?
+            }
+        };
+        self.emit(Instr::DeclareBinding { binding });
+        self.emit(Instr::SetBinding {
+            binding,
+            src: self.slot(value),
+        });
+        Ok(())
     }
 
     fn compile_for_in(

@@ -160,6 +160,9 @@ struct Lowerer<'ast, 'borrow, 'src> {
     arguments_binding: Option<BindingId>,
     hoisted: BTreeSet<u32>,
     exported_imports: BTreeMap<(u32, Option<u32>), BindingId>,
+    // Anonymous `export default` statements have no source identifier to look
+    // up, so their public slot is allocated during export collection.
+    default_binding: Option<BindingId>,
 }
 
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
@@ -212,6 +215,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             arguments_binding: None,
             hoisted: BTreeSet::new(),
             exported_imports: BTreeMap::new(),
+            default_binding: None,
         }
     }
 
@@ -825,7 +829,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    fn collect_exports(&mut self, statements: &[Statement<'_>]) -> Result<(), CompileError> {
+    fn collect_exports(&mut self, statements: &'ast [Statement<'ast>]) -> Result<(), CompileError> {
         for statement in statements {
             match statement {
                 Statement::ExportDeclaration(export) => match &export.declaration {
@@ -873,10 +877,69 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         )?;
                     }
                 }
+                Statement::ExportDefaultDeclaration(export) => {
+                    match &export.declaration {
+                        // Named declarations project onto the public name
+                        // `default`; the local id is not auto-exported.
+                        ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                            let Some(identifier) = function.id.as_ref() else {
+                                // An anonymous default function has no local
+                                // name to look up: it is initialized here, at
+                                // module entry, with the public name `default`.
+                                let binding = self.register_default_slot(export.span)?;
+                                let func_id = self.enqueue_named_function(
+                                    FunctionSource::Function(function),
+                                    "default",
+                                    "default".to_owned(),
+                                    function.span,
+                                )?;
+                                self.init_function_binding(binding, func_id)?;
+                                continue;
+                            };
+                            self.export_binding(
+                                identifier.name.as_str(),
+                                identifier.span,
+                                "default",
+                                export.span,
+                            )?;
+                        }
+                        ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                            if let Some(identifier) = &class.id {
+                                self.export_binding(
+                                    identifier.name.as_str(),
+                                    identifier.span,
+                                    "default",
+                                    export.span,
+                                )?;
+                            } else {
+                                self.register_default_slot(export.span)?;
+                            }
+                        }
+                        ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                            return Err(unsupported(
+                                self.source_text(),
+                                export.span,
+                                "TypeScript interface",
+                            ));
+                        }
+                        _ => {
+                            self.register_default_slot(export.span)?;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Anonymous `export default` statements have no source identifier, so the
+    /// public slot is allocated here and filled when the statement executes.
+    fn register_default_slot(&mut self, span: Span) -> Result<BindingId, CompileError> {
+        let binding = self.alloc_binding();
+        self.session.insert_export("default", binding, span)?;
+        self.default_binding = Some(binding);
+        Ok(binding)
     }
 
     fn export_binding(
@@ -886,13 +949,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         public: &str,
         public_span: Span,
     ) -> Result<(), CompileError> {
-        if public == "default" {
-            return Err(unsupported(
-                self.source_text(),
-                public_span,
-                "default export",
-            ));
-        }
         let binding = if let Some(import) = self.session.import(local) {
             let key = (import.module, import.export);
             if let Some(binding) = self.exported_imports.get(&key) {
@@ -969,6 +1025,32 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 _ => {}
             }
+            if let Statement::ExportDefaultDeclaration(export) = statement {
+                match &export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                        if let Some(identifier) = &function.id {
+                            let name = identifier.name.as_str();
+                            function_names.insert(name.to_owned());
+                            self.predeclare_name(
+                                name,
+                                VariableDeclarationKind::Let,
+                                function.span,
+                            )?;
+                        }
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        if let Some(id) = &class.id {
+                            let name = id.name.as_str();
+                            if let Some(binding) =
+                                self.predeclare_name(name, VariableDeclarationKind::Let, id.span)?
+                            {
+                                lexical.push((binding, name.to_owned()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
         // Function declarations are initialized at block entry. They use a
         // lexical kind internally but are not pending.
@@ -979,6 +1061,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         // other statement runs. Their captured scope already includes every
         // lexical binding predeclared above.
         for statement in statements {
+            if let Statement::ExportDefaultDeclaration(export) = statement {
+                let ExportDefaultDeclarationKind::FunctionDeclaration(function) =
+                    &export.declaration
+                else {
+                    continue;
+                };
+                let Some(identifier) = &function.id else {
+                    continue;
+                };
+                if !self.hoisted.insert(function.span.start) {
+                    continue;
+                }
+                let name = identifier.name.as_str().to_owned();
+                let (binding, _) =
+                    self.declare(&name, VariableDeclarationKind::Let, function.span)?;
+                let func_id = self.enqueue_function(
+                    FunctionSource::Function(function),
+                    &name,
+                    function.span,
+                )?;
+                self.init_function_binding(binding, func_id)?;
+                continue;
+            }
             let Some(Declaration::FunctionDeclaration(function)) = local_declaration(statement)
             else {
                 continue;
@@ -1374,6 +1479,45 @@ fn collect_stmt<'ast>(
             }
         }
         _ => {}
+    }
+    if let Statement::ExportDefaultDeclaration(export) = statement {
+        match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                let Some(identifier) = &function.id else {
+                    // The anonymous default function is enqueued and
+                    // initialized during export collection; it binds no
+                    // script-local name.
+                    return Ok(());
+                };
+                let name = identifier.name.as_str();
+                if func_as_var {
+                    if functions.iter().any(|(existing, _)| existing == name) {
+                        return Err(CompileError::new(
+                            source,
+                            function.span,
+                            format!("duplicate function declaration {name:?}"),
+                        ));
+                    }
+                    if lexical.contains_key(name) {
+                        return Err(CompileError::new(
+                            source,
+                            function.span,
+                            format!("duplicate lexical binding {name:?}"),
+                        ));
+                    }
+                    functions.push((name.to_owned(), function));
+                    vars.entry(name.to_owned()).or_insert(function.span);
+                } else {
+                    add_lexical(source, lexical, name, function.span)?;
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    add_lexical(source, lexical, id.name.as_str(), class.span)?;
+                }
+            }
+            _ => {}
+        }
     }
     match statement {
         Statement::ImportDeclaration(import) => {
