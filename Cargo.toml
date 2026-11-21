@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vm", "crates/compiler", "crates/harness", "crates/binding-macros"]
+members = ["crates/vm", "crates/compiler", "crates/harness", "crates/binding-macros", "crates/host-dts"]
 resolver = "2"
 
 [workspace.package]

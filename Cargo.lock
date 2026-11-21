@@ -856,6 +856,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yield-host-dts"
+version = "0.1.0"
+dependencies = [
+ "oxc",
+]
+
+[[package]]
 name = "yield-vm"
 version = "0.1.0"
 dependencies = [
