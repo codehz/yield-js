@@ -57,7 +57,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(())
             }
             Statement::WhileStatement(statement) => {
-                let start = self.pc();
+                let start = self.emit.loop_header();
                 let test = self.compile_expression(&statement.test)?;
                 let exit_branch = self.branch_false(test);
                 self.control.push_loop(Some(start));
@@ -69,7 +69,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.patch_loop(loop_context, end)
             }
             Statement::DoWhileStatement(statement) => {
-                let start = self.pc();
+                let start = self.emit.loop_header();
                 self.control.push_loop(None);
                 self.compile_statement(&statement.body)?;
                 let test_pc = self.pc();
@@ -110,7 +110,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         }
                     }
                 }
-                let test_pc = self.pc();
+                let test_pc = self.emit.loop_header();
                 let exit_branch = if let Some(test) = &statement.test {
                     let test = self.compile_expression(test)?;
                     Some(self.branch_false(test))

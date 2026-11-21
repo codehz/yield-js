@@ -15,7 +15,6 @@
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
 - 顶层 `for await…of` 仍按 top-level await 在编译期拒绝；`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
-- 生成器（含 async generator）正文若以 `for (;;)`、`while (…)` 或 `do…while` 这类回边落在正文入口的循环开始，编译期以 `internal bytecode validation failed: … ordinary control flow enters generator body pc N` 失败：`GeneratorStart.body_pc` 恰好是循环的回边目标。前置空语句不改变结果；`for (let …; …; …)`、`for…of` 等头部不在正文入口的循环正常编译。这是加载期校验缺陷（合法 JS 被拒），不是语法子集限制；把循环前挪一条语句或改用 `for…of` 可绕开。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整

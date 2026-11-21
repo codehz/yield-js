@@ -33,6 +33,15 @@ impl<'src> Emitter<'src> {
         self.code.len()
     }
 
+    pub(crate) fn loop_header(&mut self) -> usize {
+        // Keep the first-resume entry exclusive to the generator dispatcher.
+        // Only the initial resume takes this jump; back edges target the header.
+        if matches!(self.code.last(), Some(Instr::GeneratorStart)) {
+            self.jump_to(self.pc() + 1);
+        }
+        self.pc()
+    }
+
     pub(crate) fn reg_count(&self) -> u16 {
         self.next_reg
     }
