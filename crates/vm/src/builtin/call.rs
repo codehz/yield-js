@@ -977,6 +977,21 @@ impl Vm {
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if let ValueRef::Object(id) = target.view() {
             let id = self.heap.proxy_target(id)?;
+            // A view over a resizable buffer can still gain and lose elements,
+            // so it cannot be made non-extensible.
+            if self
+                .heap
+                .typed_array(id)?
+                .is_some_and(|view| view.byte_length.is_none())
+            {
+                return if reflect {
+                    Ok(Invocation::Value(Value::boolean(false)))
+                } else {
+                    self.throw_type_error(
+                        "cannot prevent extensions on a length-tracking TypedArray",
+                    )
+                };
+            }
             self.heap.get_mut(id)?.prevent_extensions();
         } else if reflect {
             return self.throw_type_error("Reflect.preventExtensions requires an object");
@@ -1078,7 +1093,9 @@ impl Vm {
             return Ok(Invocation::Value(target.clone()));
         };
         let base = self.heap.proxy_target(id)?;
-        if base == id {
+        // A typed array's elements are defined one by one, so a non-empty view
+        // cannot be frozen; the per-key path reports that as a TypeError.
+        if base == id && self.heap.typed_array(id)?.is_none() {
             self.heap.get_mut(id)?.set_integrity_level(level);
             return Ok(Invocation::Value(target.clone()));
         }
@@ -1692,6 +1709,27 @@ impl Vm {
     ) -> Result<Result<bool, Value>, VmError> {
         let target = self.heap.proxy_target(target)?;
         let roots = &roots.with(&target);
+        // Integer-indexed exotic [[DefineOwnProperty]].
+        match self.heap.typed_index(target, key.borrowed())? {
+            crate::heap::TypedIndex::Ordinary => {}
+            crate::heap::TypedIndex::Invalid => return Ok(Ok(false)),
+            crate::heap::TypedIndex::Valid(index) => {
+                if update.configurable == Some(false)
+                    || update.enumerable == Some(false)
+                    || update.writable == Some(false)
+                    || update.is_accessor()
+                {
+                    return Ok(Ok(false));
+                }
+                if let Some(value) = update.value {
+                    match self.typed_set_element(host, roots, target, index, &value)? {
+                        Ok(()) => {}
+                        Err(error) => return Ok(Err(error)),
+                    }
+                }
+                return Ok(Ok(true));
+            }
+        }
         if key.borrowed().is_str("length")
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value

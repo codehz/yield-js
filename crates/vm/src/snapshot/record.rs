@@ -8,8 +8,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Date objects persist their time value.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 58;
+// Binary arrays persist one byte sequence per buffer and a buffer reference per view.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 59;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

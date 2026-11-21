@@ -34,6 +34,70 @@ fn valid_date_time(object: &Object) -> bool {
         if !(-TIME_CLIP_BOUND..=TIME_CLIP_BOUND).contains(time))
 }
 
+/// A buffer's length never exceeds its maximum; a view keeps whole elements
+/// and a representable range. A buffer that is currently detached still bounds
+/// its views by the maximum it was created with, so a detached view record is
+/// not rejected for looking out of range. The reason is a located diagnostic.
+fn binary_object_error(heap: &Heap, id: ObjectId) -> Option<String> {
+    let capacity = |buffer: ObjectId| -> Result<usize, String> {
+        let buffer = heap
+            .buffer(buffer)
+            .ok()
+            .flatten()
+            .ok_or_else(|| format!("binary object {id} references an invalid buffer"))?;
+        Ok(match (buffer.max_byte_length, buffer.byte_length()) {
+            (Some(max), _) => max,
+            (None, Some(length)) => length,
+            // A detached fixed buffer no longer records its original length.
+            (None, None) => usize::MAX,
+        })
+    };
+    let view_range =
+        |buffer: ObjectId, offset: usize, length: Option<usize>| -> Result<(), String> {
+            match length {
+                Some(length) => {
+                    let capacity = capacity(buffer)?;
+                    if offset.checked_add(length).is_none_or(|end| end > capacity) {
+                        return Err(format!("binary object {id} exceeds its buffer"));
+                    }
+                }
+                None => {
+                    let buffer = heap.buffer(buffer).ok().flatten().ok_or_else(|| {
+                        format!("binary object {id} references an invalid buffer")
+                    })?;
+                    if !buffer.is_resizable() {
+                        return Err(format!(
+                            "binary object {id} tracks the length of a fixed-length buffer"
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        };
+    match heap.get(id) {
+        Err(_) => Some(format!("binary object {id} is missing")),
+        Ok(Object::ArrayBuffer(buffer)) => buffer
+            .byte_length()
+            .zip(buffer.max_byte_length)
+            .filter(|(length, max)| length > max)
+            .map(|_| format!("ArrayBuffer {id} exceeds its maximum byte length")),
+        Ok(Object::TypedArray(view)) => {
+            let width = view.kind.bytes();
+            if view.byte_offset % width != 0 {
+                Some(format!("TypedArray {id} has an unaligned byte offset"))
+            } else if view.byte_length.is_some_and(|length| length % width != 0) {
+                Some(format!("TypedArray {id} has a partial element length"))
+            } else {
+                view_range(view.buffer, view.byte_offset, view.byte_length).err()
+            }
+        }
+        Ok(Object::DataView(view)) => {
+            view_range(view.buffer, view.byte_offset, view.byte_length).err()
+        }
+        Ok(_) => None,
+    }
+}
+
 impl Vm {
     /// Captures an idle VM without releasing any live registrations.
     /// The caller must hold external logical time and delivery at the same cut;
@@ -80,6 +144,16 @@ impl Vm {
                     return Err(VmError::InvalidState(format!(
                         "Date {id} has a time outside the TimeClip range"
                     )));
+                }
+                object
+                    if matches!(
+                        object,
+                        Object::ArrayBuffer(_) | Object::TypedArray(_) | Object::DataView(_)
+                    ) && binary_object_error(&self.heap, *id).is_some() =>
+                {
+                    return Err(VmError::InvalidState(
+                        binary_object_error(&self.heap, *id).expect("checked above"),
+                    ));
                 }
                 Object::WeakMap { object, entries } => Object::WeakMap {
                     object: object.clone(),
@@ -944,6 +1018,9 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
         .collect::<BTreeMap<_, _>>();
     for id in heap.ids() {
         use crate::builtin::call::{DERIVED_CLASS, DERIVED_TARGET, DERIVED_THIS};
+        if let Some(error) = binary_object_error(heap, id) {
+            return Err(VmError::InvalidSnapshot(error));
+        }
         if let Object::Environment(env) = heap.get(id)?
             && env.bindings.range(DERIVED_THIS..).next().is_some()
         {
@@ -1250,6 +1327,9 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                     | Object::Array(_)
                     | Object::Boxed { .. }
                     | Object::Date { .. }
+                    | Object::ArrayBuffer(_)
+                    | Object::TypedArray(_)
+                    | Object::DataView(_)
                     | Object::Proxy { .. })
             ) {
                 return Err(VmError::InvalidSnapshot(format!(

@@ -444,8 +444,13 @@ impl DescriptorUpdate {
             return None;
         }
         let virtual_property;
+        let computed_property;
         let (old, attrs) = match current {
             Some(OwnProperty::Stored(property, attrs)) => (Some(property), attrs),
+            Some(OwnProperty::Computed(property, attrs)) => {
+                computed_property = property;
+                (Some(&computed_property), attrs)
+            }
             Some(property @ OwnProperty::ArrayLength(..)) => {
                 let attrs = property.attributes();
                 virtual_property = property.into_owned();
@@ -530,6 +535,10 @@ impl DescriptorUpdate {
 
 pub(crate) enum OwnProperty<'a> {
     Stored(&'a Property, Attributes),
+    /// A property computed from another object's state, such as a TypedArray
+    /// element read from its buffer. It is materialized before it is returned
+    /// so no view of the bytes outlives the lookup.
+    Computed(Property, Attributes),
     ArrayLength(usize, bool),
     StringLength(usize),
     StringIndex(u16),
@@ -538,6 +547,7 @@ pub(crate) enum OwnProperty<'a> {
 impl OwnProperty<'_> {
     pub(crate) fn into_owned(self) -> Property {
         match self {
+            Self::Computed(property, _) => property,
             Self::Stored(property, _) => property.clone(),
             Self::ArrayLength(length, _) => Property::Data(Value::number(length as f64)),
             Self::StringLength(length) => Property::Data(Value::number(length as f64)),
@@ -548,14 +558,15 @@ impl OwnProperty<'_> {
     pub(crate) fn data_value(&self) -> Option<&Value> {
         match self {
             Self::Stored(Property::Data(value), _) => Some(value),
-            Self::Stored(_, _) => None,
+            Self::Computed(Property::Data(value), _) => Some(value),
+            Self::Stored(_, _) | Self::Computed(_, _) => None,
             _ => None,
         }
     }
 
     pub(crate) fn attributes(&self) -> Attributes {
         match self {
-            Self::Stored(_, attributes) => *attributes,
+            Self::Stored(_, attributes) | Self::Computed(_, attributes) => *attributes,
             Self::ArrayLength(_, writable) => Attributes {
                 writable: *writable,
                 ..Attributes::FIXED
@@ -570,7 +581,8 @@ impl OwnProperty<'_> {
 
     pub(crate) fn setter(&self) -> Option<Option<ObjectId>> {
         match self {
-            Self::Stored(Property::Accessor { set, .. }, _) => Some(*set),
+            Self::Stored(Property::Accessor { set, .. }, _)
+            | Self::Computed(Property::Accessor { set, .. }, _) => Some(*set),
             _ => None,
         }
     }
@@ -614,6 +626,152 @@ impl PlainObject {
                 Property::Data(Value::string(name))
             });
         object
+    }
+}
+
+/// Binary element type of one TypedArray. Element width, numeric domain, and
+/// clamping are derived from it; a view never reinterprets its own kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float16,
+    Float32,
+    Float64,
+    BigInt64,
+    BigUint64,
+}
+
+impl ElementKind {
+    pub(crate) const fn bytes(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
+            Self::Int16 | Self::Uint16 | Self::Float16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::Float64 | Self::BigInt64 | Self::BigUint64 => 8,
+        }
+    }
+
+    pub(crate) const fn is_bigint(self) -> bool {
+        matches!(self, Self::BigInt64 | Self::BigUint64)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::Float16 => "Float16Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
+            Self::BigInt64 => "BigInt64Array",
+            Self::BigUint64 => "BigUint64Array",
+        }
+    }
+}
+
+/// A byte buffer. `bytes` is the single owner of the bytes: views name this
+/// object and never hold a copy, so aliasing survives restore unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArrayBufferObject {
+    pub object: PlainObject,
+    /// `None` means detached. A detached buffer keeps its resizable flag.
+    pub bytes: Option<Vec<u8>>,
+    /// `Some` for a resizable buffer; the byte length may grow up to it.
+    pub max_byte_length: Option<usize>,
+}
+
+impl ArrayBufferObject {
+    pub(crate) fn is_detached(&self) -> bool {
+        self.bytes.is_none()
+    }
+
+    pub(crate) fn byte_length(&self) -> Option<usize> {
+        self.bytes.as_ref().map(Vec::len)
+    }
+
+    pub(crate) fn is_resizable(&self) -> bool {
+        self.max_byte_length.is_some()
+    }
+}
+
+/// One view over an `ArrayBuffer`. `byte_length == None` tracks the buffer's
+/// byte length, which only a resizable buffer allows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypedArrayObject {
+    pub object: PlainObject,
+    pub buffer: ObjectId,
+    pub byte_offset: usize,
+    pub byte_length: Option<usize>,
+    pub kind: ElementKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataViewObject {
+    pub object: PlainObject,
+    pub buffer: ObjectId,
+    pub byte_offset: usize,
+    pub byte_length: Option<usize>,
+}
+
+/// Current byte extent of one view, resolved against the live buffer.
+///
+/// `Detached` and `OutOfBounds` are distinct: a detached buffer makes every
+/// access throw, while a fixed view that a resize pushed out of range stays a
+/// legal record that currently reads and writes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewRange {
+    Detached,
+    OutOfBounds,
+    Bytes { start: usize, len: usize },
+}
+
+impl ViewRange {
+    pub(crate) fn len(self) -> usize {
+        match self {
+            Self::Bytes { len, .. } => len,
+            Self::Detached | Self::OutOfBounds => 0,
+        }
+    }
+}
+
+/// Resolve a view against its buffer bytes. Tracking views round down to whole
+/// elements; a legal zero-length result is not the same as an out-of-range view.
+pub(crate) fn view_range(
+    bytes: Option<&[u8]>,
+    byte_offset: usize,
+    byte_length: Option<usize>,
+    element_size: usize,
+) -> ViewRange {
+    let Some(bytes) = bytes else {
+        return ViewRange::Detached;
+    };
+    let available = match bytes.len().checked_sub(byte_offset) {
+        Some(available) => available,
+        None => return ViewRange::OutOfBounds,
+    };
+    let len = match byte_length {
+        Some(len) => {
+            if len > available {
+                return ViewRange::OutOfBounds;
+            }
+            len
+        }
+        None => available / element_size * element_size,
+    };
+    ViewRange::Bytes {
+        start: byte_offset,
+        len,
     }
 }
 
@@ -940,6 +1098,10 @@ pub enum Object {
         object: PlainObject,
         time: Option<i64>,
     },
+    /// The only owner of a byte buffer. Views name it by id.
+    ArrayBuffer(ArrayBufferObject),
+    TypedArray(TypedArrayObject),
+    DataView(DataViewObject),
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
         target: ObjectId,

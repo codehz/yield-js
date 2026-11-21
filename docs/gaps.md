@@ -35,7 +35,8 @@
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥），不保证覆盖全部 Annex B 兼容语法。字符串方法仍查找相应的 Symbol 协议，但内建 `[Symbol.matchAll]` / `[Symbol.split]` 克隆匹配器时不使用 species；直接调用内建 `[Symbol.matchAll]` 也要求全局标志 |
 | `Map` / `Set` | 已覆盖基础集合操作和同步迭代；不提供较新的 `Map.groupBy` 或 `Set.prototype.union` 等集合运算 |
-| `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date 实例及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
+| `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
+| `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 
 ## 5. 结构性缺口
 

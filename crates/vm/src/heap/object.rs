@@ -1,8 +1,9 @@
 use super::store::lookup_tables;
 use super::types::{
-    BoundObject, BoxedPrimitive, EnvironmentObject, FunctionObject, IntegrityLevel, NativeObject,
-    Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables,
-    PropertyTablesMut, Resolution, array_index, collect_own_keys,
+    ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, EnvironmentObject,
+    FunctionObject, IntegrityLevel, NativeObject, Object, OwnProperty, PromiseCallback,
+    PromiseObject, PromiseState, Property, PropertyTables, PropertyTablesMut, Resolution,
+    TypedArrayObject, array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -109,6 +110,9 @@ impl Object {
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Date { object: o, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
+            | Self::TypedArray(TypedArrayObject { object: o, .. })
+            | Self::DataView(DataViewObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -137,6 +141,9 @@ impl Object {
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Date { object: o, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
+            | Self::TypedArray(TypedArrayObject { object: o, .. })
+            | Self::DataView(DataViewObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -201,6 +208,9 @@ impl Object {
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Date { object: o, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
+            | Self::TypedArray(TypedArrayObject { object: o, .. })
+            | Self::DataView(DataViewObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -229,6 +239,9 @@ impl Object {
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Date { object: o, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
+            | Self::TypedArray(TypedArrayObject { object: o, .. })
+            | Self::DataView(DataViewObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -349,6 +362,11 @@ impl Object {
                         !key.is_str("length") && array_index(key).is_none()
                     })
             }
+            Self::TypedArray(view) => {
+                view.object.props.iter().all(|(key, _)| {
+                    !super::binary::is_canonical_index(PropertyKeyRef::JsString(key))
+                })
+            }
             Self::Boxed {
                 primitive: BoxedPrimitive::String(text),
                 object,
@@ -372,6 +390,9 @@ impl Object {
             | Self::Proxy { object: plain, .. }
             | Self::Map { object: plain, .. }
             | Self::Date { object: plain, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: plain, .. })
+            | Self::TypedArray(TypedArrayObject { object: plain, .. })
+            | Self::DataView(DataViewObject { object: plain, .. })
             | Self::Set { object: plain, .. }
             | Self::WeakMap { object: plain, .. }
             | Self::WeakSet { object: plain, .. }
@@ -400,6 +421,9 @@ impl Object {
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
             | Self::Date { object: o, .. }
+            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
+            | Self::TypedArray(TypedArrayObject { object: o, .. })
+            | Self::DataView(DataViewObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -490,7 +514,14 @@ impl Object {
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}
+            // Byte content is not a heap edge; only the buffer object is.
+            Self::ArrayBuffer(_) => {}
             Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
+            // Views name their buffer; the bytes themselves have no GC edges.
+            Self::TypedArray(TypedArrayObject { buffer, .. })
+            | Self::DataView(DataViewObject { buffer, .. }) => {
+                out.push(OwnedEdge::Object(*buffer));
+            }
             Self::Map { entries, .. } => {
                 for (key, value) in entries.iter().flatten() {
                     push_value(out, key);

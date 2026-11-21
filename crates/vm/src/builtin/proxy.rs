@@ -51,10 +51,16 @@ impl Vm {
         let base = self.heap.proxy_target(target)?;
         if !matches!(
             self.heap.get(base)?,
-            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. } | Object::Date { .. }
+            Object::Plain(_)
+                | Object::Array(_)
+                | Object::Boxed { .. }
+                | Object::Date { .. }
+                | Object::ArrayBuffer(_)
+                | Object::TypedArray(_)
+                | Object::DataView(_)
         ) {
             return self.throw_type_error(
-                "Proxy supports only plain object, array, primitive wrapper, and Date targets",
+                "Proxy supports only plain object, array, primitive wrapper, Date, and binary targets",
             );
         }
         Ok(Invocation::Value(Value::object(self.heap.alloc(
@@ -252,6 +258,9 @@ impl Vm {
             target, handler, ..
         } = *self.heap.get(id)?
         else {
+            if let Some(keys) = self.heap.typed_own_keys(id, include_metadata)? {
+                return Ok(Ok(keys));
+            }
             return Ok(Ok(self.heap.get(id)?.own_keys(include_metadata).collect()));
         };
         let Some(result) = unwrap_script!(self.proxy_trap(
@@ -414,7 +423,7 @@ impl Vm {
             target, handler, ..
         } = *self.heap.get(id)?
         else {
-            let property = self.heap.get(id)?.own_property(key);
+            let property = self.heap.own_property(id, key)?;
             return Ok(Ok(property.map(|property| {
                 let attrs = property.attributes();
                 (property.into_owned(), attrs)

@@ -545,7 +545,7 @@ impl Heap {
     }
 
     pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
-        Ok(self.get(id)?.own_property(key.borrowed()).is_some())
+        Ok(self.own_property(id, key.borrowed())?.is_some())
     }
 
     pub(crate) fn delete_own(
@@ -553,6 +553,13 @@ impl Heap {
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<bool, VmError> {
+        // Integer-indexed [[Delete]]: a valid element is never deletable, and an
+        // invalid canonical index is already absent.
+        match self.typed_index(id, key)? {
+            super::binary::TypedIndex::Valid(_) => return Ok(false),
+            super::binary::TypedIndex::Invalid => return Ok(true),
+            super::binary::TypedIndex::Ordinary => {}
+        }
         let object = self.get_mut(id)?;
         if let Object::Array(array) = &mut *object {
             if key.is_str("length") {
@@ -628,6 +635,13 @@ impl Heap {
         {
             return Ok(false);
         }
+        if matches!(object, Object::TypedArray(_))
+            && super::binary::is_canonical_index(key.borrowed())
+        {
+            // Typed array elements are defined by the VM so the value can be
+            // converted; storage never creates a shadowing property.
+            return Ok(false);
+        }
         let current = object.own_property(key.borrowed());
         if let Some(property @ (OwnProperty::StringLength(_) | OwnProperty::StringIndex(_))) =
             current
@@ -664,6 +678,13 @@ impl Heap {
         if object.string_own_property(key.borrowed()).is_some() {
             return Err(VmError::InvalidState(format!(
                 "object {id} has a fixed virtual string property"
+            )));
+        }
+        if matches!(object, Object::TypedArray(_))
+            && super::binary::is_canonical_index(key.borrowed())
+        {
+            return Err(VmError::InvalidState(format!(
+                "object {id} cannot shadow a typed array element"
             )));
         }
         if let Object::Array(array) = &mut *object

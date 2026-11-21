@@ -797,3 +797,132 @@ fn packed_value_keeps_legacy_json() {
     assert_eq!(serde_json::to_string(&value).unwrap(), string_json);
     assert!(serde_json::from_str::<Value>(r#"{"number":"unknown"}"#).is_err());
 }
+
+#[test]
+fn restore_rejects_invalid_binary_object_records() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Object, Vm, VmError};
+
+    let build = build(
+        r#"
+export function run() {
+  return [
+    new Uint32Array(2),
+    new ArrayBuffer(4, { maxByteLength: 8 }),
+    new Uint8Array(new ArrayBuffer(4)),
+  ];
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let result = vm.start(&mut host, "run", vec![]).expect("start run");
+    vm.run_until_idle(&mut host).expect("drain run");
+    let snapshot = vm.snapshot(&[result]).expect("capture binary objects");
+
+    let view_id = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::TypedArray(view) if view.byte_length == Some(8) => Some(record.id),
+            _ => None,
+        })
+        .expect("Uint32Array view");
+    let resizable_id = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::ArrayBuffer(buffer) if buffer.max_byte_length == Some(8) => Some(record.id),
+            _ => None,
+        })
+        .expect("resizable buffer");
+    let tracked_id = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            Object::TypedArray(view) if view.byte_length == Some(4) => Some(record.id),
+            _ => None,
+        })
+        .expect("Uint8Array view");
+
+    assert!(Vm::restore(snapshot.clone(), build.clone(), &mut host).is_ok());
+
+    let mut misaligned = snapshot.clone();
+    if let Object::TypedArray(view) = &mut misaligned
+        .objects
+        .iter_mut()
+        .find(|record| record.id == view_id)
+        .expect("view record")
+        .object
+    {
+        view.byte_offset = 2;
+    }
+    assert!(matches!(
+        Vm::restore(misaligned, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message))
+            if message.contains("unaligned byte offset")
+    ));
+
+    let mut partial = snapshot.clone();
+    if let Object::TypedArray(view) = &mut partial
+        .objects
+        .iter_mut()
+        .find(|record| record.id == view_id)
+        .expect("view record")
+        .object
+    {
+        view.byte_length = Some(3);
+    }
+    assert!(matches!(
+        Vm::restore(partial, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message))
+            if message.contains("partial element length")
+    ));
+
+    let mut overflow = snapshot.clone();
+    if let Object::TypedArray(view) = &mut overflow
+        .objects
+        .iter_mut()
+        .find(|record| record.id == view_id)
+        .expect("view record")
+        .object
+    {
+        view.byte_offset = 8;
+    }
+    assert!(matches!(
+        Vm::restore(overflow, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("exceeds its buffer")
+    ));
+
+    let mut shrink = snapshot.clone();
+    if let Object::ArrayBuffer(buffer) = &mut shrink
+        .objects
+        .iter_mut()
+        .find(|record| record.id == resizable_id)
+        .expect("buffer record")
+        .object
+    {
+        buffer.max_byte_length = Some(2);
+    }
+    assert!(matches!(
+        Vm::restore(shrink, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message))
+            if message.contains("exceeds its maximum byte length")
+    ));
+
+    let mut tracking = snapshot.clone();
+    if let Object::TypedArray(view) = &mut tracking
+        .objects
+        .iter_mut()
+        .find(|record| record.id == tracked_id)
+        .expect("view record")
+        .object
+    {
+        view.byte_length = None;
+    }
+    assert!(matches!(
+        Vm::restore(tracking, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message))
+            if message.contains("tracks the length of a fixed-length buffer")
+    ));
+}

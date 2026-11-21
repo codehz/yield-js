@@ -1,5 +1,6 @@
 use crate::builtin::array;
 use crate::builtin::bigint;
+use crate::builtin::binary;
 use crate::builtin::boolean::members as boolean_family;
 use crate::builtin::collections;
 use crate::builtin::date;
@@ -47,6 +48,9 @@ impl Owner {
 enum Global {
     Owner(Owner),
     Number(f64),
+    /// A global whose object is an already allocated builtin root, used for a
+    /// family of constructors that share one owner.
+    Root(&'static str),
 }
 
 macro_rules! builtin_globals {
@@ -105,12 +109,26 @@ builtin_globals! {
     "Function" => Global::Owner(Owner::new("function", &[], &[], None)),
     "Date" => Global::Owner(date::OWNER),
     bigint::members::NAME => Global::Owner(bigint::OWNER),
+    "ArrayBuffer" => Global::Owner(binary::OWNER),
+    "DataView" => Global::Root("dataView"),
+    "Int8Array" => Global::Root("int8Array"),
+    "Uint8Array" => Global::Root("uint8Array"),
+    "Uint8ClampedArray" => Global::Root("uint8ClampedArray"),
+    "Int16Array" => Global::Root("int16Array"),
+    "Uint16Array" => Global::Root("uint16Array"),
+    "Int32Array" => Global::Root("int32Array"),
+    "Uint32Array" => Global::Root("uint32Array"),
+    "Float16Array" => Global::Root("float16Array"),
+    "Float32Array" => Global::Root("float32Array"),
+    "Float64Array" => Global::Root("float64Array"),
+    "BigInt64Array" => Global::Root("bigInt64Array"),
+    "BigUint64Array" => Global::Root("bigUint64Array"),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
     GLOBALS.iter().filter_map(|global| match global {
         Global::Owner(owner) => Some(owner),
-        Global::Number(_) => None,
+        Global::Number(_) | Global::Root(_) => None,
     })
 }
 
@@ -150,6 +168,7 @@ impl Vm {
         match GLOBALS.get(index as usize) {
             Some(Global::Owner(owner)) => Ok(Value::object(self.builtins.get(owner.root))),
             Some(Global::Number(number)) => Ok(Value::number(*number)),
+            Some(Global::Root(root)) => Ok(Value::object(self.builtins.get(root))),
             None => Err(VmError::InvalidState(format!(
                 "builtin {index} does not exist"
             ))),

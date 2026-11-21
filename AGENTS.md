@@ -117,6 +117,7 @@ Where to edit:
 | Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `harness/src/lib.rs`, `harness/src/main.rs` |
 | Host declaration syntax | `host-dts/src/lib.rs` (inventory and rejections), `compiler/src/lib.rs` (`from_dts`), `binding-macros/src/registry.rs` (`dts`, const checks), `binding-macros/src/typed.rs` (`__YIELD_NAMES`) |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
+| ArrayBuffer / DataView / TypedArray member | `vm/src/builtin/binary/` (`buffer.rs`, `view.rs`, `typed.rs`, `element.rs`, `codec.rs`); exotic index lookup lives in `vm/src/heap/binary.rs` |
 
 Easy to break:
 
@@ -182,7 +183,7 @@ export async function run() {
 }
 ```
 
-Add a behavior case by dropping `snake_case.js` into a category subdirectory of `crates/harness/tests/cases/` (`arrays`, `async`, `closures`, `coercion`, `collections`, `const`, `control`, `descriptors`, `destructuring`, `errors`, `finally`, `functions`, `gc`, `host`, `json`, `loops`, `math`, `numbers`, `objects`, `optional_chain`, `promise`, `prototypes`, `proxy`, `reflect`, `regexp`, `strings`, `switch`, `symbols`). Do not add cases at the top level of `tests/cases/`; keep every fixture in the matching category. `build.rs` walks the directory recursively; the generated test is `case_<category>_<stem>`. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
+Add a behavior case by dropping `snake_case.js` into a category subdirectory of `crates/harness/tests/cases/` (`arrays`, `async`, `binary`, `closures`, `coercion`, `collections`, `const`, `control`, `descriptors`, `destructuring`, `errors`, `finally`, `functions`, `gc`, `host`, `json`, `loops`, `math`, `numbers`, `objects`, `optional_chain`, `promise`, `prototypes`, `proxy`, `reflect`, `regexp`, `strings`, `switch`, `symbols`). Do not add cases at the top level of `tests/cases/`; keep every fixture in the matching category. `build.rs` walks the directory recursively; the generated test is `case_<category>_<stem>`. `cargo:rerun-if-changed=tests/cases` regenerates tests. Use `e2e.rs` when the assertion needs heap identity, slot tables, or a rejected restore.
 
 ## Commit Workflow
 

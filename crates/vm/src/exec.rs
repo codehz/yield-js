@@ -18,7 +18,7 @@ use crate::heap::{
     AsyncCompletion, AsyncRequest, Attributes, BoundObject, ClassElement, DescriptorUpdate,
     GeneratorStatus, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty,
     PlainObject, PrivateElement, Property, ScriptClass, ScriptClassSource, TO_PRIMITIVE_SYMBOL,
-    object_id, string_own_property,
+    TypedIndex, object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -1764,7 +1764,13 @@ impl Vm {
                 let receiver = receiver(self);
                 return self.proxy_get(host, roots, target, handler, key, &receiver);
             }
-            if let Some(property) = object.own_property(key) {
+            // Integer-indexed exotic [[Get]]: a canonical index never falls
+            // through to the prototype chain, even when it addresses nothing.
+            match self.heap.typed_index(id, key)? {
+                TypedIndex::Invalid => return Ok(Invocation::Value(Value::UNDEFINED)),
+                TypedIndex::Valid(_) | TypedIndex::Ordinary => {}
+            }
+            if let Some(property) = self.heap.own_property(id, key)? {
                 return match property.into_owned() {
                     Property::Data(value) => Ok(Invocation::Value(value)),
                     Property::Accessor { get: Some(get), .. } => {
@@ -1979,7 +1985,12 @@ impl Vm {
             {
                 return self.proxy_presence(host, roots, target, handler, key, false);
             }
-            if object.own_property(key).is_some() {
+            match self.heap.typed_index(id, key)? {
+                TypedIndex::Valid(_) => return Ok(Invocation::Value(Value::boolean(true))),
+                TypedIndex::Invalid => return Ok(Invocation::Value(Value::boolean(false))),
+                TypedIndex::Ordinary => {}
+            }
+            if self.heap.own_property(id, key)?.is_some() {
                 return Ok(Invocation::Value(Value::boolean(true)));
             }
             current = object.prototype();
@@ -2086,6 +2097,31 @@ impl Vm {
             }
         };
 
+        // Integer-indexed exotic [[Set]]: a canonical index is resolved before
+        // any prototype lookup, and the value still converts when the index
+        // addresses no element.
+        match self.heap.typed_index(target, key.borrowed())? {
+            TypedIndex::Ordinary => {}
+            TypedIndex::Valid(index) => {
+                if ops::strict_equal(receiver, &Value::object(target)) {
+                    return match self.typed_set_element(host, roots, target, index, &value)? {
+                        Ok(()) => Ok(success),
+                        Err(error) => Ok(Invocation::Thrown(error)),
+                    };
+                }
+            }
+            TypedIndex::Invalid => {
+                // The conversion of the value is observable; the store is not.
+                if ops::strict_equal(receiver, &Value::object(target))
+                    && let Some(kind) = self.heap.typed_array(target)?.map(|view| view.kind)
+                    && let Err(error) = self.element_bits(host, roots, kind, &value)?
+                {
+                    return Ok(Invocation::Thrown(error));
+                }
+                return Ok(success);
+            }
+        }
+
         // Lookup starts at the target. A setter sees the receiver as `this`;
         // a data write goes to the receiver, not to the descriptor's owner.
         let mut current = Some(target);
@@ -2106,7 +2142,7 @@ impl Vm {
                     strict,
                 );
             }
-            property = object.own_property(key.borrowed());
+            property = self.heap.own_property(id, key.borrowed())?;
             if property.is_some() {
                 break;
             }
@@ -2164,7 +2200,7 @@ impl Vm {
         // With the same extensible target and receiver, the lookup above
         // already rules out an incompatible own property.
         if id != target || !object.is_extensible() {
-            match object.own_property(key.borrowed()) {
+            match self.heap.own_property(id, key.borrowed())? {
                 Some(property)
                     if property.setter().is_some() || !property.attributes().writable =>
                 {
