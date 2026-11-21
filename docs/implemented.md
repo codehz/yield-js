@@ -2,7 +2,7 @@
 
 当前实现由代码推导的覆盖范围清单。语法子集与未覆盖项见 [`docs/gaps.md`](gaps.md)。
 
-- 字节码 **41** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
+- 字节码 **42** 将源码模块图、声明与求值函数、入口、可选 preload 和最终导出目标纳入构建摘要。加载时校验模块索引、可达性、绑定归属、getter 和原有指令结构。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - `compile(entry, preload, resolver, options)` 用同步 `ModuleResolver` 链接可达源码；`MemoryResolver` 和 `FileResolver` 使用根相对规范 ID。`CompileOptions::from_dts` 从宿主声明文件（`.d.ts`）单独读出模块与值导出清单；无法解释的导出语法按位置拒绝。支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出。星号不传递 `default`；相同最终目标不冲突，不同目标的同名导出从命名空间排除，对该名字的显式请求报错。
 - VM 在执行任何模块体前创建全部模块环境和命名空间，并初始化提升函数和 `var`。依赖优先、按源码声明顺序求值；循环回边跳过，共享模块只执行一次。读取另一模块未初始化的词法绑定抛出可捕获的 `ReferenceError`。命名空间无原型、不可扩展，按导出名排序，通过只读 getter 提供活绑定。
@@ -19,6 +19,7 @@
 - `test` 的 `setTimeout` / `clearTimeout` 使用可取消后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 timer driver，只接受有限非负的 `u32` 整数毫秒。快照写剩余时长，恢复不计离线时间；`@advance` 按截止时间、同截止时按登记顺序投递，每次投递后排空微任务。
 - `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
 - 同步生成器 `function*`（声明、表达式、对象与类的方法）在调用时初始化形参后立即返回生成器对象，正文只在 `next` 时执行。`GeneratorStart` 是独立的调用期边界，只捕获正文入口的活槽；每次 `yield` 生成一个 `GeneratorEntry`，分别给出 `next_pc` / `throw_pc` 的注入槽和 `return_pc`，`LoadGeneratorReturn` 只在该落点读取本次恢复传入的完成值，待完成值不进入全局状态。生成器函数不可构造，其实例原型是函数的 `prototype`（非对象时回退共享的生成器原型）。
+- `yield*` 降为显式委托循环，只覆盖同步迭代：取得迭代器并缓存 `next`，首次传 `undefined`，此后把恢复值传给委托；`throw` / `return` 完成先动态读取委托的同名方法并以委托为 `this` 调用。委托结果对象原样交给消费者，不重复包装——`done` 为假时只在真正推进时才读 `value`；`done` 为真时用其 `value` 作为 `yield*` 表达式的值，`return` 完成则沿外层 `return` 路径穿过 finally。缺 `return` 方法时传播传入的 `return`；缺 `throw` 方法先用无参 `return` 关闭（关闭自身的异常优先），再抛可捕获的 `TypeError`；`null` / `undefined` 视为方法缺失，其他不可调用值和非对象结果同样抛 `TypeError`，取方法、调用或读属性抛错按当前词法处理且不额外关闭。
 - 生成器对象是普通对象加一份暂停帧（状态、函数 ID、环境、按入口 `saved_slots` 排列的值）。`next` / `throw` / `return` 是共享生成器原型上的内建方法：恢复前取走保存状态并标记执行中，重入抛可捕获的 `TypeError`；`next` 同步返回 `{ value, done: false }`，正文返回或落底给出 `done: true`，未捕获异常使生成器完成并原样抛出；已完成状态不再持有帧。`[Symbol.iterator]` 返回 `this`，因此 `for…of`、数组展开等现有消费路径不需要生成器特判，`finally` 中的 `yield` 保留待完成的 `return`。
 - 生成器帧参与运行期 GC 与快照：暂停的环境和保存槽是强引用边，完成后释放；快照格式 **55** 保存普通对象身份、原型、状态、函数 ID、恢复表索引和按表排列的槽值，不写瞬时槽或运行时 PC。恢复在发布 VM 前拒绝执行中状态、非生成器函数、非法表索引和值数不符。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。

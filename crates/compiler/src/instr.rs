@@ -44,6 +44,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::DeleteMember { .. }
         | Instr::ForInNext { .. }
         | Instr::GetIterator { .. }
+        | Instr::IteratorCall { .. }
         | Instr::IteratorNext { .. }
         | Instr::IteratorSkip { .. }
         | Instr::IteratorClose {
@@ -310,6 +311,16 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         } => {
             uses.insert(iterable.index);
             defs.extend([iterator.index, next.index]);
+        }
+        Instr::IteratorCall {
+            dst,
+            iterator,
+            method,
+            argument,
+        } => {
+            uses.extend([iterator.index, method.index]);
+            uses.extend(argument.map(|slot| slot.index));
+            defs.insert(dst.index);
         }
         Instr::IteratorNext {
             done,
@@ -699,6 +710,17 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             iterator: remap(iterator),
             next: remap(next),
             iterable: remap(iterable),
+        },
+        Instr::IteratorCall {
+            dst,
+            iterator,
+            method,
+            argument,
+        } => Instr::IteratorCall {
+            dst: remap(dst),
+            iterator: remap(iterator),
+            method: remap(method),
+            argument: argument.map(remap),
         },
         Instr::IteratorNext {
             done,

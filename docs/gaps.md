@@ -14,7 +14,7 @@
 
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
-- 同步生成器已支持；异步迭代仍在编译期拒绝：`async function*`、`yield*` 委托、`for await…of` 报带行列的 `unsupported syntax: …`。`Symbol.asyncIterator`、异步迭代协议、同步转异步回退包装及 async generator 请求队列均缺失；目标语义见 `design.md` 的「Generator、async generator 与异步迭代」。生成器只实现同步 `yield`：`yield` 出现在非生成器函数中同样被拒绝。
+- 同步生成器（含 `yield*` 同步委托）已支持；异步迭代仍在编译期拒绝：`async function*` 与 `for await…of` 报带行列的 `unsupported syntax: …`。`Symbol.asyncIterator`、异步迭代协议、同步转异步回退包装及 async generator 请求队列均缺失；目标语义见 `design.md` 的「Generator、async generator 与异步迭代」。`yield` / `yield*` 出现在非生成器函数中同样被拒绝。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整

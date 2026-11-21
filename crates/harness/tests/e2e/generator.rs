@@ -110,7 +110,13 @@ export async function run() {
   setup();
   await wait("pause");
   const step = state.it.next();
-  return step.done === false && step.value === 6 ? "ok" : "bad";
+  const fresh = g(2).next();
+  return step.done === false &&
+    step.value === 6 &&
+    fresh.done === false &&
+    fresh.value === 2
+    ? "ok"
+    : "bad";
 }
 "#;
     let mut suspended = start(source);
@@ -171,6 +177,73 @@ export async function run() {
     suspended
         .restore(captured)
         .expect("restore completed generator");
+    suspended.complete(
+        "wait:pause",
+        Completion::Fulfilled(yield_vm::JsValue::undefined()),
+    );
+    assert_fulfilled(&suspended, "ok");
+}
+
+/// A delegation suspension keeps the delegate, the cached `next`, and the read
+/// state in saved slots, so recovery continues the same iterator.
+#[test]
+fn delegated_generator_resumes_without_regaining_the_iterator() {
+    let source = r#"
+import { wait } from "test";
+
+let iteratorCalls = 0;
+let nextCalls = 0;
+
+const delegate = {
+  next() {
+    nextCalls = nextCalls + 1;
+    return { done: false, value: nextCalls };
+  },
+};
+delegate[Symbol.iterator] = function () {
+  iteratorCalls = iteratorCalls + 1;
+  return delegate;
+};
+
+function* outer() {
+  yield* delegate;
+}
+
+export const state = { it: null };
+
+export async function run() {
+  const it = outer();
+  state.it = it;
+  const first = it.next();
+  await wait("pause");
+  const second = it.next();
+  return iteratorCalls === 1 &&
+    nextCalls === 2 &&
+    first.value === 1 &&
+    second.value === 2 &&
+    second.done === false
+    ? "ok"
+    : "bad";
+}
+"#;
+    let mut suspended = start(source);
+    let mut roots = suspended.roots();
+    suspended.vm.collect_garbage(&roots).expect("collect");
+    let captured = json_round_trip(&suspended.snapshot());
+    assert_eq!(
+        captured
+            .generators
+            .values()
+            .next()
+            .map(|record| record.status),
+        Some(GeneratorStatus::Suspended(0))
+    );
+    suspended.restore(captured).expect("restore delegation");
+    roots = suspended.roots();
+    suspended
+        .vm
+        .collect_garbage(&roots)
+        .expect("collect after restore");
     suspended.complete(
         "wait:pause",
         Completion::Fulfilled(yield_vm::JsValue::undefined()),

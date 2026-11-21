@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 41;
+pub const BYTECODE_VERSION: u32 = 42;
 
 pub use crate::builtin::BUILTINS;
 
@@ -458,6 +458,16 @@ pub enum Instr {
         iterator: Slot,
         next: Slot,
         iterable: Slot,
+    },
+    /// Calls one iterator method with the iterator as receiver and requires an
+    /// object result, preserving that result object's own identity.
+    ///
+    /// `argument` is `None` for a method called with no arguments.
+    IteratorCall {
+        dst: Slot,
+        iterator: Slot,
+        method: Slot,
+        argument: Option<Slot>,
     },
     /// Calls cached `next` and reads `done`, then `value` only when not done.
     IteratorNext {
@@ -1559,6 +1569,19 @@ impl Build {
                         ));
                     }
                     check_slot(*iterable, "GetIterator.iterable")?;
+                }
+                Instr::IteratorCall {
+                    dst,
+                    iterator,
+                    method,
+                    argument,
+                } => {
+                    check_slot(*dst, "IteratorCall.dst")?;
+                    check_slot(*iterator, "IteratorCall.iterator")?;
+                    check_slot(*method, "IteratorCall.method")?;
+                    if let Some(argument) = argument {
+                        check_slot(*argument, "IteratorCall.argument")?;
+                    }
                 }
                 Instr::IteratorNext {
                     done,

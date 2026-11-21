@@ -1857,6 +1857,33 @@ export function* run(a) {
 }
 
 #[test]
+fn yield_delegation_uses_one_delegated_suspension() {
+    let function = compile_generator(
+        r#"
+export function* run(iterable) {
+  return yield* iterable;
+}
+"#,
+    );
+    assert_eq!(function.generator_resumes.len(), 1);
+    assert_eq!(
+        function
+            .code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instr::Yield { delegate: true, .. }))
+            .count(),
+        1
+    );
+    assert!(
+        function
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instr::IteratorCall { .. })),
+        "delegation calls the delegate's methods directly"
+    );
+}
+
+#[test]
 fn rejects_async_generator_with_location() {
     let error = compile(
         "const holder = { async *m() { yield 1; } };",

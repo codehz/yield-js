@@ -288,11 +288,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             None => self.emit_undefined()?,
         };
         if expression.delegate {
-            return Err(unsupported(
-                self.source_text(),
-                expression.span,
-                "yield* delegation",
-            ));
+            return self.emit_yield_delegate(argument);
         }
         self.emit_yield(argument)
     }

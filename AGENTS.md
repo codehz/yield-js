@@ -41,9 +41,12 @@ Public entry points:
 
 Suspend/resume invariants (do not weaken these):
 
-- Operands are explicit slots. Nothing implicit is persisted across `Instr::Await`.
+- Operands are explicit slots. Nothing implicit is persisted across `Instr::Await` or `Instr::Yield`.
 - `ResumeEntry` is `{ fulfill_pc, fulfill_dst, reject_pc, reject_dst, saved_slots }`. Continuations are keyed by `resume_id`, not a runtime PC.
 - `saved_slots` is the union of both resume entries' live-in after subtracting that entry's result register. Result slots are written on resume, not saved. Persistent slots are not reused across different live values. Transient slots are dropped on suspend.
+- A synchronous generator resumes through `GeneratorEntry { next_pc, next_dst, throw_pc, throw_dst, return_pc, saved_slots }`, indexed by `Instr::Yield::generator`. Subtract each entry's own injected register before joining the three live-ins; subtracting after the union drops a value another entry needs. `return_pc` has no result slot: it begins with `Instr::LoadGeneratorReturn`, so the pending completion payload lives in the rebuilt frame, never in VM-global state.
+- `Instr::GeneratorStart` ends a generator call after parameter initialization: capture `Function::generator_start.saved_slots` and the invocation environment into a fresh generator object and return it without running the body. Only the start capture and the three yield entries are externally injected; ordinary control flow must not reach `throw_pc`, `return_pc`, or `body_pc`.
+- Generator objects are ordinary objects plus a suspended frame (`func_id`, status, environment, values in entry order). `Executor` state is never snapshotted: capture records it and restore rejects it. Reentrant resume throws a script `TypeError`. Consume generators only through `Symbol.iterator`; do not special-case them in `for...of`.
 - `undefined` is a real value. Frame slot `None` means uninitialized, not `undefined`.
 - Bindings read or written from another function, plus exported bindings, stay in a heap environment. Other bindings are frame slots. A call that shares nothing and creates no closure allocates no environment.
 - `finally` is explicit completion state (kind + payload), not a native exception stack. Nested `await` inside `finally` must keep that pending completion.
@@ -106,7 +109,7 @@ Where to edit:
 | Change | Touch |
 | --- | --- |
 | Syntax subset | `compiler/src/lower` (worklist, not recursive borrow), `frontend.rs`; reject with `unsupported()` |
-| Liveness / which slots survive await | `analyze.rs`, `allocate.rs` |
+| Liveness / which slots survive await or yield | `analyze.rs`, `allocate.rs` |
 | New opcode | `vm/src/bytecode.rs`, `vm/src/exec.rs` (and `ops.rs` if it is a value op), `compiler/src/instr.rs`, lowerer |
 | New heap kind | `vm/src/heap/object.rs` `write_edges`; GC and snapshot capture share the tracer in `vm/src/gc.rs` |
 | Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `harness/tests/e2e.rs` |

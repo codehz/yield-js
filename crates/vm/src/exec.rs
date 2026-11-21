@@ -1057,6 +1057,28 @@ impl Vm {
                 frame.write(next, next_method)?;
                 Ok(Step::Next)
             }
+            Instr::IteratorCall {
+                dst,
+                iterator,
+                method,
+                argument,
+            } => {
+                let iterator = frame.read(iterator)?;
+                let method = frame.read(method)?;
+                let args = match argument {
+                    Some(argument) => vec![frame.read(argument)?],
+                    None => Vec::new(),
+                };
+                let invocation = self.invoke(host, frame_roots, &method, args, &iterator)?;
+                let result = match self
+                    .require_iterator_object(invocation, "iterator method must return an object")?
+                {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
+                };
+                frame.write(dst, result)?;
+                Ok(Step::Next)
+            }
             Instr::IteratorNext {
                 done,
                 value,

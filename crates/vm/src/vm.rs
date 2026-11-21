@@ -1661,6 +1661,7 @@ impl Vm {
             module_namespaces,
         } = state;
         heap.promise_prototype = Some(builtins.get("promise.prototype"));
+        heap.generator_prototype = Some(builtins.get("generator.prototype"));
         heap.object_prototype = Some(builtins.get("object.prototype"));
         heap.array_prototype = Some(builtins.get("array.prototype"));
         heap.function_prototype = Some(builtins.get("function.prototype"));

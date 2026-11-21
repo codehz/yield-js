@@ -6,12 +6,13 @@
 //! `await` records both resume entries before slot allocation fills `saved_slots`.
 
 use oxc::ast::ast::*;
-use yield_vm::bytecode::{ExceptionHandler, Instr};
+use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, ExceptionHandler, Instr};
 
 use super::{Lowerer, for_each_binding_name};
 use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::ir::{AwaitSite, YieldSite};
+use crate::names::builtin_index;
 
 #[derive(Clone, Copy)]
 pub(super) enum Completion {
@@ -352,6 +353,208 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return_pc,
         });
         Ok(next)
+    }
+
+    /// Emit `yield*` as an explicit delegation loop over the synchronous
+    /// iterator protocol and return the expression's value register.
+    ///
+    /// The delegate's result objects are handed back unwrapped, so `done` and
+    /// `value` are read here instead of being discarded by a `for...of` style
+    /// step. All three completions of the single suspension dispatch to the
+    /// delegate's own `throw` / `return` methods first, and only fall back to
+    /// the outer throw or return when the delegate cannot handle them.
+    pub(super) fn emit_yield_delegate(&mut self, iterable: Reg) -> Result<Reg, CompileError> {
+        let iterator = self.alloc_reg()?;
+        let next = self.alloc_reg()?;
+        self.emit(Instr::GetIterator {
+            iterator: self.slot(iterator),
+            next: self.slot(next),
+            iterable: self.slot(iterable),
+        });
+        // Also the suspension's next destination, so a consumer's next value
+        // lands exactly where the delegate step reads it.
+        let sent = self.alloc_reg()?;
+        self.emit(Instr::Undefined {
+            dst: self.slot(sent),
+        });
+        let head = self.pc();
+        let result = self.alloc_reg()?;
+        self.emit(Instr::IteratorCall {
+            dst: self.slot(result),
+            iterator: self.slot(iterator),
+            method: self.slot(next),
+            argument: Some(self.slot(sent)),
+        });
+        let to_process = self.jump();
+
+        // throw entry: delegate to the iterator's own throw method.
+        let throw_pc = self.pc();
+        let thrown = self.alloc_reg()?;
+        let throw_method = self.alloc_reg()?;
+        self.emit_member_read(throw_method, iterator, "throw")?;
+        let absent_throw = self.emit_absent_branch(throw_method)?;
+        let delegated = self.alloc_reg()?;
+        self.emit(Instr::IteratorCall {
+            dst: self.slot(delegated),
+            iterator: self.slot(iterator),
+            method: self.slot(throw_method),
+            argument: Some(self.slot(thrown)),
+        });
+        self.emit(Instr::Move {
+            dst: self.slot(result),
+            src: self.slot(delegated),
+        });
+        let to_process_after_throw = self.jump();
+        let absent_throw_pc = self.pc();
+        for jump in absent_throw {
+            self.patch_jump(jump, absent_throw_pc)?;
+        }
+        // Close the delegate with no argument first; a failing close wins over
+        // the TypeError that reports the missing method.
+        self.emit(Instr::IteratorClose {
+            iterator: self.slot(iterator),
+            preserve_throw: false,
+        });
+        let error = self.emit_type_error("iterator does not have a throw method")?;
+        self.emit(Instr::Throw {
+            src: self.slot(error),
+        });
+
+        // return entry: delegate to the iterator's own return method.
+        let return_pc = self.pc();
+        let returned = self.alloc_reg()?;
+        self.emit(Instr::LoadGeneratorReturn {
+            dst: self.slot(returned),
+        });
+        let return_method = self.alloc_reg()?;
+        self.emit_member_read(return_method, iterator, "return")?;
+        let absent_return = self.emit_absent_branch(return_method)?;
+        self.emit(Instr::IteratorCall {
+            dst: self.slot(result),
+            iterator: self.slot(iterator),
+            method: self.slot(return_method),
+            argument: Some(self.slot(returned)),
+        });
+        let to_check_return = self.jump();
+        let absent_return_pc = self.pc();
+        for jump in absent_return {
+            self.patch_jump(jump, absent_return_pc)?;
+        }
+        // No return method: the incoming return completion propagates outward.
+        self.emit_pending_return(returned)?;
+
+        // next and throw completions share the done/value reads.
+        let process = self.pc();
+        self.patch_jump(to_process, process)?;
+        self.patch_jump(to_process_after_throw, process)?;
+        let done = self.alloc_reg()?;
+        self.emit_member_read(done, result, "done")?;
+        let not_done = self.branch_false(done);
+        let value = self.alloc_reg()?;
+        self.emit_member_read(value, result, "value")?;
+        let finish = self.jump();
+
+        let yield_pc = self.pc();
+        self.patch_jump(not_done, yield_pc)?;
+        let generator = self.control.yields.len() as u32;
+        self.emit(Instr::Yield {
+            input: self.slot(result),
+            generator,
+            delegate: true,
+        });
+        self.jump_to(head);
+        self.control.yields.push(YieldSite {
+            next: sent,
+            thrown,
+            next_pc: yield_pc + 1,
+            throw_pc,
+            return_pc,
+        });
+
+        // A delegated return that is not done keeps the loop running.
+        let check_return = self.pc();
+        self.patch_jump(to_check_return, check_return)?;
+        let return_done = self.alloc_reg()?;
+        self.emit_member_read(return_done, result, "done")?;
+        let return_not_done = self.branch_false(return_done);
+        let return_value = self.alloc_reg()?;
+        self.emit_member_read(return_value, result, "value")?;
+        self.emit_pending_return(return_value)?;
+        let resume_loop = self.pc();
+        self.patch_jump(return_not_done, resume_loop)?;
+        self.emit(Instr::Undefined {
+            dst: self.slot(sent),
+        });
+        self.jump_to(head);
+
+        let after = self.pc();
+        self.patch_jump(finish, after)?;
+        Ok(value)
+    }
+
+    /// Read a fixed own-or-inherited property from `object`.
+    fn emit_member_read(&mut self, dst: Reg, object: Reg, name: &str) -> Result<(), CompileError> {
+        let key = self.emit_constant(Constant::String(name.into()))?;
+        self.emit(Instr::GetMember {
+            dst: self.slot(dst),
+            object: self.slot(object),
+            key: self.slot(key),
+        });
+        Ok(())
+    }
+
+    /// Branch on a missing method: `value` is `undefined` or `null`.
+    ///
+    /// Returns the jumps taken when the method is absent; the fall-through is
+    /// the present path, which must validate callability.
+    fn emit_absent_branch(&mut self, value: Reg) -> Result<Vec<usize>, CompileError> {
+        let mut absent = Vec::new();
+        let undefined = self.emit_undefined()?;
+        let is_undefined = self.alloc_reg()?;
+        self.emit(Instr::Binary {
+            dst: self.slot(is_undefined),
+            op: BinaryOp::StrictEq,
+            lhs: self.slot(value),
+            rhs: self.slot(undefined),
+        });
+        let not_undefined = self.branch_false(is_undefined);
+        absent.push(self.jump());
+        let present = self.pc();
+        self.patch_jump(not_undefined, present)?;
+        let null = self.emit_constant(Constant::Null)?;
+        let is_null = self.alloc_reg()?;
+        self.emit(Instr::Binary {
+            dst: self.slot(is_null),
+            op: BinaryOp::StrictEq,
+            lhs: self.slot(value),
+            rhs: self.slot(null),
+        });
+        let not_null = self.branch_false(is_null);
+        absent.push(self.jump());
+        let present = self.pc();
+        self.patch_jump(not_null, present)?;
+        Ok(absent)
+    }
+
+    /// Build the internal `TypeError` a delegation fallback throws.
+    fn emit_type_error(&mut self, message: &str) -> Result<Reg, CompileError> {
+        let builtin = builtin_index("TypeError").ok_or_else(|| {
+            CompileError::internal("internal compiler error: no TypeError builtin")
+        })?;
+        let message = self.emit_constant(Constant::String(message.into()))?;
+        let callee = self.alloc_reg()?;
+        self.emit(Instr::GetBuiltin {
+            dst: self.slot(callee),
+            builtin: builtin as u32,
+        });
+        let error = self.alloc_reg()?;
+        self.emit(Instr::CallValue {
+            dst: self.slot(error),
+            callee: self.slot(callee),
+            args: CallArgs::Slots(vec![self.slot(message)]),
+            receiver: None,
+        });
+        Ok(error)
     }
 
     fn push_finalizer(&mut self) -> Result<(), CompileError> {
