@@ -34,7 +34,6 @@ export async function run() {
   try { bareValues(); } catch (e) { badValues = e; }
   expect(typeof badValues).toBe("object");
   expect(badValues?.name).toBe("TypeError");
-  expect(badValues?.message).toBe("Array.values requires an object");
 
   it.next = 42;
   a[Symbol.iterator] = 43;

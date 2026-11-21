@@ -4,10 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::object::{OwnedEdge, push_state, push_value};
 use super::types::{
     ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
-    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL,
-    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object,
-    OrderedProperty, OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject,
-    PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION,
+    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
+    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OrderedProperty,
+    OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
+    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION,
     SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
     TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
 };
@@ -57,9 +58,13 @@ impl Heap {
                 (SEARCH_SYMBOL, Some(SEARCH_DESCRIPTION.into())),
                 (SPLIT_SYMBOL, Some(SPLIT_DESCRIPTION.into())),
                 (HAS_INSTANCE_SYMBOL, Some(HAS_INSTANCE_DESCRIPTION.into())),
+                (
+                    IS_CONCAT_SPREADABLE_SYMBOL,
+                    Some(IS_CONCAT_SPREADABLE_DESCRIPTION.into()),
+                ),
             ]),
             symbol_registry: BTreeMap::new(),
-            next_symbol_id: HAS_INSTANCE_SYMBOL + 1,
+            next_symbol_id: IS_CONCAT_SPREADABLE_SYMBOL + 1,
             combines: BTreeMap::new(),
             private: BTreeMap::new(),
             resolutions: BTreeSet::new(),

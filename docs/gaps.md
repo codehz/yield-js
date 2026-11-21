@@ -28,7 +28,7 @@
 
 | 内建 | 限制与缺项 |
 | --- | --- |
-| `Array` | 缺少 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries` 等方法。`map` 等多数原型方法只接受数组接收者。不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
+| `Array` | 不提供 `Array.prototype.toLocaleString`；`flat` 在无法减少深度的循环数组上抛 `TypeError`，而不是无限展开 |
 | 错误构造器 | 缺少专用的 `Error.prototype.toString`；`stack` 是简化文本，不包含调用帧 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |

@@ -4,6 +4,24 @@ mod suite;
 use yield_vm::ValueRef;
 
 #[test]
+fn restore_rejects_the_previous_array_iterator_format() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Vm, VmError};
+
+    let build = build("export function run() { return [1].entries(); }");
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let cursor = vm.start(&mut host, "run", vec![]).unwrap();
+    let mut snapshot = vm.snapshot(&[cursor]).unwrap();
+    assert_eq!(snapshot.format_version, 51);
+    snapshot.format_version -= 1;
+    assert!(matches!(
+        Vm::restore(snapshot, build, &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("unsupported snapshot format 50")
+    ));
+}
+
+#[test]
 fn restore_rejects_a_missing_boxed_symbol_payload() {
     use yield_harness::{TestHost, build};
     use yield_vm::heap::BoxedPrimitive;

@@ -713,13 +713,19 @@ impl Vm {
         Ok(Value::object(id))
     }
 
-    pub(crate) fn array_values(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("Array.values requires an object");
+    pub(crate) fn array_iterator(
+        &mut self,
+        receiver: &Value,
+        kind: crate::heap::ArrayIterationKind,
+    ) -> Result<Invocation, VmError> {
+        let id = match self.array_receiver(receiver)? {
+            Ok(id) => id,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let iterator = self.heap.alloc(Object::ArrayIterator {
             object: PlainObject::new(Some(self.builtins.get("arrayIterator.prototype"))),
             array: Some(id),
+            kind,
             next_index: 0,
         });
         Ok(Invocation::Value(Value::object(iterator)))
@@ -731,74 +737,57 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
-        let roots = &roots.with(&receiver);
+        use crate::heap::ArrayIterationKind;
+
         let invalid_receiver = "ArrayIterator.next requires an array iterator";
         let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(invalid_receiver);
         };
         let Object::ArrayIterator {
-            array, next_index, ..
+            array,
+            next_index,
+            kind,
+            ..
         } = self.heap.get(id)?
         else {
             return self.throw_type_error(invalid_receiver);
         };
-        let next = if let Some(source) = *array {
-            let roots = &roots.with(&source);
-            let index = *next_index;
-            let length = match self.heap.get(source)? {
-                Object::Array(array) => array.length,
-                _ => {
-                    let value = match self.read_property(
-                        host,
-                        roots,
-                        &Value::object(source),
-                        PropertyKeyRef::String("length"),
-                    )? {
-                        Invocation::Value(value) => value,
-                        thrown => return Ok(thrown),
-                    };
-                    match self.coerce_number(host, roots, &value)? {
-                        Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as usize,
-                        Err(error) => return Ok(Invocation::Thrown(error)),
-                    }
-                }
-            };
-            let next = (index < length).then_some((source, index));
-            let Object::ArrayIterator {
-                array, next_index, ..
-            } = self.heap.get_mut(id)?
-            else {
-                unreachable!()
-            };
-            if next.is_some() {
-                *next_index = index + 1;
-            } else {
-                *array = None;
-            }
-            next
-        } else {
-            None
+        let Some(source) = *array else {
+            return self.iterator_result(Value::UNDEFINED, true);
         };
-        let done = next.is_none();
-        let value = if let Some((source, index)) = next {
-            let result = if matches!(self.heap.get(source)?, Object::Array(_)) {
-                self.read_array_index(host, roots, source, index)?
-            } else {
-                self.read_property(
-                    host,
-                    roots,
-                    &Value::object(source),
-                    PropertyKeyRef::String(&index.to_string()),
-                )?
-            };
-            match result {
+        let (index, kind) = (*next_index, *kind);
+        let view = (id, source);
+        let roots = &roots.with(&view);
+        let length = match self.length_of_array_like(host, roots, source)? {
+            Ok(length) => length,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let Object::ArrayIterator {
+            array, next_index, ..
+        } = self.heap.get_mut(id)?
+        else {
+            unreachable!()
+        };
+        if index >= length {
+            *array = None;
+            return self.iterator_result(Value::UNDEFINED, true);
+        }
+        *next_index = index + 1;
+        let key = Value::number(index as f64);
+        let value = if kind == ArrayIterationKind::Keys {
+            key
+        } else {
+            let value = match self.read_array_like_index(host, roots, source, index)? {
                 Invocation::Value(value) => value,
                 thrown => return Ok(thrown),
+            };
+            if kind == ArrayIterationKind::Entries {
+                Value::object(self.heap.alloc_array(vec![key, value]))
+            } else {
+                value
             }
-        } else {
-            Value::UNDEFINED
         };
-        self.iterator_result(value, done)
+        self.iterator_result(value, false)
     }
 
     pub(crate) fn iterator_result(

@@ -9,7 +9,7 @@ use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Callable records persist their mutable descriptors and creation names.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 50;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 51;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

@@ -34,6 +34,8 @@ pub(crate) const SPLIT_SYMBOL: SymbolId = 7;
 pub(crate) const SPLIT_DESCRIPTION: &str = "Symbol.split";
 pub(crate) const HAS_INSTANCE_SYMBOL: SymbolId = 8;
 pub(crate) const HAS_INSTANCE_DESCRIPTION: &str = "Symbol.hasInstance";
+pub(crate) const IS_CONCAT_SPREADABLE_SYMBOL: SymbolId = 9;
+pub(crate) const IS_CONCAT_SPREADABLE_DESCRIPTION: &str = "Symbol.isConcatSpreadable";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -875,7 +877,8 @@ pub enum Object {
     ArrayIterator {
         object: PlainObject,
         array: Option<ObjectId>,
-        next_index: usize,
+        kind: ArrayIterationKind,
+        next_index: u64,
     },
     StringIterator {
         object: PlainObject,
@@ -1056,14 +1059,16 @@ impl PartialEq for Object {
                 ArrayIterator {
                     object: x,
                     array: a,
+                    kind: k,
                     next_index: n,
                 },
                 ArrayIterator {
                     object: y,
                     array: b,
+                    kind: l,
                     next_index: m,
                 },
-            ) => x == y && a == b && n == m,
+            ) => x == y && a == b && k == l && n == m,
             (
                 StringIterator {
                     object: x,
@@ -1162,4 +1167,11 @@ impl IntegrityLevel {
     pub(super) fn allows(self, property: &Property, attributes: Attributes) -> bool {
         !attributes.configurable && !(attributes.writable && self.freeze_data(property))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayIterationKind {
+    Keys,
+    Values,
+    Entries,
 }

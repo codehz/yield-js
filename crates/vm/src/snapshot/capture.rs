@@ -7,12 +7,13 @@ use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::heap::{
-    EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, ITERATOR_DESCRIPTION,
-    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
-    NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind, PromiseState,
-    Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
-    SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
-    TO_PRIMITIVE_SYMBOL, WeakKey,
+    EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
+    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OwnProperty,
+    OwnedEdge, PrivateElement, PrivateMemberKind, PromiseState, Property, REPLACE_DESCRIPTION,
+    REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
+    SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    WeakKey,
 };
 use crate::host::Host;
 use crate::regexp::compile_pattern;
@@ -399,6 +400,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             SEARCH_SYMBOL => Some(SEARCH_DESCRIPTION),
             SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
+            IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -421,6 +423,10 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
         (SEARCH_SYMBOL, SEARCH_DESCRIPTION),
         (SPLIT_SYMBOL, SPLIT_DESCRIPTION),
         (HAS_INSTANCE_SYMBOL, HAS_INSTANCE_DESCRIPTION),
+        (
+            IS_CONCAT_SPREADABLE_SYMBOL,
+            IS_CONCAT_SPREADABLE_DESCRIPTION,
+        ),
     ] {
         if !snapshot
             .symbols
@@ -445,6 +451,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             SEARCH_SYMBOL => Some(SEARCH_DESCRIPTION),
             SPLIT_SYMBOL => Some(SPLIT_DESCRIPTION),
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
+            IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(
