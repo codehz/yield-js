@@ -3,7 +3,7 @@
 
 use std::any::Any;
 
-use crate::binding::{ClassId, Recovery};
+use crate::binding::{ClassId, HostFault, LiveRegistration, Recovery};
 use crate::error::VmError;
 use crate::gc::{TraceRoots, Tracer};
 use crate::heap::{CombineKind, PromiseState};
@@ -45,7 +45,6 @@ impl std::fmt::Debug for ModuleState {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct PendingOperation {
     pub(crate) name: String,
     pub(crate) schema: u32,
@@ -53,6 +52,32 @@ pub(crate) struct PendingOperation {
     pub(crate) rejection: &'static str,
     pub(crate) state: Vec<u8>,
     pub(crate) promise: ObjectId,
+    pub(crate) declaration: usize,
+    pub(crate) live: Option<Box<dyn LiveRegistration>>,
+}
+
+impl PendingOperation {
+    pub(crate) fn checkpoint(&self) -> Result<Vec<u8>, HostFault> {
+        let Some(live) = &self.live else {
+            return Ok(self.state.clone());
+        };
+        let mut state = Vec::new();
+        live.checkpoint(&self.state, &mut state)?;
+        Ok(state)
+    }
+}
+
+impl std::fmt::Debug for PendingOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingOperation")
+            .field("name", &self.name)
+            .field("schema", &self.schema)
+            .field("recovery", &self.recovery)
+            .field("promise", &self.promise)
+            .field("armed", &self.live.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]

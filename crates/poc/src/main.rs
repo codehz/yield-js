@@ -3,8 +3,9 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::compile;
+use yield_poc::{LabelRegistration, LabelService};
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, JsResult, JsValue, OperationStart, OperationToken,
+    Bindings, CallCx, CodecError, JsResult, JsValue, OperationDriver, OperationToken,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
@@ -65,20 +66,47 @@ impl Wait {
     }
 }
 
+impl OperationDriver for Wait {
+    type Live = LabelRegistration;
+
+    fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
+        self.register(token, bindings, false)
+    }
+
+    fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
+        self.register(token, bindings, true)
+    }
+}
+
+impl Wait {
+    fn register(
+        &self,
+        token: OperationToken,
+        bindings: &Bindings,
+        restoring: bool,
+    ) -> Result<LabelRegistration, HostFault> {
+        let labels = bindings
+            .service::<Arc<LabelService>>("labels")
+            .ok_or_else(|| HostFault::new("missing labels service"))?;
+        labels.register(self.label.clone(), token, restoring)
+    }
+}
+
 struct DemoHost {
     bindings: Arc<Bindings>,
     counters: Arc<DemoCounters>,
-    operations: BTreeMap<String, OperationToken>,
+    labels: Arc<LabelService>,
 }
 
 impl DemoHost {
     fn new() -> Result<Self, String> {
         let counters = Arc::new(DemoCounters::default());
-        let bindings = demo_bindings(counters.clone())?;
+        let labels = Arc::new(LabelService::default());
+        let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels))?;
         Ok(Self {
             bindings: Arc::new(bindings),
             counters,
-            operations: BTreeMap::new(),
+            labels,
         })
     }
 
@@ -87,7 +115,7 @@ impl DemoHost {
     }
 
     fn token(&self, label: &str) -> Option<OperationToken> {
-        self.operations.get(label).copied()
+        self.labels.token(label)
     }
 
     fn complete(&self, vm: &mut Vm, label: &str, value: JsValue) -> Result<(), String> {
@@ -97,12 +125,6 @@ impl DemoHost {
         vm.complete_operation(token, Completion::Fulfilled(value))
             .map_err(|error| error.to_string())
     }
-
-    fn complete_mut(&mut self, vm: &mut Vm, label: &str, value: JsValue) -> Result<(), String> {
-        self.complete(vm, label, value)?;
-        self.operations.remove(label);
-        Ok(())
-    }
 }
 
 impl Host for DemoHost {
@@ -110,31 +132,19 @@ impl Host for DemoHost {
         self.bindings.clone()
     }
 
-    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        if start.name != "wait" {
-            return Err(HostFault::new(format!("unknown operation {}", start.name)));
-        }
-        let label = std::str::from_utf8(start.state)
-            .map_err(|_| HostFault::new("wait label is not UTF-8"))?
-            .to_owned();
-        self.operations.insert(label, start.token);
-        Ok(())
-    }
-
-    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        self.start_operation(start)
-    }
-
     fn report_error(&mut self, _error: JsValue) {}
 }
 
-fn demo_bindings(counters: Arc<DemoCounters>) -> Result<Bindings, String> {
+fn demo_bindings(
+    counters: Arc<DemoCounters>,
+    labels: Arc<LabelService>,
+) -> Result<Bindings, String> {
     host_bindings! {
         modules: [demo],
         classes: [],
         states: [],
         operations: [Wait],
-        services: [("demo-counters", 1, counters)],
+        services: [("demo-counters", 1, counters), ("labels", 1, labels)],
     }
 }
 
@@ -175,7 +185,11 @@ mod demo {
 }
 
 fn compile_options() -> yield_compiler::CompileOptions {
-    let bindings = demo_bindings(Arc::new(DemoCounters::default())).expect("demo bindings");
+    let bindings = demo_bindings(
+        Arc::new(DemoCounters::default()),
+        Arc::new(LabelService::default()),
+    )
+    .expect("demo bindings");
     let mut imports = BTreeMap::new();
     for module in bindings.module_names() {
         imports.insert(
@@ -222,7 +236,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut vm = Vm::new(build.clone(), &mut host)?;
     let result = vm.start(&mut host, "run", vec![JsValue::string("input")])?;
     vm.run_until_idle(&mut host)?;
-    println!("\nafter first await: pending {:?}", host.operations.keys());
+    println!(
+        "\nafter first await: pending {:?}",
+        host.labels.pending_labels()
+    );
     let first = vm.snapshot(std::slice::from_ref(&result))?;
     println!(
         "snapshot 1: {}, {} continuation(s)",
@@ -232,15 +249,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(vm);
 
     let mut vm = Vm::restore(first, build.clone(), &mut host)?;
-    vm.start_recovered_operations(&mut host)?;
+    vm.start_recovered_operations()?;
     println!(
         "restored snapshot 1; inspect/seed calls = {}/{}",
         host.calls("inspect"),
         host.calls("seed")
     );
-    host.complete_mut(&mut vm, "a", JsValue::number(2.0))?;
+    host.complete(&mut vm, "a", JsValue::number(2.0))?;
     vm.run_until_idle(&mut host)?;
-    println!("after second await: pending {:?}", host.operations.keys());
+    println!(
+        "after second await: pending {:?}",
+        host.labels.pending_labels()
+    );
     let second = vm.snapshot(std::slice::from_ref(&result))?;
     println!(
         "snapshot 2: {}, {} continuation(s)",
@@ -250,8 +270,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     drop(vm);
 
     let mut vm = Vm::restore(second, build, &mut host)?;
-    vm.start_recovered_operations(&mut host)?;
-    host.complete_mut(&mut vm, "b", JsValue::number(3.0))?;
+    vm.start_recovered_operations()?;
+    host.complete(&mut vm, "b", JsValue::number(3.0))?;
     vm.run_until_idle(&mut host)?;
     match vm.promise_state(&result)? {
         PromiseState::Pending => println!("result: pending (unexpected)"),

@@ -360,7 +360,6 @@ impl Vm {
             let wrap = |value| JsValue::handle(value, epoch, call_id);
             let mut cx = CallCx {
                 vm: self,
-                host,
                 bindings: &bindings,
                 epoch,
                 call: call_id,
@@ -752,6 +751,7 @@ impl Vm {
         self.operations
             .remove(&token.id)
             .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
+        self.recovered_operations.retain(|id| *id != token.id);
         let settlement = if rejected {
             Settlement::Rejected(value)
         } else {
@@ -776,33 +776,27 @@ impl Vm {
             .collect()
     }
 
-    /// Hands recovered `Resume` / `Reissue` operations to the host after
-    /// [`Vm::restore`] has published the new VM. Each operation is registered
-    /// at most once. A host failure rejects that operation's original Promise
-    /// with its declared rejection and does not discard the restored VM.
-    pub fn start_recovered_operations(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    /// Rearms recovered `Resume` / `Reissue` operations after publication.
+    /// Each operation is registered at most once. A driver failure rejects
+    /// the original Promise without discarding the restored VM.
+    pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
         let pending = std::mem::take(&mut self.recovered_operations);
         for id in pending {
-            let Some(operation) = self.operations.get(&id) else {
+            let Some(operation) = self.operations.get_mut(&id) else {
                 continue;
             };
-            let name = operation.name.clone();
-            let schema = operation.schema;
-            let recovery = operation.recovery;
-            let state = operation.state.clone();
-            let promise = operation.promise;
-            let rejection = operation.rejection;
-            let start = crate::binding::OperationStart {
-                token: crate::binding::OperationToken {
-                    epoch: self.epoch,
-                    id,
-                },
-                name: &name,
-                schema,
-                recovery,
-                state: &state,
+            let token = crate::binding::OperationToken {
+                epoch: self.epoch,
+                id,
             };
-            if host.resume_operation(start).is_err() {
+            if let Ok(live) =
+                self.bindings
+                    .resume_operation(operation.declaration, &operation.state, token)
+            {
+                operation.live = Some(live);
+            } else {
+                let promise = operation.promise;
+                let rejection = operation.rejection;
                 self.operations.remove(&id);
                 self.settle(
                     promise,
@@ -815,14 +809,15 @@ impl Vm {
 
     pub(crate) fn alloc_operation<O: crate::binding::Operation>(
         &mut self,
+        declaration: usize,
         state: Vec<u8>,
         promise: ObjectId,
-    ) -> crate::binding::OperationToken {
+    ) -> Result<crate::binding::OperationToken, crate::binding::HostFault> {
         let id = self.next_operation_id;
         self.next_operation_id = self
             .next_operation_id
             .checked_add(1)
-            .expect("operation id space exhausted");
+            .ok_or_else(|| crate::binding::HostFault::new("operation id space exhausted"))?;
         self.operations.insert(
             id,
             PendingOperation {
@@ -832,12 +827,14 @@ impl Vm {
                 rejection: O::REJECTION,
                 state,
                 promise,
+                declaration,
+                live: None,
             },
         );
-        crate::binding::OperationToken {
+        Ok(crate::binding::OperationToken {
             epoch: self.epoch,
             id,
-        }
+        })
     }
 
     pub fn promise_state(&self, value: &Value) -> Result<PromiseState, VmError> {

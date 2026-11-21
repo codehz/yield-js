@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use super::{StrategyHost, options};
+use yield_poc::{LabelService, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
     Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
@@ -36,15 +39,16 @@ mod original {
 
         #[function(name = "wait")]
         fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            cx.start_operation(yield_poc::Wait {
+            cx.start_operation(Wait {
                 label: "pending".into(),
             })
         }
     }
 
-    pub(super) fn bindings() -> Result<Bindings, String> {
+    pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
         host_bindings! {
-            modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [yield_poc::Wait], services: [],
+            modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
+            services: [("labels", 1, Arc::clone(labels))],
         }
     }
 }
@@ -76,16 +80,17 @@ macro_rules! independent_contract {
 
                 #[function(name = "wait")]
                 fn schedule(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-                    cx.start_operation(yield_poc::Wait { label: "pending".into() })
+                    cx.start_operation(Wait { label: "pending".into() })
                 }
 
                 #[function(name = "probe")]
                 fn renamed_probe($probe_cx: &mut CallCx<'_>, $value: $($arg)+) -> JsResult<$($result)+> $probe
             }
 
-            pub(super) fn bindings() -> Result<Bindings, String> {
+            pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
                 host_bindings! {
-                    modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [yield_poc::Wait], services: [],
+                    modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
+                    services: [("labels", 1, Arc::clone(labels))],
                 }
             }
         }
@@ -114,7 +119,8 @@ fn assert_probe_arity(bindings: &Bindings) {
 
 #[test]
 fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration_order() {
-    let bindings = original::bindings().expect("original bindings");
+    let labels = Arc::new(LabelService::default());
+    let bindings = original::bindings(&labels).expect("original bindings");
     assert_probe_arity(&bindings);
     let build = yield_compiler::compile(
         r#"
@@ -131,19 +137,23 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
-    assert!(host.tokens.contains_key("wait"));
+    assert!(labels.token("wait:pending").is_some());
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     drop(vm);
 
-    for (change, bindings) in [
-        ("function return kind", instance_result::bindings()),
-        ("step return kind", step_result::bindings()),
-        ("function parameter kind", optional_argument::bindings()),
-        ("getter return kind", instance_getter::bindings()),
+    for (change, bind) in [
+        (
+            "function return kind",
+            instance_result::bindings as fn(&Arc<LabelService>) -> Result<Bindings, String>,
+        ),
+        ("step return kind", step_result::bindings),
+        ("function parameter kind", optional_argument::bindings),
+        ("getter return kind", instance_getter::bindings),
     ] {
-        let bindings = bindings.expect("compatible export shape");
+        let labels = Arc::new(LabelService::default());
+        let bindings = bind(&labels).expect("compatible export shape");
         assert_probe_arity(&bindings);
         let mut changed_host = StrategyHost::new(bindings);
         let error = Vm::restore(snapshot.clone(), build.clone(), &mut changed_host)
@@ -153,26 +163,28 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
             "{change}: {error:?}"
         );
         assert!(
-            changed_host.tokens.is_empty(),
+            labels.pending_labels().is_empty(),
             "{change}: operation started"
         );
         assert!(
-            changed_host.resumed.is_empty(),
+            labels.resume_log().is_empty(),
             "{change}: operation resumed"
         );
     }
 
-    let mut reordered_host = StrategyHost::new(reordered::bindings().expect("reordered bindings"));
+    let labels = Arc::new(LabelService::default());
+    let mut reordered_host =
+        StrategyHost::new(reordered::bindings(&labels).expect("reordered bindings"));
     let mut restored = Vm::restore(snapshot, build, &mut reordered_host)
         .expect("restore with renamed and reordered declarations");
-    assert!(reordered_host.tokens.is_empty());
+    assert!(labels.pending_labels().is_empty());
     restored
-        .start_recovered_operations(&mut reordered_host)
+        .start_recovered_operations()
         .expect("start recovered operation");
-    assert_eq!(reordered_host.resumed, ["wait"]);
+    assert_eq!(labels.resume_log(), ["wait:pending"]);
     restored
         .complete_operation(
-            reordered_host.tokens["wait"],
+            labels.token("wait:pending").expect("restored wait token"),
             Completion::Fulfilled(JsValue::undefined()),
         )
         .expect("complete wait");

@@ -25,6 +25,9 @@ use crate::vm::Vm;
 use super::record::{valid_string_position, *};
 
 impl Vm {
+    /// Captures an idle VM without releasing any live registrations.
+    /// The caller must hold external logical time and delivery at the same cut;
+    /// no event may have been taken out of its source but not yet delivered.
     pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, VmError> {
         if !self.microtasks.is_empty() {
             return Err(VmError::InvalidState(
@@ -182,7 +185,9 @@ impl Vm {
                 name: operation.name.clone(),
                 schema: operation.schema,
                 recovery: operation.recovery,
-                state: operation.state.clone(),
+                state: operation
+                    .checkpoint()
+                    .map_err(|error| VmError::HostFault(error.0))?,
                 promise: operation.promise,
             });
         }
@@ -1599,21 +1604,20 @@ fn load_operations(
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
     for record in records {
-        if record.id == 0 || operations.contains_key(&record.id) {
+        if record.id == 0 || record.id == u64::MAX || operations.contains_key(&record.id) {
             return Err(VmError::InvalidSnapshot(format!(
                 "duplicate or invalid host operation id {}",
                 record.id
             )));
         }
-        let (_, recovery, rejection) =
-            bindings
-                .operation(&record.name, record.schema)
-                .ok_or_else(|| {
-                    VmError::InvalidSnapshot(format!(
-                        "operation {} schema {} is not declared",
-                        record.name, record.schema
-                    ))
-                })?;
+        let (declaration, recovery, rejection) = bindings
+            .operation(&record.name, record.schema)
+            .ok_or_else(|| {
+                VmError::InvalidSnapshot(format!(
+                    "operation {} schema {} is not declared",
+                    record.name, record.schema
+                ))
+            })?;
         if recovery != record.recovery {
             return Err(VmError::InvalidSnapshot(format!(
                 "operation {} schema {} recovery mismatch",
@@ -1652,6 +1656,8 @@ fn load_operations(
                 rejection,
                 state: record.state.clone(),
                 promise: record.promise,
+                declaration,
+                live: None,
             },
         );
     }

@@ -112,7 +112,7 @@ export async function run() {
                 let snapshot = vm.snapshot(std::slice::from_ref(&result)).unwrap();
                 let snapshot = Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
                 vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
-                vm.start_recovered_operations(&mut host).unwrap();
+                vm.start_recovered_operations().unwrap();
             }
             vm.complete_operation(host.token(label).unwrap(), completion)
                 .unwrap();
@@ -466,7 +466,7 @@ export async function run() {
     for snapshot in [before, after] {
         let mut host = TestHost::default();
         let mut restored = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
-        restored.start_recovered_operations(&mut host).unwrap();
+        restored.start_recovered_operations().unwrap();
         host.complete(
             &mut restored,
             "wait:a",

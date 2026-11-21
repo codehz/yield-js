@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::CompileOptions;
-use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationStart, OperationToken};
+use yield_poc::{LabelRegistration, LabelService};
+use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
 use yield_vm::{
     Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
-    PromiseState, This, Value, Vm, VmError, host_bindings, host_class, host_module, host_state,
-    methods, operation,
+    OperationDriver, PromiseState, This, Value, Vm, VmError, host_bindings, host_class,
+    host_module, host_state, methods, operation,
 };
 
 #[path = "signature_fingerprint.rs"]
@@ -32,8 +33,6 @@ fn options(bindings: &Bindings) -> CompileOptions {
 
 struct StrategyHost {
     bindings: Arc<Bindings>,
-    tokens: BTreeMap<String, OperationToken>,
-    resumed: Vec<String>,
     errors: usize,
 }
 
@@ -41,8 +40,6 @@ impl StrategyHost {
     fn new(bindings: Bindings) -> Self {
         Self {
             bindings: Arc::new(bindings),
-            tokens: BTreeMap::new(),
-            resumed: Vec::new(),
             errors: 0,
         }
     }
@@ -53,19 +50,45 @@ impl Host for StrategyHost {
         self.bindings.clone()
     }
 
-    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        self.tokens.insert(start.name.to_owned(), start.token);
-        Ok(())
-    }
-
-    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        self.resumed.push(start.name.to_owned());
-        self.start_operation(start)
-    }
-
     fn report_error(&mut self, _error: JsValue) {
         self.errors += 1;
     }
+}
+
+fn register_label(
+    bindings: &Bindings,
+    label: &str,
+    token: OperationToken,
+    restoring: bool,
+) -> Result<LabelRegistration, HostFault> {
+    bindings
+        .service::<Arc<LabelService>>("labels")
+        .ok_or_else(|| HostFault::new("missing labels service"))?
+        .register(label.to_owned(), token, restoring)
+}
+
+macro_rules! label_driver {
+    ($operation:ty, $wire:tt) => {
+        impl OperationDriver for $operation {
+            type Live = LabelRegistration;
+
+            fn start(
+                &self,
+                token: OperationToken,
+                bindings: &Bindings,
+            ) -> Result<Self::Live, HostFault> {
+                register_label(bindings, $wire, token, false)
+            }
+
+            fn resume(
+                &self,
+                token: OperationToken,
+                bindings: &Bindings,
+            ) -> Result<Self::Live, HostFault> {
+                register_label(bindings, $wire, token, true)
+            }
+        }
+    };
 }
 
 mod strategy_fixture {
@@ -85,6 +108,8 @@ mod strategy_fixture {
                     Ok(Self)
                 }
             }
+
+            label_driver!($name, $wire);
         };
     }
 
@@ -118,13 +143,13 @@ mod strategy_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
+    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             modules: [ops],
             classes: [],
             states: [],
             operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
-            services: [],
+            services: [("labels", 1, Arc::clone(labels))],
         }
         .expect("strategy bindings")
     }
@@ -151,38 +176,40 @@ export async function run() {
   return seen;
 }
 "#;
-    let bindings = strategy_fixture::bindings();
+    let labels = Arc::new(LabelService::default());
+    let bindings = strategy_fixture::bindings(&labels);
     let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
-    assert_eq!(host.tokens.len(), 4);
+    assert_eq!(labels.pending_labels().len(), 4);
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
+    assert!(labels.pending_labels().is_empty());
     assert!(
-        host.resumed.is_empty(),
+        labels.resume_log().is_empty(),
         "restore must not start external work before returning"
     );
     assert_eq!(vm.pending_operations().len(), 2);
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operations");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("starting recovered operations is idempotent");
     vm.run_until_idle(&mut host)
         .expect("settle restored operations");
     assert_eq!(
-        host.resumed,
+        labels.resume_log(),
         vec!["resume".to_owned(), "reissue".to_owned()]
     );
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
 
     for (name, value) in [("resume", 1.0), ("reissue", 2.0)] {
-        let token = host.tokens[name];
+        let token = labels.token(name).expect("restored token");
         vm.complete_operation(token, Completion::Fulfilled(JsValue::number(value)))
             .expect("complete restored operation");
         vm.run_until_idle(&mut host).expect("drain completion");
@@ -214,7 +241,7 @@ export async function run() {
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operations");
     assert!(matches!(
         vm.complete_operation(stale, Completion::Fulfilled(JsValue::undefined())),
@@ -611,13 +638,13 @@ mod counter_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
+    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             modules: [counter, test],
             classes: [],
             states: [CounterState],
             operations: [Wait],
-            services: [],
+            services: [("labels", 1, Arc::clone(labels))],
         }
         .expect("counter bindings")
     }
@@ -636,7 +663,8 @@ export async function run() {
   return value();
 }
 "#;
-    let bindings = counter_fixture::bindings();
+    let labels = Arc::new(LabelService::default());
+    let bindings = counter_fixture::bindings(&labels);
     let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
@@ -650,9 +678,9 @@ export async function run() {
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operations");
-    let token = host.tokens["wait"];
+    let token = labels.token("wait:a").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
     vm.run_until_idle(&mut host).expect("resume");
@@ -835,6 +863,8 @@ mod inherit_fixture {
         }
     }
 
+    label_driver!(InheritWait, "inherit-wait");
+
     #[host_class(tag = "Base", methods, schema = 1, encode = Base::encode_payload, decode = Base::decode_payload)]
     struct Base {
         payload_value: u8,
@@ -930,13 +960,13 @@ mod inherit_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
+    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             modules: [inherit],
             classes: [Base, Derived],
             states: [],
             operations: [InheritWait],
-            services: [],
+            services: [("labels", 1, Arc::clone(labels))],
         }
         .expect("derived bindings")
     }
@@ -944,7 +974,8 @@ mod inherit_fixture {
 
 #[test]
 fn derived_host_classes_inherit_prototypes_and_slot_layout() {
-    let bindings = inherit_fixture::bindings();
+    let labels = Arc::new(LabelService::default());
+    let bindings = inherit_fixture::bindings(&labels);
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";
 export async function run() {
@@ -981,9 +1012,9 @@ export async function run() {
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operation");
-    let token = host.tokens["inherit-wait"];
+    let token = labels.token("inherit-wait").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
     vm.run_until_idle(&mut host).expect("drain");
@@ -995,7 +1026,8 @@ export async function run() {
 
 #[test]
 fn script_subclass_of_host_class_survives_restore() {
-    let bindings = inherit_fixture::bindings();
+    let labels = Arc::new(LabelService::default());
+    let bindings = inherit_fixture::bindings(&labels);
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";
 
@@ -1062,9 +1094,9 @@ export async function run() {
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operation");
-    let token = host.tokens["inherit-wait"];
+    let token = labels.token("inherit-wait").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
     vm.run_until_idle(&mut host).expect("drain");

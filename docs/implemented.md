@@ -77,7 +77,7 @@
 - Promise 组合子接受同步可迭代值。每次调用先读取接收者的 `resolve` 一次，按输入顺序以同一接收者调用它，并调用每个返回值的 `then`。属性读取、调用与迭代错误拒绝结果 Promise。等待中的组合子可跨快照恢复；`Promise.any` 全拒绝时以真实 `AggregateError` 拒绝，`.errors` 按输入顺序保留拒绝原因。
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
-- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 创建 Promise 与持久 operation 记录，宿主只收到声明名、schema、策略、状态字节和代际令牌。结算必须使用当前代际令牌；旧 VM 的令牌、重复结算和未知 operation 被拒绝。恢复按声明策略处理：`Pause` 以 `undefined` 兑现，`Reject` 拒绝；`Resume` / `Reissue` 保持 pending，由宿主在 `Vm::restore` 返回后调用 `Vm::start_recovered_operations` 重新登记并保留原 Promise。登记失败以该 operation 的声明拒绝结算，不丢弃已恢复的 VM；重复调用不会重复登记。
+- 宿主异步工作通过 `CallCx::start_operation::<O>` 启动：VM 先创建 Promise 和持久 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态，不取消运行中的登记。捕获时宿主必须保持外部逻辑时间和投递在同一切点。结算必须使用本代令牌；旧代、重复及未知令牌被拒绝。`Pause` 在恢复时以 `undefined` 兑现，`Reject` 以声明原因拒绝；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在恢复发布后调用 driver 重新登记，原 Promise 不变。登记失败拒绝原 Promise，不丢弃 VM；重复调用不重复登记。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。

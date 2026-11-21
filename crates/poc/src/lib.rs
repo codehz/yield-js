@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use yield_compiler::{CompileOptions, compile};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectKey, InspectValue, Instance,
-    JsResult, JsValue, OperationStart, OperationToken, This,
+    JsResult, JsValue, Operation, OperationDriver, OperationToken, Registration, This,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
@@ -325,13 +325,119 @@ fn decode_operation_label(input: &[u8]) -> Result<String, CodecError> {
         .map_err(|_| CodecError::new("operation label is not UTF-8"))
 }
 
+#[derive(Default)]
+pub struct LabelService(Mutex<LabelState>);
+
+#[derive(Default)]
+struct LabelState {
+    pending: BTreeMap<String, OperationToken>,
+    resume_log: Vec<String>,
+    reject_restore_operation: bool,
+}
+
+impl LabelService {
+    pub fn token(&self, label: &str) -> Option<OperationToken> {
+        self.0
+            .lock()
+            .expect("label lock")
+            .pending
+            .get(label)
+            .copied()
+    }
+
+    pub fn pending_labels(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .expect("label lock")
+            .pending
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub fn resume_log(&self) -> Vec<String> {
+        self.0.lock().expect("label lock").resume_log.clone()
+    }
+
+    pub fn set_reject_restore_operation(&self, reject: bool) {
+        self.0.lock().expect("label lock").reject_restore_operation = reject;
+    }
+
+    pub fn register(
+        self: &Arc<Self>,
+        label: String,
+        token: OperationToken,
+        restoring: bool,
+    ) -> Result<LabelRegistration, HostFault> {
+        let mut state = self.0.lock().expect("label lock");
+        if restoring {
+            if state.reject_restore_operation {
+                return Err(HostFault::new("restore rejected by host"));
+            }
+            state.resume_log.push(label.clone());
+        }
+        state.pending.insert(label.clone(), token);
+        Ok(LabelRegistration {
+            service: Arc::clone(self),
+            label,
+            token,
+        })
+    }
+}
+
+pub struct LabelRegistration {
+    service: Arc<LabelService>,
+    label: String,
+    token: OperationToken,
+}
+
+impl<O: Operation> Registration<O> for LabelRegistration {}
+
+impl Drop for LabelRegistration {
+    fn drop(&mut self) {
+        let mut state = self.service.0.lock().expect("label lock");
+        if state.pending.get(&self.label) == Some(&self.token) {
+            state.pending.remove(&self.label);
+        }
+    }
+}
+
+macro_rules! label_driver {
+    ($($operation:ty),+ $(,)?) => {
+        $(impl OperationDriver for $operation {
+            type Live = LabelRegistration;
+
+            fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(bindings, &self.label, token, false)
+            }
+
+            fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(bindings, &self.label, token, true)
+            }
+        })+
+    };
+}
+
+label_driver!(Wait, Pause, Reject, Reissue);
+
+fn register_label<O: Operation>(
+    bindings: &Bindings,
+    label: &str,
+    token: OperationToken,
+    restoring: bool,
+) -> Result<LabelRegistration, HostFault> {
+    let service = bindings
+        .service::<Arc<LabelService>>("labels")
+        .ok_or_else(|| HostFault::new("missing labels service"))?;
+    service.register(format!("{}:{label}", O::NAME), token, restoring)
+}
+
 pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
-    operations: BTreeMap<String, OperationToken>,
+    labels: Arc<LabelService>,
     errors: Vec<JsValue>,
     gc_roots: Vec<yield_vm::Value>,
-    pub reject_restore_operation: bool,
     pub reject_native: bool,
 }
 
@@ -344,14 +450,15 @@ impl Default for TestHost {
 impl TestHost {
     pub fn new() -> Self {
         let counters = Arc::new(Counters::default());
-        let bindings = test_bindings(counters.clone()).expect("test bindings");
+        let labels = Arc::new(LabelService::default());
+        let bindings =
+            test_bindings(Arc::clone(&counters), Arc::clone(&labels)).expect("test bindings");
         Self {
             bindings: Arc::new(bindings),
             counters,
-            operations: BTreeMap::new(),
+            labels,
             errors: Vec::new(),
             gc_roots: Vec::new(),
-            reject_restore_operation: false,
             reject_native: false,
         }
     }
@@ -370,12 +477,16 @@ impl TestHost {
         self.gc_roots = roots;
     }
 
+    pub fn labels(&self) -> &Arc<LabelService> {
+        &self.labels
+    }
+
     pub fn pending_labels(&self) -> Vec<String> {
-        self.operations.keys().cloned().collect()
+        self.labels.pending_labels()
     }
 
     pub fn token(&self, label: &str) -> Option<OperationToken> {
-        self.operations.get(label).copied()
+        self.labels.token(label)
     }
 
     pub fn complete(
@@ -388,9 +499,7 @@ impl TestHost {
             .token(label)
             .ok_or_else(|| format!("unknown operation {label:?}"))?;
         vm.complete_operation(token, completion)
-            .map_err(|error| error.to_string())?;
-        self.operations.remove(label);
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -403,36 +512,18 @@ impl Host for TestHost {
         &self.gc_roots
     }
 
-    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        if !matches!(start.name, "wait" | "pause" | "reject" | "reissue") {
-            return Err(HostFault::new(format!("unknown operation {}", start.name)));
-        }
-        let label = std::str::from_utf8(start.state)
-            .map_err(|_| HostFault::new("operation state is not UTF-8"))?;
-        self.operations
-            .insert(format!("{}:{label}", start.name), start.token);
-        Ok(())
-    }
-
-    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        if self.reject_restore_operation {
-            return Err(HostFault::new("restore rejected by host"));
-        }
-        self.start_operation(start)
-    }
-
     fn report_error(&mut self, error: JsValue) {
         self.errors.push(error);
     }
 }
 
-fn test_bindings(counters: Arc<Counters>) -> Result<Bindings, String> {
+fn test_bindings(counters: Arc<Counters>, labels: Arc<LabelService>) -> Result<Bindings, String> {
     host_bindings! {
         modules: [test],
         classes: [Node, Matcher],
         states: [],
         operations: [Wait, Pause, Reject, Reissue],
-        services: [("counters", 1, counters), ("node-factory", 1, NodeFactory)],
+        services: [("counters", 1, counters), ("node-factory", 1, NodeFactory), ("labels", 1, labels)],
     }
 }
 

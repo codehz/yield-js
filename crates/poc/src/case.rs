@@ -451,7 +451,7 @@ fn restore(
         .map_err(|error| located(name, line, "@restore", error))?;
     // The snapshot includes the host's root graph and restore preserves its
     // object and symbol IDs, so the retained values now refer to that graph.
-    vm.start_recovered_operations(host)
+    vm.start_recovered_operations()
         .map_err(|error| located(name, line, "@restore", error))?;
     vm.run_until_idle(host)
         .map_err(|error| located(name, line, "@restore", error))?;

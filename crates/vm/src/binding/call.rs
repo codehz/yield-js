@@ -213,7 +213,6 @@ impl<T: HostClass> This<T> {
 
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut Vm,
-    pub(crate) host: &'a mut dyn crate::host::Host,
     pub(crate) bindings: &'a Bindings,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
@@ -537,23 +536,29 @@ impl<'a> CallCx<'a> {
         })
     }
 
-    pub fn start_operation<O: Operation>(&mut self, state: O) -> JsResult<JsValue> {
+    pub fn start_operation<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue> {
+        let declaration = self
+            .bindings
+            .operation_index::<O>()
+            .map_err(JsError::Fault)?;
         let mut bytes = Vec::new();
         state
             .encode(&mut bytes)
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
         let promise = self.vm.heap.alloc_promise();
-        let token = self.vm.alloc_operation::<O>(bytes.clone(), promise);
-        let start = OperationStart {
-            token,
-            name: O::NAME,
-            schema: O::SCHEMA,
-            recovery: O::RECOVERY,
-            state: &bytes,
-        };
-        if let Err(error) = self.host.start_operation(start) {
-            self.vm.operations.remove(&token.id);
-            return Err(JsError::Fault(error));
+        let token = self
+            .vm
+            .alloc_operation::<O>(declaration, bytes, promise)
+            .map_err(JsError::Fault)?;
+        match state.start(token, self.bindings) {
+            Ok(live) => {
+                self.vm.operations.get_mut(&token.id).unwrap().live =
+                    Some(Box::new(TypedRegistration::<O>(live)))
+            }
+            Err(error) => {
+                self.vm.operations.remove(&token.id);
+                return Err(JsError::Fault(error));
+            }
         }
         Ok(self.js_value(Value::Object(promise)))
     }

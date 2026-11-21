@@ -6,7 +6,7 @@
 //! [`JsValue`] carries the calling VM generation and call id, and slot writes
 //! are the only way to retain a value across calls.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
@@ -505,14 +505,46 @@ impl OperationToken {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct OperationStart<'a> {
-    pub token: OperationToken,
-    pub name: &'a str,
-    pub schema: u32,
-    pub recovery: Recovery,
-    pub state: &'a [u8],
+/// Owns the platform registration for an operation. Drivers must not re-enter
+/// the VM; on failure they must roll back any platform side effects.
+pub trait OperationDriver: Operation {
+    type Live: Registration<Self>;
+
+    fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault>;
+
+    fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
+        self.start(token, bindings)
+    }
 }
+
+/// One live platform registration. Drop releases it. A registration must
+/// not hold the VM or guest values.
+pub trait Registration<O: Operation>: 'static {
+    /// Read state at the capture cut without changing the live registration.
+    fn checkpoint(&self) -> Result<Option<O>, HostFault> {
+        Ok(None)
+    }
+}
+
+pub(crate) trait LiveRegistration {
+    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault>;
+}
+
+pub(crate) struct TypedRegistration<O: OperationDriver>(pub(crate) O::Live);
+
+impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
+    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault> {
+        if let Some(state) = self.0.checkpoint()? {
+            state.encode(out).map_err(|error| HostFault(error.0))?;
+        } else {
+            out.extend_from_slice(original);
+        }
+        Ok(())
+    }
+}
+
+type ArmOperation =
+    fn(&[u8], OperationToken, &Bindings) -> Result<Box<dyn LiveRegistration>, HostFault>;
 
 /// Read-side context for payload decoding. Services are process resources and
 /// are never captured by the snapshot.
@@ -577,6 +609,8 @@ struct OperationDecl {
     recovery: Recovery,
     rejection: &'static str,
     decode: fn(&[u8], &Bindings) -> Result<(), CodecError>,
+    rust_type: TypeId,
+    resume: ArmOperation,
 }
 
 #[doc(hidden)]
@@ -593,7 +627,7 @@ pub mod __macro_support {
         ReturnKind,
     };
     use super::{
-        Bindings, ClassDecl, HostClass, HostModuleState, Operation, OperationDecl, StateDecl,
+        Bindings, ClassDecl, HostClass, HostModuleState, OperationDecl, OperationDriver, StateDecl,
     };
     use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
     use std::any::Any;
@@ -613,7 +647,7 @@ pub mod __macro_support {
         State(StateDecl::of::<T>())
     }
 
-    pub fn operation<T: Operation>() -> OperationType {
+    pub fn operation<T: OperationDriver>() -> OperationType {
         OperationType(OperationDecl::of::<T>())
     }
 
@@ -906,6 +940,32 @@ impl Bindings {
         (operation.decode)(state, self)
     }
 
+    pub(crate) fn operation_index<O: OperationDriver>(&self) -> Result<usize, HostFault> {
+        let (index, _, _) = self.operation(O::NAME, O::SCHEMA).ok_or_else(|| {
+            HostFault::new(format!(
+                "operation {} schema {} is not declared",
+                O::NAME,
+                O::SCHEMA
+            ))
+        })?;
+        if self.inner.operations[index].rust_type != TypeId::of::<O>() {
+            return Err(HostFault::new(format!(
+                "operation {} has the wrong Rust type",
+                O::NAME
+            )));
+        }
+        Ok(index)
+    }
+
+    pub(crate) fn resume_operation(
+        &self,
+        index: usize,
+        state: &[u8],
+        token: OperationToken,
+    ) -> Result<Box<dyn LiveRegistration>, HostFault> {
+        (self.inner.operations[index].resume)(state, token, self)
+    }
+
     pub(crate) fn state_module(&self, name: &str) -> Option<usize> {
         self.module_index(name)
             .filter(|module| self.inner.states.contains_key(module))
@@ -959,7 +1019,7 @@ impl Bindings {
             .map(|state| state.module.as_str())
     }
 
-    pub(crate) fn service<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
+    pub fn service<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
         self.inner.services.get(id)
     }
 
@@ -1057,13 +1117,19 @@ impl StateDecl {
 }
 
 impl OperationDecl {
-    fn of<O: Operation>() -> Self {
+    fn of<O: OperationDriver>() -> Self {
         Self {
             name: O::NAME.to_owned(),
             schema: O::SCHEMA,
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
             decode: |input, bindings| O::decode(input, bindings).map(|_| ()),
+            rust_type: TypeId::of::<O>(),
+            resume: |bytes, token, bindings| {
+                let state = O::decode(bytes, bindings).map_err(|error| HostFault(error.0))?;
+                let live = state.resume(token, bindings)?;
+                Ok(Box::new(TypedRegistration::<O>(live)))
+            },
         }
     }
 }

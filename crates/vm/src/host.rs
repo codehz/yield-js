@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::binding::{Bindings, HostFault, JsValue, OperationStart};
+use crate::binding::{Bindings, JsValue};
 use crate::value::Value;
 
 /// How a host operation completed. Values are produced outside a call, so
@@ -14,10 +14,8 @@ pub enum Completion {
 
 /// Host-side resources and delivery endpoint.
 ///
-/// Declarations, classes, codecs and services come from [`Bindings`]. The VM
-/// owns every instance, prototype, slot and operation record; the host only
-/// schedules work and delivers completions through
-/// [`crate::Vm::complete_operation`].
+/// Drivers from [`Bindings`] register external work. The host delivers
+/// completions through [`crate::Vm::complete_operation`].
 pub trait Host {
     fn bindings(&self) -> Arc<Bindings>;
 
@@ -25,20 +23,6 @@ pub trait Host {
     /// binding requests collection, not by `Vm::collect_garbage` or snapshots.
     fn gc_roots(&self) -> &[Value] {
         &[]
-    }
-
-    /// Called synchronously after the VM records a new operation. The host may
-    /// hand `start.state` to a platform service. It must not re-enter the VM.
-    fn start_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault>;
-
-    /// Called during restore for `Resume` and `Reissue` operations, after the
-    /// snapshot has been fully validated. Returning an error rejects the whole
-    /// restore; the VM is not created.
-    fn resume_operation(&mut self, start: OperationStart<'_>) -> Result<(), HostFault> {
-        let _ = start;
-        Err(HostFault::new(
-            "host does not support operation recovery".to_owned(),
-        ))
     }
 
     /// Reports an uncaught microtask error. The host decides whether to log it.

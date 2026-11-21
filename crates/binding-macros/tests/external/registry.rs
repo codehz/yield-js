@@ -1,8 +1,8 @@
 use std::cell::Cell;
 use yield_vm::binding::{CodecError, DecodeCx};
 use yield_vm::{
-    Bindings, HostModuleState, Operation, Recovery, host_bindings, host_module, host_state,
-    operation,
+    Bindings, HostFault, HostModuleState, Operation, OperationDriver, OperationToken, Recovery,
+    Registration, host_bindings, host_module, host_state, operation,
 };
 
 #[host_module(name = "state")]
@@ -49,6 +49,18 @@ impl Work {
         } else {
             Err(CodecError::new("invalid work payload"))
         }
+    }
+}
+
+struct Live;
+
+impl Registration<Work> for Live {}
+
+impl OperationDriver for Work {
+    type Live = Live;
+
+    fn start(&self, _: OperationToken, _: &Bindings) -> Result<Live, HostFault> {
+        Ok(Live)
     }
 }
 

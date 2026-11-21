@@ -36,7 +36,7 @@ Public entry points:
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
 - `Vm::collect_garbage(roots)` explicitly sweeps unreachable heap state between calls, only with an empty microtask queue; `roots` is a slice of same-VM `Value`s the host still needs. It returns the number of heap objects removed and preserves live IDs.
 - `Vm::restore(snapshot, same_build, host)` rebinds declarations and operations before execution
-- Host async work is `CallCx::start_operation::<O>(state)`, later `Vm::complete_operation(token, completion)` with the current VM generation token
+- Host async work starts with `CallCx::start_operation::<O>(state)` and `OperationDriver::start`; deliver with `Vm::complete_operation(token, completion)` using the current VM generation token. Registrations release their platform resources on drop. Publish the restored VM before calling `Vm::start_recovered_operations()`.
 
 Suspend/resume invariants (do not weaken these):
 
@@ -96,7 +96,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-poc` (not the directory n
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
 - Name policy (`compiler/src/names.rs`): local/module bindings, static host imports, preload globals, then builtins. Host imports are indexed first-class values; preload names read getter-only properties through the fixed `globalThis` root. Preserve legacy `typeof` shadowing folds outside the preload export list.
 - Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `poc/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
-- `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Failure injection: `reject_restore_operation`; corrupt snapshot payloads by editing the record.
+- `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Inject recovery failure with `host.labels().set_reject_restore_operation(true)`; corrupt snapshot payloads by editing the record.
 
 Where to edit:
 

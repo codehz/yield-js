@@ -96,7 +96,7 @@ export async function run() {
     let snapshot = s.snapshot();
 
     let set_label = s.host.count("setLabel");
-    s.host.reject_restore_operation = true;
+    s.host.labels().set_reject_restore_operation(true);
     s.restore(snapshot.clone())
         .expect("restore publishes the VM");
     s.vm.run_until_idle(&mut s.host)
@@ -110,7 +110,7 @@ export async function run() {
         0,
         "restore must not run script"
     );
-    s.host.reject_restore_operation = false;
+    s.host.labels().set_reject_restore_operation(false);
 
     let mut mismatched = snapshot.clone();
     mismatched.binding_fingerprint = "deadbeef".to_owned();
@@ -732,7 +732,7 @@ export async function run() {
             .expect("snapshot"),
     );
     vm = Vm::restore(snapshot, build, &mut host).expect("restore imports");
-    vm.start_recovered_operations(&mut host)
+    vm.start_recovered_operations()
         .expect("start recovered operations");
     host.complete(
         &mut vm,
