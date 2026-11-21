@@ -54,7 +54,7 @@
 | `JSON` | `parse` / `stringify`：普通对象与数组、可枚举自有字符串键、`toJSON`、replacer、`space`、循环检测 | 不支持 `BigInt` |
 | `RegExp` | 字面量、调用和构造、`exec` / `test` / `toString`、模式和标志访问器、`lastIndex`、`d` indices 与 `RegExp.escape`；`Symbol.match` / `Symbol.matchAll` / `Symbol.replace` / `Symbol.search` / `Symbol.split` 协议，`matchAll` 迭代器可快照恢复。固定 ECMAScript 语法后端支持反向引用、前后行断言、Unicode 属性、v 集合、内联 `ims` 和命名组；匹配与捕获按码元范围返回任意 UTF-16 字符串 | `matchAll` 与 `split` 通过内建 `RegExp` 构造克隆匹配器，忽略 `Symbol.species` 与自定义构造器；不支持 Annex B 历史语法 |
 | `Map` / `Set` | 支持插入顺序、实时迭代及快照恢复 | — |
-| `WeakMap` | 对象身份键、`get` / `has` / `set` / `delete`，快照按 ephemeron 可达性保留条目 | 不支持原始值键（包括非注册 Symbol）；所有四种方法收到原始值键均抛出 `TypeError`。弱键筛选只在生成快照时发生，不是运行期 GC |
+| `WeakMap` | 对象身份键、`get` / `has` / `set` / `delete`；快照与显式运行期 GC 均按 ephemeron 可达性筛选条目 | 不支持原始值键（包括非注册 Symbol）；所有四种方法收到原始值键均抛出 `TypeError` |
 | `Proxy` | `new Proxy` 支持普通对象、数组或原始值包装对象目标上的 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor`，包括目标不变量及快照恢复 | 不可直接调用；不支持撤销、代理函数或构造器、其他 traps，也不保证所有需要内部槽的内建方法都能以代理为接收者 |
 | `Promise` | 构造、`then` / `catch` / `finally`、`resolve` / `reject` 和四个组合子；支持覆写的 `then` / `resolve` 及 `Symbol.species` 派生构造器 | 原型方法仍要求原生 Promise 接收者，静态方法仍要求内建 `Promise` 接收者，不支持借用静态方法构造派生结果 |
 
@@ -62,9 +62,10 @@
 
 1. **隐式装箱和数字边界语义仍不完整。** 见第 1 节；这些限制也影响依赖转换的内建。
 2. **代理仅覆盖六种 trap。** 支持的属性操作及边界见上表和已实现清单，不等同于完整 ECMAScript Proxy。
-3. **新的堆种类仍要改可达性**。常规强边由 `heap.rs::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由快照追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
+3. **新的堆种类仍要改可达性**。常规强边由 `Heap::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由 GC 和快照共享的追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理。记录形状变化要 bump `SNAPSHOT_FORMAT_VERSION`；执行语义变化靠 `build_id` 拒绝旧快照，不必因此 bump `BYTECODE_VERSION`。
 4. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
 5. **宿主回调只同步恢复。** `HostStep::Call` 不等待 Promise，不排空微任务，也不把 Rust 恢复函数写入快照。需要跨异步边界的宿主工作仍使用 operation。
+6. **GC 不会自动触发。** 宿主须在 VM 调用之间排空微任务并显式调用 `Vm::collect_garbage`，每次提供 VM 自身未持有、之后仍需使用的本 VM 值。
 
 ## 6. 依赖关系（现状组织，非承诺）
 

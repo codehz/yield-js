@@ -12,6 +12,7 @@ use super::types::{
     TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, array_index,
 };
 use crate::error::VmError;
+use crate::gc::LiveSet;
 use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
 
 type PrivateElements = BTreeMap<(ObjectId, u32), PrivateElement>;
@@ -28,9 +29,9 @@ pub(crate) struct Heap {
     next_symbol_id: SymbolId,
     pub(crate) combines: BTreeMap<ObjectId, CombineState>,
     pub(crate) private: BTreeMap<ObjectId, PrivateElements>,
-    /// Uncalled [`Resolution`] objects. Capture rejects any id in this set that
-    /// the tracer did not reach: that capability is only held by an in-flight
-    /// `then` call, which is not a snapshot root.
+    /// Uncalled resolution objects. Capture conservatively rejects any id in
+    /// this set that the tracer did not reach. At a GC safepoint, unreachable
+    /// resolutions can be discarded with their owning objects.
     pub(crate) resolutions: BTreeSet<ObjectId>,
     pub(crate) object_prototype: Option<ObjectId>,
     pub(crate) array_prototype: Option<ObjectId>,
@@ -65,6 +66,24 @@ impl Heap {
             function_prototype: None,
             promise_prototype: None,
         }
+    }
+
+    pub(crate) fn sweep(&mut self, live: &LiveSet) -> usize {
+        let before = self.objects.len();
+        self.objects.retain(|id, object| {
+            if !live.objects.contains(id) {
+                return false;
+            }
+            if let Object::WeakMap { entries, .. } = object {
+                entries.retain(|key, _| live.objects.contains(key));
+            }
+            true
+        });
+        self.combines.retain(|id, _| live.objects.contains(id));
+        self.private.retain(|id, _| live.objects.contains(id));
+        self.resolutions.retain(|id| live.objects.contains(id));
+        self.symbols.retain(|id, _| live.symbols.contains(id));
+        before - self.objects.len()
     }
 
     pub(crate) fn alloc(&mut self, object: Object) -> ObjectId {

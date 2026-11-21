@@ -1,0 +1,285 @@
+//! Runtime garbage collection and read-only tracing shared with snapshots.
+//!
+//! Tracing is read-only; sweeping starts only after all reachable IDs have
+//! been validated. Unreachable IDs are never reused within the same VM.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use crate::error::VmError;
+use crate::heap::{
+    HAS_INSTANCE_SYMBOL, Heap, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, OwnedEdge,
+    REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
+};
+use crate::runtime::{Continuation, HostInstance, HostSlot};
+use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
+use crate::vm::Vm;
+
+#[derive(Default)]
+pub(crate) struct LiveSet {
+    pub(crate) objects: BTreeSet<ObjectId>,
+    pub(crate) symbols: BTreeSet<SymbolId>,
+    pub(crate) continuations_seen: BTreeSet<ContinuationId>,
+}
+
+impl Vm {
+    /// Collects unreachable heap objects, returning the number removed.
+    ///
+    /// Call only between VM calls, after draining microtasks. No microtasks
+    /// are run by this method. Pass every same-VM [`Value`] you intend to use
+    /// later that is not otherwise reachable from the VM, including ordinary
+    /// symbols. The list may be empty or contain duplicates. Raw IDs do not
+    /// identify their VM of origin, so foreign IDs may alias local values.
+    /// This does not extend the lifetime of temporary host binding handles.
+    ///
+    /// Returns [`VmError::InvalidState`] if microtasks are queued or tracing
+    /// encounters a missing object, continuation, or symbol. A failed
+    /// collection leaves the VM unchanged.
+    pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<usize, VmError> {
+        if !self.microtasks.is_empty() {
+            return Err(VmError::InvalidState(
+                "garbage collection requires a drained microtask queue".to_owned(),
+            ));
+        }
+        let live = self.trace_roots(roots)?;
+        for id in &live.symbols {
+            if !self.heap.symbols.contains_key(id) {
+                return Err(VmError::InvalidState(format!(
+                    "garbage collection references missing symbol {id}"
+                )));
+            }
+        }
+
+        let removed = self.heap.sweep(&live);
+        self.host_instances
+            .retain(|id, _| live.objects.contains(id));
+        self.continuations
+            .retain(|id, _| live.continuations_seen.contains(id));
+        Ok(removed)
+    }
+
+    pub(crate) fn trace_roots(&self, roots: &[Value]) -> Result<LiveSet, VmError> {
+        let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
+        for root in roots {
+            tracer.mark_value(root)?;
+        }
+        for value in self.globals.values() {
+            tracer.mark_value(value)?;
+        }
+        for import in &self.imports {
+            tracer.mark_object(import.namespace)?;
+        }
+        for operation in self.operations.values() {
+            tracer.mark_object(operation.promise)?;
+        }
+        for class in &self.host_classes {
+            tracer.mark_object(class.prototype)?;
+        }
+        for state in self.module_states.iter().flatten() {
+            for slot in &state.slots {
+                tracer.mark_slot(slot)?;
+            }
+        }
+        for id in self.builtins.ids() {
+            tracer.mark_object(id)?;
+        }
+        let script_needs_env = self
+            .build
+            .function(self.build.script)
+            .is_some_and(|function| function.needs_environment());
+        match (script_needs_env, self.script_env) {
+            (true, Some(id)) => tracer.mark_object(id)?,
+            (false, None) => {}
+            (true, None) => {
+                return Err(VmError::InvalidState(
+                    "script environment is missing".to_owned(),
+                ));
+            }
+            (false, Some(id)) => {
+                return Err(VmError::InvalidState(format!(
+                    "script environment {id} is unexpected"
+                )));
+            }
+        }
+        tracer.drain()?;
+        tracer.mark_ephemerons()?;
+        tracer.live.symbols.extend([
+            ITERATOR_SYMBOL,
+            TO_PRIMITIVE_SYMBOL,
+            SPECIES_SYMBOL,
+            MATCH_SYMBOL,
+            MATCH_ALL_SYMBOL,
+            REPLACE_SYMBOL,
+            SEARCH_SYMBOL,
+            SPLIT_SYMBOL,
+            HAS_INSTANCE_SYMBOL,
+        ]);
+        tracer
+            .live
+            .symbols
+            .extend(self.heap.symbol_registry.values().copied());
+        Ok(tracer.live)
+    }
+}
+
+struct Tracer<'a> {
+    heap: &'a Heap,
+    continuations: &'a BTreeMap<ContinuationId, Continuation>,
+    host_instances: &'a BTreeMap<ObjectId, HostInstance>,
+    live: LiveSet,
+    weak_maps: Vec<ObjectId>,
+    object_queue: VecDeque<ObjectId>,
+    continuation_queue: VecDeque<ContinuationId>,
+    edges: Vec<OwnedEdge>,
+}
+
+impl<'a> Tracer<'a> {
+    fn new(
+        heap: &'a Heap,
+        continuations: &'a BTreeMap<ContinuationId, Continuation>,
+        host_instances: &'a BTreeMap<ObjectId, HostInstance>,
+    ) -> Self {
+        Self {
+            heap,
+            continuations,
+            host_instances,
+            live: LiveSet::default(),
+            weak_maps: Vec::new(),
+            object_queue: VecDeque::new(),
+            continuation_queue: VecDeque::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    fn mark_value(&mut self, value: &Value) -> Result<(), VmError> {
+        match value {
+            Value::Object(id) => self.mark_object(*id)?,
+            Value::Symbol(id) => {
+                self.live.symbols.insert(*id);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn mark_slot(&mut self, slot: &HostSlot) -> Result<(), VmError> {
+        match slot {
+            HostSlot::Js(value) => self.mark_value(value)?,
+            HostSlot::JsList(values) => {
+                for value in values {
+                    self.mark_value(value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn mark_object(&mut self, id: ObjectId) -> Result<(), VmError> {
+        if !self.heap.contains(id) {
+            return Err(VmError::InvalidState(format!(
+                "snapshot root references missing object {id}"
+            )));
+        }
+        if self.live.objects.insert(id) {
+            self.object_queue.push_back(id);
+        }
+        Ok(())
+    }
+
+    fn mark_continuation(&mut self, promise: ObjectId, id: ContinuationId) -> Result<(), VmError> {
+        if !self.continuations.contains_key(&id) {
+            return Err(VmError::InvalidState(format!(
+                "Promise {promise} references missing continuation {id}"
+            )));
+        }
+        if self.live.continuations_seen.insert(id) {
+            self.continuation_queue.push_back(id);
+        }
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<(), VmError> {
+        loop {
+            let mut progressed = false;
+            while let Some(id) = self.object_queue.pop_front() {
+                progressed = true;
+                self.walk_object(id)?;
+            }
+            while let Some(id) = self.continuation_queue.pop_front() {
+                progressed = true;
+                self.walk_continuation(id)?;
+            }
+            if !progressed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn mark_ephemerons(&mut self) -> Result<(), VmError> {
+        let heap = self.heap;
+        loop {
+            // Values can reveal more keys (or more WeakMaps) through strong edges.
+            // A scan that queues no new objects cannot unlock more entries.
+            for index in 0..self.weak_maps.len() {
+                let Object::WeakMap { entries, .. } = heap.get(self.weak_maps[index])? else {
+                    unreachable!("only WeakMaps are deferred");
+                };
+                for (key, value) in entries {
+                    if self.live.objects.contains(key) {
+                        self.mark_value(value)?;
+                    }
+                }
+            }
+            if self.object_queue.is_empty() {
+                return Ok(());
+            }
+            self.drain()?;
+        }
+    }
+
+    fn walk_object(&mut self, id: ObjectId) -> Result<(), VmError> {
+        if matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
+            self.weak_maps.push(id);
+        }
+        let mut edges = std::mem::take(&mut self.edges);
+        self.heap.write_edges(id, &mut edges)?;
+        for edge in &edges {
+            match *edge {
+                OwnedEdge::Object(target)
+                | OwnedEdge::Accessor(target)
+                | OwnedEdge::Prototype(target)
+                | OwnedEdge::Environment { id: target, .. } => {
+                    self.mark_object(target)?;
+                }
+                OwnedEdge::Continuation(continuation) => {
+                    self.mark_continuation(id, continuation)?;
+                }
+                OwnedEdge::Symbol(symbol) => {
+                    self.live.symbols.insert(symbol);
+                }
+            }
+        }
+        edges.clear();
+        self.edges = edges;
+        if let Some(instance) = self.host_instances.get(&id) {
+            for slot in &instance.slots {
+                self.mark_slot(slot)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_continuation(&mut self, id: ContinuationId) -> Result<(), VmError> {
+        let continuation = self
+            .continuations
+            .get(&id)
+            .ok_or_else(|| VmError::InvalidState(format!("continuation {id} does not exist")))?;
+        for object in continuation.linked_objects() {
+            self.mark_object(object)?;
+        }
+        for value in &continuation.values {
+            self.mark_value(value)?;
+        }
+        Ok(())
+    }
+}

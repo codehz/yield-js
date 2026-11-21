@@ -65,19 +65,10 @@ pub(crate) struct Continuation {
 }
 
 impl Continuation {
-    pub(crate) fn for_each_object(&self, mut visit: impl FnMut(ObjectId)) {
-        visit(self.async_promise);
-        if let Some(id) = self.waiting_on {
-            visit(id);
-        }
-        if let Some(id) = self.env {
-            visit(id);
-        }
-        for value in &self.values {
-            if let Value::Object(id) = value {
-                visit(*id);
-            }
-        }
+    pub(crate) fn linked_objects(&self) -> impl Iterator<Item = ObjectId> {
+        [Some(self.async_promise), self.waiting_on, self.env]
+            .into_iter()
+            .flatten()
     }
 }
 

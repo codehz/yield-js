@@ -63,6 +63,7 @@ pub mod bytecode;
 pub mod error;
 mod exec;
 mod frame;
+mod gc;
 pub mod heap;
 pub mod host;
 mod intrinsic;

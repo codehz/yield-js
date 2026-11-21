@@ -63,6 +63,10 @@ impl BuiltinRoots {
         self.0[key]
     }
 
+    pub(crate) fn ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.0.values().copied()
+    }
+
     pub fn to_map(&self) -> BTreeMap<String, ObjectId> {
         self.0
             .iter()

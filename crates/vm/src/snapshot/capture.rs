@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{Bindings, Recovery};
 use crate::builtin::is_callable_object;
@@ -19,7 +19,7 @@ use crate::regexp::compile_pattern;
 use crate::runtime::{
     Continuation, HostInstance, HostSlot, ModuleState, PendingOperation, Settlement,
 };
-use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, SymbolId, Value};
+use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value};
 use crate::vm::Vm;
 
 use super::record::{valid_string_position, *};
@@ -32,62 +32,12 @@ impl Vm {
             ));
         }
 
-        let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
-        for root in roots {
-            tracer.mark_value(root)?;
-        }
-        for value in self.globals.values() {
-            tracer.mark_value(value)?;
-        }
-        for import in &self.imports {
-            tracer.mark_object(import.namespace)?;
-        }
-        for operation in self.operations.values() {
-            tracer.mark_object(operation.promise)?;
-        }
-        for class in &self.host_classes {
-            tracer.mark_object(class.prototype)?;
-        }
-        for state in self.module_states.iter().flatten() {
-            for slot in &state.slots {
-                match slot {
-                    HostSlot::Js(value) => tracer.mark_value(value)?,
-                    HostSlot::JsList(values) => {
-                        for value in values {
-                            tracer.mark_value(value)?;
-                        }
-                    }
-                }
-            }
-        }
-        for id in self.builtins.to_map().values() {
-            tracer.mark_object(*id)?;
-        }
-        let script_needs_env = self
-            .build
-            .function(self.build.script)
-            .is_some_and(|function| function.needs_environment());
-        match (script_needs_env, self.script_env) {
-            (true, Some(id)) => tracer.mark_object(id)?,
-            (false, None) => {}
-            (true, None) => {
-                return Err(VmError::InvalidState(
-                    "script environment is missing".to_owned(),
-                ));
-            }
-            (false, Some(id)) => {
-                return Err(VmError::InvalidState(format!(
-                    "script environment {id} is unexpected"
-                )));
-            }
-        }
-        tracer.drain()?;
-        tracer.mark_ephemerons()?;
+        let live = self.trace_roots(roots)?;
         if self
             .heap
             .resolutions
             .iter()
-            .any(|id| !tracer.objects.contains(id))
+            .any(|id| !live.objects.contains(id))
         {
             return Err(VmError::InvalidState(
                 "snapshot during pending thenable assimilation".to_owned(),
@@ -105,13 +55,13 @@ impl Vm {
                 .insert(tag.to_owned(), self.host_classes[class].prototype);
         }
         snapshot.script_env = self.script_env;
-        for id in &tracer.objects {
+        for id in &live.objects {
             let object = match self.heap.get(*id)? {
                 Object::WeakMap { object, entries } => Object::WeakMap {
                     object: object.clone(),
                     entries: entries
                         .iter()
-                        .filter(|(key, _)| tracer.objects.contains(key))
+                        .filter(|(key, _)| live.objects.contains(key))
                         .map(|(&key, value)| (key, value.clone()))
                         .collect(),
                 },
@@ -130,7 +80,7 @@ impl Vm {
             }
         }
         for (object, instance) in &self.host_instances {
-            if !tracer.objects.contains(object) {
+            if !live.objects.contains(object) {
                 continue;
             }
             let class = instance.class;
@@ -199,7 +149,7 @@ impl Vm {
                 payload: PayloadRecord { schema, bytes },
             });
         }
-        for id in tracer.continuations_seen {
+        for id in live.continuations_seen {
             let continuation = self.continuations.get(&id).ok_or_else(|| {
                 VmError::InvalidState(format!("continuation {id} does not exist"))
             })?;
@@ -229,27 +179,14 @@ impl Vm {
             });
         }
         for (id, state) in &self.heap.combines {
-            if tracer.objects.contains(id) {
+            if live.objects.contains(id) {
                 snapshot.combines.insert(*id, state.clone());
             }
         }
         snapshot.next_symbol_id = self.heap.next_symbol_id();
         snapshot.random_state = self.random_state;
         snapshot.symbol_registry = self.heap.symbol_registry.clone();
-        let mut symbol_ids = tracer.symbols;
-        symbol_ids.insert(ITERATOR_SYMBOL);
-        symbol_ids.insert(TO_PRIMITIVE_SYMBOL);
-        symbol_ids.insert(SPECIES_SYMBOL);
-        symbol_ids.extend([
-            MATCH_SYMBOL,
-            MATCH_ALL_SYMBOL,
-            REPLACE_SYMBOL,
-            SEARCH_SYMBOL,
-            SPLIT_SYMBOL,
-            HAS_INSTANCE_SYMBOL,
-        ]);
-        symbol_ids.extend(self.heap.symbol_registry.values().copied());
-        for id in symbol_ids {
+        for id in live.symbols {
             if let Some(description) = self.heap.symbols.get(&id) {
                 snapshot.symbols.insert(id, description.clone());
             }
@@ -373,172 +310,6 @@ impl Vm {
                     self.operations.insert(id, operation);
                 }
             }
-        }
-        Ok(())
-    }
-}
-
-struct Tracer<'a> {
-    heap: &'a Heap,
-    continuations: &'a BTreeMap<ContinuationId, Continuation>,
-    host_instances: &'a BTreeMap<ObjectId, HostInstance>,
-    objects: BTreeSet<ObjectId>,
-    symbols: BTreeSet<SymbolId>,
-    continuations_seen: BTreeSet<ContinuationId>,
-    weak_maps: Vec<ObjectId>,
-    object_queue: VecDeque<ObjectId>,
-    continuation_queue: VecDeque<ContinuationId>,
-    edges: Vec<OwnedEdge>,
-}
-
-impl<'a> Tracer<'a> {
-    fn new(
-        heap: &'a Heap,
-        continuations: &'a BTreeMap<ContinuationId, Continuation>,
-        host_instances: &'a BTreeMap<ObjectId, HostInstance>,
-    ) -> Self {
-        Self {
-            heap,
-            continuations,
-            host_instances,
-            objects: BTreeSet::new(),
-            symbols: BTreeSet::new(),
-            continuations_seen: BTreeSet::new(),
-            weak_maps: Vec::new(),
-            object_queue: VecDeque::new(),
-            continuation_queue: VecDeque::new(),
-            edges: Vec::new(),
-        }
-    }
-
-    fn mark_value(&mut self, value: &Value) -> Result<(), VmError> {
-        match value {
-            Value::Object(id) => self.mark_object(*id)?,
-            Value::Symbol(id) => {
-                self.symbols.insert(*id);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn mark_object(&mut self, id: ObjectId) -> Result<(), VmError> {
-        if !self.heap.contains(id) {
-            return Err(VmError::InvalidState(format!(
-                "snapshot root references missing object {id}"
-            )));
-        }
-        if self.objects.insert(id) {
-            self.object_queue.push_back(id);
-        }
-        Ok(())
-    }
-
-    fn mark_continuation(&mut self, promise: ObjectId, id: ContinuationId) -> Result<(), VmError> {
-        if !self.continuations.contains_key(&id) {
-            return Err(VmError::InvalidState(format!(
-                "Promise {promise} references missing continuation {id}"
-            )));
-        }
-        if self.continuations_seen.insert(id) {
-            self.continuation_queue.push_back(id);
-        }
-        Ok(())
-    }
-
-    fn drain(&mut self) -> Result<(), VmError> {
-        loop {
-            let mut progressed = false;
-            while let Some(id) = self.object_queue.pop_front() {
-                progressed = true;
-                self.walk_object(id)?;
-            }
-            while let Some(id) = self.continuation_queue.pop_front() {
-                progressed = true;
-                self.walk_continuation(id)?;
-            }
-            if !progressed {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    fn mark_ephemerons(&mut self) -> Result<(), VmError> {
-        let heap = self.heap;
-        loop {
-            // Values can reveal more keys (or more WeakMaps) through strong edges.
-            // A scan that queues no new objects cannot unlock more entries.
-            for index in 0..self.weak_maps.len() {
-                let Object::WeakMap { entries, .. } = heap.get(self.weak_maps[index])? else {
-                    unreachable!("only WeakMaps are deferred");
-                };
-                for (key, value) in entries {
-                    if self.objects.contains(key) {
-                        self.mark_value(value)?;
-                    }
-                }
-            }
-            if self.object_queue.is_empty() {
-                return Ok(());
-            }
-            self.drain()?;
-        }
-    }
-
-    fn walk_object(&mut self, id: ObjectId) -> Result<(), VmError> {
-        if matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
-            self.weak_maps.push(id);
-        }
-        let mut edges = std::mem::take(&mut self.edges);
-        self.heap.write_edges(id, &mut edges)?;
-        for edge in &edges {
-            match *edge {
-                OwnedEdge::Object(target)
-                | OwnedEdge::Accessor(target)
-                | OwnedEdge::Prototype(target)
-                | OwnedEdge::Environment { id: target, .. } => {
-                    self.mark_object(target)?;
-                }
-                OwnedEdge::Continuation(continuation) => {
-                    self.mark_continuation(id, continuation)?;
-                }
-                OwnedEdge::Symbol(symbol) => {
-                    self.symbols.insert(symbol);
-                }
-            }
-        }
-        edges.clear();
-        self.edges = edges;
-        if let Some(instance) = self.host_instances.get(&id) {
-            let mut values = Vec::new();
-            for slot in &instance.slots {
-                match slot {
-                    HostSlot::Js(value) => values.push(value.clone()),
-                    HostSlot::JsList(items) => values.extend(items.iter().cloned()),
-                }
-            }
-            for value in values {
-                self.mark_value(&value)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn walk_continuation(&mut self, id: ContinuationId) -> Result<(), VmError> {
-        let (objects, values) = {
-            let continuation = self.continuations.get(&id).ok_or_else(|| {
-                VmError::InvalidState(format!("continuation {id} does not exist"))
-            })?;
-            let mut objects = Vec::new();
-            continuation.for_each_object(|object| objects.push(object));
-            (objects, continuation.values.clone())
-        };
-        for object in objects {
-            self.mark_object(object)?;
-        }
-        for value in &values {
-            self.mark_value(value)?;
         }
         Ok(())
     }

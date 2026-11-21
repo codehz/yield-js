@@ -142,3 +142,240 @@ fn restore_rejects_changed_has_instance_description() {
         Err(VmError::InvalidSnapshot(message)) if message.contains("reserved symbol 8 has an invalid description")
     ));
 }
+
+#[test]
+fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Value, Vm, VmError};
+
+    let build = build(
+        "export function cycle() { const object = {}; object.self = object; return object; }",
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    vm.collect_garbage(&[]).unwrap();
+
+    let cycle = vm.start(&mut host, "cycle", vec![]).unwrap();
+    let Value::Object(id) = cycle else {
+        panic!("expected cycle object");
+    };
+    let roots = [Value::Object(id), Value::Object(id)];
+    vm.collect_garbage(&roots).unwrap();
+    let snapshot = vm.snapshot(&roots).unwrap();
+    assert!(snapshot.objects.iter().any(|record| record.id == id));
+
+    assert!(vm.collect_garbage(&[]).unwrap() >= 1);
+    assert_eq!(vm.collect_garbage(&[]).unwrap(), 0);
+    assert!(matches!(
+        vm.collect_garbage(&roots),
+        Err(VmError::InvalidState(_))
+    ));
+
+    let next = vm.start(&mut host, "cycle", vec![]).unwrap();
+    let Value::Object(next_id) = next else {
+        panic!("expected new cycle object");
+    };
+    assert_ne!(id, next_id);
+    let missing = u32::MAX;
+    assert!(matches!(
+        vm.collect_garbage(&[Value::Symbol(missing)]),
+        Err(VmError::InvalidState(message))
+            if message == format!("garbage collection references missing symbol {missing}")
+    ));
+    let snapshot = vm.snapshot(&[next]).expect("failed GC must not sweep");
+    assert!(snapshot.objects.iter().any(|record| record.id == next_id));
+}
+
+#[test]
+fn gc_traces_weak_map_values_only_for_live_keys() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Value, Vm, VmError};
+
+    let build = build(
+        r#"
+const second = new WeakMap();
+const first = new WeakMap();
+let key1 = {};
+let key2 = {};
+let backref = {};
+first.set(key1, key2);
+second.set(key2, { answer: 42 });
+first.set(backref, { key: backref });
+export function takeBackref() { const key = backref; backref = undefined; return key; }
+export function takeKey2() { const key = key2; key2 = undefined; return key; }
+export function takeKey1() { const key = key1; key1 = undefined; return key; }
+export function read() { return second.get(first.get(key1)).answer; }
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let key2 = vm.start(&mut host, "takeKey2", vec![]).unwrap();
+    let backref = vm.start(&mut host, "takeBackref", vec![]).unwrap();
+
+    // Only key1 remains in the script's roots. Neither key2 nor the
+    // backreference key is a root just because the Rust test holds its ID.
+    vm.collect_garbage(&[]).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "read", vec![]).unwrap(),
+        Value::Number(42.0)
+    );
+    assert!(matches!(
+        vm.collect_garbage(&[backref]),
+        Err(VmError::InvalidState(_))
+    ));
+
+    let key1 = vm.start(&mut host, "takeKey1", vec![]).unwrap();
+    vm.collect_garbage(&[key1]).unwrap();
+    vm.snapshot(std::slice::from_ref(&key2))
+        .expect("an explicit key1 root must still preserve key2");
+
+    vm.collect_garbage(&[]).unwrap();
+    assert!(matches!(
+        vm.collect_garbage(&[key2]),
+        Err(VmError::InvalidState(_))
+    ));
+}
+
+#[test]
+fn gc_roots_registered_symbols_and_reclaims_unrooted_ordinary_symbols() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Value, Vm, VmError};
+
+    let build = build(
+        r#"
+export function fresh() { return Symbol("ordinary"); }
+export function registered() { return Symbol.for("registry"); }
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    vm.collect_garbage(&[]).unwrap();
+    let registered = vm.start(&mut host, "registered", vec![]).unwrap();
+    let Value::Symbol(id) = vm.start(&mut host, "fresh", vec![]).unwrap() else {
+        panic!("expected ordinary symbol");
+    };
+    let roots = [Value::Symbol(id)];
+    vm.collect_garbage(&roots).unwrap();
+    let snapshot = vm.snapshot(&roots).unwrap();
+    assert_eq!(snapshot.symbols[&id], Some("ordinary".into()));
+
+    assert_eq!(
+        vm.collect_garbage(&[]).unwrap(),
+        0,
+        "symbols are not counted"
+    );
+    assert!(matches!(
+        vm.collect_garbage(&roots),
+        Err(VmError::InvalidState(message))
+            if message == format!("garbage collection references missing symbol {id}")
+    ));
+    assert_eq!(
+        vm.start(&mut host, "registered", vec![]).unwrap(),
+        registered
+    );
+}
+
+#[test]
+fn gc_preserves_suspended_closures_and_host_instances() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{Completion, JsValue, PromiseState, Value, Vm};
+
+    let build = build(
+        r#"
+import { bind, expect, wait } from "test";
+export async function run() {
+  const matcher = expect(bind("payload"));
+  const prefix = "closure:";
+  const read = () => prefix + matcher.value.label();
+  const suffix = await wait("a");
+  return read() + suffix;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let token = host.token("wait:a").unwrap();
+    let roots = std::slice::from_ref(&result);
+    let before = vm.snapshot(roots).unwrap();
+    vm.collect_garbage(roots).unwrap();
+    let after = vm.snapshot(roots).unwrap();
+
+    let expected = PromiseState::Fulfilled(Value::String("closure:payload!".into()));
+    vm.complete_operation(token, Completion::Fulfilled(JsValue::string("!")))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(vm.promise_state(&result).unwrap(), expected);
+
+    for snapshot in [before, after] {
+        let mut host = TestHost::default();
+        let mut restored = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
+        restored.start_recovered_operations(&mut host).unwrap();
+        host.complete(
+            &mut restored,
+            "wait:a",
+            Completion::Fulfilled(JsValue::string("!")),
+        )
+        .unwrap();
+        restored.run_until_idle(&mut host).unwrap();
+        assert_eq!(restored.promise_state(&result).unwrap(), expected);
+    }
+}
+
+#[test]
+fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{PromiseState, Value, Vm, VmError};
+
+    let build = build("export async function run() { return await 42; }");
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let roots = std::slice::from_ref(&result);
+    assert!(matches!(
+        vm.collect_garbage(roots),
+        Err(VmError::InvalidState(message))
+            if message == "garbage collection requires a drained microtask queue"
+    ));
+    assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
+    vm.run_until_idle(&mut host).unwrap();
+    vm.collect_garbage(roots).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Number(42.0))
+    );
+}
+
+#[test]
+fn gc_discards_unreachable_uncalled_resolvers() {
+    use yield_poc::{TestHost, build};
+    use yield_vm::{PromiseState, Value, Vm, VmError};
+
+    let build = build(
+        r#"
+let saved;
+export function pending() {
+  new Promise(() => {});
+  return new Promise(resolve => { saved = resolve; });
+}
+export function settle() { saved(42); }
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    let result = vm.start(&mut host, "pending", vec![]).unwrap();
+    let roots = std::slice::from_ref(&result);
+    assert!(matches!(
+        vm.snapshot(roots),
+        Err(VmError::InvalidState(message)) if message == "snapshot during pending thenable assimilation"
+    ));
+    assert!(vm.collect_garbage(roots).unwrap() >= 3);
+    vm.start(&mut host, "settle", vec![]).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::Number(42.0))
+    );
+    vm.snapshot(roots)
+        .expect("GC must remove stale resolver records");
+}

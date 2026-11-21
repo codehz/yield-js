@@ -34,6 +34,7 @@ Public entry points:
 - `Vm::get_export("name")` reads the current value of an explicitly exported main module binding
 - `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver; `args` are `JsValue` constants, then the host calls `Vm::run_until_idle(host)`
 - `Vm::snapshot(&[roots])` only when the microtask queue is empty
+- `Vm::collect_garbage(roots)` explicitly sweeps unreachable heap state between calls, only with an empty microtask queue; `roots` is a slice of same-VM `Value`s the host still needs. It returns the number of heap objects removed and preserves live IDs.
 - `Vm::restore(snapshot, same_build, host)` rebinds declarations and operations before execution
 - Host async work is `CallCx::start_operation::<O>(state)`, later `Vm::complete_operation(token, completion)` with the current VM generation token
 
@@ -104,7 +105,7 @@ Where to edit:
 | Syntax subset | `compiler/src/lower` (worklist, not recursive borrow), `frontend.rs`; reject with `unsupported()` |
 | Liveness / which slots survive await | `analyze.rs`, `allocate.rs` |
 | New opcode | `vm/src/bytecode.rs`, `vm/src/exec.rs` (and `ops.rs` if it is a value op), `compiler/src/instr.rs`, lowerer |
-| New heap kind | `vm/src/heap/object.rs` `write_edges` (included into `heap/mod.rs`); snapshot reachability uses that list only |
+| New heap kind | `vm/src/heap/object.rs` `write_edges`; GC and snapshot capture share the tracer in `vm/src/gc.rs` |
 | Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `poc/tests/e2e.rs` |
 | Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `poc/src/lib.rs`, `poc/src/main.rs` |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
