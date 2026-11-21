@@ -75,6 +75,9 @@ pub(crate) mod async_generator;
 mod boolean;
 pub(crate) mod call;
 pub(crate) mod collections;
+mod date;
+#[path = "date/calendar.rs"]
+pub(crate) mod date_calendar;
 pub(super) mod error_family;
 pub(crate) mod generator;
 pub(crate) mod globals;

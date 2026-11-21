@@ -272,7 +272,7 @@ enum Step {
 }
 
 #[derive(Clone, Copy)]
-enum Hint {
+pub(crate) enum Hint {
     Default,
     Number,
     String,
@@ -1494,7 +1494,7 @@ impl Vm {
         }))
     }
 
-    fn coerce_primitive<'a>(
+    pub(crate) fn coerce_primitive<'a>(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -1545,6 +1545,17 @@ impl Vm {
             }
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         }
+        self.ordinary_to_primitive(host, roots, value, hint)
+    }
+
+    pub(crate) fn ordinary_to_primitive(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+        hint: Hint,
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(value);
         let methods = match hint {
             Hint::String => ["toString", "valueOf"],
             _ => ["valueOf", "toString"],

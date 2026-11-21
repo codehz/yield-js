@@ -544,7 +544,7 @@ pub type BindingId = u32;
 pub type ContinuationId = u64;
 
 /// Symbol identity. Local to one VM instance and persisted in snapshots.
-/// The first three IDs are reserved for `Symbol.iterator`, `Symbol.toPrimitive`, and `Symbol.species`.
+/// The lowest IDs are reserved for well-known symbols.
 pub type SymbolId = u32;
 
 /// An owned JavaScript value. Inspect its logical type with [`Value::view`].

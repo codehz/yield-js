@@ -51,10 +51,10 @@ impl Vm {
         let base = self.heap.proxy_target(target)?;
         if !matches!(
             self.heap.get(base)?,
-            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. }
+            Object::Plain(_) | Object::Array(_) | Object::Boxed { .. } | Object::Date { .. }
         ) {
             return self.throw_type_error(
-                "Proxy supports only plain object, array, and primitive wrapper targets",
+                "Proxy supports only plain object, array, primitive wrapper, and Date targets",
             );
         }
         Ok(Invocation::Value(Value::object(self.heap.alloc(

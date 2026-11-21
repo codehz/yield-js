@@ -4,7 +4,7 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::heap::{
     ASYNC_ITERATOR_SYMBOL, Attributes, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_SYMBOL,
     ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL,
-    SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
+    SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_SYMBOL,
 };
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::Value;
@@ -70,6 +70,7 @@ fn install(vm: &mut Vm, _: &Value) {
         ("hasInstance", HAS_INSTANCE_SYMBOL),
         ("isConcatSpreadable", IS_CONCAT_SPREADABLE_SYMBOL),
         ("asyncIterator", ASYNC_ITERATOR_SYMBOL),
+        ("toStringTag", TO_STRING_TAG_SYMBOL),
     ] {
         define_builtin_data(vm, constructor, name, Value::symbol(id), Attributes::FIXED);
     }

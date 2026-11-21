@@ -87,12 +87,20 @@ type Construct = fn(
     Vec<Value>,
     Option<ObjectId>,
 ) -> Result<Invocation, VmError>;
+type ConstructWithTarget =
+    fn(&mut Vm, &mut dyn Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Construction {
+    WithPrototype(Construct),
+    WithNewTarget(ConstructWithTarget),
+}
 
 pub(crate) struct IntrinsicDef {
     pub key: IntrinsicKey,
     pub length: u32,
     pub call: Call,
-    pub construct: Option<Construct>,
+    pub construct: Option<Construction>,
     pub skip_new_target_prototype: bool,
 }
 
@@ -114,8 +122,21 @@ impl IntrinsicDef {
         construct: Construct,
     ) -> Self {
         Self {
-            construct: Some(construct),
+            construct: Some(Construction::WithPrototype(construct)),
             ..Self::call(key, length, call)
+        }
+    }
+
+    /// The constructor reads newTarget.prototype itself, after coercion.
+    pub const fn constructor_with_target(
+        key: IntrinsicKey,
+        length: u32,
+        call: Call,
+        construct: ConstructWithTarget,
+    ) -> Self {
+        Self {
+            construct: Some(Construction::WithNewTarget(construct)),
+            ..Self::call(key, length, call).without_new_target_prototype()
         }
     }
 

@@ -7,10 +7,11 @@ use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{
     Attributes, BoundObject, BoxedPrimitive, CombineKind, CombineState, DescriptorUpdate,
     ITERATOR_SYMBOL, IntegrityLevel, Object, OwnProperty, PlainObject, PromiseCallback,
-    PromiseState, Property, ReactionJob, Resolution, SPECIES_SYMBOL, string_own_property,
+    PromiseState, Property, ReactionJob, Resolution, SPECIES_SYMBOL, TO_STRING_TAG_SYMBOL,
+    string_own_property,
 };
 use crate::host::Host;
-use crate::intrinsic::CallableTarget;
+use crate::intrinsic::{CallableTarget, Construction};
 use crate::ops;
 use crate::runtime::{Invocation, Microtask, Settlement};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -338,10 +339,15 @@ impl Vm {
                 Some(crate::vm::HostConstruction { prototype }),
             ),
             Constructor::Native(CallableTarget::Intrinsic(id)) => {
-                let roots = &roots.with(&prototype);
-                (id.definition().construct.expect("classified constructor"))(
-                    self, host, roots, args, prototype,
-                )
+                match id.definition().construct.expect("classified constructor") {
+                    Construction::WithPrototype(construct) => {
+                        let roots = &roots.with(&prototype);
+                        construct(self, host, roots, args, prototype)
+                    }
+                    Construction::WithNewTarget(construct) => {
+                        construct(self, host, roots, args, new_target)
+                    }
+                }
             }
         }
     }
@@ -570,30 +576,62 @@ impl Vm {
             let receiver = Value::object(boxed.unwrap_or_else(|| self.coercible_object(receiver)));
             self.invoke(host, roots, &join, Vec::new(), &receiver)
         } else {
-            self.object_to_string(receiver)
+            match boxed {
+                Some(id) => self.object_to_string(host, roots, &Value::object(id)),
+                None => self.object_to_string(host, roots, receiver),
+            }
         }
     }
 
-    pub(crate) fn object_to_string(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+    pub(crate) fn object_to_string(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
         let tag = match receiver.view() {
             ValueRef::Object(id) if self.heap.is_environment(id) == Some(true) => {
                 return self.throw_type_error("incompatible Object.prototype receiver");
             }
             ValueRef::Object(id) => self.object_tag(id)?,
-            ValueRef::Undefined => "Undefined",
-            ValueRef::Null => "Null",
+            ValueRef::Undefined => {
+                return Ok(Invocation::Value(Value::string(
+                    "[object Undefined]".into(),
+                )));
+            }
+            ValueRef::Null => {
+                return Ok(Invocation::Value(Value::string("[object Null]".into())));
+            }
             ValueRef::String(_) => "String",
             ValueRef::Number(_) => "Number",
             ValueRef::Bool(_) => "Boolean",
             ValueRef::Symbol(_) => "Symbol",
         };
+        let custom_tag = match self.read_to_object_property(
+            host,
+            &roots.with(receiver),
+            receiver,
+            &mut None,
+            PropertyKeyRef::Symbol(TO_STRING_TAG_SYMBOL),
+        )? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        if let ValueRef::String(custom_tag) = custom_tag.view() {
+            let mut result = JsString::from("[object ");
+            result.push_str(custom_tag);
+            result.push(']');
+            return Ok(Invocation::Value(Value::string(result)));
+        }
         Ok(Invocation::Value(Value::string(
             format!("[object {tag}]").into(),
         )))
     }
 
     pub(crate) fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
-        Ok(match self.heap.get(self.heap.proxy_target(id)?)? {
+        let target = self.heap.proxy_target(id)?;
+        Ok(match self.heap.get(target)? {
+            Object::Date { .. } if id == target => "Date",
             Object::Boxed { primitive, .. } => match primitive {
                 BoxedPrimitive::String(_) => "String",
                 BoxedPrimitive::Number(_) => "Number",

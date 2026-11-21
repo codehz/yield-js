@@ -20,7 +20,7 @@ pub(crate) use types::{
     MATCH_SYMBOL, OwnProperty, PrivateElement, PrivateMember, PrivateMemberKind,
     REPLACE_DESCRIPTION, REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
     SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, ScriptClass, ScriptClassSource,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL,
 };
 pub use types::{
     ArrayIterationKind, ArrayObject, AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive,

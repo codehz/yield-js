@@ -108,6 +108,7 @@ impl Object {
             | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
+            | Self::Date { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -135,6 +136,7 @@ impl Object {
             | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
+            | Self::Date { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -198,6 +200,7 @@ impl Object {
             | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
+            | Self::Date { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -225,6 +228,7 @@ impl Object {
             | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
+            | Self::Date { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -367,6 +371,7 @@ impl Object {
             | Self::RegExp { object: plain, .. }
             | Self::Proxy { object: plain, .. }
             | Self::Map { object: plain, .. }
+            | Self::Date { object: plain, .. }
             | Self::Set { object: plain, .. }
             | Self::WeakMap { object: plain, .. }
             | Self::WeakSet { object: plain, .. }
@@ -394,6 +399,7 @@ impl Object {
             | Self::RegExp { object: o, .. }
             | Self::Proxy { object: o, .. }
             | Self::Map { object: o, .. }
+            | Self::Date { object: o, .. }
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -480,6 +486,7 @@ impl Object {
             Self::Native(_)
             | Self::Plain(_)
             | Self::RegExp { .. }
+            | Self::Date { .. }
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}

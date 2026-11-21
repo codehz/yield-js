@@ -1,6 +1,7 @@
 use crate::builtin::array;
 use crate::builtin::boolean::members as boolean_family;
 use crate::builtin::collections;
+use crate::builtin::date;
 use crate::builtin::json::namespace as json;
 use crate::builtin::math::namespace as math;
 use crate::builtin::number;
@@ -101,6 +102,7 @@ builtin_globals! {
     "RegExp" => Global::Owner(regexp::OWNER),
     "WeakSet" => Global::Owner(collections::WEAK_SET_OWNER),
     "Function" => Global::Owner(Owner::new("function", &[], &[], None)),
+    "Date" => Global::Owner(date::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

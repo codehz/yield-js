@@ -38,8 +38,10 @@ pub(crate) const IS_CONCAT_SPREADABLE_SYMBOL: SymbolId = 9;
 pub(crate) const IS_CONCAT_SPREADABLE_DESCRIPTION: &str = "Symbol.isConcatSpreadable";
 pub(crate) const ASYNC_ITERATOR_SYMBOL: SymbolId = 10;
 pub(crate) const ASYNC_ITERATOR_DESCRIPTION: &str = "Symbol.asyncIterator";
+pub(crate) const TO_STRING_TAG_SYMBOL: SymbolId = 11;
+pub(crate) const TO_STRING_TAG_DESCRIPTION: &str = "Symbol.toStringTag";
 /// Bound for ordinary symbols. Every reserved well-known symbol stays below it.
-pub(crate) const NEXT_SYMBOL_ID: SymbolId = ASYNC_ITERATOR_SYMBOL + 1;
+pub(crate) const NEXT_SYMBOL_ID: SymbolId = TO_STRING_TAG_SYMBOL + 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -933,6 +935,10 @@ pub enum Object {
         compiled: regress::Regex,
         object: PlainObject,
     },
+    Date {
+        object: PlainObject,
+        time: Option<i64>,
+    },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
         target: ObjectId,
@@ -1076,6 +1082,7 @@ impl PartialEq for Object {
                     ..
                 },
             ) => a == b && f == g && x == y,
+            (Date { object: x, time: a }, Date { object: y, time: b }) => x == y && a == b,
             (
                 Proxy {
                     target: a,

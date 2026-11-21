@@ -106,7 +106,7 @@ pub(crate) mod members {
             ValueRef::Object(id) if vm.heap.is_environment(id) != Some(false) => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),
             _ => Ok(Invocation::Value(Value::object(vm.coercible_object(receiver)))),
         };
-        toString: 0 => |vm, _, _, _, receiver| vm.object_to_string(receiver);
+        toString: 0 => |vm, host, roots, _, receiver| vm.object_to_string(host, roots, receiver);
     }
 
     fn test_own_property(

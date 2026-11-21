@@ -1,6 +1,7 @@
 //! Integration tests for snapshot state, restore validation, and execution.
 
 mod bindings;
+mod date;
 mod defaults;
 mod generator;
 mod host_tasks;

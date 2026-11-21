@@ -11,7 +11,8 @@ use super::types::{
     OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
     Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
     SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
-    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey, array_index,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION,
+    TO_STRING_TAG_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -74,6 +75,7 @@ impl Heap {
                     ASYNC_ITERATOR_SYMBOL,
                     Some(ASYNC_ITERATOR_DESCRIPTION.into()),
                 ),
+                (TO_STRING_TAG_SYMBOL, Some(TO_STRING_TAG_DESCRIPTION.into())),
             ]),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: NEXT_SYMBOL_ID,
@@ -694,6 +696,7 @@ impl Heap {
         let plain = match self.get_mut(id)? {
             Object::Plain(plain)
             | Object::Map { object: plain, .. }
+            | Object::Date { object: plain, .. }
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }
             | Object::WeakSet { object: plain, .. }

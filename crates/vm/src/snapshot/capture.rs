@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget, Recovery};
+use crate::builtin::date_calendar::TIME_CLIP_BOUND;
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
@@ -13,7 +14,8 @@ use crate::heap::{
     OwnedEdge, PrivateElement, PrivateMemberKind, PromiseCallback, PromiseState, Property,
     REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, RejectionStatus, SEARCH_DESCRIPTION,
     SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL,
-    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
+    TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL,
+    WeakKey,
 };
 use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::host::Host;
@@ -26,6 +28,11 @@ use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 use super::record::{valid_string_position, *};
+
+fn valid_date_time(object: &Object) -> bool {
+    !matches!(object, Object::Date { time: Some(time), .. }
+        if !(-TIME_CLIP_BOUND..=TIME_CLIP_BOUND).contains(time))
+}
 
 impl Vm {
     /// Captures an idle VM without releasing any live registrations.
@@ -69,6 +76,11 @@ impl Vm {
         snapshot.module_namespaces = self.module_namespaces.clone();
         for id in &live.objects {
             let object = match self.heap.get(*id)? {
+                object if !valid_date_time(object) => {
+                    return Err(VmError::InvalidState(format!(
+                        "Date {id} has a time outside the TimeClip range"
+                    )));
+                }
                 Object::WeakMap { object, entries } => Object::WeakMap {
                     object: object.clone(),
                     entries: entries
@@ -277,6 +289,11 @@ impl Vm {
 
         let mut heap = Heap::new();
         for ObjectRecord { id, mut object } in std::mem::take(&mut snapshot.objects) {
+            if !valid_date_time(&object) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "Date {id} has a time outside the TimeClip range"
+                )));
+            }
             if let Object::RegExp {
                 source,
                 flags,
@@ -435,6 +452,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
+            TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -462,6 +480,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             IS_CONCAT_SPREADABLE_DESCRIPTION,
         ),
         (ASYNC_ITERATOR_SYMBOL, ASYNC_ITERATOR_DESCRIPTION),
+        (TO_STRING_TAG_SYMBOL, TO_STRING_TAG_DESCRIPTION),
     ] {
         if !snapshot
             .symbols
@@ -488,6 +507,7 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             HAS_INSTANCE_SYMBOL => Some(HAS_INSTANCE_DESCRIPTION),
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
+            TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(
@@ -1229,6 +1249,7 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 Ok(Object::Plain(_)
                     | Object::Array(_)
                     | Object::Boxed { .. }
+                    | Object::Date { .. }
                     | Object::Proxy { .. })
             ) {
                 return Err(VmError::InvalidSnapshot(format!(

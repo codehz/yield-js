@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false }
+chrono-tz = "=0.10.4"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+# Match chrono-tz 0.10.4's IANA 2025b data.
+jiff-tzdb = "=0.1.4"
 regress.workspace = true
 ryu-js.workspace = true
 serde.workspace = true

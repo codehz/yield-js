@@ -8,8 +8,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Source module environments and namespaces are indexed roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 56;
+// Date objects persist their time value.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 57;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

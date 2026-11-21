@@ -343,6 +343,7 @@ pub enum WellKnownSymbol {
     Search,
     Split,
     HasInstance,
+    ToStringTag,
 }
 
 impl WellKnownSymbol {
@@ -357,6 +358,7 @@ impl WellKnownSymbol {
             Self::Search => "Symbol.search",
             Self::Split => "Symbol.split",
             Self::HasInstance => "Symbol.hasInstance",
+            Self::ToStringTag => "Symbol.toStringTag",
         }
     }
 
@@ -371,6 +373,7 @@ impl WellKnownSymbol {
             Self::Search => crate::heap::SEARCH_SYMBOL,
             Self::Split => crate::heap::SPLIT_SYMBOL,
             Self::HasInstance => crate::heap::HAS_INSTANCE_SYMBOL,
+            Self::ToStringTag => crate::heap::TO_STRING_TAG_SYMBOL,
         }
     }
 }
