@@ -1,11 +1,16 @@
 //! Compatibility probe: real React 19 source compiled by the strict-ESM subset.
 //!
-//! Environment globals absent from the VM are supplied by the preload module.
-//! This probes compilation only, not runtime behavior.
-use super::support::{TEST_DECLARATIONS, compile_main, compile_preloaded, declared};
-use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
+//! The probe stages a headless custom-renderer smoke test: compile the
+//! reconciler, then run one render once the framework gaps in `docs/gaps.md`
+//! are closed. Until then it pins the first compile blocker, so a moved
+//! frontier fails instead of passing silently.
+//!
+//! Host-provided environment globals are supplied by the preload module; the
+//! framework-owned gaps are recorded in `docs/gaps.md` §8.
+use super::support::{TEST_DECLARATIONS, compile_preloaded, declared};
+use yield_compiler::{MemoryResolver, compile};
 use yield_harness::TestHost;
-use yield_vm::Vm;
+use yield_vm::{Value, Vm};
 
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
 const REACT_RECONCILER: &str = include_str!("vendor/react-reconciler-0.31.0.mjs");
@@ -22,7 +27,7 @@ fn real_react_19_bundle_compiles_with_environment_polyfills() {
 }
 
 #[test]
-fn react_reconciler_custom_renderer_attempts_headless_host_execution() {
+fn react_reconciler_custom_renderer_headless_smoke() {
     let main = r#"
         import React from "react.mjs";
         import { render } from "renderer.mjs";
@@ -40,33 +45,36 @@ fn react_reconciler_custom_renderer_attempts_headless_host_execution() {
         ("renderer.mjs", CUSTOM_RENDERER),
     ])
     .expect("valid React probe module paths");
-    match compile(
+    let build = match compile(
         "main.js",
         Some("preload.js"),
         &resolver,
         &declared(TEST_DECLARATIONS),
     ) {
-        Ok(build) => {
-            let mut host = TestHost::default();
-            let mut vm = Vm::new(build, &mut host).expect("headless host bindings");
-            match vm.start(&mut host, "run", Vec::new()) {
-                Ok(result) => panic!("unexpected React headless result: {result:?}"),
-                Err(error) => eprintln!("React reconciler headless runtime failure: {error}"),
-            }
+        Ok(build) => build,
+        Err(error) => {
+            // The current frontier and the complete blocker chain, including
+            // framework/host ownership, are recorded in `docs/gaps.md` §8.
+            // Move this assertion when the framework gap is fixed.
+            assert_eq!(error.module(), "react-reconciler-0.31.0.mjs", "{error}");
+            assert_eq!(
+                error.message(),
+                "unknown binding \"TextDecoder\"",
+                "{error}"
+            );
+            assert_eq!((error.line(), error.column()), (6, 2701), "{error}");
+            return;
         }
-        Err(error) => eprintln!("React reconciler headless compile failure: {error}"),
-    }
-}
+    };
 
-#[test]
-fn minimal_input_confirms_the_unknown_global_cause() {
-    let error: CompileError = compile_main(
-        "function probe(){ reportError('x'); }",
-        &CompileOptions {
-            imports: Default::default(),
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.message(), "unknown callee \"reportError\"", "{error}");
-    assert_eq!(error.module(), "main.js");
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host).expect("React headless VM initialization");
+    let children = vm
+        .start(&mut host, "run", Vec::new())
+        .expect("React headless smoke run");
+    assert_eq!(
+        children,
+        Value::number(1.0),
+        "custom renderer committed one child"
+    );
 }
