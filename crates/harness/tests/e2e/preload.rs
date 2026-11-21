@@ -1,14 +1,30 @@
 //! Preload initialization and the live bindings rooted by its getters.
 
-use super::support::json_round_trip;
-use yield_compiler::{CompileOptions, compile_with_preload};
+use super::support::{compile_preloaded, json_round_trip};
+use yield_compiler::CompileOptions;
 use yield_harness::TestHost;
 use yield_vm::heap::Property;
 use yield_vm::{JsString, Object, Value, Vm, VmError};
 
 #[test]
+fn preload_import_errors_identify_the_source_module() {
+    let error = compile_preloaded("", "import 'missing-host';", &options()).unwrap_err();
+    assert_eq!(error.module(), "preload.js");
+    assert!(
+        error
+            .message()
+            .contains("source file not found: \"missing-host\""),
+        "{error}"
+    );
+
+    let error = compile_preloaded("", "import { missing } from 'test';", &options()).unwrap_err();
+    assert_eq!(error.module(), "preload.js");
+    assert!(error.message().contains("has no export"), "{error}");
+}
+
+#[test]
 fn preload_getters_survive_restore() {
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         r#"
 export function run() {
     const n = Object.getOwnPropertyDescriptor(globalThis, 'n');
@@ -104,7 +120,7 @@ fn options() -> CompileOptions {
 #[test]
 fn preload_globals_are_live_and_read_only() {
     let mut host = TestHost::default();
-    let build = compile_with_preload(MAIN, PRELOAD, &options()).unwrap();
+    let build = compile_preloaded(MAIN, PRELOAD, &options()).unwrap();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
     assert!(vm.get_export("bump").is_err());
     assert!(vm.start(&mut host, "bump", vec![]).is_err());
@@ -114,8 +130,7 @@ fn preload_globals_are_live_and_read_only() {
         Value::number(2.0)
     );
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
-    let changed =
-        compile_with_preload(MAIN, &PRELOAD.replace("n = 1", "n = 5"), &options()).unwrap();
+    let changed = compile_preloaded(MAIN, &PRELOAD.replace("n = 1", "n = 5"), &options()).unwrap();
     assert!(matches!(
         Vm::restore(snapshot.clone(), changed, &mut host),
         Err(VmError::InvalidSnapshot(_))
@@ -133,12 +148,12 @@ fn preload_globals_are_live_and_read_only() {
 fn preload_failure_prevents_main_initialization() {
     let main = "import { inspect } from 'test'; inspect();";
     let mut host = TestHost::default();
-    let build = compile_with_preload(main, "throw 'boom';", &options()).unwrap();
+    let build = compile_preloaded(main, "throw 'boom';", &options()).unwrap();
     assert!(matches!(
         Vm::new(build, &mut host),
         Err(VmError::Thrown(value)) if value == Value::string("boom".into())
     ));
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         main,
         "Object.defineProperty(globalThis, 'x', {value: 0}); export let x = 1;",
         &options(),
@@ -152,7 +167,7 @@ fn preload_failure_prevents_main_initialization() {
 
 #[test]
 fn preload_can_shadow_global_this_without_recursive_lookup() {
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         "export const result = globalThis + undefined;",
         "const g = 8; const u = 9; export {g as globalThis, u as undefined};",
         &CompileOptions::default(),
@@ -164,7 +179,7 @@ fn preload_can_shadow_global_this_without_recursive_lookup() {
 
 #[test]
 fn preload_initialization_does_not_wait_and_drains_microtasks_after_main() {
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         "export const observed = n; export function current() { return n; }",
         "import { wait } from 'test'; wait('preload'); export let n = 1; queueMicrotask(() => { n = 2; });",
         &options(),

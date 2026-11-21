@@ -1,7 +1,26 @@
 //! Shared fixtures and lifecycle helpers for snapshot tests.
 
+use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_harness::{TestHost, build};
 use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
+
+pub(super) fn compile_main(
+    source: &str,
+    options: &CompileOptions,
+) -> Result<yield_vm::Build, CompileError> {
+    let resolver = MemoryResolver::new([("main.js", source)]).expect("valid fixture path");
+    compile("main.js", None, &resolver, options)
+}
+
+pub(super) fn compile_preloaded(
+    source: &str,
+    preload: &str,
+    options: &CompileOptions,
+) -> Result<yield_vm::Build, CompileError> {
+    let resolver = MemoryResolver::new([("main.js", source), ("preload.js", preload)])
+        .expect("valid fixture paths");
+    compile("main.js", Some("preload.js"), &resolver, options)
+}
 
 pub(super) const RUN: &str = r#"
 import { inspect, seed, wait } from "test";

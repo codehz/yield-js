@@ -29,6 +29,7 @@ mod ir;
 mod lower;
 mod names;
 mod promote;
+mod resolver;
 mod session;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +38,7 @@ use oxc::allocator::Allocator;
 use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
+pub use resolver::{FileResolver, MemoryResolver, ModuleResolver};
 
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
@@ -45,40 +47,101 @@ pub struct CompileOptions {
     pub imports: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Compiles a strict-mode JavaScript program into a versioned bytecode build.
-/// Parsing uses ES module grammar so strict syntax is rejected up front.
-/// Evaluation is a synthetic script (function id 0). Direct function
-/// declarations become entries in that script's environment.
-pub fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
-    let mut session = session::Session::new(source, options);
-    lower_module(&mut session, source, 0, "\0script")?;
-    session.finish()
+impl CompileOptions {
+    /// Builds the host import manifest from binding declarations.
+    pub fn from_bindings(bindings: &yield_vm::Bindings) -> Self {
+        Self {
+            imports: bindings
+                .module_names()
+                .map(|module| {
+                    (
+                        module.to_owned(),
+                        bindings.export_names(module).map(str::to_owned).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
-/// Compiles a main module and a separate host-supplied preload module.
-pub fn compile_with_preload(
-    source: &str,
-    preload: &str,
+/// Compiles explicit source roots with a synchronous source resolver.
+pub fn compile(
+    entry: &str,
+    preload: Option<&str>,
+    resolver: &dyn ModuleResolver,
     options: &CompileOptions,
 ) -> Result<Build, CompileError> {
-    let mut session = session::Session::new(preload, options);
-    let initializer = session.alloc_func_id(oxc::span::Span::default())?;
-    lower_module(&mut session, preload, initializer, "\0preload")
-        .map_err(CompileError::in_preload)?;
-    session
-        .finish_preload(initializer, source)
-        .map_err(CompileError::in_preload)?;
-    lower_module(&mut session, source, 0, "\0script")?;
-    session.finish()
+    let root = |specifier: &str| {
+        let result = if specifier.is_empty() {
+            Err("empty source root".into())
+        } else {
+            resolved_id(resolver, None, specifier)
+        };
+        result.map_err(|reason| root_error(specifier, reason))
+    };
+    let preload_id = preload.map(root).transpose()?;
+    let entry_id = root(entry)?;
+    let preload_source = preload_id
+        .as_deref()
+        .zip(preload)
+        .map(|(id, request)| {
+            resolver
+                .load(id)
+                .map_err(|reason| root_error(request, reason))
+        })
+        .transpose()?;
+    let entry_source = match (&preload_source, preload_id.as_deref()) {
+        (Some(source), Some(id)) if id == entry_id => std::borrow::Cow::Borrowed(source.as_ref()),
+        _ => resolver
+            .load(&entry_id)
+            .map_err(|reason| root_error(entry, reason))?,
+    };
+    let loaded_roots: Vec<_> = preload_id
+        .as_deref()
+        .into_iter()
+        .chain([entry_id.as_str()])
+        .collect();
+    let allocator = Allocator::default();
+    let mut session =
+        session::Session::new(preload_source.as_deref().unwrap_or(&entry_source), options);
+    if let Some((id, source)) = preload_id.as_deref().zip(preload_source.as_deref()) {
+        (|| {
+            let initializer = session.alloc_func_id(oxc::span::Span::default())?;
+            let program = frontend::parse(&allocator, source)?;
+            frontend::check_dependencies(&program, id, source, resolver, options, &loaded_roots)?;
+            lower::lower_program(&mut session, &program, initializer, "\0preload")?;
+            session.finish_preload(initializer, &entry_source)
+        })()
+        .map_err(|err: CompileError| err.in_module(id))?;
+    }
+    (|| {
+        let program = frontend::parse(&allocator, &entry_source)?;
+        frontend::check_dependencies(
+            &program,
+            &entry_id,
+            &entry_source,
+            resolver,
+            options,
+            &loaded_roots,
+        )?;
+        lower::lower_program(&mut session, &program, 0, "\0script")?;
+        session.finish()
+    })()
+    .map_err(|err: CompileError| err.in_module(&entry_id))
 }
 
-fn lower_module(
-    session: &mut session::Session<'_>,
-    source: &str,
-    initializer: u32,
-    name: &str,
-) -> Result<(), CompileError> {
-    let allocator = Allocator::default();
-    let program = frontend::parse(&allocator, source)?;
-    lower::lower_program(session, &program, initializer, name)
+fn root_error(request: &str, reason: String) -> CompileError {
+    CompileError::internal(format!("source root {request:?}: {reason}")).in_module(request)
+}
+
+fn resolved_id(
+    resolver: &dyn ModuleResolver,
+    referrer: Option<&str>,
+    specifier: &str,
+) -> Result<String, String> {
+    let id = resolver.resolve(referrer, specifier)?;
+    if id.is_empty() {
+        return Err("resolver returned an empty module ID".into());
+    }
+    Ok(id)
 }

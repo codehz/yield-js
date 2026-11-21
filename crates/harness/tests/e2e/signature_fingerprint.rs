@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::super::support::compile_main;
 use super::{StrategyHost, options};
 use yield_harness::{LabelService, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
@@ -122,7 +123,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     let labels = Arc::new(LabelService::default());
     let bindings = original::bindings(&labels).expect("original bindings");
     assert_probe_arity(&bindings);
-    let build = yield_compiler::compile(
+    let build = compile_main(
         r#"
         import { probe, wait } from 'contract';
         export async function run() {

@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use yield_compiler::{CompileOptions, compile};
+use super::support::compile_main;
+use yield_compiler::CompileOptions;
 use yield_harness::{LabelService, Wait};
 use yield_vm::binding::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
@@ -120,7 +121,7 @@ fn finish(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
 #[test]
 fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     let mut host = TaskHost::new();
-    let build = compile(
+    let build = compile_main(
         r#"
         import { spawn, cancel } from 'task';
         export let result = 0;
@@ -425,7 +426,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         labels,
         errors: None,
     };
-    let build = compile(
+    let build = compile_main(
         r#"
         import { choose, spawn, cancel, early } from 'branch';
         export let result = 0;
@@ -541,7 +542,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
 }
 
 fn branch_build(source: &str, imports: &[&str]) -> yield_vm::Build {
-    compile(
+    compile_main(
         source,
         &CompileOptions {
             imports: [(

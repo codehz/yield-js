@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use yield_compiler::{CompileOptions, compile};
+use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectKey, InspectValue, Instance,
     JsResult, JsValue, Operation, OperationDriver, OperationToken, Registration, This,
@@ -770,24 +770,14 @@ mod console {
     }
 }
 
-pub(crate) fn compile_options() -> CompileOptions {
-    let host = TestHost::new();
-    let bindings = host.bindings();
-    let mut imports = BTreeMap::new();
-    for module in bindings.module_names() {
-        imports.insert(
-            module.to_owned(),
-            bindings
-                .export_names(module)
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>(),
-        );
-    }
-    CompileOptions { imports }
+fn compile_source(source: &str) -> Result<Build, CompileError> {
+    let resolver = MemoryResolver::new([("main.js", source)]).expect("valid fixture path");
+    let options = CompileOptions::from_bindings(&TestHost::new().bindings());
+    compile("main.js", None, &resolver, &options)
 }
 
 pub fn build(source: &str) -> Build {
-    compile(source, &compile_options()).expect("source compiles")
+    compile_source(source).expect("source compiles")
 }
 
 pub fn number(value: f64) -> JsValue {

@@ -1,6 +1,6 @@
 //! The loader and snapshot APIs reject invalid inputs and state.
 
-use super::support::{RUN, Suspended, count_delta, json_round_trip};
+use super::support::{RUN, Suspended, compile_main, count_delta, json_round_trip};
 use yield_harness::{TestHost, build};
 use yield_vm::bytecode::{Instr, Slot};
 use yield_vm::heap::EnvironmentObject;
@@ -698,7 +698,7 @@ fn script_startup_validates_before_calling_the_host() {
             std::collections::BTreeSet::from(["inspect".to_owned(), "missing".to_owned()]),
         )]),
     };
-    let missing = yield_compiler::compile("import { missing } from 'test';", &options).unwrap();
+    let missing = compile_main("import { missing } from 'test';", &options).unwrap();
     let error = Vm::new(missing, &mut host).expect_err("missing module export is rejected eagerly");
     assert!(
         matches!(error, VmError::MissingImport(detail) if detail.contains("test") && detail.contains("missing"))

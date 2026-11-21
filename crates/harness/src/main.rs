@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
-use yield_compiler::compile;
+use yield_compiler::{CompileOptions, MemoryResolver, compile};
 use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, JsResult, JsValue, OperationDriver, OperationToken,
@@ -184,23 +184,13 @@ mod demo {
     }
 }
 
-fn compile_options() -> yield_compiler::CompileOptions {
+fn compile_options() -> CompileOptions {
     let bindings = demo_bindings(
         Arc::new(DemoCounters::default()),
         Arc::new(LabelService::default()),
     )
     .expect("demo bindings");
-    let mut imports = BTreeMap::new();
-    for module in bindings.module_names() {
-        imports.insert(
-            module.to_owned(),
-            bindings
-                .export_names(module)
-                .map(str::to_owned)
-                .collect::<std::collections::BTreeSet<_>>(),
-        );
-    }
-    yield_compiler::CompileOptions { imports }
+    CompileOptions::from_bindings(&bindings)
 }
 
 fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
@@ -218,7 +208,8 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let build: Build = compile(SOURCE, &compile_options())?;
+    let resolver = MemoryResolver::new([("main.js", SOURCE)])?;
+    let build: Build = compile("main.js", None, &resolver, &compile_options())?;
     let function = build.function_named("run").expect("demo entry function");
     println!("build {} ({})", build.build_id, function.name);
     println!(

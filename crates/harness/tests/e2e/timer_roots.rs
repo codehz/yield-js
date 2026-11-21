@@ -192,8 +192,9 @@ mod repeat_timer {
 
 #[test]
 fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
+    use super::support::compile_main;
     use std::sync::Arc;
-    use yield_compiler::{CompileOptions, compile};
+    use yield_compiler::CompileOptions;
     use yield_harness::{FakeClock, Timer};
     use yield_vm::{Bindings, Host};
 
@@ -214,7 +215,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     }
     .unwrap();
     let mut host = RepeatHost(Arc::new(bindings));
-    let program = compile(
+    let program = compile_main(
         r#"
         import { start, clearTimeout } from 'repeat_timer';
         export let result = 0;

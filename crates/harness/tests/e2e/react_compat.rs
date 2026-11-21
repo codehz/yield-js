@@ -4,6 +4,7 @@
 //! This probes compilation only, not runtime behavior.
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::support::{compile_main, compile_preloaded};
 use yield_compiler::{CompileError, CompileOptions};
 
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
@@ -11,7 +12,7 @@ const PRELOAD: &str = "import * as console from 'console'; export { console }; e
 
 #[test]
 fn real_react_19_bundle_compiles_with_environment_polyfills() {
-    yield_compiler::compile_with_preload(
+    compile_preloaded(
         REACT_19_BUNDLE,
         PRELOAD,
         &CompileOptions {
@@ -26,7 +27,7 @@ fn real_react_19_bundle_compiles_with_environment_polyfills() {
 
 #[test]
 fn minimal_input_confirms_the_unknown_global_cause() {
-    let error: CompileError = yield_compiler::compile(
+    let error: CompileError = compile_main(
         "function probe(){ reportError('x'); }",
         &CompileOptions {
             imports: Default::default(),
@@ -34,4 +35,5 @@ fn minimal_input_confirms_the_unknown_global_cause() {
     )
     .unwrap_err();
     assert_eq!(error.message(), "unknown callee \"reportError\"", "{error}");
+    assert_eq!(error.module(), "main.js");
 }

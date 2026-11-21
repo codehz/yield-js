@@ -1,6 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
-use yield_compiler::{CompileOptions, compile};
-use yield_vm::bytecode::{CallArgs, Instr};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use yield_compiler::{CompileError, CompileOptions, FileResolver, MemoryResolver, ModuleResolver};
+use yield_vm::bytecode::{Build, CallArgs, Instr};
+
+fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
+    let resolver = MemoryResolver::new([("main.js", source)]).unwrap();
+    yield_compiler::compile("main.js", None, &resolver, options)
+}
+
+fn compile_with_preload(
+    source: &str,
+    preload: &str,
+    options: &CompileOptions,
+) -> Result<Build, CompileError> {
+    let resolver = MemoryResolver::new([("main.js", source), ("preload.js", preload)]).unwrap();
+    yield_compiler::compile("main.js", Some("preload.js"), &resolver, options)
+}
 
 #[test]
 fn compiles_overflowing_number_literals() {
@@ -19,7 +36,7 @@ fn compiles_overflowing_number_literals() {
 #[test]
 fn compiles_preload_and_main_in_separate_module_scopes() {
     let options = CompileOptions::default();
-    let build = yield_compiler::compile_with_preload(
+    let build = compile_with_preload(
         "export function shared() { return 'same'; }",
         "export function shared() { return 'same'; }",
         &options,
@@ -31,18 +48,18 @@ fn compiles_preload_and_main_in_separate_module_scopes() {
     assert_ne!(build.exports["shared"], preload.exports["shared"]);
     assert_eq!(build.constants.len(), 1);
 
-    let error = yield_compiler::compile_with_preload("", "\nmissing;", &options).unwrap_err();
-    assert!(error.message().starts_with("preload: "), "{error}");
+    let error = compile_with_preload("", "\nmissing;", &options).unwrap_err();
+    assert_eq!(error.module(), "preload.js");
     assert_eq!(error.line(), 2);
 
-    let error = yield_compiler::compile_with_preload("\nmissing;", "", &options).unwrap_err();
-    assert!(!error.message().starts_with("preload: "), "{error}");
+    let error = compile_with_preload("\nmissing;", "", &options).unwrap_err();
+    assert_eq!(error.module(), "main.js");
     assert_eq!(error.line(), 2);
 }
 
 #[test]
 fn validates_preload_initializer_and_its_own_exports() {
-    let build = yield_compiler::compile_with_preload(
+    let build = compile_with_preload(
         "export let main = 0; export function run() {}",
         "export let n = 1;",
         &CompileOptions::default(),
@@ -101,12 +118,8 @@ fn validates_preload_initializer_and_its_own_exports() {
 
 #[test]
 fn rejects_preload_getters_reading_the_wrong_binding() {
-    let mut build = yield_compiler::compile_with_preload(
-        "",
-        "export let x = 1, y = 2;",
-        &CompileOptions::default(),
-    )
-    .unwrap();
+    let mut build =
+        compile_with_preload("", "export let x = 1, y = 2;", &CompileOptions::default()).unwrap();
     let preload = build.preload.as_mut().unwrap();
     preload.getters.insert("x".into(), preload.getters["y"]);
     assert!(build.validate().unwrap_err().contains("build_id"));
@@ -942,7 +955,6 @@ fn rejects_unsupported_module_syntax() {
     for (statement, feature) in [
         ("await 1;", "top-level await"),
         ("for await (const value of []) {}", "top-level await"),
-        ("import 'dep';", "unknown host module"),
         ("import('dep');", "dynamic import"),
         ("import.meta;", "import.meta"),
         ("export { x } from 'dep';", "re-export"),
@@ -1212,10 +1224,10 @@ function run() { return call(item, fallback, empty, host.value); }
 }
 
 #[test]
-fn rejects_unknown_host_module_and_export_at_import_location() {
+fn delegates_unknown_host_specifiers_and_rejects_missing_host_exports() {
     let imports = manifest(&[("host", &["known"])]);
     for (source, text) in [
-        ("import { known } from 'missing';", "unknown host module"),
+        ("import { known } from 'missing';", "source file not found"),
         ("import { absent } from 'host';", "has no export"),
     ] {
         let error = compile(
@@ -1225,9 +1237,148 @@ fn rejects_unknown_host_module_and_export_at_import_location() {
             },
         )
         .unwrap_err();
+        assert_eq!(error.module(), "main.js");
         assert!(error.message().contains(text), "{error}");
         assert!(error.span().start > 0, "{error}");
     }
+}
+
+#[test]
+fn memory_resolver_resolves_relative_and_root_relative_paths() {
+    let resolver = MemoryResolver::new([
+        ("src/./main.js", "export const main = 1;"),
+        ("src/dep.js", "export const local = 2;"),
+        ("dep.js", "export const shared = 3;"),
+    ])
+    .unwrap();
+    let entry = resolver.resolve(None, "./src/main.js").unwrap();
+    assert_eq!(entry, "src/main.js");
+    let local = resolver.resolve(Some(&entry), "./dir/../dep.js").unwrap();
+    assert_eq!(local, "src/dep.js");
+    assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
+    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap();
+    assert_eq!(shared, "dep.js");
+    assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap(), shared);
+    assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
+    assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
+}
+
+#[test]
+fn memory_resolver_rejects_duplicate_normalized_ids() {
+    let error = MemoryResolver::new([("src/dep.js", "1;"), ("src/dir/../dep.js", "2;")])
+        .err()
+        .expect("normalized IDs should collide");
+    assert!(error.contains("duplicate source ID"), "{error}");
+    assert!(error.contains("src/dep.js"), "{error}");
+}
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "yield-compiler-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("creating {path:?}: {error}"),
+            }
+        }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn file_resolver_resolves_relative_and_root_relative_paths() {
+    let root = TempDir::new();
+    fs::create_dir(root.0.join("src")).unwrap();
+    fs::write(root.0.join("src/main.js"), "export const main = 1;").unwrap();
+    fs::write(root.0.join("src/dep.js"), "export const local = 2;").unwrap();
+    fs::write(root.0.join("dep.js"), "export const shared = 3;").unwrap();
+
+    let resolver = FileResolver::new(&root.0).unwrap();
+    let entry = resolver.resolve(None, "./src/main.js").unwrap();
+    assert_eq!(entry, "src/main.js");
+    let local = resolver.resolve(Some(&entry), "./dir/../dep.js").unwrap();
+    assert_eq!(local, "src/dep.js");
+    assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
+    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap();
+    assert_eq!(shared, "dep.js");
+    assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap(), shared);
+    assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
+    assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn file_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new();
+    let root = dir.0.join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("dep.js"), "1;").unwrap();
+    fs::write(dir.0.join("outside.js"), "2;").unwrap();
+    symlink("dep.js", root.join("alias.js")).unwrap();
+    symlink("../outside.js", root.join("escape.js")).unwrap();
+
+    let resolver = FileResolver::new(&root).unwrap();
+    assert_eq!(resolver.resolve(None, "alias.js").unwrap(), "dep.js");
+    let error = resolver.resolve(None, "escape.js").unwrap_err();
+    assert!(error.contains("outside the source root"), "{error}");
+    let error = resolver.load("escape.js").unwrap_err();
+    assert!(error.contains("outside the source root"), "{error}");
+}
+
+#[test]
+fn missing_source_imports_point_to_the_import_specifier() {
+    let source = "\n  import { value } from './missing.js';\n";
+    let memory = MemoryResolver::new([("src/main.js", source)]).unwrap();
+    let root = TempDir::new();
+    fs::create_dir(root.0.join("src")).unwrap();
+    fs::write(root.0.join("src/main.js"), source).unwrap();
+    let file = FileResolver::new(&root.0).unwrap();
+    let file_reason = file
+        .resolve(Some("src/main.js"), "./missing.js")
+        .unwrap_err();
+
+    for (resolver, reason) in [
+        (&memory as &dyn ModuleResolver, "source file not found"),
+        (&file as &dyn ModuleResolver, file_reason.as_str()),
+    ] {
+        let error =
+            yield_compiler::compile("./src/main.js", None, resolver, &CompileOptions::default())
+                .unwrap_err();
+        let (start, line, column) = access_at(source, "'./missing.js'", 0);
+        assert_eq!(error.module(), "src/main.js");
+        assert_eq!(error.span().start, start, "{error}");
+        assert_eq!(error.line(), line, "{error}");
+        assert_eq!(error.column(), column, "{error}");
+        assert!(error.message().contains("./missing.js"), "{error}");
+        assert!(error.message().contains(reason), "{error}");
+    }
+}
+
+#[test]
+fn missing_file_entry_points_to_the_requested_root() {
+    let root = TempDir::new();
+    let resolver = FileResolver::new(&root.0).unwrap();
+    let error =
+        yield_compiler::compile("./missing.js", None, &resolver, &CompileOptions::default())
+            .unwrap_err();
+    assert_eq!(error.module(), "./missing.js");
+    assert_eq!(error.line(), 1, "{error}");
+    assert_eq!(error.column(), 1, "{error}");
 }
 
 #[test]

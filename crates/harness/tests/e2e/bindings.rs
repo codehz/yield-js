@@ -1,10 +1,10 @@
 //! Host binding contract tests: static declarations, instance state, handles,
 //! operation recovery strategies, and deterministic snapshots.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::support::compile_main;
 use yield_compiler::CompileOptions;
 use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
@@ -18,17 +18,7 @@ use yield_vm::{
 mod signature_fingerprint;
 
 fn options(bindings: &Bindings) -> CompileOptions {
-    let mut imports = BTreeMap::new();
-    for module in bindings.module_names() {
-        imports.insert(
-            module.to_owned(),
-            bindings
-                .export_names(module)
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>(),
-        );
-    }
-    CompileOptions { imports }
+    CompileOptions::from_bindings(bindings)
 }
 
 struct StrategyHost {
@@ -178,7 +168,7 @@ export async function run() {
 "#;
     let labels = Arc::new(LabelService::default());
     let bindings = strategy_fixture::bindings(&labels);
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -345,7 +335,7 @@ export function run() {
   return unstash();
 }
 "#;
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -480,7 +470,7 @@ mod guest_call_fixture {
             services: [("stash", 1, Stash::default()), ("runs", 1, runs.clone())],
         }
         .expect("guest bindings");
-        let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+        let build = compile_main(source, &options(&bindings)).expect("compile");
         let mut host = StrategyHost::new(bindings);
         let mut vm = Vm::new(build, &mut host).expect("create VM");
         let result = vm.start(&mut host, "run", vec![]);
@@ -668,7 +658,7 @@ export async function run() {
 "#;
     let labels = Arc::new(LabelService::default());
     let bindings = counter_fixture::bindings(&labels);
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -758,7 +748,7 @@ export function run() {
   return point.x();
 }
 "#;
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
@@ -806,7 +796,7 @@ export function run() {
   return make();
 }
 "#;
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -1004,7 +994,7 @@ export async function run() {
   return true;
 }
 "#;
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -1085,7 +1075,7 @@ export async function run() {
   return true;
 }
 "#;
-    let build = yield_compiler::compile(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(&bindings)).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");

@@ -10,6 +10,7 @@ use oxc::span::Span;
 
 #[derive(Debug, Clone)]
 pub struct CompileError {
+    module: String,
     message: String,
     span: Span,
     line: usize,
@@ -24,6 +25,7 @@ impl CompileError {
         let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
         let column = prefix[line_start..].chars().count() + 1;
         Self {
+            module: String::new(),
             message: message.into(),
             span,
             line,
@@ -35,9 +37,13 @@ impl CompileError {
         Self::new("", Span::default(), message)
     }
 
-    pub(crate) fn in_preload(mut self) -> Self {
-        self.message.insert_str(0, "preload: ");
+    pub(crate) fn in_module(mut self, module: &str) -> Self {
+        self.module = module.to_owned();
         self
+    }
+
+    pub fn module(&self) -> &str {
+        &self.module
     }
 
     pub fn message(&self) -> &str {
@@ -61,8 +67,8 @@ impl fmt::Display for CompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} at {}:{} (byte {})",
-            self.message, self.line, self.column, self.span.start
+            "{} at {}:{}:{} (byte {})",
+            self.message, self.module, self.line, self.column, self.span.start
         )
     }
 }

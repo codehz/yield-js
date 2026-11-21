@@ -218,8 +218,9 @@ impl yield_vm::Host for ChainHost {
 
 #[test]
 fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
+    use super::support::compile_main;
     use std::sync::Arc;
-    use yield_compiler::{CompileOptions, compile};
+    use yield_compiler::CompileOptions;
     use yield_harness::Timer;
 
     let clock = Arc::new(yield_harness::FakeClock::default());
@@ -229,7 +230,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     }
     .unwrap();
     let mut host = ChainHost(Arc::new(bindings));
-    let build = compile(
+    let build = compile_main(
         r#"
         import { start, cancel } from 'chain';
         export let count = 0;

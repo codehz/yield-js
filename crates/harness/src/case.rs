@@ -1,7 +1,6 @@
-use yield_compiler::compile;
 use yield_vm::{Completion, Host, JsString, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
 
-use crate::{TestHost, compile_options};
+use crate::{TestHost, compile_source};
 
 /// Runs one directive-headed JavaScript case against a fresh [`TestHost`].
 ///
@@ -24,8 +23,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
         _ => Vec::new(),
     };
 
-    let build =
-        compile(source, &compile_options()).map_err(|error| format!("{name}: compile: {error}"))?;
+    let build = compile_source(source).map_err(|error| format!("{name}: compile: {error}"))?;
     let mut host = TestHost::default();
     let mut vm =
         Vm::new(build.clone(), &mut host).map_err(|error| format!("{name}: vm: {error}"))?;

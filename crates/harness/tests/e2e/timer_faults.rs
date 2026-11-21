@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::support::json_round_trip;
-use yield_compiler::{CompileOptions, compile};
+use super::support::{compile_main, json_round_trip};
+use yield_compiler::CompileOptions;
 use yield_harness::{FakeClock, TestHost, Timer, build};
 use yield_vm::binding::{CallCx, NativeTarget};
 use yield_vm::snapshot::DeliveryTarget;
@@ -311,7 +311,7 @@ impl Host for ContractHost {
 fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     let source_clock = Arc::new(FakeClock::default());
     let mut source = ContractHost(Arc::new(original::bindings(&source_clock)));
-    let build = compile(
+    let build = compile_main(
         r#"
         import { schedule } from 'contract';
         export let calls = 0;

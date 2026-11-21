@@ -1,8 +1,8 @@
 //! Default exports: statement-position values, live aliases, and preload names.
 
-use super::support::json_round_trip;
+use super::support::{compile_main, compile_preloaded, json_round_trip};
 use std::collections::{BTreeMap, BTreeSet};
-use yield_compiler::{CompileOptions, compile, compile_with_preload};
+use yield_compiler::CompileOptions;
 use yield_harness::TestHost;
 use yield_vm::{Value, Vm, VmError};
 
@@ -18,7 +18,7 @@ fn options(imports: &[(&str, &[&str])]) -> CompileOptions {
 }
 
 fn vm_of(source: &str, options: &CompileOptions) -> Vm {
-    let build = compile(source, options).unwrap();
+    let build = compile_main(source, options).unwrap();
     Vm::new(build, &mut TestHost::default()).unwrap()
 }
 
@@ -90,7 +90,7 @@ fn preload_default_name_is_default() {
         "export default class {}",
         "export default (() => 4)",
     ] {
-        let build = compile_with_preload(
+        let build = compile_preloaded(
             "export function run(){ return globalThis.default.name }",
             preload,
             &CompileOptions::default(),
@@ -105,7 +105,7 @@ fn preload_default_name_is_default() {
         );
         // The host reads the main module's own default, not the preload's.
         let build =
-            compile_with_preload("export default 9;", preload, &CompileOptions::default()).unwrap();
+            compile_preloaded("export default 9;", preload, &CompileOptions::default()).unwrap();
         let vm = Vm::new(build, &mut TestHost::default()).unwrap();
         assert_eq!(vm.get_export("default").unwrap(), Value::number(9.0));
     }
@@ -113,7 +113,7 @@ fn preload_default_name_is_default() {
 
 #[test]
 fn preload_default_alias_survives_restore() {
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         "export function run(){ bump(); return globalThis.default; }",
         "let x = 1; export { x as default }; export function bump(){ x++ }",
         &CompileOptions::default(),
@@ -132,7 +132,7 @@ fn preload_default_alias_survives_restore() {
         Value::number(3.0)
     );
     // The alias is still a getter-only preload global.
-    let build = compile_with_preload(
+    let build = compile_preloaded(
         r#"
 export function run(){
   try { globalThis.default = 0; return 'no-throw'; }
