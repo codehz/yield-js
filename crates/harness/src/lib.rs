@@ -558,7 +558,7 @@ fn test_bindings(
     clock: &Arc<FakeClock>,
 ) -> Result<Bindings, String> {
     host_bindings! {
-        modules: [test],
+        modules: [test, console],
         classes: [Node, Matcher],
         states: [],
         operations: [Wait, Pause, Reject, Reissue, Timer],
@@ -725,6 +725,48 @@ mod test {
             None => String::new(),
         };
         Err(cx.throw_string(format!("assert: expected truthy, actual {actual}{message}")))
+    }
+}
+
+fn write_console(level: &str, value: Option<JsValue>) {
+    match value {
+        Some(value) => eprintln!("console.{level}: {value}"),
+        None => eprintln!("console.{level}"),
+    }
+}
+
+#[host_module(name = "console")]
+mod console {
+    use super::*;
+
+    #[function(name = "debug")]
+    fn debug(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        write_console("debug", _value);
+        Ok(())
+    }
+
+    #[function(name = "error")]
+    fn error(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        write_console("error", _value);
+        Ok(())
+    }
+
+    #[function(name = "info")]
+    fn info(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        write_console("info", _value);
+        Ok(())
+    }
+
+    #[function(name = "log")]
+    fn log(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        write_console("log", _value);
+        Ok(())
+    }
+
+    #[function(name = "warn")]
+    fn warn(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+        write_console("warn", _value);
+        Ok(())
     }
 }
 
