@@ -45,6 +45,9 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                 ));
             }
             Directive::Restore => restore(name, step.line, &mut vm, &build, &mut host)?,
+            Directive::Advance(ms) => host
+                .advance(&mut vm, ms)
+                .map_err(|error| located(name, step.line, "@advance", error))?,
             Directive::Fulfill(id, value) => {
                 complete(
                     name,
@@ -111,6 +114,7 @@ struct Step {
 enum Directive {
     Args(Vec<JsValue>),
     Restore,
+    Advance(u64),
     Fulfill(String, JsValue),
     Reject(String, JsValue),
     Pending(Vec<String>),
@@ -157,6 +161,7 @@ fn parse_directive(line: usize, body: &str) -> Result<Step, String> {
             require_no_args(line, "@restore", args)?;
             Directive::Restore
         }
+        "advance" => Directive::Advance(parse_advance(line, args)?),
         "fulfill" => {
             let (id, value) = parse_completion(line, "@fulfill", args)?;
             Directive::Fulfill(id, value)
@@ -226,6 +231,7 @@ fn directive_name(kind: &Directive) -> &'static str {
     match kind {
         Directive::Args(_) => "@args",
         Directive::Restore => "@restore",
+        Directive::Advance(_) => "@advance",
         Directive::Fulfill(_, _) => "@fulfill",
         Directive::Reject(_, _) => "@reject",
         Directive::Pending(_) => "@pending",
@@ -250,6 +256,17 @@ fn require_args<'a>(line: usize, directive: &str, args: &'a str) -> Result<&'a s
     } else {
         Ok(args)
     }
+}
+
+fn parse_advance(line: usize, args: &str) -> Result<u64, String> {
+    let args = require_args(line, "@advance", args)?;
+    if !args.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "{line}: @advance: expected a non-negative decimal integer"
+        ));
+    }
+    args.parse()
+        .map_err(|_| format!("{line}: @advance: value exceeds u64::MAX"))
 }
 
 fn parse_args(line: usize, args: &str) -> Result<Vec<JsValue>, String> {

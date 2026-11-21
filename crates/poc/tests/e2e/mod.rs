@@ -9,4 +9,7 @@ mod promises;
 mod resume;
 mod support;
 mod sync;
+mod timer_faults;
+mod timer_roots;
+mod timers;
 mod validation;

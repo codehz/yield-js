@@ -153,8 +153,9 @@ Case contract (`yield_poc::run_case`):
 - Body must explicitly export a callable binding under the public name `run`. The runner always starts `"run"`.
 - `@args` JSON array, only as the first directive.
 - `@pending ["wait:a"]`, `@restore` (JSON round-trip, then `Vm::restore`), `@fulfill ["wait:a", 2]`, `@reject ["wait:a", "boom"]`.
+- `@advance <u64>` advances the test clock by decimal milliseconds and drains work after each due timer.
 - Last directive must be `@returns`, `@fulfilled`, `@rejected`, or `@uncaught`. Scalars only: number, bool, string, `null`, `undefined`. `@uncaught` takes an array and checks the exact ordered list of errors reported to the host.
-- Fixtures import used host exports explicitly from the static `test` module; these include `inspect`, `seed`, `wait`, `bind`, `setLabel`, `expect`, `assert`, and `gc`. The synchronous `gc()` returns the number of objects removed without draining microtasks.
+- Fixtures import host exports explicitly from `test`. `gc()` collects synchronously without draining microtasks. `setTimeout` returns a cancellable task handle, `clearTimeout` cancels it, and `sleep` returns a native Promise.
 
 Example:
 

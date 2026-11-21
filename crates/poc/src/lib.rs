@@ -12,8 +12,10 @@ use yield_vm::{GuestOutcome, Host, HostStep, JsString, Vm};
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
+pub mod timer;
 
 pub use case::run_case;
+pub use timer::{FakeClock, Timer};
 
 #[derive(Default)]
 pub struct Counters(Mutex<BTreeMap<String, usize>>);
@@ -436,6 +438,7 @@ pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
+    clock: Arc<FakeClock>,
     errors: Vec<JsValue>,
     gc_roots: Vec<yield_vm::Value>,
     pub reject_native: bool,
@@ -451,12 +454,14 @@ impl TestHost {
     pub fn new() -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
-        let bindings =
-            test_bindings(Arc::clone(&counters), Arc::clone(&labels)).expect("test bindings");
+        let clock = Arc::new(FakeClock::default());
+        let bindings = test_bindings(Arc::clone(&counters), Arc::clone(&labels), &clock)
+            .expect("test bindings");
         Self {
             bindings: Arc::new(bindings),
             counters,
             labels,
+            clock,
             errors: Vec::new(),
             gc_roots: Vec::new(),
             reject_native: false,
@@ -479,6 +484,14 @@ impl TestHost {
 
     pub fn labels(&self) -> &Arc<LabelService> {
         &self.labels
+    }
+
+    pub fn clock(&self) -> &Arc<FakeClock> {
+        &self.clock
+    }
+
+    pub fn advance(&mut self, vm: &mut Vm, ms: u64) -> Result<(), String> {
+        Arc::clone(&self.clock).advance(vm, self, ms)
     }
 
     pub fn pending_labels(&self) -> Vec<String> {
@@ -517,19 +530,55 @@ impl Host for TestHost {
     }
 }
 
-fn test_bindings(counters: Arc<Counters>, labels: Arc<LabelService>) -> Result<Bindings, String> {
+fn test_bindings(
+    counters: Arc<Counters>,
+    labels: Arc<LabelService>,
+    clock: &Arc<FakeClock>,
+) -> Result<Bindings, String> {
     host_bindings! {
         modules: [test],
         classes: [Node, Matcher],
         states: [],
-        operations: [Wait, Pause, Reject, Reissue],
-        services: [("counters", 1, counters), ("node-factory", 1, NodeFactory), ("labels", 1, labels)],
+        operations: [Wait, Pause, Reject, Reissue, Timer],
+        services: [
+            ("counters", 1, counters),
+            ("node-factory", 1, NodeFactory),
+            ("labels", 1, labels),
+            ("clock", 1, Arc::clone(clock)),
+        ],
     }
 }
 
 #[host_module(name = "test")]
 mod test {
     use super::*;
+
+    #[function(name = "setTimeout")]
+    fn set_timeout(cx: &mut CallCx<'_>, cb: JsValue, ms: JsValue) -> JsResult<JsValue> {
+        if !cx.is_callable(&cb)? {
+            return Err(cx.type_error("expected a callable"));
+        }
+        let timer = Timer::from_delay(cx, &ms)?;
+        cx.spawn(async move {
+            cx.effect(timer).await?;
+            cx.call(cb, JsValue::undefined(), Vec::new()).await?;
+            Ok(())
+        })
+    }
+
+    #[function(name = "clearTimeout")]
+    fn clear_timeout(cx: &mut CallCx<'_>, handle: Option<JsValue>) -> JsResult<()> {
+        if let Some(h) = handle {
+            cx.cancel_task(&h)?;
+        }
+        Ok(())
+    }
+
+    #[function(name = "sleep")]
+    fn sleep(cx: &mut CallCx<'_>, ms: JsValue) -> JsResult<JsValue> {
+        let timer = Timer::from_delay(cx, &ms)?;
+        cx.promise(timer)
+    }
 
     #[function(name = "gc")]
     async fn gc(cx: &mut CallCx<'_>) -> JsResult<HostStep> {

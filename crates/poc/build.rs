@@ -10,6 +10,8 @@ fn collect_cases(cases_dir: &Path) -> Vec<(PathBuf, String, String)> {
     let mut cases = Vec::new();
     let mut walk = vec![cases_dir.to_path_buf()];
     while let Some(dir) = walk.pop() {
+        // Adding a file updates its immediate directory, not the case root.
+        println!("cargo:rerun-if-changed={}", dir.display());
         let entries = fs::read_dir(&dir)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
         for entry in entries {
@@ -59,8 +61,6 @@ fn collect_cases(cases_dir: &Path) -> Vec<(PathBuf, String, String)> {
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=tests/cases");
-
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let cases_dir = Path::new(&manifest_dir).join("tests/cases");
     if !cases_dir.is_dir() {
@@ -79,18 +79,12 @@ fn main() {
         );
         // `run_case` keys on the path relative to `tests/cases`, so failures
         // keep the file's location even across categories.
-        let name = format!(
-            "{}.js",
-            relative.to_str().unwrap_or_else(|| {
-                panic!(
-                    "case path is not UTF-8: {}",
-                    cases_dir.join(relative).display()
-                )
-            })
-        );
+        let name = relative
+            .to_str()
+            .unwrap_or_else(|| panic!("case path is not UTF-8: {}", path.display()));
         let function = match category.as_str() {
-            "" => rust_fn_name(stem),
-            category => format!("case_{category}_{}", rust_fn_name(stem)),
+            "" => format!("case_{stem}"),
+            category => format!("case_{category}_{stem}"),
         };
         generated.push_str(&format!(
             "#[test]\nfn {function}() {{\n    let source = include_str!({path_literal});\n    if let Err(error) = yield_poc::run_case(\"{name}\", source) {{\n        panic!(\"{{error}}\");\n    }}\n}}\n\n"
@@ -110,70 +104,4 @@ fn valid_stem(stem: &str) -> bool {
     };
     first.is_ascii_lowercase()
         && chars.all(|char| char.is_ascii_lowercase() || char.is_ascii_digit() || char == '_')
-}
-
-fn rust_fn_name(stem: &str) -> String {
-    let name = format!("case_{stem}");
-    if is_rust_keyword(&name) {
-        format!("r#{name}")
-    } else {
-        name
-    }
-}
-
-fn is_rust_keyword(name: &str) -> bool {
-    matches!(
-        name,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "Self"
-            | "static"
-            | "struct"
-            | "super"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-            | "abstract"
-            | "become"
-            | "box"
-            | "do"
-            | "final"
-            | "gen"
-            | "macro"
-            | "override"
-            | "priv"
-            | "try"
-            | "typeof"
-            | "unsized"
-            | "virtual"
-            | "yield"
-    )
 }
