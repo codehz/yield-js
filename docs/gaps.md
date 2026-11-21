@@ -64,3 +64,7 @@
 - 模块顶层及仅嵌套在其中的箭头函数不能使用 `new.target`。普通函数有自己的 `new.target`，嵌套箭头函数可捕获它。
 - 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。合法的 `export default function () {}` 不在此例之内，但该子集不支持默认导出。
 - 严格模式下不能使用 `with`，也不能删除裸标识符（包括加括号的标识符）。
+
+## 8. 真实源码兼容性探针
+
+`crates/harness/tests/e2e/react_compat.rs` 把真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，约 10 KB，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）送入编译器。当前结果：编译失败，首个诊断为 `unsupported syntax: default export`，位于第 7 行第 9121 列。测试按此钉住；若某天能编过或诊断变化，测试变红，届时把探针升级为真实执行用例并同步刷新本文与 `implemented.md`。npm 原始包是 CJS 入口（`require` / `module.exports`），不在严格 ESM 子集内，故探针选用 ESM 产物。

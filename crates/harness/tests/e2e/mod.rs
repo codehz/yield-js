@@ -6,6 +6,7 @@ mod liveness;
 mod objects;
 mod preload;
 mod promises;
+mod react_compat;
 mod resume;
 mod support;
 mod sync;
