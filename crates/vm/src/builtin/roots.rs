@@ -129,7 +129,7 @@ impl BuiltinRoots {
                     .own_property(PropertyKeyRef::String("prototype"))
                     .is_some_and(|prop| {
                         prop.attributes() == Attributes::FIXED
-                            && prop.into_owned() == Property::Data(Value::Object(prototype))
+                            && prop.into_owned() == Property::Data(Value::object(prototype))
                     });
                 if !valid {
                     let name = match spec.kind {
@@ -146,7 +146,7 @@ impl BuiltinRoots {
                         .own_property(PropertyKeyRef::String("constructor"))
                         .is_some_and(|prop| {
                             attributes.is_none_or(|attributes| prop.attributes() == attributes)
-                                && prop.into_owned() == Property::Data(Value::Object(id))
+                                && prop.into_owned() == Property::Data(Value::object(id))
                         });
                     if !valid {
                         return Err(VmError::InvalidSnapshot(format!(

@@ -14,7 +14,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vm::Vm;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -119,9 +119,9 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         Ok(match args.first() {
-            None => Invocation::Value(Value::Number(0.0)),
+            None => Invocation::Value(Value::number(0.0)),
             Some(arg) => match self.coerce_number(host, roots, arg)? {
-                Ok(number) => Invocation::Value(Value::Number(number)),
+                Ok(number) => Invocation::Value(Value::number(number)),
                 Err(error) => Invocation::Thrown(error),
             },
         })
@@ -135,7 +135,8 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let arg = args.first().unwrap_or(&Value::Undefined);
+        let undefined = Value::UNDEFINED;
+        let arg = args.first().unwrap_or(&undefined);
         let value = match method {
             "parseFloat" | "parseInt" => {
                 let text = match self.coerce_string(host, roots, arg)? {
@@ -159,16 +160,16 @@ impl Vm {
                     };
                     parse_int(text, radix)
                 };
-                Value::Number(number)
+                Value::number(number)
             }
-            "isFinite" | "isNaN" | "isInteger" | "isSafeInteger" => {
-                Value::Bool(matches!(arg, Value::Number(number) if match method {
+            "isFinite" | "isNaN" | "isInteger" | "isSafeInteger" => Value::boolean(
+                matches!(arg.view(), ValueRef::Number(number) if match method {
                     "isFinite" => number.is_finite(),
                     "isNaN" => number.is_nan(),
                     "isInteger" => number.fract() == 0.0,
                     _ => number.fract() == 0.0 && number.abs() <= MAX_SAFE_INTEGER,
-                }))
-            }
+                }),
+            ),
             _ => unreachable!("registered Number static"),
         };
         Ok(Invocation::Value(value))
@@ -184,9 +185,9 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let root_view = (receiver, args);
         let roots = &roots.with(&root_view);
-        let number = match receiver {
-            Value::Number(number) => Some(*number),
-            Value::Object(id) => match self.heap.get(*id)? {
+        let number = match receiver.view() {
+            ValueRef::Number(number) => Some(number),
+            ValueRef::Object(id) => match self.heap.get(id)? {
                 Object::Boxed {
                     primitive: BoxedPrimitive::Number(number),
                     ..
@@ -199,12 +200,13 @@ impl Vm {
             return self.throw_type_error("Number method called on incompatible receiver");
         };
         if method == "valueOf" {
-            return Ok(Invocation::Value(Value::Number(number)));
+            return Ok(Invocation::Value(Value::number(number)));
         }
-        let decimal = || ops::to_js_string(&Value::Number(number));
-        let string = |text| Ok(Invocation::Value(Value::String(text)));
-        let arg = args.first().unwrap_or(&Value::Undefined);
-        let omitted = matches!(arg, Value::Undefined);
+        let decimal = || ops::to_js_string(&Value::number(number));
+        let string = |text| Ok(Invocation::Value(Value::string(text)));
+        let undefined = Value::UNDEFINED;
+        let arg = args.first().unwrap_or(&undefined);
+        let omitted = matches!(arg.view(), ValueRef::Undefined);
         if method == "toLocaleString" || (method == "toPrecision" && omitted) {
             return string(decimal());
         }

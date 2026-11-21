@@ -10,7 +10,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
-use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
@@ -41,13 +41,13 @@ macro_rules! unwrap_script {
 
 impl Vm {
     fn construct_proxy(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
-        let Some(Value::Object(target)) = args.first() else {
+        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
             return self.throw_type_error("Proxy requires an object target");
         };
-        let Some(Value::Object(handler)) = args.get(1) else {
+        let Some(ValueRef::Object(handler)) = args.get(1).map(Value::view) else {
             return self.throw_type_error("Proxy requires an object handler");
         };
-        let base = self.heap.proxy_target(*target)?;
+        let base = self.heap.proxy_target(target)?;
         if !matches!(
             self.heap.get(base)?,
             Object::Plain(_) | Object::Array(_) | Object::Boxed { .. }
@@ -56,10 +56,10 @@ impl Vm {
                 "Proxy supports only plain object, array, and primitive wrapper targets",
             );
         }
-        Ok(Invocation::Value(Value::Object(self.heap.alloc(
+        Ok(Invocation::Value(Value::object(self.heap.alloc(
             Object::Proxy {
-                target: *target,
-                handler: *handler,
+                target,
+                handler,
                 object: PlainObject::new(None),
             },
         ))))
@@ -73,7 +73,7 @@ impl Vm {
         name: &str,
         args: Vec<Value>,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
-        let handler = Value::Object(handler);
+        let handler = Value::object(handler);
         let trap = self.read_property(
             host,
             &roots.with(&(&handler, &args)),
@@ -81,7 +81,11 @@ impl Vm {
             PropertyKeyRef::String(name),
         )?;
         match trap {
-            Invocation::Value(Value::Undefined | Value::Null) => Ok(Ok(None)),
+            Invocation::Value(value)
+                if matches!(value.view(), ValueRef::Undefined | ValueRef::Null) =>
+            {
+                Ok(Ok(None))
+            }
             Invocation::Value(method) => match self.invoke(host, roots, &method, args, &handler)? {
                 Invocation::Value(value) => Ok(Ok(Some(value))),
                 Invocation::Thrown(error) => Ok(Err(error)),
@@ -106,7 +110,7 @@ impl Vm {
             roots,
             handler,
             "get",
-            vec![Value::Object(target), key_value(key), receiver.clone()],
+            vec![Value::object(target), key_value(key), receiver.clone()],
         )?;
         let value = match result {
             Ok(None) => {
@@ -121,7 +125,7 @@ impl Vm {
             Ok(Some((property, attrs))) if !attrs.configurable => {
                 let valid = match property {
                     Property::Data(fixed) if !attrs.writable => ops::same_value(&fixed, &value),
-                    Property::Accessor { get: None, .. } => value == Value::Undefined,
+                    Property::Accessor { get: None, .. } => value == Value::UNDEFINED,
                     _ => true,
                 };
                 if !valid {
@@ -158,7 +162,7 @@ impl Vm {
             handler,
             "set",
             vec![
-                Value::Object(target),
+                Value::object(target),
                 key_value(key.borrowed()),
                 value.clone(),
                 receiver.clone(),
@@ -172,7 +176,7 @@ impl Vm {
                 return if strict {
                     self.throw_type_error("Proxy set trap rejected the write")
                 } else {
-                    Ok(Invocation::Value(Value::Bool(false)))
+                    Ok(Invocation::Value(Value::boolean(false)))
                 };
             }
             _ => {}
@@ -191,7 +195,7 @@ impl Vm {
             }
             _ => {}
         }
-        Ok(Invocation::Value(Value::Bool(true)))
+        Ok(Invocation::Value(Value::boolean(true)))
     }
 
     pub(crate) fn proxy_presence(
@@ -211,12 +215,12 @@ impl Vm {
             roots,
             handler,
             name,
-            vec![Value::Object(target), key_value(key)],
+            vec![Value::object(target), key_value(key)],
         )? {
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some(value)) => value.truthy(),
             Ok(None) if delete => {
-                return self.delete_property(host, roots, &Value::Object(target), &key_value(key));
+                return self.delete_property(host, roots, &Value::object(target), &key_value(key));
             }
             Ok(None) => return self.has_property_key(host, roots, target, key),
         };
@@ -232,7 +236,7 @@ impl Vm {
                 _ => {}
             }
         }
-        Ok(Invocation::Value(Value::Bool(flag)))
+        Ok(Invocation::Value(Value::boolean(flag)))
     }
 
     pub(crate) fn own_keys(
@@ -254,11 +258,11 @@ impl Vm {
             roots,
             handler,
             "ownKeys",
-            vec![Value::Object(target)]
+            vec![Value::object(target)]
         )) else {
             return self.own_keys(host, roots, target, include_metadata);
         };
-        if !matches!(result, Value::Object(_)) {
+        if !matches!(result.view(), ValueRef::Object(_)) {
             return Ok(Err(
                 self.type_error("Proxy ownKeys trap must return an object")?
             ));
@@ -272,14 +276,18 @@ impl Vm {
             };
         let mut keys = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
-        let iterable = if length == Value::Undefined {
+        let iterable = if length == Value::UNDEFINED {
             match self.read_property(
                 host,
                 roots,
                 &result,
                 PropertyKeyRef::Symbol(crate::heap::ITERATOR_SYMBOL),
             )? {
-                Invocation::Value(Value::Undefined | Value::Null) => None,
+                Invocation::Value(value)
+                    if matches!(value.view(), ValueRef::Undefined | ValueRef::Null) =>
+                {
+                    None
+                }
                 Invocation::Value(method) => Some(unwrap_script!(
                     self.get_iterator_from_method(host, roots, &result, &method)
                 )),
@@ -313,18 +321,20 @@ impl Vm {
                 index += 1;
                 entry
             };
-            let key = match entry {
-                Invocation::Value(Value::String(key)) => PropertyKey::String(key),
-                Invocation::Value(Value::Symbol(key)) => PropertyKey::Symbol(key),
+            let entry = match entry {
+                Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
-                Invocation::Value(_) => {
-                    let error =
-                        self.type_error("Proxy ownKeys entries must be strings or symbols")?;
-                    if let Some((iterator, _)) = &iterable {
-                        self.close_iterator(host, &roots.with(&error), iterator)?;
-                    }
-                    return Ok(Err(error));
+            };
+            let key = if matches!(entry.view(), ValueRef::String(_)) {
+                PropertyKey::String(entry.into_string().expect("ownKeys entry is a string"))
+            } else if let ValueRef::Symbol(key) = entry.view() {
+                PropertyKey::Symbol(key)
+            } else {
+                let error = self.type_error("Proxy ownKeys entries must be strings or symbols")?;
+                if let Some((iterator, _)) = &iterable {
+                    self.close_iterator(host, &roots.with(&error), iterator)?;
                 }
+                return Ok(Err(error));
             };
             if !seen.insert(key.clone()) {
                 if let Some((iterator, _)) = &iterable {
@@ -414,11 +424,11 @@ impl Vm {
             roots,
             handler,
             "getOwnPropertyDescriptor",
-            vec![Value::Object(target), key_value(key)]
+            vec![Value::object(target), key_value(key)]
         )) else {
             return self.own_descriptor(host, roots, target, key);
         };
-        if !matches!(result, Value::Undefined | Value::Object(_)) {
+        if !matches!(result.view(), ValueRef::Undefined | ValueRef::Object(_)) {
             return Ok(Err(self.type_error(
                 "Proxy descriptor trap must return an object or undefined",
             )?));
@@ -434,7 +444,7 @@ impl Vm {
                 "Proxy descriptor trap reported an incompatible descriptor",
             )?))
         };
-        if result == Value::Undefined {
+        if result == Value::UNDEFINED {
             return if current.is_some_and(|(_, attrs)| !attrs.configurable || !extensible) {
                 invalid(self)
             } else {
@@ -565,8 +575,8 @@ impl Vm {
 
 fn key_value(key: PropertyKeyRef<'_>) -> Value {
     match key {
-        PropertyKeyRef::String(key) => Value::String(key.into()),
-        PropertyKeyRef::JsString(key) => Value::String(key.clone()),
-        PropertyKeyRef::Symbol(key) => Value::Symbol(key),
+        PropertyKeyRef::String(key) => Value::string(key.into()),
+        PropertyKeyRef::JsString(key) => Value::string(key.clone()),
+        PropertyKeyRef::Symbol(key) => Value::symbol(key),
     }
 }

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::heap::{Attributes, Object, Property};
-use crate::value::{JsString, ObjectId, PropertyKey, SymbolId, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
 
 use super::schema::*;
@@ -26,23 +26,23 @@ pub struct JsValue {
 
 impl JsValue {
     pub fn undefined() -> Self {
-        Self::constant(Value::Undefined)
+        Self::constant(Value::UNDEFINED)
     }
 
     pub fn null() -> Self {
-        Self::constant(Value::Null)
+        Self::constant(Value::NULL)
     }
 
     pub fn boolean(value: bool) -> Self {
-        Self::constant(Value::Bool(value))
+        Self::constant(Value::boolean(value))
     }
 
     pub fn number(value: f64) -> Self {
-        Self::constant(Value::Number(value))
+        Self::constant(Value::number(value))
     }
 
     pub fn string(value: impl Into<JsString>) -> Self {
-        Self::constant(Value::String(value.into()))
+        Self::constant(Value::string(value.into()))
     }
 
     fn constant(value: Value) -> Self {
@@ -60,38 +60,38 @@ impl JsValue {
     }
 
     pub fn is_undefined(&self) -> bool {
-        matches!(self.value, Value::Undefined)
+        matches!(self.value.view(), ValueRef::Undefined)
     }
 
     pub fn is_null(&self) -> bool {
-        matches!(self.value, Value::Null)
+        matches!(self.value.view(), ValueRef::Null)
     }
 
     pub fn is_object(&self) -> bool {
-        matches!(self.value, Value::Object(_))
+        matches!(self.value.view(), ValueRef::Object(_))
     }
 
     pub fn is_symbol(&self) -> bool {
-        matches!(self.value, Value::Symbol(_))
+        matches!(self.value.view(), ValueRef::Symbol(_))
     }
 
     pub fn as_bool(&self) -> Option<bool> {
-        match self.value {
-            Value::Bool(value) => Some(value),
+        match self.value.view() {
+            ValueRef::Bool(value) => Some(value),
             _ => None,
         }
     }
 
     pub fn as_number(&self) -> Option<f64> {
-        match self.value {
-            Value::Number(value) => Some(value),
+        match self.value.view() {
+            ValueRef::Number(value) => Some(value),
             _ => None,
         }
     }
 
     pub fn as_string(&self) -> Option<&JsString> {
-        match &self.value {
-            Value::String(value) => Some(value),
+        match self.value.view() {
+            ValueRef::String(value) => Some(value),
             _ => None,
         }
     }
@@ -122,14 +122,14 @@ impl PartialEq for JsValue {
 
 impl fmt::Display for JsValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.value {
-            Value::Undefined => formatter.write_str("undefined"),
-            Value::Null => formatter.write_str("null"),
-            Value::Bool(value) => write!(formatter, "{value}"),
-            Value::Number(value) => write!(formatter, "{value}"),
-            Value::String(value) => write!(formatter, "{value:?}"),
-            Value::Symbol(id) => write!(formatter, "symbol({id})"),
-            Value::Object(id) => write!(formatter, "object({id})"),
+        match self.value.view() {
+            ValueRef::Undefined => formatter.write_str("undefined"),
+            ValueRef::Null => formatter.write_str("null"),
+            ValueRef::Bool(value) => write!(formatter, "{value}"),
+            ValueRef::Number(value) => write!(formatter, "{value}"),
+            ValueRef::String(value) => write!(formatter, "{value:?}"),
+            ValueRef::Symbol(id) => write!(formatter, "symbol({id})"),
+            ValueRef::Object(id) => write!(formatter, "object({id})"),
         }
     }
 }
@@ -158,7 +158,7 @@ impl<T: HostClass> Instance<T> {
     }
 
     pub fn value(&self, cx: &CallCx<'_>) -> JsValue {
-        cx.js_value(Value::Object(self.id))
+        cx.js_value(Value::object(self.id))
     }
 
     pub fn identity(&self) -> u64 {
@@ -356,7 +356,7 @@ impl<'a> CallCx<'a> {
 
     pub fn cancel_task(&mut self, handle: &JsValue) -> JsResult<()> {
         self.check_value(handle)?;
-        if let Value::Number(id) = handle.value
+        if let Some(id) = handle.as_number()
             && id > 0.0
             && id < crate::runtime::HOST_TASK_ID_LIMIT as f64
             && id.fract() == 0.0
@@ -388,7 +388,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn throw_string(&self, message: impl Into<String>) -> JsError {
-        JsError::Throw(self.js_value(Value::String(message.into().into())))
+        JsError::Throw(self.js_value(Value::string(message.into().into())))
     }
 
     pub fn type_error(&mut self, message: impl Into<String>) -> JsError {
@@ -575,7 +575,7 @@ impl<'a> CallCx<'a> {
             .class_slots(class)
             .iter()
             .map(|slot| match slot.kind {
-                SlotKind::Js => crate::runtime::HostSlot::Js(Value::Undefined),
+                SlotKind::Js => crate::runtime::HostSlot::Js(Value::UNDEFINED),
                 SlotKind::JsList => crate::runtime::HostSlot::JsList(Vec::new()),
             });
         let slots = slots.collect();
@@ -591,7 +591,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn this<T: HostClass>(&mut self) -> JsResult<This<T>> {
-        let Value::Object(id) = self.this.value else {
+        let ValueRef::Object(id) = self.this.value.view() else {
             return Err(self.type_error(format!("{} called on incompatible receiver", T::TAG)));
         };
         let Some(class) = self.bindings.class_by_tag(T::TAG) else {
@@ -648,7 +648,7 @@ impl<'a> CallCx<'a> {
                 },
             )
             .map_err(JsError::Fault)?;
-        Ok(self.js_value(Value::Object(promise)))
+        Ok(self.js_value(Value::object(promise)))
     }
 
     pub(crate) fn js_value(&self, value: Value) -> JsValue {
@@ -862,14 +862,14 @@ pub struct Inspect<'a> {
 
 impl<'a> Inspect<'a> {
     pub fn kind(&self) -> InspectKind {
-        match self.value.value {
-            Value::Undefined => InspectKind::Undefined,
-            Value::Null => InspectKind::Null,
-            Value::Bool(_) => InspectKind::Bool,
-            Value::Number(_) => InspectKind::Number,
-            Value::String(_) => InspectKind::String,
-            Value::Symbol(_) => InspectKind::Symbol,
-            Value::Object(_) => InspectKind::Object,
+        match self.value.value.view() {
+            ValueRef::Undefined => InspectKind::Undefined,
+            ValueRef::Null => InspectKind::Null,
+            ValueRef::Bool(_) => InspectKind::Bool,
+            ValueRef::Number(_) => InspectKind::Number,
+            ValueRef::String(_) => InspectKind::String,
+            ValueRef::Symbol(_) => InspectKind::Symbol,
+            ValueRef::Object(_) => InspectKind::Object,
         }
     }
 
@@ -878,14 +878,14 @@ impl<'a> Inspect<'a> {
     }
 
     pub fn identity(&self) -> Option<u64> {
-        match self.value.value {
-            Value::Object(id) | Value::Symbol(id) => Some(u64::from(id)),
+        match self.value.value.view() {
+            ValueRef::Object(id) | ValueRef::Symbol(id) => Some(u64::from(id)),
             _ => None,
         }
     }
 
     pub fn array_length(&self) -> Option<usize> {
-        let Value::Object(id) = self.value.value else {
+        let ValueRef::Object(id) = self.value.value.view() else {
             return None;
         };
         match self.vm.heap.get(id).ok()? {
@@ -925,14 +925,14 @@ impl<'a> Inspect<'a> {
     }
 
     fn object(&self) -> Option<&Object> {
-        let Value::Object(id) = self.value.value else {
+        let ValueRef::Object(id) = self.value.value.view() else {
             return None;
         };
         self.vm.heap.get(id).ok()
     }
 
     pub fn own_keys(&self) -> Vec<InspectKey> {
-        let Value::Object(id) = self.value.value else {
+        let ValueRef::Object(id) = self.value.value.view() else {
             return Vec::new();
         };
         let Ok(object) = self.vm.heap.get(id) else {
@@ -956,7 +956,7 @@ impl<'a> Inspect<'a> {
     }
 
     pub fn get(&self, key: &InspectKey) -> Option<InspectValue> {
-        let Value::Object(id) = self.value.value else {
+        let ValueRef::Object(id) = self.value.value.view() else {
             return None;
         };
         let key = match key {

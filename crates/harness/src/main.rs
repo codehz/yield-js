@@ -288,13 +288,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn render_value(value: &yield_vm::Value) -> String {
-    match value {
-        yield_vm::Value::Undefined => "undefined".to_owned(),
-        yield_vm::Value::Null => "null".to_owned(),
-        yield_vm::Value::Bool(value) => value.to_string(),
-        yield_vm::Value::Number(value) => value.to_string(),
-        yield_vm::Value::String(value) => format!("{value:?}"),
-        yield_vm::Value::Symbol(_) => "symbol".to_owned(),
-        yield_vm::Value::Object(_) => "object".to_owned(),
+    match value.view() {
+        yield_vm::ValueRef::Undefined => "undefined".to_owned(),
+        yield_vm::ValueRef::Null => "null".to_owned(),
+        yield_vm::ValueRef::Bool(value) => value.to_string(),
+        yield_vm::ValueRef::Number(value) => value.to_string(),
+        yield_vm::ValueRef::String(value) => format!("{value:?}"),
+        yield_vm::ValueRef::Symbol(_) => "symbol".to_owned(),
+        yield_vm::ValueRef::Object(_) => "object".to_owned(),
     }
 }

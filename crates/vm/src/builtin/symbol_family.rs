@@ -67,6 +67,6 @@ fn install(vm: &mut Vm, _: &Value) {
         ("split", SPLIT_SYMBOL),
         ("hasInstance", HAS_INSTANCE_SYMBOL),
     ] {
-        define_builtin_data(vm, constructor, name, Value::Symbol(id), Attributes::FIXED);
+        define_builtin_data(vm, constructor, name, Value::symbol(id), Attributes::FIXED);
     }
 }

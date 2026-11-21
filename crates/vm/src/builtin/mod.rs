@@ -32,14 +32,14 @@ fn link_constructor(vm: &mut Vm, constructor: ObjectId, prototype: ObjectId) {
         vm,
         constructor,
         "prototype",
-        Value::Object(prototype),
+        Value::object(prototype),
         Attributes::FIXED,
     );
     define_builtin_data(
         vm,
         prototype,
         "constructor",
-        Value::Object(constructor),
+        Value::object(constructor),
         Attributes::METHOD,
     );
 }

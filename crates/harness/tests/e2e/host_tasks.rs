@@ -138,7 +138,8 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     )
     .unwrap();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
-    let Value::Number(handle) = vm.start(&mut host, "run", vec![]).unwrap() else {
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let yield_vm::ValueRef::Number(handle) = result.view() else {
         panic!("expected numeric handle");
     };
     let old = host.labels.token("wait:task").unwrap();
@@ -194,14 +195,14 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         ));
         vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
             .unwrap();
-        assert_eq!(vm.get_export("result").unwrap(), Value::Number(0.0));
+        assert_eq!(vm.get_export("result").unwrap(), Value::number(0.0));
         if cancel {
             vm.start(&mut host, "clear", vec![]).unwrap();
         }
         vm.run_until_idle(&mut host).unwrap();
         assert_eq!(
             vm.get_export("result").unwrap(),
-            Value::Number(if cancel { 0.0 } else { 42.0 })
+            Value::number(if cancel { 0.0 } else { 42.0 })
         );
         assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     }
@@ -454,24 +455,27 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(
         vm.start(&mut host, "immediate", vec![JsValue::number(2.0)])
             .unwrap(),
-        Value::Number(-1.0)
+        Value::number(-1.0)
     );
-    assert!(
-        matches!(vm.start(&mut host, "immediate", vec![JsValue::number(1.0)]), Err(VmError::Thrown(Value::String(message))) if message == "prefix failed")
-    );
-    assert!(
-        matches!(vm.start(&mut host, "immediate", vec![JsValue::number(0.0)]), Ok(Value::Number(id)) if id > 0.0)
-    );
+    let failed = vm.start(&mut host, "immediate", vec![JsValue::number(1.0)]);
+    assert!(matches!(
+        failed,
+        Err(VmError::Thrown(value)) if value == Value::string("prefix failed".into())
+    ));
+    let handle = vm
+        .start(&mut host, "immediate", vec![JsValue::number(0.0)])
+        .unwrap();
+    assert!(matches!(handle.view(), yield_vm::ValueRef::Number(id) if id > 0.0));
     assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     assert_eq!(
         vm.start(&mut host, "sync", vec![JsValue::number(0.0)])
             .unwrap(),
-        Value::Number(99.0)
+        Value::number(99.0)
     );
     assert_eq!(
         vm.start(&mut host, "sync", vec![JsValue::number(1.0)])
             .unwrap(),
-        Value::Number(10.0)
+        Value::number(10.0)
     );
     let handle = vm.start(&mut host, "run", vec![]).unwrap();
     assert_eq!(host.labels.pending_labels(), ["wait:one"]);
@@ -483,14 +487,14 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     vm.complete_operation(first, Completion::Fulfilled(JsValue::number(5.0)))
         .unwrap();
     vm.run_until_idle(&mut host).unwrap();
-    assert_eq!(vm.get_export("result").unwrap(), Value::Number(12.0));
+    assert_eq!(vm.get_export("result").unwrap(), Value::number(12.0));
     assert_eq!(host.labels.pending_labels(), ["wait:again"]);
     assert!(matches!(
         vm.complete_operation(first, Completion::Fulfilled(JsValue::undefined())),
         Err(VmError::UnknownOperation(_))
     ));
     let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
-    assert_eq!(Value::Number(snapshot.host_tasks[0].id as f64), handle);
+    assert_eq!(Value::number(snapshot.host_tasks[0].id as f64), handle);
     for cancel in [true, false] {
         let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
         vm.start_recovered_operations().unwrap();
@@ -509,7 +513,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         vm.run_until_idle(&mut host).unwrap();
         assert_eq!(
             vm.get_export("result").unwrap(),
-            Value::Number(if cancel { 12.0 } else { 32.0 })
+            Value::number(if cancel { 12.0 } else { 32.0 })
         );
     }
     assert_eq!(counters.count("prefix"), 1);
@@ -569,11 +573,11 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     let [first_task] = first_snapshot.host_tasks.as_slice() else {
         panic!("expected one task")
     };
-    assert_eq!(Value::Number(first_task.id as f64), handle);
+    assert_eq!(Value::number(first_task.id as f64), handle);
     vm.complete_operation(first, Completion::Fulfilled(JsValue::string("first")))
         .unwrap();
     vm.run_until_idle(&mut host).unwrap();
-    assert_eq!(vm.get_export("observed").unwrap(), Value::String("".into()));
+    assert_eq!(vm.get_export("observed").unwrap(), Value::string("".into()));
     let second = host.labels.token("wait:repeat").unwrap();
     let second_snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     let [second_task] = second_snapshot.host_tasks.as_slice() else {
@@ -601,7 +605,7 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     vm.run_until_idle(&mut host).unwrap();
     assert_eq!(
         vm.get_export("observed").unwrap(),
-        Value::String("first;".into())
+        Value::string("first;".into())
     );
     let third = host.labels.token("wait:repeat").unwrap();
     vm.complete_operation(third, Completion::Fulfilled(JsValue::string("stop")))
@@ -609,7 +613,7 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     vm.run_until_idle(&mut host).unwrap();
     assert_eq!(
         vm.get_export("observed").unwrap(),
-        Value::String("first;second;".into())
+        Value::string("first;second;".into())
     );
     assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     assert!(host.labels.pending_labels().is_empty());
@@ -647,18 +651,18 @@ fn while_evaluates_once_per_test_and_while_let_preserves_both_bindings() {
     assert_eq!(
         vm.start(&mut host, "run", vec![JsValue::number(0.0)])
             .unwrap(),
-        Value::Number(0.0)
+        Value::number(0.0)
     );
     assert_eq!(counters.count("while-check"), 1);
     assert_eq!(
         vm.start(&mut host, "run", vec![JsValue::number(5.0)])
             .unwrap(),
-        Value::Number(5.0)
+        Value::number(5.0)
     );
     assert_eq!(counters.count("while-check") - 1, 6);
     assert_eq!(
         vm.start(&mut host, "runLet", vec![]).unwrap(),
-        Value::Number(33.0)
+        Value::number(33.0)
     );
     assert_eq!(counters.count("while-let-check"), 3);
 }
@@ -679,23 +683,23 @@ fn labeled_jumps_skip_the_tail_and_native_for_can_exit_the_graph_loop() {
     let mut vm = Vm::new(build, &mut host).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::Number(2.0)
+        Value::number(2.0)
     );
     assert_eq!(
         vm.start(&mut host, "fromFor", vec![]).unwrap(),
-        Value::Number(1.0)
+        Value::number(1.0)
     );
     assert_eq!(counters.count("for-break-value"), 1);
     assert_eq!(counters.count("after-for"), 0);
     assert_eq!(counters.count("after-inner"), 0);
     assert_eq!(
         vm.start(&mut host, "selector", vec![]).unwrap(),
-        Value::Number(3.0)
+        Value::number(3.0)
     );
     assert_eq!(counters.count("after-guard"), 1);
     assert_eq!(
         vm.start(&mut host, "many", vec![]).unwrap(),
-        Value::Number(2048.0)
+        Value::number(2048.0)
     );
     assert_eq!(counters.count("while-check"), 2049);
 }

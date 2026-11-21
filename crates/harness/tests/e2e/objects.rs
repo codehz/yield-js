@@ -31,7 +31,7 @@ fn restore_rejects_private_stamp_with_non_class_brand() {
     suspended.complete("wait:private", Completion::Fulfilled(number(0.0)));
     assert_eq!(
         suspended.state(),
-        PromiseState::Fulfilled(Value::Number(4.0))
+        PromiseState::Fulfilled(Value::number(4.0))
     );
 }
 
@@ -68,7 +68,7 @@ export async function run() {
     suspended.complete("wait:home", Completion::Fulfilled(number(0.0)));
     assert_eq!(
         suspended.state(),
-        PromiseState::Fulfilled(Value::Number(3.0))
+        PromiseState::Fulfilled(Value::number(3.0))
     );
 }
 
@@ -138,7 +138,7 @@ export async function run() {
     );
     let seed = s.host.count("seed");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(7.0)));
     assert_eq!(count_delta(s.host.count("seed"), seed), 1);
 }
 
@@ -197,7 +197,7 @@ export async function run() {
     );
     s.restore(json_round_trip(&snapshot)).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(2.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(23.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(23.0)));
 }
 
 #[test]
@@ -229,7 +229,7 @@ export async function run() {
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(1.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(11.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(11.0)));
 }
 
 #[test]
@@ -258,7 +258,10 @@ export async function run() {
         .iter()
         .find_map(|record| match &record.object {
             Object::Plain(plain) => match plain.props.get(&JsString::from("prototype")) {
-                Some(Property::Data(Value::Object(peer))) => Some((record.id, *peer)),
+                Some(Property::Data(value)) => match value.view() {
+                    yield_vm::ValueRef::Object(peer) => Some((record.id, peer)),
+                    _ => None,
+                },
                 _ => None,
             },
             _ => None,
@@ -318,7 +321,7 @@ export async function run() {
 
     s.restore(json_round_trip(&snapshot)).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(1.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::boolean(true)));
 }
 
 #[test]
@@ -359,7 +362,7 @@ export async function run() {
 
     s.restore(json_round_trip(&snapshot)).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::boolean(true)));
 }
 
 #[test]
@@ -397,7 +400,7 @@ function demo() {
 
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(JsValue::number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(4.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(4.0)));
 }
 
 #[test]
@@ -441,7 +444,7 @@ export async function run() {
         Some(&bound_record)
     );
     s.complete("wait:a", Completion::Fulfilled(JsValue::number(2.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(14.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(14.0)));
 }
 
 #[test]
@@ -621,12 +624,12 @@ fn restore_rejects_corrupt_collection_records() {
         let changed = corrupt.objects.iter_mut().any(|record| {
             match (fault, &mut record.object) {
                 (0, Object::Map { entries, .. }) => {
-                    entries[0].as_mut().unwrap().0 = Value::Object(u32::MAX)
+                    entries[0].as_mut().unwrap().0 = Value::object(u32::MAX)
                 }
                 (1, Object::Map { entries, .. }) => {
-                    entries[0].as_mut().unwrap().1 = Value::Symbol(u32::MAX)
+                    entries[0].as_mut().unwrap().1 = Value::symbol(u32::MAX)
                 }
-                (2, Object::Set { elements, .. }) => elements[0] = Some(Value::Object(u32::MAX)),
+                (2, Object::Set { elements, .. }) => elements[0] = Some(Value::object(u32::MAX)),
                 (3, Object::CollectionIterator { target, .. }) => *target = Some(set_id),
                 (4, Object::CollectionIterator { target, .. }) => *target = Some(u32::MAX),
                 (5, Object::CollectionIterator { next_index, .. }) => *next_index = usize::MAX,
@@ -715,7 +718,7 @@ export async function run() {
         })
         .expect("reachable WeakMap");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries.values().next(), Some(&Value::Number(7.0)));
+    assert_eq!(entries.values().next(), Some(&Value::number(7.0)));
     assert!(
         snapshot
             .host_instances
@@ -725,7 +728,7 @@ export async function run() {
     s.restore(snapshot)
         .expect("weak-only native is not rebound");
     s.complete("wait:a", Completion::Fulfilled(JsValue::undefined()));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(7.0)));
 }
 
 #[test]
@@ -736,9 +739,9 @@ fn restore_rejects_dangling_weakmap_entries() {
     );
     let snapshot = s.snapshot();
     for (key, value) in [
-        (Some(WeakKey::Object(u32::MAX)), Value::Number(1.0)),
-        (None, Value::Object(u32::MAX)),
-        (None, Value::Symbol(u32::MAX)),
+        (Some(WeakKey::Object(u32::MAX)), Value::number(1.0)),
+        (None, Value::object(u32::MAX)),
+        (None, Value::symbol(u32::MAX)),
     ] {
         let mut corrupt = snapshot.clone();
         let entries = corrupt

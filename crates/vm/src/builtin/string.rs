@@ -1,5 +1,7 @@
 //! UTF-16 string operations.
 
+static UNDEFINED: Value = Value::UNDEFINED;
+
 use crate::JsString;
 use crate::builtin::globals::Owner;
 use crate::builtin::regexp_runtime::RegExpMethod;
@@ -17,7 +19,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = 16 * 1024 * 1024;
@@ -154,7 +156,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     STRING_ROOTS,
     &[STRING_INTRINSICS, members::INTRINSICS],
     Some(|vm, identity| {
-        let Value::Object(identity) = *identity else {
+        let ValueRef::Object(identity) = identity.view() else {
             unreachable!("iterator identity is a function")
         };
         install(vm, identity);
@@ -205,7 +207,7 @@ impl Vm {
             .define_data(
                 prototype,
                 PropertyKey::Symbol(ITERATOR_SYMBOL),
-                Value::Object(iterator),
+                Value::object(iterator),
                 Attributes::METHOD,
             )
             .expect("String.prototype stores Symbol.iterator");
@@ -213,7 +215,7 @@ impl Vm {
     }
 
     fn init_string_iterator_prototype(&mut self, prototype: ObjectId, identity: ObjectId) {
-        let next = Value::Object(self.alloc_intrinsic(ITERATOR_NEXT));
+        let next = Value::object(self.alloc_intrinsic(ITERATOR_NEXT));
         self.heap
             .define_data(prototype, "next", next, Attributes::METHOD)
             .expect("iterator prototype stores next");
@@ -221,7 +223,7 @@ impl Vm {
             .define_data(
                 prototype,
                 PropertyKey::Symbol(ITERATOR_SYMBOL),
-                Value::Object(identity),
+                Value::object(identity),
                 Attributes::METHOD,
             )
             .expect("iterator prototype stores Symbol.iterator");
@@ -234,7 +236,7 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&receiver);
-        if matches!(receiver, Value::Null | Value::Undefined) {
+        if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
             return self.throw_type_error("String[Symbol.iterator] requires a non-null receiver");
         }
         let string = match self.coerce_string(host, roots, receiver)? {
@@ -246,12 +248,12 @@ impl Vm {
             string,
             position: 0,
         });
-        Ok(Invocation::Value(Value::Object(iterator)))
+        Ok(Invocation::Value(Value::object(iterator)))
     }
 
     fn string_iterator_next(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
         let invalid_receiver = "StringIterator.next requires a string iterator";
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(invalid_receiver);
         };
         let Object::StringIterator {
@@ -261,7 +263,7 @@ impl Vm {
             return self.throw_type_error(invalid_receiver);
         };
         let Some(first) = utf16_unit(string, *position) else {
-            return self.iterator_result(Value::Undefined, true);
+            return self.iterator_result(Value::UNDEFINED, true);
         };
         let width = if (0xd800..=0xdbff).contains(&first)
             && matches!(utf16_unit(string, *position + 1), Some(0xdc00..=0xdfff))
@@ -277,7 +279,7 @@ impl Vm {
             *string = JsString::default();
             *position = 0;
         }
-        self.iterator_result(Value::String(value), false)
+        self.iterator_result(Value::string(value), false)
     }
 
     fn call_string(
@@ -288,7 +290,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(value) = args.first() else {
-            return Ok(Invocation::Value(Value::String(JsString::default())));
+            return Ok(Invocation::Value(Value::string(JsString::default())));
         };
         self.string_value(host, roots, value)
     }
@@ -306,7 +308,7 @@ impl Vm {
         if matches!(method, StringMethod::ToString | StringMethod::ValueOf) {
             return self.string_primitive(receiver);
         }
-        if matches!(receiver, Value::Undefined | Value::Null) {
+        if matches!(receiver.view(), ValueRef::Undefined | ValueRef::Null) {
             return self.throw_type_error("String method requires a non-null receiver");
         }
         if matches!(
@@ -374,9 +376,9 @@ impl Vm {
     }
 
     fn string_primitive(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let text = match receiver {
-            Value::String(text) => Some(text),
-            Value::Object(id) => match self.heap.get(*id)? {
+        let text = match receiver.view() {
+            ValueRef::String(text) => Some(text),
+            ValueRef::Object(id) => match self.heap.get(id)? {
                 Object::Boxed {
                     primitive: BoxedPrimitive::String(text),
                     ..
@@ -386,7 +388,7 @@ impl Vm {
             _ => None,
         };
         match text {
-            Some(text) => Ok(Invocation::Value(Value::String(text.clone()))),
+            Some(text) => Ok(Invocation::Value(Value::string(text.clone()))),
             None => self.throw_type_error("String method called on incompatible receiver"),
         }
     }
@@ -402,7 +404,7 @@ impl Vm {
             Ok(index) => index.and_then(|index| utf16_unit(text, index)),
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(Invocation::Value(Value::String(
+        Ok(Invocation::Value(Value::string(
             unit.map(utf16_unit_string).unwrap_or_default(),
         )))
     }
@@ -419,7 +421,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let code = index.and_then(|index| utf16_unit(text, index));
-        Ok(Invocation::Value(Value::Number(
+        Ok(Invocation::Value(Value::number(
             code.map_or(f64::NAN, f64::from),
         )))
     }
@@ -437,8 +439,8 @@ impl Vm {
         };
         Ok(Invocation::Value(
             match index.and_then(|index| code_point_at(text, index)) {
-                Some(point) => Value::Number(f64::from(point)),
-                None => Value::Undefined,
+                Some(point) => Value::number(f64::from(point)),
+                None => Value::UNDEFINED,
             },
         ))
     }
@@ -456,8 +458,8 @@ impl Vm {
         };
         Ok(Invocation::Value(
             match index.and_then(|index| utf16_unit(text, index)) {
-                Some(unit) => Value::String(utf16_unit_string(unit)),
-                None => Value::Undefined,
+                Some(unit) => Value::string(utf16_unit_string(unit)),
+                None => Value::UNDEFINED,
             },
         ))
     }
@@ -477,7 +479,7 @@ impl Vm {
         };
         let length = utf16_len(text);
         let start = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.integer_index(host, roots, value, last)? {
                     Ok(value) => value,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -491,7 +493,7 @@ impl Vm {
         } else {
             find_first(text, &needle, start, length)
         };
-        Ok(Invocation::Value(Value::Number(position)))
+        Ok(Invocation::Value(Value::number(position)))
     }
 
     fn string_includes(
@@ -510,7 +512,7 @@ impl Vm {
             Ok(start) => start,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        Ok(Invocation::Value(Value::Bool(
+        Ok(Invocation::Value(Value::boolean(
             find_first(text, &needle, start as f64, utf16_len(text)) >= 0.0,
         )))
     }
@@ -533,7 +535,7 @@ impl Vm {
             length
         } else {
             match args.get(1) {
-                Some(value) if !matches!(value, Value::Undefined) => {
+                Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                     match self.clamp_index(host, roots, value, length)? {
                         Ok(end) => end,
                         Err(error) => return Ok(Invocation::Thrown(error)),
@@ -551,7 +553,7 @@ impl Vm {
         } else {
             search.unit_len() <= end && matches_at(text, &search, end - search.unit_len())
         };
-        Ok(Invocation::Value(Value::Bool(matched)))
+        Ok(Invocation::Value(Value::boolean(matched)))
     }
 
     fn string_slice(
@@ -575,7 +577,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let end = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.integer_index(host, roots, value, false)? {
                     Ok(end) => clamp(end),
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -583,7 +585,7 @@ impl Vm {
             }
             _ => length as usize,
         };
-        Ok(Invocation::Value(Value::String(slice_units(
+        Ok(Invocation::Value(Value::string(slice_units(
             text,
             start,
             end.max(start),
@@ -604,7 +606,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let end = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.integer_index(host, roots, value, false)? {
                     Ok(end) => end.clamp(0.0, length) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -617,7 +619,7 @@ impl Vm {
         } else {
             (end, start)
         };
-        Ok(Invocation::Value(Value::String(slice_units(
+        Ok(Invocation::Value(Value::string(slice_units(
             text, start, end,
         ))))
     }
@@ -631,7 +633,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let limit = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.coerce_number(host, roots, value)? {
                     Ok(number) => crate::ops::number_to_uint32(number) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -643,8 +645,11 @@ impl Vm {
         if limit == 0 {
             return self.array_result(parts);
         }
-        match args.first() {
-            None | Some(Value::Undefined) => parts.push(Value::String(text.to_owned())),
+        match args
+            .first()
+            .filter(|value| !matches!(value.view(), ValueRef::Undefined))
+        {
+            None => parts.push(Value::string(text.to_owned())),
             Some(separator) => {
                 let separator = match self.coerce_string(host, roots, separator)? {
                     Ok(separator) => separator,
@@ -654,16 +659,16 @@ impl Vm {
                     parts.extend(
                         text.units()
                             .take(limit)
-                            .map(|unit| Value::String(utf16_unit_string(unit))),
+                            .map(|unit| Value::string(utf16_unit_string(unit))),
                     );
                 } else {
                     let mut cursor = 0;
                     while parts.len() < limit {
                         if let Some(found) = find_from(text, &separator, cursor) {
-                            parts.push(Value::String(slice_units(text, cursor, found)));
+                            parts.push(Value::string(slice_units(text, cursor, found)));
                             cursor = found + utf16_len(&separator);
                         } else {
-                            parts.push(Value::String(slice_units(text, cursor, utf16_len(text))));
+                            parts.push(Value::string(slice_units(text, cursor, utf16_len(text))));
                             break;
                         }
                     }
@@ -708,13 +713,13 @@ impl Vm {
             for part in &parts {
                 out.extend(part.units().map(|unit| unit as u8));
             }
-            Ok(Invocation::Value(Value::String(JsString::from_latin1(out))))
+            Ok(Invocation::Value(Value::string(JsString::from_latin1(out))))
         } else {
             let mut out = Vec::with_capacity(unit_len);
             for part in &parts {
                 out.extend(part.units());
             }
-            Ok(Invocation::Value(Value::String(JsString::from_wide(out))))
+            Ok(Invocation::Value(Value::string(JsString::from_wide(out))))
         }
     }
 
@@ -734,7 +739,7 @@ impl Vm {
         }
         let count = count as usize;
         if count == 0 || text.is_empty() {
-            return Ok(Invocation::Value(Value::String(JsString::default())));
+            return Ok(Invocation::Value(Value::string(JsString::default())));
         }
         let first = text.len();
         let extra = first - pair_savings(text, text);
@@ -746,13 +751,13 @@ impl Vm {
             for _ in 0..count {
                 out.extend(text.units().map(|unit| unit as u8));
             }
-            Ok(Invocation::Value(Value::String(JsString::from_latin1(out))))
+            Ok(Invocation::Value(Value::string(JsString::from_latin1(out))))
         } else {
             let mut out = Vec::with_capacity(text.unit_len() * count);
             for _ in 0..count {
                 out.extend(text.units());
             }
-            Ok(Invocation::Value(Value::String(JsString::from_wide(out))))
+            Ok(Invocation::Value(Value::string(JsString::from_wide(out))))
         }
     }
 
@@ -770,7 +775,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let fill = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.coerce_string(host, roots, value)? {
                     Ok(fill) => fill,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -780,7 +785,7 @@ impl Vm {
         };
         let length = utf16_len(text);
         if target <= length || fill.is_empty() {
-            return Ok(Invocation::Value(Value::String(text.to_owned())));
+            return Ok(Invocation::Value(Value::string(text.to_owned())));
         }
         let pad_len = target - length;
         if target > MAX_LENGTH {
@@ -804,7 +809,7 @@ impl Vm {
             if out.len() > MAX_LENGTH {
                 return self.range_error("Invalid string length");
             }
-            Ok(Invocation::Value(Value::String(out)))
+            Ok(Invocation::Value(Value::string(out)))
         } else {
             let mut out = Vec::with_capacity(target);
             if !start {
@@ -821,7 +826,7 @@ impl Vm {
             if out.len() > MAX_LENGTH {
                 return self.range_error("Invalid string length");
             }
-            Ok(Invocation::Value(Value::String(out)))
+            Ok(Invocation::Value(Value::string(out)))
         }
     }
 
@@ -838,7 +843,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let Some(position) = find_from(text, &search, 0) else {
-            return Ok(Invocation::Value(Value::String(text.to_owned())));
+            return Ok(Invocation::Value(Value::string(text.to_owned())));
         };
         let matched = search;
         let end = position + utf16_len(&matched);
@@ -849,11 +854,11 @@ impl Vm {
                     roots,
                     value,
                     vec![
-                        Value::String(matched),
-                        Value::Number(position as f64),
-                        Value::String(text.to_owned()),
+                        Value::string(matched),
+                        Value::number(position as f64),
+                        Value::string(text.to_owned()),
                     ],
-                    &Value::Undefined,
+                    &Value::UNDEFINED,
                 )? {
                     Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {
                         Ok(value) => value,
@@ -871,7 +876,7 @@ impl Vm {
         let mut out = slice_units(text, 0, position);
         out.push_str(&replacement);
         out.push_str(&slice_units(text, end, utf16_len(text)));
-        Ok(Invocation::Value(Value::String(out)))
+        Ok(Invocation::Value(Value::string(out)))
     }
 
     /// Runs the `String.prototype` protocol lookup. `None` means the caller
@@ -886,7 +891,7 @@ impl Vm {
     ) -> Result<Option<Invocation>, VmError> {
         let root_view = (receiver, args);
         let roots = &roots.with(&root_view);
-        let search = args.first().cloned().unwrap_or(Value::Undefined);
+        let search = args.first().cloned().unwrap_or(Value::UNDEFINED);
         let (symbol, requires_global, builtin) = match method {
             StringMethod::Match => (MATCH_SYMBOL, false, Some(RegExpMethod::Match)),
             StringMethod::MatchAll => (MATCH_ALL_SYMBOL, true, Some(RegExpMethod::MatchAll)),
@@ -924,21 +929,21 @@ impl Vm {
                 Err(error) => return Ok(Some(Invocation::Thrown(error))),
             }
         }
-        let protocol = if matches!(search, Value::Undefined | Value::Null) {
-            Value::Undefined
+        let protocol = if matches!(search.view(), ValueRef::Undefined | ValueRef::Null) {
+            Value::UNDEFINED
         } else {
             match self.get_method(host, roots, &search, symbol)? {
                 Ok(method) => method,
                 Err(error) => return Ok(Some(Invocation::Thrown(error))),
             }
         };
-        if !matches!(protocol, Value::Undefined) {
+        if !matches!(protocol.view(), ValueRef::Undefined) {
             let this = receiver.clone();
             let call_args = match method {
                 StringMethod::Replace | StringMethod::ReplaceAll => {
-                    vec![this, args.get(1).cloned().unwrap_or(Value::Undefined)]
+                    vec![this, args.get(1).cloned().unwrap_or(Value::UNDEFINED)]
                 }
-                StringMethod::Split => vec![this, args.get(1).cloned().unwrap_or(Value::Undefined)],
+                StringMethod::Split => vec![this, args.get(1).cloned().unwrap_or(Value::UNDEFINED)],
                 _ => vec![this],
             };
             return Ok(Some(
@@ -949,19 +954,22 @@ impl Vm {
             return Ok(None);
         };
         let flags = if matches!(method, StringMethod::MatchAll) {
-            Value::String("g".into())
+            Value::string("g".into())
         } else {
-            Value::Undefined
+            Value::UNDEFINED
         };
         let created = self.construct_regexp(host, roots, &[search.clone(), flags], None, false)?;
-        let Invocation::Value(Value::Object(id)) = created else {
+        let Invocation::Value(value) = &created else {
+            return Ok(Some(created));
+        };
+        let ValueRef::Object(id) = value.view() else {
             return Ok(Some(created));
         };
         Ok(Some(self.call_regexp_method(
             host,
             roots,
             builtin,
-            &Value::Object(id),
+            &Value::object(id),
             std::slice::from_ref(receiver),
         )?))
     }
@@ -975,7 +983,11 @@ impl Vm {
     ) -> Result<Result<Value, Value>, VmError> {
         let roots = &roots.with(&value);
         match self.read_property(host, roots, value, PropertyKeyRef::Symbol(symbol))? {
-            Invocation::Value(Value::Undefined | Value::Null) => Ok(Ok(Value::Undefined)),
+            Invocation::Value(method)
+                if matches!(method.view(), ValueRef::Undefined | ValueRef::Null) =>
+            {
+                Ok(Ok(Value::UNDEFINED))
+            }
             Invocation::Value(method) => Ok(Ok(method)),
             Invocation::Thrown(error) => Ok(Err(error)),
         }
@@ -988,7 +1000,7 @@ impl Vm {
         value: &Value,
     ) -> Result<Result<bool, Value>, VmError> {
         let roots = &roots.with(&value);
-        let Value::Object(id) = *value else {
+        let ValueRef::Object(id) = value.view() else {
             return Ok(Ok(false));
         };
         let matcher =
@@ -996,7 +1008,7 @@ impl Vm {
                 Invocation::Value(matcher) => matcher,
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
-        if !matches!(matcher, Value::Undefined) {
+        if !matches!(matcher.view(), ValueRef::Undefined) {
             return Ok(Ok(true));
         }
         Ok(Ok(matches!(self.heap.get(id)?, Object::RegExp { .. })))
@@ -1014,7 +1026,7 @@ impl Vm {
             Ok(search) => search,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let replacement_arg = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let replacement_arg = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
         let functional = self.is_callable(&replacement_arg);
         let pattern = if functional {
             JsString::default()
@@ -1026,7 +1038,7 @@ impl Vm {
         };
         let search_length = utf16_len(&search);
         let Some(mut position) = find_from(text, &search, 0) else {
-            return Ok(Invocation::Value(Value::String(text.clone())));
+            return Ok(Invocation::Value(Value::string(text.clone())));
         };
         let has_substitution = !functional && pattern.units().any(|unit| unit == u16::from(b'$'));
         let mut out = Vec::new();
@@ -1040,11 +1052,11 @@ impl Vm {
                     roots,
                     &replacement_arg,
                     vec![
-                        Value::String(search.clone()),
-                        Value::Number(position as f64),
-                        Value::String(text.clone()),
+                        Value::string(search.clone()),
+                        Value::number(position as f64),
+                        Value::string(text.clone()),
                     ],
-                    &Value::Undefined,
+                    &Value::UNDEFINED,
                 )? {
                     Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {
                         Ok(value) => value,
@@ -1076,7 +1088,7 @@ impl Vm {
             position = next;
         }
         out.extend(source);
-        Ok(Invocation::Value(Value::String(JsString::from_units(out))))
+        Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
     fn string_from_char_code(
@@ -1094,7 +1106,7 @@ impl Vm {
             };
             units.push(crate::ops::number_to_uint32(number) as u16);
         }
-        Ok(Invocation::Value(Value::String(JsString::from_units(
+        Ok(Invocation::Value(Value::string(JsString::from_units(
             units,
         ))))
     }
@@ -1126,7 +1138,7 @@ impl Vm {
                 ]);
             }
         }
-        Ok(Invocation::Value(Value::String(JsString::from_units(out))))
+        Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
     fn string_raw(
@@ -1137,17 +1149,17 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let template = arg(args, 0);
-        let raw = match self.read_member(host, roots, template, &Value::String("raw".into()))? {
+        let raw = match self.read_member(host, roots, template, &Value::string("raw".into()))? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
-        let Value::Object(raw_id) = raw else {
+        let ValueRef::Object(raw_id) = raw.view() else {
             return self.throw_type_error("String.raw requires a raw array");
         };
-        let raw_object = Value::Object(raw_id);
+        let raw_object = Value::object(raw_id);
         let roots = &roots.with(&raw_object);
         let length =
-            match self.read_member(host, roots, &raw_object, &Value::String("length".into()))? {
+            match self.read_member(host, roots, &raw_object, &Value::string("length".into()))? {
                 Invocation::Value(value) => value,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
@@ -1158,7 +1170,7 @@ impl Vm {
         let mut out = JsString::default();
         let mut segment_index = 0;
         while segment_index < length {
-            let key = Value::String(segment_index.to_string().into());
+            let key = Value::string(segment_index.to_string().into());
             let segment = match self.read_member(host, roots, &raw_object, &key)? {
                 Invocation::Value(value) => value,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -1177,7 +1189,7 @@ impl Vm {
                 }
             }
         }
-        Ok(Invocation::Value(Value::String(out)))
+        Ok(Invocation::Value(Value::string(out)))
     }
 
     fn relative_index(
@@ -1242,7 +1254,7 @@ impl Vm {
     }
 
     pub(crate) fn array_result(&mut self, elements: Vec<Value>) -> Result<Invocation, VmError> {
-        Ok(Invocation::Value(Value::Object(
+        Ok(Invocation::Value(Value::object(
             self.heap.alloc_array(elements),
         )))
     }
@@ -1261,7 +1273,7 @@ impl Vm {
 }
 
 fn arg(args: &[Value], index: usize) -> &Value {
-    args.get(index).unwrap_or(&Value::Undefined)
+    args.get(index).unwrap_or(&UNDEFINED)
 }
 
 pub(crate) fn utf16_len(text: &JsString) -> usize {
@@ -1384,7 +1396,7 @@ fn string_case(text: &JsString, upper: bool) -> Result<Invocation, VmError> {
     if !run.is_empty() {
         out.extend(convert(&run).encode_utf16());
     }
-    Ok(Invocation::Value(Value::String(JsString::from_units(out))))
+    Ok(Invocation::Value(Value::string(JsString::from_units(out))))
 }
 
 fn string_trim(text: &JsString, start: bool, end: bool) -> Result<Invocation, VmError> {
@@ -1406,7 +1418,7 @@ fn string_trim(text: &JsString, start: bool, end: bool) -> Result<Invocation, Vm
     } else {
         length
     };
-    Ok(Invocation::Value(Value::String(slice_units(
+    Ok(Invocation::Value(Value::string(slice_units(
         text, first, last,
     ))))
 }

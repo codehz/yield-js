@@ -20,7 +20,7 @@ export function run() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build_return, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(5.0));
+    assert_eq!(result, Value::number(5.0));
 
     let source = r#"
 export function run() {
@@ -34,7 +34,7 @@ export function run() {
     let build_override = build(source);
     let mut vm = Vm::new(build_override, &mut host).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(result, Value::Number(2.0));
+    assert_eq!(result, Value::number(2.0));
 
     let source = r#"
 export function run() {
@@ -50,7 +50,7 @@ export function run() {
     let error = vm
         .start(&mut host, "run", Vec::new())
         .expect_err("finally throw wins");
-    assert!(matches!(error, VmError::Thrown(Value::Number(3.0))));
+    assert!(matches!(error, VmError::Thrown(value) if value == Value::number(3.0)));
 }
 
 #[test]
@@ -71,7 +71,7 @@ export function run() {
     let result = vm
         .start(&mut host, "run", Vec::new())
         .expect("captured read");
-    assert_eq!(result, Value::Undefined);
+    assert_eq!(result, Value::UNDEFINED);
 }
 
 #[test]
@@ -97,7 +97,7 @@ export function run(n) {
         vm.promise_state(&result),
         Err(VmError::InvalidState(message)) if message == "value is not an object"
     ));
-    assert_eq!(result, Value::Number(6.0));
+    assert_eq!(result, Value::number(6.0));
 }
 
 #[test]

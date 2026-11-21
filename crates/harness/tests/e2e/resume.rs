@@ -29,7 +29,7 @@ fn snapshot_and_restore_across_two_awaits() {
             &snapshot.continuations[0].values,
             &baseline.continuations[0].values,
         ),
-        vec![Value::Number(10.0)],
+        vec![Value::number(10.0)],
         "base is the only extra live value"
     );
     assert!(
@@ -59,7 +59,7 @@ fn snapshot_and_restore_across_two_awaits() {
             &snapshot.continuations[0].values,
             &baseline_at_second_await().continuations[0].values,
         ),
-        vec![Value::Number(12.0)],
+        vec![Value::number(12.0)],
         "sum is the only value live across the second await"
     );
     assert!(snapshot.continuations[0].env.is_none());
@@ -68,7 +68,7 @@ fn snapshot_and_restore_across_two_awaits() {
     let seed = s.host.count("seed");
     let wait = s.host.count("wait");
     s.complete("wait:b", Completion::Fulfilled(number(3.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(15.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(15.0)));
     assert_eq!(count_delta(s.host.count("inspect"), inspect), 0);
     assert_eq!(count_delta(s.host.count("seed"), seed), 0);
     assert_eq!(count_delta(s.host.count("wait"), wait), 0);
@@ -95,7 +95,7 @@ export async function run() {
     assert!(
         snapshot.continuations[0]
             .values
-            .contains(&Value::Number(7.0)),
+            .contains(&Value::number(7.0)),
         "pending return payload is saved"
     );
     s.restore(snapshot).expect("restore");
@@ -104,7 +104,7 @@ export async function run() {
     s.complete("wait:fin", Completion::Fulfilled(number(0.0)));
     assert_eq!(count_delta(s.host.count("seed"), seed), 0);
     assert_eq!(count_delta(s.host.count("setLabel"), set_label), 1);
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(7.0)));
 }
 
 #[test]
@@ -125,14 +125,14 @@ export async function run() {
     assert!(
         snapshot.continuations[0]
             .values
-            .contains(&Value::Number(5.0)),
+            .contains(&Value::number(5.0)),
         "pending throw payload is saved"
     );
     s.restore(snapshot).expect("restore");
     let seed = s.host.count("seed");
     s.complete("wait:fin", Completion::Fulfilled(number(0.0)));
     assert_eq!(count_delta(s.host.count("seed"), seed), 0);
-    assert_eq!(s.state(), PromiseState::Rejected(Value::Number(5.0)));
+    assert_eq!(s.state(), PromiseState::Rejected(Value::number(5.0)));
 }
 
 #[test]
@@ -151,10 +151,10 @@ export async function run() {
             &snapshot.continuations[0].values,
             &baseline_at_second_await().continuations[0].values,
         ),
-        vec![Value::Number(4.0)],
+        vec![Value::number(4.0)],
         "the first await result is live across the second await"
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:b", Completion::Fulfilled(number(5.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(9.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(9.0)));
 }

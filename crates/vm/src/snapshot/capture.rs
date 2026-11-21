@@ -20,7 +20,7 @@ use crate::runtime::{
     Continuation, HOST_TASK_ID_LIMIT, HostInstance, HostSlot, HostTask, HostTaskState, ModuleState,
     PendingOperation, Settlement,
 };
-use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value};
+use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 use super::record::{valid_string_position, *};
@@ -340,13 +340,13 @@ impl Vm {
                 Recovery::Pause => {
                     self.deliver_operation(
                         operation.target,
-                        Settlement::Fulfilled(Value::Undefined),
+                        Settlement::Fulfilled(Value::UNDEFINED),
                     )?;
                 }
                 Recovery::Reject => {
                     self.deliver_operation(
                         operation.target,
-                        Settlement::Rejected(Value::String(operation.rejection.into())),
+                        Settlement::Rejected(Value::string(operation.rejection.into())),
                     )?;
                 }
                 Recovery::Resume | Recovery::Reissue => {
@@ -594,7 +594,7 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
         }
         if let PrivateElement::Field(value) = &record.element {
             require_value_objects(heap, std::iter::once(value))?;
-            if matches!(value, Value::Object(id) if matches!(heap.get(*id), Ok(Object::Environment(_) | Object::ForInIterator { .. })))
+            if matches!(value.view(), ValueRef::Object(id) if matches!(heap.get(id), Ok(Object::Environment(_) | Object::ForInIterator { .. })))
             {
                 return Err(invalid());
             }
@@ -618,7 +618,7 @@ fn validate_weak_key(heap: &Heap, owner: &str, id: ObjectId, key: WeakKey) -> Re
             heap.get(target),
             Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
         ),
-        WeakKey::Symbol(target) => heap.weak_key(&Value::Symbol(target)).is_some(),
+        WeakKey::Symbol(target) => heap.weak_key(&Value::symbol(target)).is_some(),
     };
     if !valid {
         return Err(VmError::InvalidSnapshot(format!(
@@ -665,14 +665,14 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
         if let Object::Environment(env) = heap.get(id)?
             && env.bindings.range(DERIVED_THIS..).next().is_some()
         {
-            let valid_class = matches!(env.bindings.get(&DERIVED_CLASS), Some(Value::Object(class))
-                if heap.function(*class).and_then(|f| f.class.as_ref()).is_some_and(|c| c.source.derived && !c.source.default_constructor));
-            let valid_target = matches!(env.bindings.get(&DERIVED_TARGET), Some(Value::Object(target))
-                if heap.get(*target).is_ok_and(crate::builtin::is_callable_object));
-            let valid_this = match env.bindings.get(&DERIVED_THIS) {
+            let valid_class = matches!(env.bindings.get(&DERIVED_CLASS).map(Value::view), Some(ValueRef::Object(class))
+                if heap.function(class).and_then(|f| f.class.as_ref()).is_some_and(|c| c.source.derived && !c.source.default_constructor));
+            let valid_target = matches!(env.bindings.get(&DERIVED_TARGET).map(Value::view), Some(ValueRef::Object(target))
+                if heap.get(target).is_ok_and(crate::builtin::is_callable_object));
+            let valid_this = match env.bindings.get(&DERIVED_THIS).map(Value::view) {
                 None => true,
-                Some(Value::Object(receiver)) => !matches!(
-                    heap.get(*receiver),
+                Some(ValueRef::Object(receiver)) => !matches!(
+                    heap.get(receiver),
                     Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
                 ),
                 _ => false,
@@ -711,11 +711,12 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 && (!code.is_constructable()
                     || definitions.get(&function.func_id) != Some(&(class.source.derived, class.source.default_constructor, class.source.private_count, class.source.private_binding))
                     || function.home != Some(class.prototype)
-                    || class.source.private_binding.is_some_and(|binding| !matches!(heap.environment(function.env), Ok(env) if env.bindings.get(&binding) == Some(&Value::Object(id))))
+                    || class.source.private_binding.is_some_and(|binding| !matches!(heap.environment(function.env), Ok(env) if env.bindings.get(&binding) == Some(&Value::object(id))))
                     || !matches!(heap.get(class.prototype), Ok(Object::Plain(_)))
                     || !matches!(heap.get(id)?.own_property(PropertyKeyRef::String("prototype")),
-                        Some(OwnProperty::Stored(Property::Data(Value::Object(prototype)), attributes))
-                            if *prototype == class.prototype && attributes == crate::heap::Attributes::FIXED))
+                        Some(OwnProperty::Stored(Property::Data(prototype), attributes))
+                            if matches!(prototype.view(), ValueRef::Object(id) if id == class.prototype)
+                                && attributes == crate::heap::Attributes::FIXED))
             {
                 return Err(VmError::InvalidSnapshot(format!(
                     "function object {id} has an invalid class record"
@@ -1064,11 +1065,11 @@ fn validate_native_import_objects(
     let mut identities = BTreeSet::new();
     for import in imports {
         for value in &import.values {
-            if let Value::Object(id) = value
+            if let ValueRef::Object(id) = value.view()
                 && let Object::Native(NativeObject::Host {
                     target,
                     constructable,
-                }) = heap.get(*id)?
+                }) = heap.get(id)?
                 && !identities.insert((*target, *constructable))
             {
                 return Err(VmError::InvalidSnapshot(format!(
@@ -1343,13 +1344,13 @@ fn require_value_objects<'a>(
     values: impl IntoIterator<Item = &'a Value>,
 ) -> Result<(), VmError> {
     for value in values {
-        match value {
-            Value::Object(id) if !heap.contains(*id) => {
+        match value.view() {
+            ValueRef::Object(id) if !heap.contains(id) => {
                 return Err(VmError::InvalidSnapshot(format!(
                     "value references missing object {id}"
                 )));
             }
-            Value::Symbol(id) if !heap.symbols.contains_key(id) => {
+            ValueRef::Symbol(id) if !heap.symbols.contains_key(&id) => {
                 return Err(VmError::InvalidSnapshot(format!(
                     "value references missing symbol {id}"
                 )));
@@ -1525,7 +1526,7 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                             resolve, reject, ..
                         } => {
                             for callback in [resolve, reject] {
-                                if !matches!(callback, Value::Object(id) if heap.get(*id).is_ok_and(crate::builtin::is_callable_object))
+                                if !matches!(callback.view(), ValueRef::Object(id) if heap.get(id).is_ok_and(crate::builtin::is_callable_object))
                                 {
                                     return Err(VmError::InvalidSnapshot(format!(
                                         "Promise {id} reaction capability is not callable"
@@ -1722,8 +1723,8 @@ fn load_host_tasks(
             NativeTarget::Export(export) if matches!(bindings.export_decl(export), Some(ExportDecl::Function(f)) if !f.constructable) =>
                 {}
             NativeTarget::Method(method) if bindings.method(method).is_some() => {
-                let valid_receiver = match &record.receiver {
-                    Value::Object(object) => instances.get(object).is_some_and(|instance| {
+                let valid_receiver = match record.receiver.view() {
+                    ValueRef::Object(object) => instances.get(&object).is_some_and(|instance| {
                         bindings.class_is_a(instance.class, method.class as usize)
                     }),
                     _ => false,

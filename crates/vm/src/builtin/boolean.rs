@@ -7,7 +7,7 @@ pub(crate) mod members {
     use crate::heap::{BoxedPrimitive, Object};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
-    use crate::value::Value;
+    use crate::value::{Value, ValueRef};
     use crate::vm::Vm;
 
     const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
@@ -22,12 +22,12 @@ pub(crate) mod members {
             &[IntrinsicDef::constructor(
                 KEY,
                 |_, _, _, args, _| {
-                    Ok(Invocation::Value(Value::Bool(
+                    Ok(Invocation::Value(Value::boolean(
                         args.first().is_some_and(Value::truthy),
                     )))
                 },
                 |vm, _, _, args, prototype| {
-                    let result = vm.construct_object(&[Value::Bool(
+                    let result = vm.construct_object(&[Value::boolean(
                         args.first().is_some_and(Value::truthy),
                     )])?;
                     vm.with_result_prototype(result, prototype)
@@ -50,9 +50,9 @@ pub(crate) mod members {
         receiver: &Value,
         stringify: bool,
     ) -> Result<Invocation, VmError> {
-        let value = match receiver {
-            Value::Bool(value) => *value,
-            Value::Object(id) => match vm.heap.get(*id)? {
+        let value = match receiver.view() {
+            ValueRef::Bool(value) => value,
+            ValueRef::Object(id) => match vm.heap.get(id)? {
                 Object::Boxed {
                     primitive: BoxedPrimitive::Bool(value),
                     ..
@@ -62,9 +62,9 @@ pub(crate) mod members {
             _ => return vm.throw_type_error("incompatible Boolean receiver"),
         };
         Ok(Invocation::Value(if stringify {
-            Value::String(value.to_string().into())
+            Value::string(value.to_string().into())
         } else {
-            Value::Bool(value)
+            Value::boolean(value)
         }))
     }
 

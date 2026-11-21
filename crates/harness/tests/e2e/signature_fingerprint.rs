@@ -193,6 +193,6 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
         .expect("resume");
     assert_eq!(
         restored.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Number(42.0))
+        PromiseState::Fulfilled(Value::number(42.0))
     );
 }

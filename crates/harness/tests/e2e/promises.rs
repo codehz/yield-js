@@ -26,7 +26,7 @@ export async function run() {
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(JsValue::number(4.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(5.0)));
 }
 
 #[test]
@@ -119,5 +119,5 @@ export async function run() {
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:b", Completion::Fulfilled(JsValue::number(3.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(5.0)));
 }

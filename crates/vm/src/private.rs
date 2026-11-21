@@ -10,7 +10,7 @@ use crate::heap::{
 };
 use crate::host::Host;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, Value};
+use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::Vm;
 
 impl Vm {
@@ -140,13 +140,13 @@ impl Vm {
         index: u32,
     ) -> Result<Invocation, VmError> {
         let class = self.private_class(brand, index)?;
-        let Value::Object(id) = receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error("private member requires an object");
         };
         let Some(element) = self
             .heap
             .private
-            .get(id)
+            .get(&id)
             .and_then(|elements| elements.get(&(brand, index)))
         else {
             return self.throw_type_error("private member is not installed");
@@ -155,9 +155,9 @@ impl Vm {
             return Ok(Invocation::Value(value.clone()));
         }
         match class.source.private[&index].kind {
-            PrivateMemberKind::Method(method) => Ok(Invocation::Value(Value::Object(method))),
+            PrivateMemberKind::Method(method) => Ok(Invocation::Value(Value::object(method))),
             PrivateMemberKind::Accessor { get: Some(get), .. } => {
-                self.invoke(host, roots, &Value::Object(get), Vec::new(), receiver)
+                self.invoke(host, roots, &Value::object(get), Vec::new(), receiver)
             }
             _ => self.throw_type_error("private member has no getter"),
         }
@@ -178,24 +178,24 @@ impl Vm {
             .private
             .get(&index)
             .map(|member| member.kind);
-        let Value::Object(id) = receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error("private member requires an object");
         };
         let Some(element) = self
             .heap
             .private
-            .get_mut(id)
+            .get_mut(&id)
             .and_then(|elements| elements.get_mut(&(brand, index)))
         else {
             return self.throw_type_error("private member is not installed");
         };
         if let PrivateElement::Field(slot) = element {
             *slot = value;
-            return Ok(Invocation::Value(Value::Undefined));
+            return Ok(Invocation::Value(Value::UNDEFINED));
         }
         match kind {
             Some(PrivateMemberKind::Accessor { set: Some(set), .. }) => {
-                self.invoke(host, roots, &Value::Object(set), vec![value], receiver)
+                self.invoke(host, roots, &Value::object(set), vec![value], receiver)
             }
             _ => self.throw_type_error("private member is not writable"),
         }

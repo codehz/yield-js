@@ -5,7 +5,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
-use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 #[yield_binding_macros::builtin_global(name = "JSON", root = "json")]
@@ -368,7 +368,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let text =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(text) => text,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -422,11 +422,11 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let value = args.first().cloned().unwrap_or(Value::Undefined);
+        let value = args.first().cloned().unwrap_or(Value::UNDEFINED);
         let replacer = args.get(1);
-        let listed = match replacer {
-            Some(Value::Object(id)) if matches!(self.heap.get(*id)?, Object::Array(_)) => {
-                match self.json_property_list(host, roots, *id)? {
+        let listed = match replacer.map(Value::view) {
+            Some(ValueRef::Object(id)) if matches!(self.heap.get(id)?, Object::Array(_)) => {
+                match self.json_property_list(host, roots, id)? {
                     Ok(keys) => Some(keys),
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
@@ -434,7 +434,7 @@ impl Vm {
             _ => None,
         };
         let function = replacer.filter(|value| self.is_callable(value));
-        let gap = match self.json_gap(host, roots, args.get(2).unwrap_or(&Value::Undefined))? {
+        let gap = match self.json_gap(host, roots, args.get(2).unwrap_or(&Value::UNDEFINED))? {
             Ok(gap) => gap,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -452,11 +452,11 @@ impl Vm {
             path: "$".to_owned(),
         };
         match self.serialize_property(host, roots, &mut state, holder, &JsString::new())? {
-            Ok(None) => Ok(Invocation::Value(Value::Undefined)),
+            Ok(None) => Ok(Invocation::Value(Value::UNDEFINED)),
             Ok(Some(tree)) => {
                 let mut output = Vec::new();
                 encode(&tree, &mut output, &gap, 0);
-                Ok(Invocation::Value(Value::String(JsString::from_units(
+                Ok(Invocation::Value(Value::string(JsString::from_units(
                     output,
                 ))))
             }
@@ -470,10 +470,10 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         space: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
-        let space = match space {
-            Value::Object(id)
+        let space = match space.view() {
+            ValueRef::Object(id)
                 if matches!(
-                    self.heap.get(*id)?,
+                    self.heap.get(id)?,
                     Object::Boxed {
                         primitive: BoxedPrimitive::String(_),
                         ..
@@ -481,23 +481,23 @@ impl Vm {
                 ) =>
             {
                 match self.coerce_string(host, roots, space)? {
-                    Ok(text) => Value::String(text),
+                    Ok(text) => Value::string(text),
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            Value::Object(_) => match self.coerce_number(host, roots, space)? {
-                Ok(number) => Value::Number(number),
+            ValueRef::Object(_) => match self.coerce_number(host, roots, space)? {
+                Ok(number) => Value::number(number),
                 Err(error) => return Ok(Err(error)),
             },
-            other => other.clone(),
+            _ => space.clone(),
         };
-        Ok(Ok(match space {
-            Value::Number(number) => JsString::from_units(vec![
+        Ok(Ok(match space.view() {
+            ValueRef::Number(number) => JsString::from_units(vec![
                 u16::from(b' ');
                 number.trunc().clamp(0.0, 10.0)
                     as usize
             ]),
-            Value::String(text) => text.slice_units(0..text.unit_len().min(10)),
+            ValueRef::String(text) => text.slice_units(0..text.unit_len().min(10)),
             _ => JsString::new(),
         }))
     }
@@ -518,15 +518,15 @@ impl Vm {
             let item = match self.read_property(
                 host,
                 roots,
-                &Value::Object(id),
+                &Value::object(id),
                 PropertyKeyRef::JsString(&name),
             )? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
-            let key = match item {
-                Value::String(key) => key,
-                Value::Number(number) => crate::ops::to_js_string(&Value::Number(number)),
+            let key = match item.view() {
+                ValueRef::String(_) => item.into_string().expect("string item"),
+                ValueRef::Number(number) => crate::ops::to_js_string(&Value::number(number)),
                 _ => continue,
             };
             if !keys.contains(&key) {
@@ -551,14 +551,14 @@ impl Vm {
         let mut value = match self.read_property(
             host,
             roots,
-            &Value::Object(holder),
+            &Value::object(holder),
             PropertyKeyRef::JsString(key),
         )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        if let Value::Object(id) = &value {
-            let receiver = Value::Object(*id);
+        if let ValueRef::Object(id) = value.view() {
+            let receiver = Value::object(id);
             let roots = &roots.with(&receiver);
             let method = match self.read_property(
                 host,
@@ -574,7 +574,7 @@ impl Vm {
                     host,
                     roots,
                     &method,
-                    vec![Value::String(key.clone())],
+                    vec![Value::string(key.clone())],
                     &receiver,
                 )? {
                     Invocation::Value(value) => value,
@@ -587,8 +587,8 @@ impl Vm {
                 host,
                 roots,
                 &replacer,
-                vec![Value::String(key.clone()), value],
-                &Value::Object(holder),
+                vec![Value::string(key.clone()), value],
+                &Value::object(holder),
             )? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
@@ -604,18 +604,14 @@ impl Vm {
         state: &mut Serialize<'_>,
         value: Value,
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
-        if matches!(value, Value::Undefined | Value::Symbol(_))
-            || matches!(&value, Value::Object(id) if self.is_callable(&Value::Object(*id)))
-        {
-            return Ok(Ok(None));
-        }
-        let tree = match value {
-            Value::Null => JsonValue::Null,
-            Value::Bool(value) => JsonValue::Bool(value),
-            Value::Number(value) if value.is_finite() => JsonValue::Number(value),
-            Value::Number(_) => JsonValue::Null,
-            Value::String(value) => JsonValue::String(value),
-            Value::Object(id)
+        let tree = match value.view() {
+            ValueRef::Null => JsonValue::Null,
+            ValueRef::Bool(value) => JsonValue::Bool(value),
+            ValueRef::Number(value) if value.is_finite() => JsonValue::Number(value),
+            ValueRef::Number(_) => JsonValue::Null,
+            ValueRef::String(_) => JsonValue::String(value.into_string().expect("string value")),
+            ValueRef::Object(_) if self.is_callable(&value) => return Ok(Ok(None)),
+            ValueRef::Object(id)
                 if matches!(
                     self.heap.get(self.heap.proxy_target(id)?)?,
                     Object::Array(_)
@@ -626,11 +622,11 @@ impl Vm {
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            Value::Object(id) => match self.serialize_object(host, roots, state, id)? {
+            ValueRef::Object(id) => match self.serialize_object(host, roots, state, id)? {
                 Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             },
-            Value::Undefined | Value::Symbol(_) => return Ok(Ok(None)),
+            ValueRef::Undefined | ValueRef::Symbol(_) => return Ok(Ok(None)),
         };
         Ok(Ok(Some(tree)))
     }
@@ -654,7 +650,7 @@ impl Vm {
                 let length = match self.read_property(
                     host,
                     roots,
-                    &Value::Object(id),
+                    &Value::object(id),
                     PropertyKeyRef::String("length"),
                 )? {
                     Invocation::Value(value) => value,
@@ -751,8 +747,8 @@ impl Vm {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        if let Value::Object(id) = initial {
-            let roots = &roots.with(&id);
+        if let ValueRef::Object(id) = initial.view() {
+            let roots = &roots.with(&initial);
             let nested = match self.heap.get(id)? {
                 Object::Array(array) => (0..array.length)
                     .map(|index| JsString::from(index.to_string()))
@@ -784,13 +780,13 @@ impl Vm {
             host,
             roots,
             reviver,
-            vec![Value::String(key.clone()), value],
-            &Value::Object(holder),
+            vec![Value::string(key.clone()), value],
+            &Value::object(holder),
         )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        if matches!(replaced, Value::Undefined) {
+        if matches!(replaced.view(), ValueRef::Undefined) {
             self.heap
                 .delete_own(holder, PropertyKeyRef::JsString(key))?;
         } else {
@@ -808,16 +804,16 @@ impl Vm {
         let property = property.map(crate::heap::OwnProperty::into_owned);
         Ok(Invocation::Value(match property {
             Some(crate::heap::Property::Data(value)) => value,
-            _ => Value::Undefined,
+            _ => Value::UNDEFINED,
         }))
     }
 
     fn materialize_json(&mut self, value: JsonValue) -> Result<Value, VmError> {
         match value {
-            JsonValue::Null => Ok(Value::Null),
-            JsonValue::Bool(value) => Ok(Value::Bool(value)),
-            JsonValue::Number(value) => Ok(Value::Number(value)),
-            JsonValue::String(value) => Ok(Value::String(value)),
+            JsonValue::Null => Ok(Value::NULL),
+            JsonValue::Bool(value) => Ok(Value::boolean(value)),
+            JsonValue::Number(value) => Ok(Value::number(value)),
+            JsonValue::String(value) => Ok(Value::string(value)),
             JsonValue::Array(values) => {
                 let id = self.heap.alloc_array(Vec::new());
                 for (index, value) in values.into_iter().enumerate() {
@@ -829,7 +825,7 @@ impl Vm {
                         Attributes::ORDINARY,
                     )?;
                 }
-                Ok(Value::Object(id))
+                Ok(Value::object(id))
             }
             JsonValue::Object(values) => {
                 let id = self.heap.alloc_plain();
@@ -842,7 +838,7 @@ impl Vm {
                         Attributes::ORDINARY,
                     )?;
                 }
-                Ok(Value::Object(id))
+                Ok(Value::object(id))
             }
         }
     }

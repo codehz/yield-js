@@ -6,7 +6,7 @@ pub(crate) mod members {
     use crate::heap::{Attributes, SPECIES_SYMBOL};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
-    use crate::value::Value;
+    use crate::value::{Value, ValueRef};
     use crate::vm::Vm;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
@@ -31,14 +31,14 @@ pub(crate) mod members {
             vm,
             prototype,
             "constructor",
-            Value::Object(constructor),
+            Value::object(constructor),
             Attributes::METHOD,
         );
         define_builtin_data(
             vm,
             constructor,
             "prototype",
-            Value::Object(prototype),
+            Value::object(prototype),
             Attributes::FIXED,
         );
     }
@@ -48,7 +48,7 @@ pub(crate) mod members {
             Ok(Invocation::Value(receiver.clone()))
         };
         resolve | reject | all | allSettled | race | any as key => |vm, host, roots, args, receiver| {
-            if !matches!(receiver, Value::Object(id) if *id == vm.builtins.get(ROOT)) {
+            if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(ROOT)) {
                 return vm.throw_type_error("incompatible Promise receiver");
             }
             vm.call_promise_static(host, roots, receiver, key, args)
@@ -57,13 +57,13 @@ pub(crate) mod members {
 
     prototype_calls! {
         then | catch | finally as key => |vm, host, roots, args, receiver| {
-            let Value::Object(id) = receiver else {
+            let ValueRef::Object(id) = receiver.view() else {
                 return vm.throw_type_error("incompatible Promise receiver");
             };
-            if vm.heap.get(*id)?.as_promise().is_none() {
+            if vm.heap.get(id)?.as_promise().is_none() {
                 return vm.throw_type_error("incompatible Promise receiver");
             }
-            vm.call_promise_method(host, roots, *id, key, args)
+            vm.call_promise_method(host, roots, id, key, args)
         };
     }
 }

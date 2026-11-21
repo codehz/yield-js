@@ -131,8 +131,8 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
 impl Vm {
     pub(crate) fn builtin_value(&self, index: u32) -> Result<Value, VmError> {
         match GLOBALS.get(index as usize) {
-            Some(Global::Owner(owner)) => Ok(Value::Object(self.builtins.get(owner.root))),
-            Some(Global::Number(number)) => Ok(Value::Number(*number)),
+            Some(Global::Owner(owner)) => Ok(Value::object(self.builtins.get(owner.root))),
+            Some(Global::Number(number)) => Ok(Value::number(*number)),
             None => Err(VmError::InvalidState(format!(
                 "builtin {index} does not exist"
             ))),
@@ -148,7 +148,7 @@ impl Vm {
             .define_data(
                 function_prototype,
                 "toString",
-                Value::Object(to_string),
+                Value::object(to_string),
                 Attributes::METHOD,
             )
             .expect("Function.prototype stores toString");
@@ -157,10 +157,10 @@ impl Vm {
             self,
             function_prototype,
             PropertyKey::Symbol(HAS_INSTANCE_SYMBOL),
-            Value::Object(has_instance),
+            Value::object(has_instance),
             Attributes::FIXED,
         );
-        let identity = Value::Object(self.alloc_intrinsic(ITERATOR_IDENTITY));
+        let identity = Value::object(self.alloc_intrinsic(ITERATOR_IDENTITY));
         for owner in owners() {
             if let Some(install) = owner.install {
                 install(self, &identity);
@@ -177,7 +177,7 @@ impl Vm {
             .define_data(
                 global_this,
                 "undefined",
-                Value::Undefined,
+                Value::UNDEFINED,
                 Attributes::ORDINARY,
             )
             .expect("global undefined property");

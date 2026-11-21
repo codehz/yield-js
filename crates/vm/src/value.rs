@@ -5,20 +5,183 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
+    mem::{self, ManuallyDrop},
+    num::NonZeroU64,
     ops::Range,
+    ptr,
     sync::Arc,
 };
 
-#[derive(Debug, Clone)]
+const UNDEFINED_TAG: u16 = 0xfff8;
+const NULL_TAG: u16 = 0xfff9;
+const BOOL_TAG: u16 = 0xfffa;
+const SYMBOL_TAG: u16 = 0xfffb;
+const OBJECT_TAG: u16 = 0xfffc;
+const EMPTY_STRING_TAG: u16 = 0xfffd;
+const LATIN1_TAG: u16 = 0xfffe;
+const WIDE_TAG: u16 = 0xffff;
+const PAYLOAD_MASK: u64 = 0x0000_ffff_ffff_ffff;
+
+// Invert the logical bits so zero is available for Option's niche, not +0.
+// Only the private encoders may create words; none produces all-one bits.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct PackedWord(NonZeroU64);
+
+impl PackedWord {
+    const fn from_bits(bits: u64) -> Self {
+        Self(NonZeroU64::new(!bits).expect("invalid NaN-box word"))
+    }
+
+    const fn tagged(tag: u16, payload: u64) -> Self {
+        Self::from_bits((tag as u64) << 48 | payload)
+    }
+
+    fn number(number: f64) -> Self {
+        Self::from_bits(if number.is_nan() {
+            0x7ff8_0000_0000_0000
+        } else {
+            number.to_bits()
+        })
+    }
+
+    const fn bits(self) -> u64 {
+        !self.0.get()
+    }
+
+    const fn tag(self) -> u16 {
+        (self.bits() >> 48) as u16
+    }
+
+    const fn payload(self) -> u64 {
+        self.bits() & PAYLOAD_MASK
+    }
+}
+
+const _: () = {
+    assert!(size_of::<PackedWord>() == 8);
+    assert!(size_of::<Option<PackedWord>>() == 8);
+};
+
 enum StringStorage {
     Empty,
     Latin1(Arc<Vec<u8>>),
     Wide(Arc<Vec<u16>>),
 }
 
+#[derive(Debug)]
+enum StringStorageRef<'a> {
+    Empty,
+    Latin1(&'a Vec<u8>),
+    Wide(&'a Vec<u16>),
+}
+
+impl PackedWord {
+    fn from_arc<T>(tag: u16, data: Arc<Vec<T>>) -> Self {
+        let address = Arc::as_ptr(&data).expose_provenance() as u64;
+        assert!(
+            address <= PAYLOAD_MASK,
+            "string pointer exceeds 48-bit NaN-box payload"
+        );
+        // Vec alignment rules out the all-one payload for the wide tag.
+        let word = Self::tagged(tag, address);
+        let _ = Arc::into_raw(data);
+        word
+    }
+
+    // The tag determines T. The payload is the checked, exposed address
+    // of the Vec returned by Arc::into_raw, not its elements or header.
+    fn string_ptr<T>(self) -> *const Vec<T> {
+        ptr::with_exposed_provenance(self.payload() as usize)
+    }
+
+    fn clone_owner(self) -> Self {
+        // SAFETY: The tag selects the original Vec type and exposed address;
+        // the borrowing caller keeps a strong reference alive for the increment.
+        unsafe {
+            match self.tag() {
+                LATIN1_TAG => Arc::increment_strong_count(self.string_ptr::<u8>()),
+                WIDE_TAG => Arc::increment_strong_count(self.string_ptr::<u16>()),
+                _ => (),
+            }
+        }
+        self
+    }
+
+    fn drop_owner(self) {
+        // SAFETY: The tag selects the original Vec type and exposed address.
+        // The dropping wrapper owns one live strong reference, consumed here.
+        unsafe {
+            match self.tag() {
+                LATIN1_TAG => Arc::decrement_strong_count(self.string_ptr::<u8>()),
+                WIDE_TAG => Arc::decrement_strong_count(self.string_ptr::<u16>()),
+                _ => (),
+            }
+        }
+    }
+}
+
 /// A JavaScript string, including any unpaired UTF-16 surrogate code units.
-#[derive(Debug, Clone)]
-pub struct JsString(StringStorage);
+#[repr(transparent)]
+pub struct JsString(PackedWord);
+
+const _: () = assert!(size_of::<JsString>() == 8);
+
+impl Clone for JsString {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_owner())
+    }
+}
+
+impl Drop for JsString {
+    fn drop(&mut self) {
+        self.0.drop_owner();
+    }
+}
+
+impl fmt::Debug for JsString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("JsString").field(&self.storage()).finish()
+    }
+}
+
+impl JsString {
+    fn storage(&self) -> StringStorageRef<'_> {
+        // SAFETY: The tag selects the original Vec type and exposed address;
+        // self's strong reference keeps it alive throughout the borrow.
+        unsafe {
+            match self.0.tag() {
+                EMPTY_STRING_TAG => StringStorageRef::Empty,
+                LATIN1_TAG => StringStorageRef::Latin1(&*self.0.string_ptr::<u8>()),
+                WIDE_TAG => StringStorageRef::Wide(&*self.0.string_ptr::<u16>()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn from_storage(storage: StringStorage) -> Self {
+        match storage {
+            StringStorage::Empty => Self::new(),
+            StringStorage::Latin1(data) => Self(PackedWord::from_arc(LATIN1_TAG, data)),
+            StringStorage::Wide(data) => Self(PackedWord::from_arc(WIDE_TAG, data)),
+        }
+    }
+
+    fn into_storage(self) -> StringStorage {
+        let word = ManuallyDrop::new(self).0;
+        // SAFETY: The tag selects the original Vec type and exposed address
+        // from Arc::into_raw. Transfer the live strong reference from self
+        // (whose destructor is disabled) to the returned Arc.
+        unsafe {
+            match word.tag() {
+                EMPTY_STRING_TAG => StringStorage::Empty,
+                LATIN1_TAG => StringStorage::Latin1(Arc::from_raw(word.string_ptr::<u8>())),
+                WIDE_TAG => StringStorage::Wide(Arc::from_raw(word.string_ptr::<u16>())),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct JsStringUnits<'a>(UnitsInner<'a>);
@@ -70,7 +233,7 @@ impl Default for JsString {
 }
 impl JsString {
     pub const fn new() -> Self {
-        Self(StringStorage::Empty)
+        Self(PackedWord::tagged(EMPTY_STRING_TAG, 0))
     }
 
     pub fn from_units(units: Vec<u16>) -> Self {
@@ -78,22 +241,20 @@ impl JsString {
             return Self::new();
         }
         if units.iter().all(|&unit| unit <= 0xff) {
-            Self(StringStorage::Latin1(Arc::new(
-                units.into_iter().map(|u| u as u8).collect(),
-            )))
+            Self::from_latin1(units.into_iter().map(|u| u as u8).collect())
         } else {
-            Self(StringStorage::Wide(Arc::new(units)))
+            Self::from_wide(units)
         }
     }
     pub(crate) fn is_latin1(&self) -> bool {
-        matches!(self.0, StringStorage::Empty | StringStorage::Latin1(_))
+        self.0.tag() != WIDE_TAG
     }
 
     pub(crate) fn latin1_bytes(&self) -> Option<&[u8]> {
-        match &self.0 {
-            StringStorage::Empty => Some(&[]),
-            StringStorage::Latin1(bytes) => Some(bytes),
-            StringStorage::Wide(_) => None,
+        match self.storage() {
+            StringStorageRef::Empty => Some(&[]),
+            StringStorageRef::Latin1(bytes) => Some(bytes),
+            StringStorageRef::Wide(_) => None,
         }
     }
 
@@ -101,7 +262,7 @@ impl JsString {
         if bytes.is_empty() {
             Self::new()
         } else {
-            Self(StringStorage::Latin1(Arc::new(bytes)))
+            Self::from_storage(StringStorage::Latin1(Arc::new(bytes)))
         }
     }
 
@@ -109,23 +270,23 @@ impl JsString {
         if units.is_empty() {
             Self::new()
         } else {
-            Self(StringStorage::Wide(Arc::new(units)))
+            Self::from_storage(StringStorage::Wide(Arc::new(units)))
         }
     }
 
     pub fn units(&self) -> JsStringUnits<'_> {
-        JsStringUnits(match &self.0 {
-            StringStorage::Empty => UnitsInner::Empty,
-            StringStorage::Latin1(bytes) => UnitsInner::Latin1(bytes.iter().copied()),
-            StringStorage::Wide(units) => UnitsInner::Wide(units.iter().copied()),
+        JsStringUnits(match self.storage() {
+            StringStorageRef::Empty => UnitsInner::Empty,
+            StringStorageRef::Latin1(bytes) => UnitsInner::Latin1(bytes.iter().copied()),
+            StringStorageRef::Wide(units) => UnitsInner::Wide(units.iter().copied()),
         })
     }
 
     pub fn unit_at(&self, index: usize) -> Option<u16> {
-        match &self.0 {
-            StringStorage::Empty => None,
-            StringStorage::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
-            StringStorage::Wide(units) => units.get(index).copied(),
+        match self.storage() {
+            StringStorageRef::Empty => None,
+            StringStorageRef::Latin1(bytes) => bytes.get(index).copied().map(u16::from),
+            StringStorageRef::Wide(units) => units.get(index).copied(),
         }
     }
 
@@ -137,30 +298,30 @@ impl JsString {
         if range.is_empty() {
             return Self::new();
         }
-        match &self.0 {
-            StringStorage::Empty => Self::new(),
-            StringStorage::Latin1(bytes) => Self::from_latin1(bytes[range].to_vec()),
-            StringStorage::Wide(units) => Self::from_units(units[range].to_vec()),
+        match self.storage() {
+            StringStorageRef::Empty => Self::new(),
+            StringStorageRef::Latin1(bytes) => Self::from_latin1(bytes[range].to_vec()),
+            StringStorageRef::Wide(units) => Self::from_units(units[range].to_vec()),
         }
     }
 
     pub fn to_utf16(&self) -> Cow<'_, [u16]> {
-        match &self.0 {
-            StringStorage::Empty => Cow::Borrowed(&[]),
-            StringStorage::Wide(units) => Cow::Borrowed(units),
-            StringStorage::Latin1(bytes) => {
+        match self.storage() {
+            StringStorageRef::Empty => Cow::Borrowed(&[]),
+            StringStorageRef::Wide(units) => Cow::Borrowed(units),
+            StringStorageRef::Latin1(bytes) => {
                 Cow::Owned(bytes.iter().map(|&b| u16::from(b)).collect())
             }
         }
     }
 
     pub fn to_utf8(&self) -> Result<String, std::string::FromUtf16Error> {
-        match &self.0 {
-            StringStorage::Empty => Ok(String::new()),
-            StringStorage::Latin1(bytes) => {
+        match self.storage() {
+            StringStorageRef::Empty => Ok(String::new()),
+            StringStorageRef::Latin1(bytes) => {
                 Ok(bytes.iter().map(|&byte| char::from(byte)).collect())
             }
-            StringStorage::Wide(units) => String::from_utf16(units),
+            StringStorageRef::Wide(units) => String::from_utf16(units),
         }
     }
 
@@ -174,7 +335,7 @@ impl JsString {
         self.units().len()
     }
     pub fn is_empty(&self) -> bool {
-        matches!(self.0, StringStorage::Empty)
+        self.0.tag() == EMPTY_STRING_TAG
     }
 
     /// Search for a substring by UTF-16 code units, including lone surrogates.
@@ -190,35 +351,39 @@ impl JsString {
             *self = text.clone();
             return;
         }
-        match (&mut self.0, &text.0) {
-            (StringStorage::Latin1(left), StringStorage::Latin1(right)) => {
+        let mut storage = mem::take(self).into_storage();
+        match (&mut storage, text.storage()) {
+            (StringStorage::Latin1(left), StringStorageRef::Latin1(right)) => {
                 Arc::make_mut(left).extend_from_slice(right)
             }
-            (StringStorage::Wide(left), StringStorage::Latin1(right)) => {
+            (StringStorage::Wide(left), StringStorageRef::Latin1(right)) => {
                 Arc::make_mut(left).extend(right.iter().map(|&b| u16::from(b)))
             }
-            (StringStorage::Wide(left), StringStorage::Wide(right)) => {
+            (StringStorage::Wide(left), StringStorageRef::Wide(right)) => {
                 Arc::make_mut(left).extend_from_slice(right)
             }
-            (StringStorage::Latin1(left), StringStorage::Wide(right)) => {
+            (StringStorage::Latin1(left), StringStorageRef::Wide(right)) => {
                 let mut units = Vec::with_capacity(left.len() + right.len());
                 units.extend(left.iter().map(|&b| u16::from(b)));
                 units.extend_from_slice(right);
-                self.0 = StringStorage::Wide(Arc::new(units));
+                storage = StringStorage::Wide(Arc::new(units));
             }
             (StringStorage::Empty, _) => unreachable!(),
-            (_, StringStorage::Empty) => unreachable!(),
+            (_, StringStorageRef::Empty) => unreachable!(),
         }
+        *self = Self::from_storage(storage);
     }
 
     pub fn push(&mut self, ch: char) {
         if ch as u32 <= 0xff {
             let byte = ch as u8;
-            match &mut self.0 {
-                StringStorage::Empty => self.0 = StringStorage::Latin1(Arc::new(vec![byte])),
+            let mut storage = mem::take(self).into_storage();
+            match &mut storage {
+                StringStorage::Empty => storage = StringStorage::Latin1(Arc::new(vec![byte])),
                 StringStorage::Latin1(bytes) => Arc::make_mut(bytes).push(byte),
                 StringStorage::Wide(units) => Arc::make_mut(units).push(u16::from(byte)),
             }
+            *self = Self::from_storage(storage);
         } else {
             let mut encoded = [0; 2];
             self.push_units(ch.encode_utf16(&mut encoded));
@@ -226,8 +391,13 @@ impl JsString {
     }
 
     fn push_units(&mut self, units: &[u16]) {
-        match &mut self.0 {
-            StringStorage::Empty => self.0 = Self::from_units(units.to_vec()).0,
+        if self.is_empty() {
+            *self = Self::from_units(units.to_vec());
+            return;
+        }
+        let mut storage = mem::take(self).into_storage();
+        match &mut storage {
+            StringStorage::Empty => unreachable!(),
             StringStorage::Latin1(bytes) if units.iter().all(|&unit| unit <= 0xff) => {
                 Arc::make_mut(bytes).extend(units.iter().map(|&u| u as u8))
             }
@@ -235,10 +405,11 @@ impl JsString {
                 let mut wide = Vec::with_capacity(bytes.len() + units.len());
                 wide.extend(bytes.iter().map(|&b| u16::from(b)));
                 wide.extend_from_slice(units);
-                self.0 = StringStorage::Wide(Arc::new(wide));
+                storage = StringStorage::Wide(Arc::new(wide));
             }
             StringStorage::Wide(wide) => Arc::make_mut(wide).extend_from_slice(units),
         }
+        *self = Self::from_storage(storage);
     }
 }
 
@@ -248,7 +419,7 @@ impl From<&str> for JsString {
             return Self::new();
         }
         if text.is_ascii() {
-            return Self(StringStorage::Latin1(Arc::new(text.as_bytes().to_vec())));
+            return Self::from_latin1(text.as_bytes().to_vec());
         }
         let bytes = text.as_bytes();
         let mut latin1 = Vec::with_capacity(bytes.len().div_ceil(2));
@@ -263,10 +434,10 @@ impl From<&str> for JsString {
                 latin1.push(((first & 0x1f) << 6) | (second & 0x3f));
                 index += 2;
             } else {
-                return Self(StringStorage::Wide(Arc::new(text.encode_utf16().collect())));
+                return Self::from_wide(text.encode_utf16().collect());
             }
         }
-        Self(StringStorage::Latin1(Arc::new(latin1)))
+        Self::from_latin1(latin1)
     }
 }
 impl From<String> for JsString {
@@ -275,7 +446,7 @@ impl From<String> for JsString {
             return Self::new();
         }
         if text.is_ascii() {
-            return Self(StringStorage::Latin1(Arc::new(text.into_bytes())));
+            return Self::from_latin1(text.into_bytes());
         }
         Self::from(text.as_str())
     }
@@ -372,16 +543,82 @@ pub type ContinuationId = u64;
 /// The first three IDs are reserved for `Symbol.iterator`, `Symbol.toPrimitive`, and `Symbol.species`.
 pub type SymbolId = u32;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Value {
+/// An owned JavaScript value. Inspect its logical type with [`Value::view`].
+#[repr(transparent)]
+pub struct Value(PackedWord);
+
+const _: () = {
+    assert!(std::mem::size_of::<Value>() == 8);
+    assert!(std::mem::size_of::<Option<Value>>() == 8);
+};
+
+/// The logical type and payload of a borrowed JavaScript value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename = "Value", rename_all = "snake_case")]
+pub enum ValueRef<'a> {
     Undefined,
     Null,
     Bool(bool),
     Number(#[serde(with = "number_serde")] f64),
-    String(JsString),
+    String(&'a JsString),
     Symbol(SymbolId),
     Object(ObjectId),
+}
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_owner())
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        self.0.drop_owner();
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.view().fmt(f)
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.view().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "Value", rename_all = "snake_case")]
+        enum WireValue {
+            Undefined,
+            Null,
+            Bool(bool),
+            Number(#[serde(with = "number_serde")] f64),
+            String(JsString),
+            Symbol(SymbolId),
+            Object(ObjectId),
+        }
+
+        Ok(match WireValue::deserialize(deserializer)? {
+            WireValue::Undefined => Self::UNDEFINED,
+            WireValue::Null => Self::NULL,
+            WireValue::Bool(value) => Self::boolean(value),
+            WireValue::Number(value) => Self::number(value),
+            WireValue::String(value) => Self::string(value),
+            WireValue::Symbol(value) => Self::symbol(value),
+            WireValue::Object(value) => Self::object(value),
+        })
+    }
 }
 
 // JSON serializes non-finite floats as null, which cannot deserialize as f64.
@@ -423,26 +660,73 @@ pub(crate) mod number_serde {
 }
 
 impl Value {
+    pub const UNDEFINED: Self = Self(PackedWord::tagged(UNDEFINED_TAG, 0));
+    pub const NULL: Self = Self(PackedWord::tagged(NULL_TAG, 0));
+
+    pub const fn boolean(value: bool) -> Self {
+        Self(PackedWord::tagged(BOOL_TAG, value as u64))
+    }
+
+    pub fn number(value: f64) -> Self {
+        Self(PackedWord::number(value))
+    }
+
+    pub fn string(value: JsString) -> Self {
+        Self(ManuallyDrop::new(value).0)
+    }
+
+    pub const fn symbol(value: SymbolId) -> Self {
+        Self(PackedWord::tagged(SYMBOL_TAG, value as u64))
+    }
+
+    pub const fn object(value: ObjectId) -> Self {
+        Self(PackedWord::tagged(OBJECT_TAG, value as u64))
+    }
+
+    /// Inspect the logical value without taking ownership or cloning a string.
+    pub fn view(&self) -> ValueRef<'_> {
+        match self.0.tag() {
+            UNDEFINED_TAG => ValueRef::Undefined,
+            NULL_TAG => ValueRef::Null,
+            BOOL_TAG => ValueRef::Bool(self.0.payload() != 0),
+            SYMBOL_TAG => ValueRef::Symbol(self.0.payload() as SymbolId),
+            OBJECT_TAG => ValueRef::Object(self.0.payload() as ObjectId),
+            EMPTY_STRING_TAG | LATIN1_TAG | WIDE_TAG => {
+                // SAFETY: Both wrappers are transparent over PackedWord. The tag
+                // guarantees a valid JsString word. This borrow has self's lifetime,
+                // during which self retains ownership of the string's strong reference.
+                ValueRef::String(unsafe { &*ptr::from_ref(self).cast::<JsString>() })
+            }
+            _ => ValueRef::Number(f64::from_bits(self.0.bits())),
+        }
+    }
+
+    /// Transfer the string payload if this value is a string.
+    pub fn into_string(self) -> Option<JsString> {
+        match self.0.tag() {
+            EMPTY_STRING_TAG | LATIN1_TAG | WIDE_TAG => Some(JsString(ManuallyDrop::new(self).0)),
+            _ => None,
+        }
+    }
+
     pub fn truthy(&self) -> bool {
-        match self {
-            Self::Undefined | Self::Null => false,
-            Self::Bool(value) => *value,
-            Self::Number(value) => *value != 0.0 && !value.is_nan(),
-            Self::String(value) => !value.is_empty(),
-            Self::Symbol(_) => true,
-            Self::Object(_) => true,
+        match self.view() {
+            ValueRef::Undefined | ValueRef::Null => false,
+            ValueRef::Bool(value) => value,
+            ValueRef::Number(value) => value != 0.0 && !value.is_nan(),
+            ValueRef::String(value) => !value.is_empty(),
+            ValueRef::Symbol(_) | ValueRef::Object(_) => true,
         }
     }
 
     pub fn type_of(&self) -> &'static str {
-        match self {
-            Self::Undefined => "undefined",
-            Self::Null => "object",
-            Self::Bool(_) => "boolean",
-            Self::Number(_) => "number",
-            Self::String(_) => "string",
-            Self::Symbol(_) => "symbol",
-            Self::Object(_) => "object",
+        match self.view() {
+            ValueRef::Undefined => "undefined",
+            ValueRef::Null | ValueRef::Object(_) => "object",
+            ValueRef::Bool(_) => "boolean",
+            ValueRef::Number(_) => "number",
+            ValueRef::String(_) => "string",
+            ValueRef::Symbol(_) => "symbol",
         }
     }
 }

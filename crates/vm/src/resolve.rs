@@ -10,7 +10,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{Object, PromiseState};
 use crate::host::Host;
 use crate::runtime::{Invocation, Microtask, Settlement};
-use crate::value::{ObjectId, PropertyKeyRef, Value};
+use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 pub(crate) enum AwaitPrepared {
@@ -36,7 +36,7 @@ impl Vm {
         if !self.is_open(result)? {
             return Ok(());
         }
-        if matches!(value, Value::Object(id) if id == result) {
+        if matches!(value.view(), ValueRef::Object(id) if id == result) {
             let error = self.type_error("Cannot resolve a promise with itself")?;
             return self.settle(result, Settlement::Rejected(error));
         }
@@ -52,16 +52,14 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
-        let Value::Object(id) = *value else {
+        let ValueRef::Object(id) = value.view() else {
             return Ok(Ok(None));
         };
         if !matches!(self.heap.get(id)?, Object::Promise(_)) {
             return Ok(Ok(None));
         }
         match self.read_property(host, roots, value, PropertyKeyRef::String("constructor"))? {
-            Invocation::Value(Value::Object(constructor))
-                if constructor == self.builtins.get("promise") =>
-            {
+            Invocation::Value(value) if matches!(value.view(), ValueRef::Object(constructor) if constructor == self.builtins.get("promise")) => {
                 Ok(Ok(Some(id)))
             }
             Invocation::Value(_) => Ok(Ok(None)),
@@ -75,7 +73,7 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ResolutionInput, VmError> {
-        let Value::Object(id) = value else {
+        let ValueRef::Object(id) = value.view() else {
             return Ok(ResolutionInput::Plain(value));
         };
         let promise = match self.heap.get(id)? {
@@ -139,7 +137,7 @@ impl Vm {
             host,
             &roots.with(&reject_id),
             then,
-            vec![Value::Object(resolve_id), Value::Object(reject_id)],
+            vec![Value::object(resolve_id), Value::object(reject_id)],
             receiver,
         )?;
         if let Invocation::Thrown(error) = invocation {

@@ -1,6 +1,8 @@
 #[path = "e2e/mod.rs"]
 mod suite;
 
+use yield_vm::ValueRef;
+
 #[test]
 fn restore_rejects_a_missing_boxed_symbol_payload() {
     use yield_harness::{TestHost, build};
@@ -120,7 +122,7 @@ export async function run() {
         }
         assert_eq!(
             vm.promise_state(&result).unwrap(),
-            PromiseState::Fulfilled(Value::Bool(true))
+            PromiseState::Fulfilled(Value::boolean(true))
         );
     }
 }
@@ -156,10 +158,10 @@ fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
     vm.collect_garbage(&[]).unwrap();
 
     let cycle = vm.start(&mut host, "cycle", vec![]).unwrap();
-    let Value::Object(id) = cycle else {
+    let ValueRef::Object(id) = cycle.view() else {
         panic!("expected cycle object");
     };
-    let roots = [Value::Object(id), Value::Object(id)];
+    let roots = [Value::object(id), Value::object(id)];
     vm.collect_garbage(&roots).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
     assert!(snapshot.objects.iter().any(|record| record.id == id));
@@ -172,13 +174,13 @@ fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
     ));
 
     let next = vm.start(&mut host, "cycle", vec![]).unwrap();
-    let Value::Object(next_id) = next else {
+    let ValueRef::Object(next_id) = next.view() else {
         panic!("expected new cycle object");
     };
     assert_ne!(id, next_id);
     let missing = u32::MAX;
     assert!(matches!(
-        vm.collect_garbage(&[Value::Symbol(missing)]),
+        vm.collect_garbage(&[Value::symbol(missing)]),
         Err(VmError::InvalidState(message))
             if message == format!("garbage collection references missing symbol {missing}")
     ));
@@ -217,7 +219,7 @@ export function read() { return second.get(first.get(key1)).answer; }
     vm.collect_garbage(&[]).unwrap();
     assert_eq!(
         vm.start(&mut host, "read", vec![]).unwrap(),
-        Value::Number(42.0)
+        Value::number(42.0)
     );
     assert!(matches!(
         vm.collect_garbage(&[backref]),
@@ -258,16 +260,18 @@ export function take(i) { const value = stash[i]; delete stash[i]; return value;
     );
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).unwrap();
+    let values =
+        [0.0, 1.0, 2.0, 3.0].map(|i| vm.start(&mut host, "take", vec![number(i)]).unwrap());
     let [
-        Value::Object(map),
-        Value::Object(set),
-        Value::Symbol(b),
-        Value::Symbol(backref),
-    ] = [0.0, 1.0, 2.0, 3.0].map(|i| vm.start(&mut host, "take", vec![number(i)]).unwrap())
+        ValueRef::Object(map),
+        ValueRef::Object(set),
+        ValueRef::Symbol(b),
+        ValueRef::Symbol(backref),
+    ] = values.each_ref().map(Value::view)
     else {
         panic!("expected two collections and two symbols");
     };
-    let roots = [Value::Object(map), Value::Object(set), Value::Symbol(b)];
+    let roots = [Value::object(map), Value::object(set), Value::symbol(b)];
     vm.collect_garbage(&roots).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
     let map_record = snapshot.objects.iter().find(|r| r.id == map).unwrap();
@@ -275,11 +279,11 @@ export function take(i) { const value = stash[i]; delete stash[i]; return value;
         panic!("expected WeakMap");
     };
     assert_eq!(entries.len(), 2);
-    let Value::Symbol(a) = entries[&WeakKey::Symbol(b)] else {
+    let ValueRef::Symbol(a) = entries[&WeakKey::Symbol(b)].view() else {
         panic!("expected symbol value");
     };
     assert!(a < b, "a must be visited before b unlocks it");
-    let Value::Object(value) = entries[&WeakKey::Symbol(a)] else {
+    let ValueRef::Object(value) = entries[&WeakKey::Symbol(a)].view() else {
         panic!("expected object value");
     };
     assert!(snapshot.objects.iter().any(|r| r.id == value));
@@ -291,7 +295,7 @@ export function take(i) { const value = stash[i]; delete stash[i]; return value;
     assert_eq!(entries.len(), 1);
     assert!(entries.contains(&WeakKey::Symbol(a)));
     assert!(matches!(
-        vm.collect_garbage(&[Value::Symbol(backref)]),
+        vm.collect_garbage(&[Value::symbol(backref)]),
         Err(VmError::InvalidState(message))
             if message == format!("garbage collection references missing symbol {backref}")
     ));
@@ -308,11 +312,11 @@ export function take(i) { const value = stash[i]; delete stash[i]; return value;
         Object::WeakSet { entries, .. } if entries.is_empty()
     ));
     assert!(snapshot.objects.iter().all(|r| r.id != value));
-    assert!(vm.collect_garbage(&[Value::Object(value)]).is_err());
+    assert!(vm.collect_garbage(&[Value::object(value)]).is_err());
     for id in [a, b] {
         assert!(!snapshot.symbols.contains_key(&id));
         assert!(matches!(
-            vm.collect_garbage(&[Value::Symbol(id)]),
+            vm.collect_garbage(&[Value::symbol(id)]),
             Err(VmError::InvalidState(message))
                 if message == format!("garbage collection references missing symbol {id}")
         ));
@@ -334,12 +338,12 @@ export const registered = Symbol.for('registered');
     );
     let mut host = TestHost::default();
     let vm = Vm::new(build.clone(), &mut host).unwrap();
-    let Value::Symbol(registered) = vm.get_export("registered").unwrap() else {
+    let ValueRef::Symbol(registered) = vm.get_export("registered").unwrap().view() else {
         panic!("expected registered symbol");
     };
     let snapshot = vm.snapshot(&[]).unwrap();
     for (export, owner) in [("map", "WeakMap"), ("set", "WeakSet")] {
-        let Value::Object(id) = vm.get_export(export).unwrap() else {
+        let ValueRef::Object(id) = vm.get_export(export).unwrap().view() else {
             panic!("expected weak collection");
         };
         for key in [WeakKey::Symbol(u32::MAX), WeakKey::Symbol(registered)] {
@@ -347,7 +351,7 @@ export const registered = Symbol.for('registered');
             let record = corrupt.objects.iter_mut().find(|r| r.id == id).unwrap();
             match &mut record.object {
                 Object::WeakMap { entries, .. } => {
-                    entries.insert(key, Value::Undefined);
+                    entries.insert(key, Value::UNDEFINED);
                 }
                 Object::WeakSet { entries, .. } => {
                     entries.insert(key);
@@ -406,10 +410,10 @@ export function registered() { return Symbol.for("registry"); }
     let mut vm = Vm::new(build, &mut host).unwrap();
     vm.collect_garbage(&[]).unwrap();
     let registered = vm.start(&mut host, "registered", vec![]).unwrap();
-    let Value::Symbol(id) = vm.start(&mut host, "fresh", vec![]).unwrap() else {
+    let ValueRef::Symbol(id) = vm.start(&mut host, "fresh", vec![]).unwrap().view() else {
         panic!("expected ordinary symbol");
     };
-    let roots = [Value::Symbol(id)];
+    let roots = [Value::symbol(id)];
     vm.collect_garbage(&roots).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
     assert_eq!(snapshot.symbols[&id], Some("ordinary".into()));
@@ -457,7 +461,7 @@ export async function run() {
     vm.collect_garbage(roots).unwrap();
     let after = vm.snapshot(roots).unwrap();
 
-    let expected = PromiseState::Fulfilled(Value::String("closure:payload!".into()));
+    let expected = PromiseState::Fulfilled(Value::string("closure:payload!".into()));
     vm.complete_operation(token, Completion::Fulfilled(JsValue::string("!")))
         .unwrap();
     vm.run_until_idle(&mut host).unwrap();
@@ -493,10 +497,10 @@ fn gc_active_preserves_only_registered_external_roots() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).unwrap();
     let value = vm.start(&mut host, "make", vec![]).unwrap();
-    let Value::Object(id) = value else {
+    let ValueRef::Object(id) = value.view() else {
         panic!("expected object")
     };
-    let roots = [Value::Object(id)];
+    let roots = [Value::object(id)];
     host.set_gc_roots(roots.to_vec());
     vm.start(&mut host, "collect", vec![]).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
@@ -524,7 +528,7 @@ fn gc_active_rejects_a_missing_root_without_sweeping() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).unwrap();
     let value = vm.start(&mut host, "make", vec![]).unwrap();
-    host.set_gc_roots(vec![Value::Symbol(u32::MAX)]);
+    host.set_gc_roots(vec![Value::symbol(u32::MAX)]);
     assert!(matches!(
         vm.start(&mut host, "collect", vec![]),
         Err(VmError::InvalidState(message))
@@ -555,7 +559,7 @@ fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
     vm.collect_garbage(roots).unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Number(42.0))
+        PromiseState::Fulfilled(Value::number(42.0))
     );
 }
 
@@ -586,8 +590,98 @@ export function settle() { saved(42); }
     vm.start(&mut host, "settle", vec![]).unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Number(42.0))
+        PromiseState::Fulfilled(Value::number(42.0))
     );
     vm.snapshot(roots)
         .expect("GC must remove stale resolver records");
+}
+
+#[test]
+fn packed_value_distinguishes_nan_tags_and_empty_slots() {
+    use std::mem::size_of;
+    use yield_vm::{JsString, Value};
+
+    assert_eq!(size_of::<Value>(), 8);
+    assert_eq!(size_of::<Option<Value>>(), 8);
+    assert_eq!(size_of::<JsString>(), 8);
+
+    for prefix in 0xfff8_u64..=0xffff {
+        let value = Value::number(f64::from_bits(prefix << 48 | 1));
+        assert!(
+            matches!(value.view(), ValueRef::Number(n) if n.to_bits() == 0x7ff8_0000_0000_0000)
+        );
+        assert_ne!(value, value.clone());
+    }
+
+    for number in [
+        0.0,
+        -0.0,
+        f64::from_bits(1),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        assert!(
+            matches!(Value::number(number).view(), ValueRef::Number(n) if n.to_bits() == number.to_bits())
+        );
+    }
+    assert_eq!(Value::number(-0.0), Value::number(0.0));
+    assert!(matches!(
+        Some(Value::UNDEFINED).as_ref().map(Value::view),
+        Some(ValueRef::Undefined)
+    ));
+    assert_ne!(Some(Value::UNDEFINED), None);
+
+    let empty = Value::string(JsString::new());
+    assert!(matches!(empty.view(), ValueRef::String(s) if s.is_empty()));
+    assert_ne!(Some(empty.clone()), None);
+    assert!(empty.into_string().unwrap().is_empty());
+    assert!(Value::UNDEFINED.into_string().is_none());
+
+    let object = Value::object(u32::MAX);
+    let symbol = Value::symbol(u32::MAX);
+    assert!(matches!(object.view(), ValueRef::Object(u32::MAX)));
+    assert!(matches!(symbol.view(), ValueRef::Symbol(u32::MAX)));
+    assert_ne!(object, symbol);
+}
+
+#[test]
+fn packed_value_transfers_string_ownership_and_keeps_copy_on_write() {
+    use yield_vm::{JsString, Value};
+
+    for units in [vec![0x41, 0xe9], vec![0x41, 0xd800]] {
+        let original = Value::string(JsString::from_units(units.clone()));
+        let (owned, left, right) = (original.clone(), original.clone(), original.clone());
+        drop(original);
+
+        let mut owned = owned.into_string().unwrap();
+        owned.push('!');
+        assert!(
+            owned
+                .units()
+                .eq(units.iter().copied().chain([u16::from(b'!')]))
+        );
+
+        for saved in [left, right] {
+            let ValueRef::String(saved) = saved.view() else {
+                panic!("expected a string");
+            };
+            assert!(saved.units().eq(units.iter().copied()));
+        }
+    }
+}
+
+#[test]
+fn packed_value_keeps_legacy_json() {
+    use yield_vm::Value;
+
+    let number_json = r#"{"number":"NaN"}"#;
+    let value: Value = serde_json::from_str(number_json).unwrap();
+    assert!(matches!(value.view(), ValueRef::Number(n) if n.is_nan()));
+    assert_eq!(serde_json::to_string(&value).unwrap(), number_json);
+
+    let string_json = r#"{"string":{"utf16":[55296]}}"#;
+    let value: Value = serde_json::from_str(string_json).unwrap();
+    assert!(matches!(value.view(), ValueRef::String(s) if s.units().eq([0xd800])));
+    assert_eq!(serde_json::to_string(&value).unwrap(), string_json);
+    assert!(serde_json::from_str::<Value>(r#"{"number":"unknown"}"#).is_err());
 }

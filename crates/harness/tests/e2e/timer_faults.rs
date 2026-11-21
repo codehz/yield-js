@@ -86,8 +86,8 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     reject("missing saved callback", "saved value count", image);
 
     for (value, message) in [
-        (Value::Object(u32::MAX), "missing object"),
-        (Value::Symbol(u32::MAX), "missing symbol"),
+        (Value::object(u32::MAX), "missing object"),
+        (Value::symbol(u32::MAX), "missing symbol"),
     ] {
         let mut image = snapshot.clone();
         image.host_tasks[0].saved[0] = value.clone();
@@ -142,7 +142,7 @@ fn timer_start_fault_leaves_no_pending_work() {
         assert!(snapshot.operations.is_empty());
     }
     host.advance(&mut vm, 10).unwrap();
-    assert_eq!(vm.get_export("calls").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("calls").unwrap(), Value::number(0.0));
     assert!(host.errors().is_empty());
 }
 
@@ -159,9 +159,9 @@ fn timer_checkpoint_fault_does_not_disarm_the_source() {
     assert_eq!(host.clock().arm_count(), 1);
 
     host.advance(&mut vm, 9).unwrap();
-    assert_eq!(vm.get_export("calls").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("calls").unwrap(), Value::number(0.0));
     host.advance(&mut vm, 1).unwrap();
-    assert_eq!(vm.get_export("calls").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("calls").unwrap(), Value::number(1.0));
     assert!(host.errors().is_empty());
     assert!(host.clock().registrations().is_empty());
     let snapshot = vm.snapshot(&[]).unwrap();
@@ -191,11 +191,11 @@ fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
     vm.run_until_idle(&mut host).unwrap();
     assert_eq!(
         vm.promise_state(&promise).unwrap(),
-        PromiseState::Rejected(Value::String("timer unavailable".into())),
+        PromiseState::Rejected(Value::string("timer unavailable".into())),
     );
     vm.start_recovered_operations().unwrap();
     host.advance(&mut vm, 10).unwrap();
-    assert_eq!(vm.get_export("calls").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("calls").unwrap(), Value::number(0.0));
     let [error] = host.errors() else {
         panic!("expected exactly one background error");
     };
@@ -233,7 +233,7 @@ fn a_throwing_timer_callback_does_not_block_the_next_timer() {
         error.as_string().unwrap().to_utf8().unwrap(),
         "callback failed"
     );
-    assert_eq!(vm.get_export("calls").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("calls").unwrap(), Value::number(1.0));
     assert!(host.clock().registrations().is_empty());
     let snapshot = vm.snapshot(&[]).unwrap();
     assert!(snapshot.host_tasks.is_empty());
@@ -339,7 +339,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     alternate.start(&mut changed, "run", vec![]).unwrap();
     let alternate_image = alternate.snapshot(&[]).unwrap();
     assert_eq!(alternate_image.host_tasks[0].saved.len(), 2);
-    assert_eq!(alternate_image.host_tasks[0].saved[1], Value::Number(42.0));
+    assert_eq!(alternate_image.host_tasks[0].saved[1], Value::number(42.0));
     drop(alternate);
 
     let rejected_clock = Arc::new(FakeClock::default());
@@ -364,5 +364,5 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         .advance(&mut restored, &mut reordered, 10)
         .unwrap();
     assert!(restored_clock.registrations().is_empty());
-    assert_eq!(restored.get_export("calls").unwrap(), Value::Number(1.0));
+    assert_eq!(restored.get_export("calls").unwrap(), Value::number(1.0));
 }

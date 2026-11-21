@@ -10,7 +10,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, Value};
+use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::Vm;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -181,8 +181,9 @@ impl Vm {
         result: Invocation,
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
-        if let (Some(prototype), Invocation::Value(Value::Object(id))) = (prototype, &result)
-            && !self.heap.set_prototype(*id, Some(prototype))?
+        if let (Some(prototype), Invocation::Value(value)) = (prototype, &result)
+            && let ValueRef::Object(id) = value.view()
+            && !self.heap.set_prototype(id, Some(prototype))?
         {
             return self.throw_type_error("cannot set constructor result prototype");
         }

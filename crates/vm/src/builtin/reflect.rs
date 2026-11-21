@@ -4,7 +4,7 @@ pub(crate) mod namespace {
     use crate::gc::ActiveRoots;
     use crate::host::Host;
     use crate::runtime::Invocation;
-    use crate::value::{PropertyKey, Value};
+    use crate::value::{PropertyKey, Value, ValueRef};
     use crate::vm::Vm;
 
     #[function(name = "ownKeys")]
@@ -15,21 +15,21 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(Value::Object(id)) = args.first() else {
+        let Some(ValueRef::Object(id)) = args.first().map(Value::view) else {
             return vm.throw_type_error("Reflect.ownKeys requires an object");
         };
-        let keys = match vm.own_keys(host, roots, *id, false)? {
+        let keys = match vm.own_keys(host, roots, id, false)? {
             Ok(keys) => keys,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let keys = keys
             .into_iter()
             .map(|key| match key {
-                PropertyKey::String(key) => Value::String(key),
-                PropertyKey::Symbol(id) => Value::Symbol(id),
+                PropertyKey::String(key) => Value::string(key),
+                PropertyKey::Symbol(id) => Value::symbol(id),
             })
             .collect();
-        Ok(Invocation::Value(Value::Object(vm.heap.alloc_array(keys))))
+        Ok(Invocation::Value(Value::object(vm.heap.alloc_array(keys))))
     }
 
     #[function(name = "deleteProperty")]
@@ -40,14 +40,17 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(target @ Value::Object(_)) = args.first() else {
+        let Some(target) = args
+            .first()
+            .filter(|value| matches!(value.view(), ValueRef::Object(_)))
+        else {
             return vm.throw_type_error("Reflect.deleteProperty requires an object");
         };
         vm.delete_property(
             host,
             roots,
             target,
-            args.get(1).unwrap_or(&Value::Undefined),
+            args.get(1).unwrap_or(&Value::UNDEFINED),
         )
     }
 
@@ -110,18 +113,18 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(Value::Object(target)) = args.first() else {
+        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
             return vm.throw_type_error("Reflect.get requires an object");
         };
         let key =
-            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::Undefined))? {
+            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {
                 Ok(key) => key,
                 Err(thrown) => return Ok(Invocation::Thrown(thrown)),
             };
         vm.read_property_with_receiver(
             host,
             roots,
-            *target,
+            target,
             args.get(2).unwrap_or(&args[0]),
             key.borrowed(),
         )
@@ -135,17 +138,17 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(Value::Object(target)) = args.first() else {
+        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
             return vm.throw_type_error("Reflect.set requires an object");
         };
         let key =
-            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::Undefined))? {
+            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {
                 Ok(key) => key,
                 Err(thrown) => return Ok(Invocation::Thrown(thrown)),
             };
-        let value = args.get(2).cloned().unwrap_or(Value::Undefined);
+        let value = args.get(2).cloned().unwrap_or(Value::UNDEFINED);
         let receiver = args.get(3).unwrap_or(&args[0]);
-        vm.set_property(host, roots, *target, receiver, key, value, false)
+        vm.set_property(host, roots, target, receiver, key, value, false)
     }
 
     #[function(name = "has")]
@@ -156,15 +159,15 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(Value::Object(target)) = args.first() else {
+        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
             return vm.throw_type_error("Reflect.has requires an object");
         };
         let key =
-            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::Undefined))? {
+            match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {
                 Ok(key) => key,
                 Err(thrown) => return Ok(Invocation::Thrown(thrown)),
             };
-        vm.has_property_key(host, roots, *target, key.borrowed())
+        vm.has_property_key(host, roots, target, key.borrowed())
     }
 
     #[function(name = "getOwnPropertyDescriptor")]

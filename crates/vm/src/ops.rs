@@ -2,7 +2,7 @@
 
 use crate::bytecode::{BinaryOp, UnaryOp};
 use crate::error::VmError;
-use crate::value::{JsString, PropertyKeyRef, Value};
+use crate::value::{JsString, PropertyKeyRef, Value, ValueRef};
 
 pub(crate) fn unary_coerces(operator: UnaryOp) -> bool {
     matches!(operator, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
@@ -26,7 +26,10 @@ impl From<VmError> for BinaryError {
 /// Coercing operands must be rejected before the lossy helpers run; the error
 /// is a script `TypeError` so `try`/`catch` can capture it.
 fn check_no_symbol(message: &'static str, values: &[&Value]) -> Result<(), BinaryError> {
-    if values.iter().any(|value| matches!(value, Value::Symbol(_))) {
+    if values
+        .iter()
+        .any(|value| matches!(value.view(), ValueRef::Symbol(_)))
+    {
         return Err(BinaryError::TypeError(message));
     }
     Ok(())
@@ -35,85 +38,88 @@ fn check_no_symbol(message: &'static str, values: &[&Value]) -> Result<(), Binar
 pub(crate) fn binary_op(operator: BinaryOp, lhs: Value, rhs: Value) -> Result<Value, BinaryError> {
     Ok(match operator {
         BinaryOp::Add => {
-            if matches!(&lhs, Value::String(_)) || matches!(&rhs, Value::String(_)) {
+            if matches!(lhs.view(), ValueRef::String(_))
+                || matches!(rhs.view(), ValueRef::String(_))
+            {
                 check_no_symbol(SYMBOL_TO_STRING, &[&lhs, &rhs])?;
-                let mut text = match lhs {
-                    Value::String(text) => text,
-                    other => to_js_string(&other),
+                let mut text = if matches!(lhs.view(), ValueRef::String(_)) {
+                    lhs.into_string().expect("string operand")
+                } else {
+                    to_js_string(&lhs)
                 };
-                match rhs {
-                    Value::String(right) => text.push_str(&right),
-                    other => text.push_str(&to_js_string(&other)),
+                match rhs.view() {
+                    ValueRef::String(right) => text.push_str(right),
+                    _ => text.push_str(&to_js_string(&rhs)),
                 }
-                Value::String(text)
+                Value::string(text)
             } else {
                 check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-                Value::Number(to_number(&lhs)? + to_number(&rhs)?)
+                Value::number(to_number(&lhs)? + to_number(&rhs)?)
             }
         }
         BinaryOp::Sub => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number(to_number(&lhs)? - to_number(&rhs)?)
+            Value::number(to_number(&lhs)? - to_number(&rhs)?)
         }
         BinaryOp::Mul => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number(to_number(&lhs)? * to_number(&rhs)?)
+            Value::number(to_number(&lhs)? * to_number(&rhs)?)
         }
         BinaryOp::Div => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number(to_number(&lhs)? / to_number(&rhs)?)
+            Value::number(to_number(&lhs)? / to_number(&rhs)?)
         }
         BinaryOp::Rem => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number(to_number(&lhs)? % to_number(&rhs)?)
+            Value::number(to_number(&lhs)? % to_number(&rhs)?)
         }
         BinaryOp::Exp => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number(to_number(&lhs)?.powf(to_number(&rhs)?))
+            Value::number(to_number(&lhs)?.powf(to_number(&rhs)?))
         }
         BinaryOp::Lt => relational(&lhs, &rhs, |ordering| ordering.is_lt())?,
         BinaryOp::Le => relational(&lhs, &rhs, |ordering| ordering.is_le())?,
         BinaryOp::Gt => relational(&lhs, &rhs, |ordering| ordering.is_gt())?,
         BinaryOp::Ge => relational(&lhs, &rhs, |ordering| ordering.is_ge())?,
-        BinaryOp::Eq => Value::Bool(loose_equal(&lhs, &rhs)?),
-        BinaryOp::Ne => Value::Bool(!loose_equal(&lhs, &rhs)?),
-        BinaryOp::StrictEq => Value::Bool(strict_equal(&lhs, &rhs)),
-        BinaryOp::StrictNe => Value::Bool(!strict_equal(&lhs, &rhs)),
+        BinaryOp::Eq => Value::boolean(loose_equal(&lhs, &rhs)?),
+        BinaryOp::Ne => Value::boolean(!loose_equal(&lhs, &rhs)?),
+        BinaryOp::StrictEq => Value::boolean(strict_equal(&lhs, &rhs)),
+        BinaryOp::StrictNe => Value::boolean(!strict_equal(&lhs, &rhs)),
         BinaryOp::BitAnd => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_int32(&lhs)? & to_int32(&rhs)?) as f64)
+            Value::number((to_int32(&lhs)? & to_int32(&rhs)?) as f64)
         }
         BinaryOp::BitOr => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_int32(&lhs)? | to_int32(&rhs)?) as f64)
+            Value::number((to_int32(&lhs)? | to_int32(&rhs)?) as f64)
         }
         BinaryOp::BitXor => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64)
+            Value::number((to_int32(&lhs)? ^ to_int32(&rhs)?) as f64)
         }
         BinaryOp::Shl => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_int32(&lhs)?).wrapping_shl(to_uint32(&rhs)? & 0x1f) as f64)
+            Value::number((to_int32(&lhs)?).wrapping_shl(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::Shr => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_int32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
+            Value::number((to_int32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
         BinaryOp::UShr => {
             check_no_symbol(SYMBOL_TO_NUMBER, &[&lhs, &rhs])?;
-            Value::Number((to_uint32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
+            Value::number((to_uint32(&lhs)?).wrapping_shr(to_uint32(&rhs)? & 0x1f) as f64)
         }
     })
 }
 
 pub(crate) fn unary_op(operator: UnaryOp, value: Value) -> Value {
     match operator {
-        UnaryOp::Neg => Value::Number(-to_number_lossy(&value)),
-        UnaryOp::Pos => Value::Number(to_number_lossy(&value)),
-        UnaryOp::Not => Value::Bool(!value.truthy()),
-        UnaryOp::BitNot => Value::Number((!to_int32_lossy(&value)) as f64),
-        UnaryOp::TypeOf => Value::String(value.type_of().into()),
-        UnaryOp::Void => Value::Undefined,
+        UnaryOp::Neg => Value::number(-to_number_lossy(&value)),
+        UnaryOp::Pos => Value::number(to_number_lossy(&value)),
+        UnaryOp::Not => Value::boolean(!value.truthy()),
+        UnaryOp::BitNot => Value::number((!to_int32_lossy(&value)) as f64),
+        UnaryOp::TypeOf => Value::string(value.type_of().into()),
+        UnaryOp::Void => Value::UNDEFINED,
     }
 }
 
@@ -150,29 +156,29 @@ fn relational(
     predicate: impl Fn(std::cmp::Ordering) -> bool,
 ) -> Result<Value, BinaryError> {
     check_no_symbol(SYMBOL_TO_PRIMITIVE, &[lhs, rhs])?;
-    if let (Value::String(lhs), Value::String(rhs)) = (lhs, rhs) {
-        return Ok(Value::Bool(predicate(lhs.cmp(rhs))));
+    if let (ValueRef::String(lhs), ValueRef::String(rhs)) = (lhs.view(), rhs.view()) {
+        return Ok(Value::boolean(predicate(lhs.cmp(rhs))));
     }
     let lhs = to_number_lossy(lhs);
     let rhs = to_number_lossy(rhs);
-    Ok(Value::Bool(lhs.partial_cmp(&rhs).is_some_and(predicate)))
+    Ok(Value::boolean(lhs.partial_cmp(&rhs).is_some_and(predicate)))
 }
 
 pub(crate) fn strict_equal(lhs: &Value, rhs: &Value) -> bool {
-    match (lhs, rhs) {
-        (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
-        (Value::Bool(lhs), Value::Bool(rhs)) => lhs == rhs,
-        (Value::Number(lhs), Value::Number(rhs)) => lhs == rhs,
-        (Value::String(lhs), Value::String(rhs)) => lhs == rhs,
-        (Value::Symbol(lhs), Value::Symbol(rhs)) => lhs == rhs,
-        (Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
+    match (lhs.view(), rhs.view()) {
+        (ValueRef::Undefined, ValueRef::Undefined) | (ValueRef::Null, ValueRef::Null) => true,
+        (ValueRef::Bool(lhs), ValueRef::Bool(rhs)) => lhs == rhs,
+        (ValueRef::Number(lhs), ValueRef::Number(rhs)) => lhs == rhs,
+        (ValueRef::String(lhs), ValueRef::String(rhs)) => lhs == rhs,
+        (ValueRef::Symbol(lhs), ValueRef::Symbol(rhs)) => lhs == rhs,
+        (ValueRef::Object(lhs), ValueRef::Object(rhs)) => lhs == rhs,
         _ => false,
     }
 }
 
 pub(crate) fn same_value(lhs: &Value, rhs: &Value) -> bool {
-    match (lhs, rhs) {
-        (Value::Number(lhs), Value::Number(rhs)) => {
+    match (lhs.view(), rhs.view()) {
+        (ValueRef::Number(lhs), ValueRef::Number(rhs)) => {
             lhs.to_bits() == rhs.to_bits() || lhs.is_nan() && rhs.is_nan()
         }
         _ => strict_equal(lhs, rhs),
@@ -183,30 +189,30 @@ fn loose_equal(lhs: &Value, rhs: &Value) -> Result<bool, VmError> {
     if strict_equal(lhs, rhs) {
         return Ok(true);
     }
-    match (lhs, rhs) {
-        (Value::Null, Value::Undefined) | (Value::Undefined, Value::Null) => Ok(true),
-        (Value::Number(_), Value::String(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
-        (Value::String(_), Value::Number(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
-        (Value::Bool(_), _) => loose_equal(&Value::Number(to_number(lhs)?), rhs),
-        (_, Value::Bool(_)) => loose_equal(lhs, &Value::Number(to_number(rhs)?)),
+    match (lhs.view(), rhs.view()) {
+        (ValueRef::Null, ValueRef::Undefined) | (ValueRef::Undefined, ValueRef::Null) => Ok(true),
+        (ValueRef::Number(_), ValueRef::String(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
+        (ValueRef::String(_), ValueRef::Number(_)) => Ok(to_number(lhs)? == to_number(rhs)?),
+        (ValueRef::Bool(_), _) => loose_equal(&Value::number(to_number(lhs)?), rhs),
+        (_, ValueRef::Bool(_)) => loose_equal(lhs, &Value::number(to_number(rhs)?)),
         _ => Ok(false),
     }
 }
 
 pub(crate) fn to_number(value: &Value) -> Result<f64, VmError> {
-    match value {
-        Value::Undefined => Ok(f64::NAN),
-        Value::Null => Ok(0.0),
-        Value::Bool(value) => Ok(if *value { 1.0 } else { 0.0 }),
-        Value::Number(value) => Ok(*value),
-        Value::String(value) => match value.to_utf8() {
+    match value.view() {
+        ValueRef::Undefined => Ok(f64::NAN),
+        ValueRef::Null => Ok(0.0),
+        ValueRef::Bool(value) => Ok(if value { 1.0 } else { 0.0 }),
+        ValueRef::Number(value) => Ok(value),
+        ValueRef::String(value) => match value.to_utf8() {
             Ok(text) => parse_js_number(&text),
             Err(_) => Ok(f64::NAN),
         },
-        Value::Symbol(_) => Err(VmError::InvalidState(
+        ValueRef::Symbol(_) => Err(VmError::InvalidState(
             "numeric conversion of a Symbol is not implemented in this PoC".to_owned(),
         )),
-        Value::Object(_) => Err(VmError::InvalidState(
+        ValueRef::Object(_) => Err(VmError::InvalidState(
             "numeric conversion of objects is not implemented in this PoC".to_owned(),
         )),
     }
@@ -341,13 +347,13 @@ fn to_uint32(value: &Value) -> Result<u32, VmError> {
 }
 
 pub(crate) fn to_js_string(value: &Value) -> JsString {
-    match value {
-        Value::Undefined => "undefined".into(),
-        Value::Null => "null".into(),
-        Value::Bool(value) => if *value { "true" } else { "false" }.into(),
-        Value::Number(value) => ryu_js::Buffer::new().format(*value).into(),
-        Value::String(value) => value.clone(),
-        Value::Symbol(_) => "Symbol()".into(),
-        Value::Object(_) => "[object Object]".into(),
+    match value.view() {
+        ValueRef::Undefined => "undefined".into(),
+        ValueRef::Null => "null".into(),
+        ValueRef::Bool(value) => if value { "true" } else { "false" }.into(),
+        ValueRef::Number(value) => ryu_js::Buffer::new().format(value).into(),
+        ValueRef::String(value) => value.clone(),
+        ValueRef::Symbol(_) => "Symbol()".into(),
+        ValueRef::Object(_) => "[object Object]".into(),
     }
 }

@@ -10,7 +10,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::Invocation;
-use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 #[derive(Clone, Copy)]
@@ -126,7 +126,7 @@ fn install(vm: &mut Vm, identity: &Value) {
         vm,
         iterator,
         ITERATOR_NEXT.member,
-        Value::Object(next),
+        Value::object(next),
         Attributes::METHOD,
     );
     define_builtin_data(
@@ -170,7 +170,7 @@ impl Vm {
         self.heap.define_data(
             id,
             "lastIndex",
-            Value::Number(0.0),
+            Value::number(0.0),
             Attributes::FUNCTION_PROTOTYPE,
         )?;
         Ok(id)
@@ -185,18 +185,20 @@ impl Vm {
         called: bool,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let pattern = args.first().unwrap_or(&Value::Undefined);
-        let flags_arg = args.get(1).unwrap_or(&Value::Undefined);
-        let regexp = match pattern {
-            Value::Object(id) => match self.heap.get(*id)? {
-                Object::RegExp { .. } => Some(*id),
+        let undefined = Value::UNDEFINED;
+        let pattern = args.first().unwrap_or(&undefined);
+        let flags_arg = args.get(1).unwrap_or(&undefined);
+        let regexp = match pattern.view() {
+            ValueRef::Object(id) => match self.heap.get(id)? {
+                Object::RegExp { .. } => Some(id),
                 _ => None,
             },
             _ => None,
         };
-        if called && regexp.is_some() && matches!(flags_arg, Value::Undefined) {
+        if called && regexp.is_some() && matches!(flags_arg.view(), ValueRef::Undefined) {
             match self.read_property(host, roots, pattern, PropertyKeyRef::String("constructor"))? {
-                Invocation::Value(Value::Object(id)) if id == self.builtins.get("regexp") => {
+                Invocation::Value(value) if matches!(value.view(), ValueRef::Object(id) if id == self.builtins.get("regexp")) =>
+                {
                     return Ok(Invocation::Value(pattern.clone()));
                 }
                 Invocation::Value(_) => {}
@@ -209,7 +211,7 @@ impl Vm {
                 _ => unreachable!("RegExp object kind does not change"),
             },
             None => {
-                let source = if matches!(pattern, Value::Undefined) {
+                let source = if matches!(pattern.view(), ValueRef::Undefined) {
                     JsString::new()
                 } else {
                     match self.coerce_string(host, roots, pattern)? {
@@ -220,7 +222,7 @@ impl Vm {
                 (source, None)
             }
         };
-        let flags_text = if matches!(flags_arg, Value::Undefined) {
+        let flags_text = if matches!(flags_arg.view(), ValueRef::Undefined) {
             inherited_flags.map_or_else(JsString::new, |flags| flags.as_string().into())
         } else {
             match self.coerce_string(host, roots, flags_arg)? {
@@ -246,7 +248,7 @@ impl Vm {
         };
         let prototype = prototype.unwrap_or_else(|| self.builtins.get("regexp.prototype"));
         self.alloc_compiled_regexp(source, flags, compiled, prototype)
-            .map(|id| Invocation::Value(Value::Object(id)))
+            .map(|id| Invocation::Value(Value::object(id)))
     }
 
     pub(crate) fn call_regexp_method(
@@ -260,12 +262,12 @@ impl Vm {
         let root_view = (receiver, args);
         let roots = &roots.with(&root_view);
         if matches!(method, RegExpMethod::Escape) {
-            let Some(Value::String(input)) = args.first() else {
+            let Some(ValueRef::String(input)) = args.first().map(Value::view) else {
                 return self.throw_type_error("RegExp.escape requires a string argument");
             };
-            return Ok(Invocation::Value(Value::String(regexp_escape(input))));
+            return Ok(Invocation::Value(Value::string(regexp_escape(input))));
         }
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error("RegExp method requires an object receiver");
         };
         match method {
@@ -282,7 +284,7 @@ impl Vm {
                 text.push_str(&source);
                 text.push('/');
                 text.push_str(&flags);
-                return Ok(Invocation::Value(Value::String(text)));
+                return Ok(Invocation::Value(Value::string(text)));
             }
             RegExpMethod::Flags => {
                 let mut flags = String::new();
@@ -305,7 +307,7 @@ impl Vm {
                         thrown @ Invocation::Thrown(_) => return Ok(thrown),
                     }
                 }
-                return Ok(Invocation::Value(Value::String(flags.into())));
+                return Ok(Invocation::Value(Value::string(flags.into())));
             }
             RegExpMethod::Test => {
                 return self.regexp_test(
@@ -313,7 +315,7 @@ impl Vm {
                     roots,
                     receiver,
                     id,
-                    args.first().unwrap_or(&Value::Undefined),
+                    args.first().unwrap_or(&Value::UNDEFINED),
                 );
             }
             RegExpMethod::Match => return self.regexp_symbol_match(host, roots, id, args),
@@ -327,32 +329,33 @@ impl Vm {
             if id == self.builtins.get("regexp.prototype") {
                 match method {
                     RegExpMethod::Source => {
-                        return Ok(Invocation::Value(Value::String("(?:)".into())));
+                        return Ok(Invocation::Value(Value::string("(?:)".into())));
                     }
                     RegExpMethod::Exec => {}
-                    _ => return Ok(Invocation::Value(Value::Undefined)),
+                    _ => return Ok(Invocation::Value(Value::UNDEFINED)),
                 }
             }
             return self.throw_type_error("RegExp method requires a RegExp receiver");
         };
         let value = match method {
             RegExpMethod::Exec => {
-                let argument = args.first().unwrap_or(&Value::Undefined);
+                let undefined = Value::UNDEFINED;
+                let argument = args.first().unwrap_or(&undefined);
                 let input = match self.coerce_string(host, roots, argument)? {
                     Ok(input) => input,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 return self.regexp_match(host, roots, id, input);
             }
-            RegExpMethod::Source => Value::String(escaped_source(source)),
-            RegExpMethod::Global => Value::Bool(flags.global),
-            RegExpMethod::IgnoreCase => Value::Bool(flags.ignore_case),
-            RegExpMethod::Multiline => Value::Bool(flags.multiline),
-            RegExpMethod::DotAll => Value::Bool(flags.dot_all),
-            RegExpMethod::HasIndices => Value::Bool(flags.has_indices),
-            RegExpMethod::Sticky => Value::Bool(flags.sticky),
-            RegExpMethod::Unicode => Value::Bool(flags.unicode),
-            RegExpMethod::UnicodeSets => Value::Bool(flags.unicode_sets),
+            RegExpMethod::Source => Value::string(escaped_source(source)),
+            RegExpMethod::Global => Value::boolean(flags.global),
+            RegExpMethod::IgnoreCase => Value::boolean(flags.ignore_case),
+            RegExpMethod::Multiline => Value::boolean(flags.multiline),
+            RegExpMethod::DotAll => Value::boolean(flags.dot_all),
+            RegExpMethod::HasIndices => Value::boolean(flags.has_indices),
+            RegExpMethod::Sticky => Value::boolean(flags.sticky),
+            RegExpMethod::Unicode => Value::boolean(flags.unicode),
+            RegExpMethod::UnicodeSets => Value::boolean(flags.unicode_sets),
             RegExpMethod::Match
             | RegExpMethod::MatchAll
             | RegExpMethod::Replace
@@ -373,9 +376,9 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let string =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -401,8 +404,11 @@ impl Vm {
                 string.clone(),
                 Some(encoded.as_ref()),
             )? {
-                Invocation::Value(Value::Null) => break,
-                Invocation::Value(Value::Object(array)) => {
+                Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => break,
+                Invocation::Value(result) => {
+                    let ValueRef::Object(array) = result.view() else {
+                        return self.throw_type_error("RegExp exec must return an object or null");
+                    };
                     let matched = match self.regexp_capture(host, roots, array, 0)? {
                         Ok(value) => match self.coerce_string(host, roots, &value)? {
                             Ok(matched) => matched,
@@ -410,7 +416,7 @@ impl Vm {
                         },
                         Err(error) => return Ok(Invocation::Thrown(error)),
                     };
-                    results.push(Value::String(matched.clone()));
+                    results.push(Value::string(matched.clone()));
                     if matched.is_empty() {
                         let last_index = match self.regexp_last_index(host, roots, id)? {
                             Ok(index) => index,
@@ -422,14 +428,11 @@ impl Vm {
                         }
                     }
                 }
-                Invocation::Value(_) => {
-                    return self.throw_type_error("RegExp exec must return an object or null");
-                }
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             }
         }
         if results.is_empty() {
-            return Ok(Invocation::Value(Value::Null));
+            return Ok(Invocation::Value(Value::NULL));
         }
         self.array_result(results)
     }
@@ -442,9 +445,9 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let string =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -458,11 +461,14 @@ impl Vm {
         let created = self.construct_regexp(
             host,
             roots,
-            &[receiver.clone(), Value::String(flags.clone())],
+            &[receiver.clone(), Value::string(flags.clone())],
             None,
             false,
         )?;
-        let Invocation::Value(Value::Object(matcher)) = created else {
+        let Invocation::Value(value) = &created else {
+            return Ok(created);
+        };
+        let ValueRef::Object(matcher) = value.view() else {
             return Ok(created);
         };
         let last_index = match self.read_property(
@@ -478,7 +484,7 @@ impl Vm {
             host,
             roots,
             matcher,
-            &Value::Object(matcher),
+            &Value::object(matcher),
             PropertyKey::String("lastIndex".into()),
             last_index,
             true,
@@ -494,7 +500,7 @@ impl Vm {
             full_unicode,
             done: false,
         });
-        Ok(Invocation::Value(Value::Object(iterator)))
+        Ok(Invocation::Value(Value::object(iterator)))
     }
 
     fn regexp_string_iterator_next(
@@ -505,7 +511,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&receiver);
         let invalid = "RegExpStringIterator.next requires a RegExp string iterator";
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(invalid);
         };
         let Object::RegExpStringIterator {
@@ -522,18 +528,22 @@ impl Vm {
         let (regexp, string, global, full_unicode, done) =
             (*regexp, string.clone(), *global, *full_unicode, *done);
         if done {
-            return self.iterator_result(Value::Undefined, true);
+            return self.iterator_result(Value::UNDEFINED, true);
         }
-        let matcher = Value::Object(regexp);
-        match self.regexp_exec(host, roots, &matcher, regexp, string.clone())? {
-            Invocation::Value(Value::Null) => {
+        let matcher = Value::object(regexp);
+        let execution = self.regexp_exec(host, roots, &matcher, regexp, string.clone())?;
+        match execution {
+            Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => {
                 let Object::RegExpStringIterator { done, .. } = self.heap.get_mut(id)? else {
                     unreachable!("iterator kind does not change");
                 };
                 *done = true;
-                self.iterator_result(Value::Undefined, true)
+                self.iterator_result(Value::UNDEFINED, true)
             }
-            Invocation::Value(result @ Value::Object(array)) => {
+            Invocation::Value(result) => {
+                let ValueRef::Object(array) = result.view() else {
+                    return self.throw_type_error("RegExp exec must return an object or null");
+                };
                 let roots = &roots.with(&array);
                 if global {
                     let matched = match self.regexp_capture(host, roots, array, 0)? {
@@ -556,9 +566,6 @@ impl Vm {
                 }
                 self.iterator_result(result, false)
             }
-            Invocation::Value(_) => {
-                self.throw_type_error("RegExp exec must return an object or null")
-            }
             thrown @ Invocation::Thrown(_) => Ok(thrown),
         }
     }
@@ -571,13 +578,13 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let string =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
-        let replace_value = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let replace_value = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
         let functional = self.is_callable(&replace_value);
         let replacement = if functional {
             JsString::default()
@@ -608,10 +615,18 @@ impl Vm {
                     string.clone(),
                     Some(encoded.as_ref()),
                 )? {
-                    Invocation::Value(Value::Null) => break,
-                    Invocation::Value(Value::Object(array)) => {
-                        results.push(Value::Object(array));
+                    Invocation::Value(result) if matches!(result.view(), ValueRef::Null) => break,
+                    Invocation::Value(result) => {
+                        if !matches!(result.view(), ValueRef::Object(_)) {
+                            return self
+                                .throw_type_error("RegExp exec must return an object or null");
+                        }
+                        results.push(result);
                         let roots = &roots.with(&results);
+                        let array = match results.last().expect("just pushed").view() {
+                            ValueRef::Object(array) => array,
+                            _ => unreachable!("validated regexp result"),
+                        };
                         let matched = match self.regexp_capture(host, roots, array, 0)? {
                             Ok(value) => match self.coerce_string(host, roots, &value)? {
                                 Ok(matched) => matched,
@@ -630,26 +645,25 @@ impl Vm {
                             }
                         }
                     }
-                    Invocation::Value(_) => {
-                        return self.throw_type_error("RegExp exec must return an object or null");
-                    }
                     thrown @ Invocation::Thrown(_) => return Ok(thrown),
                 }
             }
         } else {
             match self.regexp_exec(host, roots, &receiver, id, string.clone())? {
-                Invocation::Value(Value::Null) => {
-                    return Ok(Invocation::Value(Value::String(string)));
+                Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => {
+                    return Ok(Invocation::Value(Value::string(string)));
                 }
-                Invocation::Value(Value::Object(array)) => results.push(Value::Object(array)),
-                Invocation::Value(_) => {
-                    return self.throw_type_error("RegExp exec must return an object or null");
+                Invocation::Value(result) => {
+                    if !matches!(result.view(), ValueRef::Object(_)) {
+                        return self.throw_type_error("RegExp exec must return an object or null");
+                    }
+                    results.push(result);
                 }
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             }
         }
         if results.is_empty() {
-            return Ok(Invocation::Value(Value::String(string)));
+            return Ok(Invocation::Value(Value::string(string)));
         }
         match self.regexp_replace_results(
             host,
@@ -660,7 +674,7 @@ impl Vm {
             &replace_value,
             &replacement,
         )? {
-            Ok(out) => Ok(Invocation::Value(Value::String(out))),
+            Ok(out) => Ok(Invocation::Value(Value::string(out))),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
@@ -673,9 +687,9 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let string =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
@@ -699,21 +713,23 @@ impl Vm {
         {
             return Ok(Invocation::Thrown(error));
         }
-        match result {
-            Invocation::Value(Value::Null) => Ok(Invocation::Value(Value::Number(-1.0))),
-            Invocation::Value(Value::Object(array)) => {
+        match &result {
+            Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => {
+                Ok(Invocation::Value(Value::number(-1.0)))
+            }
+            Invocation::Value(result) => {
+                let ValueRef::Object(array) = result.view() else {
+                    return self.throw_type_error("RegExp exec must return an object or null");
+                };
                 match self.regexp_element(host, roots, array, "index")? {
                     Ok(value) => match self.coerce_number(host, roots, &value)? {
-                        Ok(number) => Ok(Invocation::Value(Value::Number(to_integer(number)))),
+                        Ok(number) => Ok(Invocation::Value(Value::number(to_integer(number)))),
                         Err(error) => Ok(Invocation::Thrown(error)),
                     },
                     Err(error) => Ok(Invocation::Thrown(error)),
                 }
             }
-            Invocation::Value(_) => {
-                self.throw_type_error("RegExp exec must return an object or null")
-            }
-            thrown @ Invocation::Thrown(_) => Ok(thrown),
+            Invocation::Thrown(_) => Ok(result),
         }
     }
 
@@ -725,14 +741,14 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let string =
-            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
         let limit = match args.get(1) {
-            Some(value) if !matches!(value, Value::Undefined) => {
+            Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.coerce_number(host, roots, value)? {
                     Ok(number) => crate::ops::number_to_uint32(number) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -752,11 +768,14 @@ impl Vm {
         let created = self.construct_regexp(
             host,
             roots,
-            &[receiver.clone(), Value::String(splitter_flags)],
+            &[receiver.clone(), Value::string(splitter_flags)],
             None,
             false,
         )?;
-        let Invocation::Value(Value::Object(splitter)) = created else {
+        let Invocation::Value(value) = &created else {
+            return Ok(created);
+        };
+        let ValueRef::Object(splitter) = value.view() else {
             return Ok(created);
         };
         let roots = &roots.with(&splitter);
@@ -770,12 +789,14 @@ impl Vm {
             match self.regexp_exec_with_encoded(
                 host,
                 roots,
-                &Value::Object(splitter),
+                &Value::object(splitter),
                 splitter,
                 string.clone(),
                 Some(encoded.as_ref()),
             )? {
-                Invocation::Value(Value::Null) => parts.push(Value::String(string)),
+                Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => {
+                    parts.push(Value::string(string))
+                }
                 Invocation::Value(_) => {}
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             }
@@ -794,7 +815,7 @@ impl Vm {
             let result = self.regexp_exec_with_encoded(
                 host,
                 step_roots,
-                &Value::Object(splitter),
+                &Value::object(splitter),
                 splitter,
                 string.clone(),
                 Some(encoded.as_ref()),
@@ -802,7 +823,7 @@ impl Vm {
             let Invocation::Value(result) = result else {
                 return Ok(result);
             };
-            let Value::Object(array) = result else {
+            let ValueRef::Object(array) = result.view() else {
                 cursor = advance_string_index(&string, cursor as f64, unicode);
                 continue;
             };
@@ -828,9 +849,9 @@ impl Vm {
             }
             let index = index.min(size);
             if start <= index {
-                parts.push(Value::String(string.slice_units(last.min(index)..index)));
+                parts.push(Value::string(string.slice_units(last.min(index)..index)));
             } else {
-                parts.push(Value::String(JsString::default()));
+                parts.push(Value::string(JsString::default()));
             }
             if parts.len() == limit {
                 return self.array_result(parts);
@@ -857,7 +878,7 @@ impl Vm {
             }
         }
         if last <= size {
-            parts.push(Value::String(string.slice_units(last..size)));
+            parts.push(Value::string(string.slice_units(last..size)));
         }
         self.array_result(parts)
     }
@@ -882,20 +903,21 @@ impl Vm {
         let root_view = (&results, replace_value);
         let roots = &roots.with(&root_view);
         for result in &results {
-            let Value::Object(array) = result else {
+            let ValueRef::Object(array) = result.view() else {
                 continue;
             };
-            let roots = &roots.with(array);
-            let index = match self.regexp_element(host, roots, *array, "index")? {
-                Ok(value) => match self.coerce_number(host, roots, &value)? {
-                    Ok(number) => to_integer(number),
-                    Err(error) => return Ok(Err(error)),
-                },
+            let roots = &roots.with(&array);
+            let matched_value = match self.regexp_element(host, roots, array, "0")? {
+                Ok(value) => value,
                 Err(error) => return Ok(Err(error)),
             };
-            let matched = match self.regexp_capture(host, roots, *array, 0)? {
-                Ok(value) => match self.coerce_string(host, roots, &value)? {
-                    Ok(matched) => matched,
+            let matched = match self.coerce_string(host, roots, &matched_value)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error)),
+            };
+            let index = match self.regexp_element(host, roots, array, "index")? {
+                Ok(value) => match self.coerce_number(host, roots, &value)? {
+                    Ok(number) => to_integer(number),
                     Err(error) => return Ok(Err(error)),
                 },
                 Err(error) => return Ok(Err(error)),
@@ -908,7 +930,7 @@ impl Vm {
                 index as usize
             };
             let tail = (position + matched.unit_len()).min(length);
-            let count = match self.regexp_element(host, roots, *array, "length")? {
+            let count = match self.regexp_element(host, roots, array, "length")? {
                 Ok(value) => match self.coerce_number(host, roots, &value)? {
                     Ok(number) => to_integer(number).clamp(0.0, u32::MAX as f64) as usize,
                     Err(error) => return Ok(Err(error)),
@@ -917,29 +939,28 @@ impl Vm {
             };
             let mut captures = Vec::new();
             for index in 1..count {
-                match self.regexp_capture(host, &roots.with(&captures), *array, index)? {
+                match self.regexp_capture(host, &roots.with(&captures), array, index)? {
                     Ok(value) => captures.push(value),
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            let groups =
-                match self.regexp_element(host, &roots.with(&captures), *array, "groups")? {
-                    Ok(value) => value,
-                    Err(error) => return Ok(Err(error)),
-                };
+            let groups = match self.regexp_element(host, &roots.with(&captures), array, "groups")? {
+                Ok(value) => value,
+                Err(error) => return Ok(Err(error)),
+            };
             let start = next.min(position);
             out.extend(string.units().skip(start).take(position - start));
             if functional {
                 let mut argv = Vec::with_capacity(captures.len() + 4);
-                argv.push(Value::String(matched.clone()));
+                argv.push(Value::string(matched.clone()));
                 argv.extend(captures.iter().cloned());
-                argv.push(Value::Number(position as f64));
-                argv.push(Value::String(string.clone()));
-                if !matches!(groups, Value::Undefined) {
+                argv.push(Value::number(position as f64));
+                argv.push(Value::string(string.clone()));
+                if !matches!(groups.view(), ValueRef::Undefined) {
                     argv.push(groups.clone());
                 }
                 let value =
-                    match self.invoke(host, roots, replace_value, argv, &Value::Undefined)? {
+                    match self.invoke(host, roots, replace_value, argv, &Value::UNDEFINED)? {
                         Invocation::Value(value) => value,
                         thrown @ Invocation::Thrown(_) => match thrown {
                             Invocation::Thrown(error) => return Ok(Err(error)),
@@ -1025,7 +1046,7 @@ impl Vm {
                         }
                     }
                     if number >= 1 && number <= captures.len() {
-                        if !matches!(captures[number - 1], Value::Undefined) {
+                        if !matches!(captures[number - 1].view(), ValueRef::Undefined) {
                             match self.coerce_string(host, roots, &captures[number - 1])? {
                                 Ok(value) => out.extend(value.units()),
                                 Err(error) => return Ok(Err(error)),
@@ -1044,7 +1065,7 @@ impl Vm {
                         continue;
                     }
                     let (_, open) = units.next().expect("peeked opening delimiter");
-                    if matches!(named, Value::Undefined) {
+                    if matches!(named.view(), ValueRef::Undefined) {
                         out.extend([unit, open]);
                         for (_, unit) in units.by_ref() {
                             out.push(unit);
@@ -1070,7 +1091,7 @@ impl Vm {
                         Invocation::Value(value) => value,
                         Invocation::Thrown(error) => return Ok(Err(error)),
                     };
-                    if !matches!(value, Value::Undefined) {
+                    if !matches!(value.view(), ValueRef::Undefined) {
                         match self.coerce_string(host, roots, &value)? {
                             Ok(value) => out.extend(value.units()),
                             Err(error) => return Ok(Err(error)),
@@ -1107,7 +1128,7 @@ impl Vm {
         let value = match self.read_property(
             host,
             roots,
-            &Value::Object(id),
+            &Value::object(id),
             PropertyKeyRef::String("lastIndex"),
         )? {
             Invocation::Value(value) => value,
@@ -1130,9 +1151,9 @@ impl Vm {
             host,
             roots,
             id,
-            &Value::Object(id),
+            &Value::object(id),
             PropertyKey::String("lastIndex".into()),
-            Value::Number(value),
+            Value::number(value),
             true,
         )? {
             Invocation::Value(_) => Ok(Ok(())),
@@ -1151,7 +1172,7 @@ impl Vm {
         match self.read_property(
             host,
             roots,
-            &Value::Object(array),
+            &Value::object(array),
             PropertyKeyRef::String(key),
         )? {
             Invocation::Value(value) => Ok(Ok(value)),
@@ -1198,7 +1219,10 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         match self.regexp_exec(host, roots, receiver, id, input)? {
-            Invocation::Value(result) => Ok(Invocation::Value(Value::Bool(result != Value::Null))),
+            Invocation::Value(result) => Ok(Invocation::Value(Value::boolean(!matches!(
+                result.view(),
+                ValueRef::Null
+            )))),
             thrown @ Invocation::Thrown(_) => Ok(thrown),
         }
     }
@@ -1231,9 +1255,13 @@ impl Vm {
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
         if self.is_callable(&exec) {
-            return match self.invoke(host, roots, &exec, vec![Value::String(input)], receiver)? {
-                result @ (Invocation::Value(Value::Null | Value::Object(_))
-                | Invocation::Thrown(_)) => Ok(result),
+            return match self.invoke(host, roots, &exec, vec![Value::string(input)], receiver)? {
+                Invocation::Value(value)
+                    if matches!(value.view(), ValueRef::Null | ValueRef::Object(_)) =>
+                {
+                    Ok(Invocation::Value(value))
+                }
+                thrown @ Invocation::Thrown(_) => Ok(thrown),
                 Invocation::Value(_) => {
                     self.throw_type_error("RegExp exec must return an object or null")
                 }
@@ -1269,7 +1297,7 @@ impl Vm {
         };
         let flags = *flags;
         let stateful = flags.global || flags.sticky;
-        let receiver = Value::Object(id);
+        let receiver = Value::object(id);
         let last_index = match self.read_property(
             host,
             roots,
@@ -1311,7 +1339,7 @@ impl Vm {
                 id,
                 &receiver,
                 "lastIndex".into(),
-                Value::Number(next as f64),
+                Value::number(next as f64),
                 true,
             )?;
             if let Invocation::Thrown(_) = write {
@@ -1319,25 +1347,25 @@ impl Vm {
             }
         }
         let Some(matched) = matched else {
-            return Ok(Invocation::Value(Value::Null));
+            return Ok(Invocation::Value(Value::NULL));
         };
         let mut elements = Vec::new();
         let mut named = Vec::new();
         let mut index_elements = Vec::new();
         let mut named_indices = Vec::new();
         for (name, range) in groups.expect("exec match has capture ranges") {
-            let value = range.as_ref().map_or(Value::Undefined, |range| {
-                Value::String(input.slice_units(range.clone()))
+            let value = range.as_ref().map_or(Value::UNDEFINED, |range| {
+                Value::string(input.slice_units(range.clone()))
             });
             let pair = if flags.has_indices {
-                range.map_or(Value::Undefined, |range| {
-                    Value::Object(self.heap.alloc_array(vec![
-                        Value::Number(range.start as f64),
-                        Value::Number(range.end as f64),
+                range.map_or(Value::UNDEFINED, |range| {
+                    Value::object(self.heap.alloc_array(vec![
+                        Value::number(range.start as f64),
+                        Value::number(range.end as f64),
                     ]))
                 })
             } else {
-                Value::Undefined
+                Value::UNDEFINED
             };
             if let Some(name) = name {
                 named.push((name.clone(), value.clone()));
@@ -1351,7 +1379,7 @@ impl Vm {
             }
         }
         let group_object = if named.is_empty() {
-            Value::Undefined
+            Value::UNDEFINED
         } else {
             let id = self.heap.alloc_plain_with(None);
             for (name, value) in named {
@@ -1362,7 +1390,7 @@ impl Vm {
                     Attributes::ORDINARY,
                 )?;
             }
-            Value::Object(id)
+            Value::object(id)
         };
         let indices = if flags.has_indices {
             let id = self.heap.alloc_array(index_elements);
@@ -1379,11 +1407,11 @@ impl Vm {
                 self.heap.define_data(
                     id,
                     "groups",
-                    Value::Object(groups_id),
+                    Value::object(groups_id),
                     Attributes::ORDINARY,
                 )?;
             }
-            Some(Value::Object(id))
+            Some(Value::object(id))
         } else {
             None
         };
@@ -1393,14 +1421,14 @@ impl Vm {
                 .define_data(array, "indices", indices, Attributes::ORDINARY)?;
         }
         for (key, value) in [
-            ("index", Value::Number(matched.start() as f64)),
-            ("input", Value::String(input)),
+            ("index", Value::number(matched.start() as f64)),
+            ("input", Value::string(input)),
             ("groups", group_object),
         ] {
             self.heap
                 .define_data(array, key, value, Attributes::ORDINARY)?;
         }
-        Ok(Invocation::Value(Value::Object(array)))
+        Ok(Invocation::Value(Value::object(array)))
     }
 }
 struct Substitution<'a> {

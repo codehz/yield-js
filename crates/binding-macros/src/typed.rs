@@ -758,7 +758,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                     vm.heap.define_data(
                         #target,
                         #member,
-                        crate::value::Value::Number(self::#ident),
+                        crate::value::Value::number(self::#ident),
                         crate::heap::Attributes::FIXED,
                     ).expect("builtin stores constants");
                 });
@@ -794,7 +794,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                     vm.heap.define_data(
                         #target,
                         #property,
-                        crate::value::Value::Object(method),
+                        crate::value::Value::object(method),
                         crate::heap::Attributes::METHOD,
                     ).expect("builtin stores methods");
                 }

@@ -28,13 +28,13 @@ export function run() {
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::Number(2.0)
+        Value::number(2.0)
     );
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::Number(3.0)
+        Value::number(3.0)
     );
 
     let mut corrupt = snapshot;
@@ -111,7 +111,7 @@ fn preload_globals_are_live_and_read_only() {
     assert_eq!(
         vm.start(&mut host, "run", vec![yield_harness::number(2.0)])
             .unwrap(),
-        Value::Number(2.0)
+        Value::number(2.0)
     );
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     let changed =
@@ -124,7 +124,7 @@ fn preload_globals_are_live_and_read_only() {
     assert_eq!(
         vm.start(&mut host, "run", vec![yield_harness::number(3.0)])
             .unwrap(),
-        Value::Number(3.0)
+        Value::number(3.0)
     );
     assert_eq!(host.count("inspect"), 1);
 }
@@ -134,9 +134,10 @@ fn preload_failure_prevents_main_initialization() {
     let main = "import { inspect } from 'test'; inspect();";
     let mut host = TestHost::default();
     let build = compile_with_preload(main, "throw 'boom';", &options()).unwrap();
-    assert!(
-        matches!(Vm::new(build, &mut host), Err(VmError::Thrown(Value::String(s))) if s == "boom")
-    );
+    assert!(matches!(
+        Vm::new(build, &mut host),
+        Err(VmError::Thrown(value)) if value == Value::string("boom".into())
+    ));
     let build = compile_with_preload(
         main,
         "Object.defineProperty(globalThis, 'x', {value: 0}); export let x = 1;",
@@ -158,7 +159,7 @@ fn preload_can_shadow_global_this_without_recursive_lookup() {
     )
     .unwrap();
     let vm = Vm::new(build, &mut TestHost::default()).unwrap();
-    assert_eq!(vm.get_export("result").unwrap(), Value::Number(17.0));
+    assert_eq!(vm.get_export("result").unwrap(), Value::number(17.0));
 }
 
 #[test]
@@ -171,9 +172,9 @@ fn preload_initialization_does_not_wait_and_drains_microtasks_after_main() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).unwrap();
     assert_eq!(host.pending_labels(), ["wait:preload"]);
-    assert_eq!(vm.get_export("observed").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("observed").unwrap(), Value::number(1.0));
     assert_eq!(
         vm.start(&mut host, "current", vec![]).unwrap(),
-        Value::Number(2.0)
+        Value::number(2.0)
     );
 }

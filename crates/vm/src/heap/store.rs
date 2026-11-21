@@ -13,7 +13,9 @@ use super::types::{
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
-use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+use crate::value::{
+    BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
+};
 
 type PrivateElements = BTreeMap<(ObjectId, u32), PrivateElement>;
 
@@ -103,14 +105,14 @@ impl Heap {
     }
 
     pub(crate) fn weak_key(&self, value: &Value) -> Option<WeakKey> {
-        match value {
-            Value::Object(id) => Some(WeakKey::Object(*id)),
-            Value::Symbol(id) => {
-                let description = self.symbols.get(id)?;
+        match value.view() {
+            ValueRef::Object(id) => Some(WeakKey::Object(id)),
+            ValueRef::Symbol(id) => {
+                let description = self.symbols.get(&id)?;
                 let registered = description
                     .as_ref()
                     .and_then(|key| self.symbol_registry.get(key));
-                (registered != Some(id)).then_some(WeakKey::Symbol(*id))
+                (registered != Some(&id)).then_some(WeakKey::Symbol(id))
             }
             _ => None,
         }
@@ -243,14 +245,14 @@ impl Heap {
     }
 
     pub(crate) fn alloc_for_in_iterator(&mut self, source: &Value) -> ObjectId {
-        let current = match source {
-            Value::Undefined | Value::Null => None,
-            Value::Object(id) => Some(*id),
+        let current = match source.view() {
+            ValueRef::Undefined | ValueRef::Null => None,
+            ValueRef::Object(id) => Some(id),
             // The primitive wrapper prototypes do not exist in this subset.
             _ => self.object_prototype,
         };
-        let string_length = match source {
-            Value::String(string) => string.unit_len(),
+        let string_length = match source.view() {
+            ValueRef::String(string) => string.unit_len(),
             _ => 0,
         };
         self.alloc(Object::ForInIterator {
@@ -562,7 +564,10 @@ impl Heap {
         if key.borrowed().is_str("length")
             && let Object::Array(array) = self.get_mut(id)?
         {
-            let Property::Data(Value::Number(length)) = property else {
+            let Property::Data(length) = property else {
+                unreachable!("validated array length descriptor")
+            };
+            let ValueRef::Number(length) = length.view() else {
                 unreachable!("validated array length descriptor")
             };
             return Ok(array.set_length(length as usize, attrs.writable));
@@ -591,7 +596,7 @@ impl Heap {
             let entry = array
                 .elements
                 .entry(index)
-                .or_insert((Property::Data(Value::Undefined), Attributes::ORDINARY));
+                .or_insert((Property::Data(Value::UNDEFINED), Attributes::ORDINARY));
             entry.0 = property;
             if let Some(attributes) = attributes {
                 entry.1 = attributes;
@@ -706,7 +711,7 @@ impl Heap {
         self.environment_mut(env)?
             .bindings
             .entry(binding)
-            .or_insert(Value::Undefined);
+            .or_insert(Value::UNDEFINED);
         Ok(())
     }
 
@@ -753,8 +758,8 @@ fn insert_table<V>(
 }
 
 pub(crate) fn object_id(value: &Value, what: &str) -> Result<ObjectId, VmError> {
-    match value {
-        Value::Object(id) => Ok(*id),
+    match value.view() {
+        ValueRef::Object(id) => Ok(id),
         _ => Err(VmError::InvalidState(what.to_owned())),
     }
 }

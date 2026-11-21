@@ -70,7 +70,7 @@ export async function run(value) {
     vm.run_until_idle(&mut host).expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Bool(true))
+        PromiseState::Fulfilled(Value::boolean(true))
     );
 
     let _result = vm
@@ -103,7 +103,7 @@ export async function run() {
         .expect("settle rejected start");
     assert_eq!(
         s.state(),
-        PromiseState::Rejected(Value::String("wait rejected".into()))
+        PromiseState::Rejected(Value::string("wait rejected".into()))
     );
     assert_eq!(
         count_delta(s.host.count("setLabel"), set_label),
@@ -245,7 +245,7 @@ fn corrupted_snapshot_associations_are_rejected() {
     let mut wrong_values = snapshot.clone();
     wrong_values.continuations[0]
         .values
-        .push(Value::Number(999.0));
+        .push(Value::number(999.0));
     let error = s.restore(wrong_values).expect_err("slot value count");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("values")));
 
@@ -303,7 +303,7 @@ export async function run() {
         .unwrap_or(0)
         + 1;
     let mut bindings = std::collections::BTreeMap::new();
-    bindings.insert(1, Value::Number(1.0));
+    bindings.insert(1, Value::number(1.0));
     snapshot.objects.push(ObjectRecord {
         id: env_id,
         object: Object::Environment(EnvironmentObject {
@@ -671,7 +671,7 @@ export function run() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build(source), &mut host).expect("create VM");
     let value = vm.start(&mut host, "run", Vec::new()).expect("start");
-    assert_eq!(value, Value::Undefined);
+    assert_eq!(value, Value::UNDEFINED);
     assert_eq!(host.count("inspect"), 1);
 }
 
@@ -702,7 +702,7 @@ fn script_startup_validates_before_calling_the_host() {
     let throws = build("import { inspect } from 'test'; throw 7; inspect(1);");
     assert!(matches!(
         Vm::new(throws, &mut host),
-        Err(VmError::Thrown(Value::Number(7.0)))
+        Err(VmError::Thrown(value)) if value == Value::number(7.0)
     ));
     assert_eq!(host.count("inspect"), 0);
 
@@ -743,7 +743,7 @@ export async function run() {
     vm.run_until_idle(&mut host).expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Bool(true))
+        PromiseState::Fulfilled(Value::boolean(true))
     );
 }
 
@@ -810,7 +810,7 @@ export function dropEntry() { entry = 0; }
     );
     let mut host = TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(10.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(10.0));
     for name in ["entry", "count"] {
         let expected = format!("unknown export {name:?}");
         assert!(
@@ -822,9 +822,9 @@ export function dropEntry() { entry = 0; }
     }
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::Number(11.0)
+        Value::number(11.0)
     );
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(11.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(11.0));
 
     let snapshot = vm.snapshot(&[]).unwrap();
     let mut missing = snapshot.clone();
@@ -856,16 +856,16 @@ export function dropEntry() { entry = 0; }
     ));
 
     let mut vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(11.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(11.0));
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::Number(12.0)
+        Value::number(12.0)
     );
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(12.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(12.0));
 
     vm.start(&mut host, "dropEntry", vec![]).unwrap();
     let mut vm = Vm::restore(vm.snapshot(&[]).unwrap(), build, &mut host).unwrap();
-    assert_eq!(vm.get_export("run").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("run").unwrap(), Value::number(0.0));
     assert!(matches!(
         vm.start(&mut host, "run", vec![]),
         Err(VmError::Thrown(_))
@@ -882,7 +882,7 @@ fn imported_function_identity_survives_snapshot_restore() {
     let before = vm.start(&mut host, "run", vec![]).expect("start");
     let snapshot = vm.snapshot(&[]).expect("snapshot");
     vm = Vm::restore(snapshot, build, &mut host).expect("restore");
-    let Value::Object(function) = before else {
+    let yield_vm::ValueRef::Object(function) = before.view() else {
         panic!("host function import is an object");
     };
     let value = vm
@@ -890,7 +890,7 @@ fn imported_function_identity_survives_snapshot_restore() {
         .expect("start after restore");
     assert_eq!(
         value,
-        Value::Object(function),
+        Value::object(function),
         "same function object identity"
     );
 }

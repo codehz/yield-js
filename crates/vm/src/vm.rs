@@ -17,7 +17,7 @@ use crate::runtime::{
     PendingOperation, Settlement,
 };
 use crate::snapshot::DeliveryTarget;
-use crate::value::{ContinuationId, ObjectId, Value};
+use crate::value::{ContinuationId, ObjectId, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -237,7 +237,7 @@ impl Vm {
                 self.heap.define_data(
                     prototype,
                     name.key(),
-                    Value::Object(function),
+                    Value::object(function),
                     crate::binding::PROTOTYPE_METHOD_ATTRIBUTES,
                 )?;
             }
@@ -291,7 +291,7 @@ impl Vm {
                 .unwrap_or_default()
                 .iter()
                 .map(|slot| match slot.kind {
-                    crate::binding::SlotKind::Js => crate::runtime::HostSlot::Js(Value::Undefined),
+                    crate::binding::SlotKind::Js => crate::runtime::HostSlot::Js(Value::UNDEFINED),
                     crate::binding::SlotKind::JsList => {
                         crate::runtime::HostSlot::JsList(Vec::new())
                     }
@@ -380,7 +380,7 @@ impl Vm {
         if let Some(id) = task {
             return Ok(match self.finish_host_task(id, result)? {
                 Some(Invocation::Thrown(error)) => Invocation::Thrown(error),
-                _ => Invocation::Value(Value::Number(id as f64)),
+                _ => Invocation::Value(Value::number(id as f64)),
             });
         }
         result?.ok_or_else(|| VmError::InvalidState("ordinary host call suspended".to_owned()))
@@ -480,7 +480,7 @@ impl Vm {
                         ));
                     }
                     let id = self.alloc_host_task_id()?;
-                    return Ok(Some(Invocation::Value(Value::Number(id as f64))));
+                    return Ok(Some(Invocation::Value(Value::number(id as f64))));
                 }
             };
             let (linked, resume) = match resume {
@@ -507,7 +507,7 @@ impl Vm {
                     HostTask {
                         owner,
                         stage,
-                        receiver: Value::Undefined,
+                        receiver: Value::UNDEFINED,
                         saved: Vec::new(),
                         state: HostTaskState::Running,
                     },
@@ -522,7 +522,7 @@ impl Vm {
                 } => self.invoke(host, &roots.with(&saved), &callee, args, &receiver)?,
                 Action::Gc => {
                     let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
-                    Invocation::Value(Value::Number(removed as f64))
+                    Invocation::Value(Value::number(removed as f64))
                 }
                 Action::External { decl, state } => {
                     let (Some(id), Some(stage)) = (*task, linked) else {
@@ -624,7 +624,7 @@ impl Vm {
         frame.state = HostTaskState::Running;
         let owner = frame.owner;
         let stage = frame.stage;
-        let receiver = std::mem::replace(&mut frame.receiver, Value::Undefined);
+        let receiver = std::mem::replace(&mut frame.receiver, Value::UNDEFINED);
         let saved = std::mem::take(&mut frame.saved);
         let bindings = self.bindings.clone();
         let mut task = Some(id);
@@ -673,7 +673,7 @@ impl Vm {
                     bindings.export_decl(id),
                     Some(ExportDecl::Function(function)) if function.constructable
                 );
-                Ok(Value::Object(
+                Ok(Value::object(
                     self.heap
                         .intern_native(NativeTarget::Export(id), constructable),
                 ))
@@ -865,7 +865,7 @@ impl Vm {
                     .map_err(|error| VmError::Host(error.0))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.invoke(host, &ActiveRoots::EMPTY, &callee, args, &Value::Undefined)?
+        self.invoke(host, &ActiveRoots::EMPTY, &callee, args, &Value::UNDEFINED)?
             .into_result()
     }
     fn install_preload_globals(&mut self, env: Option<ObjectId>) -> Result<(), VmError> {
@@ -915,7 +915,7 @@ impl Vm {
             None,
             prepared,
             Vec::new(),
-            (&Value::Undefined, &Value::Undefined, None),
+            (&Value::UNDEFINED, &Value::UNDEFINED, None),
         )?
         .into_result()
         .map(|_| prepared)
@@ -1072,7 +1072,7 @@ impl Vm {
                 self.operations.remove(&id);
                 self.deliver_operation(
                     target,
-                    Settlement::Rejected(Value::String(rejection.into())),
+                    Settlement::Rejected(Value::string(rejection.into())),
                 )?;
             }
         }
@@ -1127,10 +1127,10 @@ impl Vm {
     }
 
     pub fn promise_state(&self, value: &Value) -> Result<PromiseState, VmError> {
-        let Value::Object(id) = value else {
+        let ValueRef::Object(id) = value.view() else {
             return Err(VmError::InvalidState("value is not an object".to_owned()));
         };
-        Ok(self.heap.promise(*id)?.state.clone())
+        Ok(self.heap.promise(id)?.state.clone())
     }
 
     pub(crate) fn host_value(&self, value: Value) -> JsValue {
@@ -1320,18 +1320,18 @@ impl Vm {
         if let Some(param) = self.build.functions[function_index].home_param.clone() {
             let home =
                 home.ok_or_else(|| VmError::InvalidState("function has no home object".into()))?;
-            bind(param, Value::Object(home));
+            bind(param, Value::object(home));
         }
         if let Some(param) = arguments_param {
             bind(param, self.create_arguments_object(&args)?);
         }
         let mut args = args.into_iter();
         for param in params {
-            bind(param, args.next().unwrap_or(Value::Undefined));
+            bind(param, args.next().unwrap_or(Value::UNDEFINED));
         }
         if let Some(param) = rest_param {
             let rest = self.heap.alloc_array(args.collect());
-            bind(param, Value::Object(rest));
+            bind(param, Value::object(rest));
         }
         let needs_env = self.build.functions[function_index].needs_environment();
         let env = if needs_env {
@@ -1363,7 +1363,7 @@ impl Vm {
         match async_promise {
             Some(promise) => {
                 self.settle_outcome(host, roots, promise, outcome)?;
-                Ok(Invocation::Value(Value::Object(promise)))
+                Ok(Invocation::Value(Value::object(promise)))
             }
             None => match outcome {
                 ExecOutcome::Suspended => Err(VmError::InvalidState(

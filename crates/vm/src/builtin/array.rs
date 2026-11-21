@@ -10,7 +10,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops::strict_equal;
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 const MAX_LENGTH: usize = u32::MAX as usize;
@@ -118,11 +118,12 @@ fn invocation(result: Completion<Value>) -> Result<Invocation, VmError> {
 }
 
 fn number(index: usize) -> Value {
-    Value::Number(index as f64)
+    Value::number(index as f64)
 }
 
 fn arg(args: &[Value], index: usize) -> &Value {
-    args.get(index).unwrap_or(&Value::Undefined)
+    static UNDEFINED: Value = Value::UNDEFINED;
+    args.get(index).unwrap_or(&UNDEFINED)
 }
 
 fn relative(index: f64, len: usize) -> usize {
@@ -147,20 +148,20 @@ impl Vm {
             self,
             prototype,
             ARRAY_VALUES.member,
-            Value::Object(values),
+            Value::object(values),
             Attributes::METHOD,
         );
         self.heap
             .define_data(
                 prototype,
                 PropertyKey::Symbol(ITERATOR_SYMBOL),
-                Value::Object(values),
+                Value::object(values),
                 Attributes::METHOD,
             )
             .expect("Array iterator alias");
         let next = self.alloc_intrinsic(ARRAY_ITERATOR_NEXT);
         self.heap
-            .define_data(iterator, "next", Value::Object(next), Attributes::METHOD)
+            .define_data(iterator, "next", Value::object(next), Attributes::METHOD)
             .expect("Array iterator next");
         self.heap
             .define_data(
@@ -173,15 +174,23 @@ impl Vm {
     }
 
     fn construct_array(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
-        let id = if let [Value::Number(length)] = args.as_slice() {
-            if !(0.0..=MAX_LENGTH as f64).contains(length) || length.fract() != 0.0 {
-                return self.throw_range_error("invalid array length");
-            }
-            self.sparse_array(*length as usize)?
-        } else {
-            self.heap.alloc_array(args)
+        let length = match args.as_slice() {
+            [arg] => match arg.view() {
+                ValueRef::Number(length) => Some(length),
+                _ => None,
+            },
+            _ => None,
         };
-        Ok(Invocation::Value(Value::Object(id)))
+        let id = match length {
+            Some(length) => {
+                if !(0.0..=MAX_LENGTH as f64).contains(&length) || length.fract() != 0.0 {
+                    return self.throw_range_error("invalid array length");
+                }
+                self.sparse_array(length as usize)?
+            }
+            None => self.heap.alloc_array(args),
+        };
+        Ok(Invocation::Value(Value::object(id)))
     }
 
     fn sparse_array(&mut self, length: usize) -> Result<ObjectId, VmError> {
@@ -194,8 +203,8 @@ impl Vm {
     }
 
     fn array_length(&self, value: &Value) -> Result<Option<usize>, VmError> {
-        Ok(match value {
-            Value::Object(id) => match self.heap.get(*id)? {
+        Ok(match value.view() {
+            ValueRef::Object(id) => match self.heap.get(id)? {
                 Object::Array(array) => Some(array.length),
                 _ => None,
             },
@@ -213,19 +222,19 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match name {
             "of" => {
-                return Ok(Invocation::Value(Value::Object(
+                return Ok(Invocation::Value(Value::object(
                     self.heap.alloc_array(args),
                 )));
             }
             "isArray" => {
-                let is_array = match arg(&args, 0) {
-                    Value::Object(id) => matches!(
-                        self.heap.get(self.heap.proxy_target(*id)?)?,
+                let is_array = match arg(&args, 0).view() {
+                    ValueRef::Object(id) => matches!(
+                        self.heap.get(self.heap.proxy_target(id)?)?,
                         Object::Array(_)
                     ),
                     _ => false,
                 };
-                return Ok(Invocation::Value(Value::Bool(is_array)));
+                return Ok(Invocation::Value(Value::boolean(is_array)));
             }
             "from" => return invocation(self.array_from(host, roots, &args)),
             _ => {}
@@ -233,7 +242,7 @@ impl Vm {
         let Some(len) = self.array_length(receiver)? else {
             return self.throw_type_error("Array method requires an array receiver");
         };
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             unreachable!()
         };
         let root_view = (receiver, &args);
@@ -263,24 +272,22 @@ impl Vm {
         let roots = &roots.with(&args);
         let items = arg(args, 0);
         let mapper = arg(args, 1);
-        let mapping = !matches!(mapper, Value::Undefined);
+        let mapping = !matches!(mapper.view(), ValueRef::Undefined);
         if mapping && !self.is_callable(mapper) {
             return Ok(Err(self.type_error("Array.from mapper is not callable")?));
         }
-        if matches!(items, Value::Null | Value::Undefined) {
+        if matches!(items.view(), ValueRef::Null | ValueRef::Undefined) {
             return Ok(Err(self.type_error("Array.from requires items")?));
         }
-        let method = match items {
-            Value::Object(_) | Value::String(_) => script!(completion(self.read_property(
-                host,
-                roots,
-                items,
-                PropertyKeyRef::Symbol(ITERATOR_SYMBOL)
-            ))),
-            _ => Value::Undefined,
-        };
+        let method =
+            match items.view() {
+                ValueRef::Object(_) | ValueRef::String(_) => script!(completion(
+                    self.read_property(host, roots, items, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))
+                )),
+                _ => Value::UNDEFINED,
+            };
         let mut values = Vec::new();
-        if !matches!(method, Value::Null | Value::Undefined) {
+        if !matches!(method.view(), ValueRef::Null | ValueRef::Undefined) {
             let (iter, next) = script!(self.get_iterator_from_method(host, roots, items, &method));
             let root_view = (&iter, &next);
             let roots = &roots.with(&root_view);
@@ -311,7 +318,7 @@ impl Vm {
                 }
                 values.push(value);
             }
-        } else if matches!(items, Value::Object(_)) {
+        } else if matches!(items.view(), ValueRef::Object(_)) {
             let length = script!(completion(self.read_property(
                 host,
                 roots,
@@ -344,7 +351,7 @@ impl Vm {
                 values.push(value);
             }
         }
-        Ok(Ok(Value::Object(self.heap.alloc_array(values))))
+        Ok(Ok(Value::object(self.heap.alloc_array(values))))
     }
 }
 
@@ -387,7 +394,7 @@ impl ArrayAccess<'_> {
         completion(self.vm.read_property(
             self.host,
             self.roots,
-            &Value::Object(id),
+            &Value::object(id),
             PropertyKeyRef::String(&index.to_string()),
         ))
     }
@@ -412,7 +419,7 @@ impl ArrayAccess<'_> {
             self.host,
             self.roots,
             self.id,
-            &Value::Object(self.id),
+            &Value::object(self.id),
             PropertyKey::String(key.into()),
             value,
             true,
@@ -476,8 +483,8 @@ impl ArrayAccess<'_> {
         };
         let value = match name {
             "pop" | "shift" if count != 0 => script!(self.get(self.id, start)),
-            "pop" | "shift" => Value::Undefined,
-            "splice" => Value::Object(script!(self.copy_range(start, count))),
+            "pop" | "shift" => Value::UNDEFINED,
+            "splice" => Value::object(script!(self.copy_range(start, count))),
             _ => number(new_len),
         };
         script!(self.with_roots(&value, |array| -> Completion<()> {
@@ -518,16 +525,16 @@ impl ArrayAccess<'_> {
         let offset = usize::from(name == "fill");
         let start = relative(script!(self.integer(arg(args, offset))), self.len);
         let end = match arg(args, offset + 1) {
-            Value::Undefined => self.len,
+            value if matches!(value.view(), ValueRef::Undefined) => self.len,
             value => relative(script!(self.integer(value)), self.len),
         };
         if name == "fill" {
             for index in start..end {
                 script!(self.set(index.to_string(), arg(args, 0).clone()));
             }
-            Ok(Ok(Value::Object(self.id)))
+            Ok(Ok(Value::object(self.id)))
         } else {
-            Ok(Ok(Value::Object(script!(
+            Ok(Ok(Value::object(script!(
                 self.copy_range(start, end.saturating_sub(start))
             ))))
         }
@@ -536,9 +543,9 @@ impl ArrayAccess<'_> {
     fn search(&mut self, name: &str, args: &[Value]) -> Completion<Value> {
         let includes = name == "includes";
         let miss = if includes {
-            Value::Bool(false)
+            Value::boolean(false)
         } else {
-            Value::Number(-1.0)
+            Value::number(-1.0)
         };
         if self.len == 0 {
             return Ok(Ok(miss));
@@ -569,10 +576,10 @@ impl ArrayAccess<'_> {
             let index = if last { start - offset } else { start + offset };
             if includes || script!(self.present(self.id, index)) {
                 let value = script!(self.get(self.id, index));
-                let both_nan = matches!((&value, needle), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan());
+                let both_nan = matches!((value.view(), needle.view()), (ValueRef::Number(a), ValueRef::Number(b)) if a.is_nan() && b.is_nan());
                 if strict_equal(&value, needle) || includes && both_nan {
                     return Ok(Ok(if includes {
-                        Value::Bool(true)
+                        Value::boolean(true)
                     } else {
                         number(index)
                     }));
@@ -595,7 +602,7 @@ impl ArrayAccess<'_> {
         let mut output = 0;
         let mut accumulator = args.get(1).cloned();
         let visit_holes = matches!(name, "find" | "findIndex");
-        let source = Value::Object(self.id);
+        let source = Value::object(self.id);
         for index in 0..self.len {
             let view = (result, &accumulator);
             if !visit_holes
@@ -611,7 +618,7 @@ impl ArrayAccess<'_> {
                         self.roots,
                         mapper,
                         vec![acc, value, number(index), source.clone()],
-                        &Value::Undefined
+                        &Value::UNDEFINED
                     ))),
                     None => value,
                 });
@@ -634,8 +641,8 @@ impl ArrayAccess<'_> {
                     output += 1;
                 }
                 "flatMap" => script!(self.flatten_value(result.unwrap(), &mut output, mapped, 1.0)),
-                "some" if mapped.truthy() => return Ok(Ok(Value::Bool(true))),
-                "every" if !mapped.truthy() => return Ok(Ok(Value::Bool(false))),
+                "some" if mapped.truthy() => return Ok(Ok(Value::boolean(true))),
+                "every" if !mapped.truthy() => return Ok(Ok(Value::boolean(false))),
                 "find" if mapped.truthy() => return Ok(Ok(saved.unwrap())),
                 "findIndex" if mapped.truthy() => return Ok(Ok(number(index))),
                 _ => {}
@@ -648,10 +655,10 @@ impl ArrayAccess<'_> {
                     .vm
                     .type_error("reduce of empty array without initial value")?),
             },
-            "some" => Ok(Value::Bool(false)),
-            "every" => Ok(Value::Bool(true)),
-            "findIndex" => Ok(Value::Number(-1.0)),
-            _ => Ok(result.map_or(Value::Undefined, Value::Object)),
+            "some" => Ok(Value::boolean(false)),
+            "every" => Ok(Value::boolean(true)),
+            "findIndex" => Ok(Value::number(-1.0)),
+            _ => Ok(result.map_or(Value::UNDEFINED, Value::object)),
         })
     }
 
@@ -659,9 +666,10 @@ impl ArrayAccess<'_> {
         let result = self.vm.sparse_array(0)?;
         let mut output = 0;
         if name == "concat" {
-            for value in std::iter::once(&Value::Object(self.id)).chain(args) {
+            let source = Value::object(self.id);
+            for value in std::iter::once(&source).chain(args) {
                 if let Some(len) = self.vm.array_length(value)? {
-                    let Value::Object(id) = *value else {
+                    let ValueRef::Object(id) = value.view() else {
                         unreachable!()
                     };
                     if len > MAX_LENGTH - output {
@@ -685,7 +693,7 @@ impl ArrayAccess<'_> {
             array.length = output;
         } else {
             let depth = match arg(args, 0) {
-                Value::Undefined => 1.0,
+                value if matches!(value.view(), ValueRef::Undefined) => 1.0,
                 value => script!(self.with_roots(&result, |array| array.integer(value))),
             };
             for index in 0..self.len {
@@ -696,7 +704,7 @@ impl ArrayAccess<'_> {
                 }
             }
         }
-        Ok(Ok(Value::Object(result)))
+        Ok(Ok(Value::object(result)))
     }
 
     fn flatten_value(
@@ -712,7 +720,7 @@ impl ArrayAccess<'_> {
             if depth > 0.0
                 && let Some(len) = self.vm.array_length(&value)?
             {
-                let Value::Object(id) = value else {
+                let ValueRef::Object(id) = value.view() else {
                     unreachable!()
                 };
                 if depth - 1.0 == depth && stack.iter().any(|(ancestor, _, _)| *ancestor == id) {

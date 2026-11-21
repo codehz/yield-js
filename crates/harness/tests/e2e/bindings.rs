@@ -216,7 +216,7 @@ export async function run() {
     }
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::String("strategy rejected".into()))
+        PromiseState::Fulfilled(Value::string("strategy rejected".into()))
     );
     assert_eq!(host.errors, 0);
 }
@@ -253,7 +253,7 @@ export async function run() {
     vm.run_until_idle(&mut host).expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Number(1.0))
+        PromiseState::Fulfilled(Value::number(1.0))
     );
 }
 
@@ -546,7 +546,7 @@ fn guest_call_resume_can_request_another_call() {
         }
     "#,
     );
-    assert_eq!(result.expect("chained guest calls"), Value::Number(8.0));
+    assert_eq!(result.expect("chained guest calls"), Value::number(8.0));
 }
 
 #[test]
@@ -573,7 +573,10 @@ fn async_guest_calls_catch_throw_and_preserve_object_identity() {
         }
     "#,
     );
-    assert_eq!(result.expect("two awaited guest calls"), Value::Bool(true));
+    assert_eq!(
+        result.expect("two awaited guest calls"),
+        Value::boolean(true)
+    );
     assert_eq!(runs, 2);
 }
 
@@ -686,7 +689,7 @@ export async function run() {
     vm.run_until_idle(&mut host).expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Number(3.0))
+        PromiseState::Fulfilled(Value::number(3.0))
     );
 }
 
@@ -760,7 +763,7 @@ export function run() {
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
         vm.start(&mut host, "run", vec![]).expect("start"),
-        Value::Number(3.0)
+        Value::number(3.0)
     );
 }
 
@@ -1020,7 +1023,7 @@ export async function run() {
     vm.run_until_idle(&mut host).expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Bool(true))
+        PromiseState::Fulfilled(Value::boolean(true))
     );
 }
 
@@ -1102,7 +1105,7 @@ export async function run() {
     vm.run_until_idle(&mut host).expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
-        PromiseState::Fulfilled(Value::Bool(true))
+        PromiseState::Fulfilled(Value::boolean(true))
     );
 }
 
@@ -1124,7 +1127,7 @@ export function run() {
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
         vm.start(&mut host, "run", vec![]).expect("start"),
-        Value::Bool(true)
+        Value::boolean(true)
     );
     assert_eq!(host.count("wait"), 1);
     assert!(host.pending_labels().is_empty());

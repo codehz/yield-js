@@ -11,7 +11,9 @@ use crate::heap::{
     REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::runtime::{Continuation, HostInstance, HostSlot};
-use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+use crate::value::{
+    ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
+};
 use crate::vm::Vm;
 
 #[derive(Default)]
@@ -76,7 +78,7 @@ impl TraceRoots for PropertyKey {
 impl TraceRoots for PropertyKeyRef<'_> {
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         if let Self::Symbol(id) = *self {
-            tracer.mark_value(&Value::Symbol(id))?;
+            tracer.mark_value(&Value::symbol(id))?;
         }
         Ok(())
     }
@@ -299,10 +301,10 @@ impl<'a> Tracer<'a> {
     }
 
     fn mark_value(&mut self, value: &Value) -> Result<(), VmError> {
-        match value {
-            Value::Object(id) => self.mark_object(*id)?,
-            Value::Symbol(id) => {
-                self.live.symbols.insert(*id);
+        match value.view() {
+            ValueRef::Object(id) => self.mark_object(id)?,
+            ValueRef::Symbol(id) => {
+                self.live.symbols.insert(id);
             }
             _ => {}
         }

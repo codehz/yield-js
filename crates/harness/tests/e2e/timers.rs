@@ -40,7 +40,7 @@ fn restore_arms_only_remaining_time_on_an_independent_clock() {
         assert_eq!(old.len(), 3);
         assert!(old.iter().all(|&(_, deadline)| deadline == 100));
         let promise = vm.get_export("sleeping").unwrap();
-        let Value::Object(promise_id) = promise else {
+        let yield_vm::ValueRef::Object(promise_id) = promise.view() else {
             panic!("sleep didn't allocate a Promise");
         };
         host.advance(&mut vm, 30).unwrap();
@@ -114,17 +114,17 @@ fn restore_arms_only_remaining_time_on_an_independent_clock() {
         host.advance(&mut vm, 69).unwrap();
         assert_eq!(
             vm.get_export("observations").unwrap(),
-            Value::String("".into())
+            Value::string("".into())
         );
         assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
         host.advance(&mut vm, 1).unwrap();
         assert_eq!(
             vm.promise_state(&promise).unwrap(),
-            PromiseState::Fulfilled(Value::Undefined)
+            PromiseState::Fulfilled(Value::UNDEFINED)
         );
         assert_eq!(
             vm.promise_state(&observed).unwrap(),
-            PromiseState::Fulfilled(Value::String("ap".into()))
+            PromiseState::Fulfilled(Value::string("ap".into()))
         );
         assert!(host.clock().registrations().is_empty());
         assert!(vm.pending_operations().is_empty());
@@ -157,9 +157,9 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     let mut host = TestHost::new();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
     let completed = vm.start(&mut host, "run", vec![]).unwrap();
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(0.0));
     host.advance(&mut vm, 0).unwrap();
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(1.0));
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert!(image.host_tasks.is_empty());
     assert!(image.operations.is_empty());
@@ -168,7 +168,7 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     let fresh = vm.start(&mut host, "again", vec![]).unwrap();
     assert_ne!(fresh, completed);
     host.advance(&mut vm, 0).unwrap();
-    assert_eq!(vm.get_export("total").unwrap(), Value::Number(3.0));
+    assert_eq!(vm.get_export("total").unwrap(), Value::number(3.0));
 }
 
 #[yield_vm::host_module(name = "chain")]
@@ -253,15 +253,15 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     clock.advance(&mut vm, &mut host, 10).unwrap();
     let second = vm.pending_operations()[0].token;
     assert_eq!(clock.registrations(), [(second, 30)]);
-    assert_eq!(vm.get_export("count").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("count").unwrap(), Value::number(1.0));
     expect_unknown(&mut vm, first_recovered);
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
-    assert_eq!(Value::Number(image.host_tasks[0].id as f64), handle);
+    assert_eq!(Value::number(image.host_tasks[0].id as f64), handle);
     vm = Vm::restore(image, build, &mut host).unwrap();
     vm.start_recovered_operations().unwrap();
     let second_recovered = vm.pending_operations()[0].token;
     vm.start(&mut host, "clear", vec![]).unwrap();
     expect_unknown(&mut vm, second_recovered);
     assert!(clock.registrations().is_empty());
-    assert_eq!(vm.get_export("count").unwrap(), Value::Number(1.0));
+    assert_eq!(vm.get_export("count").unwrap(), Value::number(1.0));
 }

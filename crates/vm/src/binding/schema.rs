@@ -251,11 +251,11 @@ impl ConstValue {
 
     pub(crate) fn value(&self) -> Value {
         match self {
-            Self::Undefined => Value::Undefined,
-            Self::Null => Value::Null,
-            Self::Bool(value) => Value::Bool(*value),
-            Self::Number(value) => Value::Number(*value),
-            Self::String(value) => Value::String(value.clone()),
+            Self::Undefined => Value::UNDEFINED,
+            Self::Null => Value::NULL,
+            Self::Bool(value) => Value::boolean(*value),
+            Self::Number(value) => Value::number(*value),
+            Self::String(value) => Value::string(value.clone()),
         }
     }
 }

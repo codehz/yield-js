@@ -40,8 +40,8 @@ pub(crate) mod namespace {
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        match vm.coerce_number(host, roots, args.first().unwrap_or(&Value::Undefined))? {
-            Ok(number) => Ok(Invocation::Value(Value::Number(number.abs()))),
+        match vm.coerce_number(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
+            Ok(number) => Ok(Invocation::Value(Value::number(number.abs()))),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
@@ -104,7 +104,7 @@ impl Vm {
                 let x = match self.coerce_number(
                     host,
                     roots,
-                    args.first().unwrap_or(&Value::Undefined),
+                    args.first().unwrap_or(&Value::UNDEFINED),
                 )? {
                     Ok(number) => number,
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -114,7 +114,7 @@ impl Vm {
                         let y = match self.coerce_number(
                             host,
                             roots,
-                            args.get(1).unwrap_or(&Value::Undefined),
+                            args.get(1).unwrap_or(&Value::UNDEFINED),
                         )? {
                             Ok(number) => number,
                             Err(error) => return Ok(Invocation::Thrown(error)),
@@ -165,7 +165,7 @@ impl Vm {
                 }
             }
         };
-        Ok(Invocation::Value(Value::Number(result)))
+        Ok(Invocation::Value(Value::number(result)))
     }
 
     fn next_random(&mut self) -> f64 {

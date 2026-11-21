@@ -32,7 +32,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         let mut vm = Vm::new(program.clone(), &mut host).unwrap();
         assert_eq!(
             vm.start(&mut host, "run", vec![]).unwrap(),
-            Value::Undefined
+            Value::UNDEFINED
         );
         vm.collect_garbage(&[]).unwrap();
         vm.snapshot(&[]).unwrap().to_json().unwrap()
@@ -43,7 +43,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         let [task] = snapshot.host_tasks.as_slice() else {
             panic!("expected one waiting callback task");
         };
-        let [Value::Object(callback_id)] = task.saved.as_slice() else {
+        let [callback] = task.saved.as_slice() else {
             panic!("expected the callback as the task's only saved slot");
         };
         let [callback_op, sleep_op] = snapshot.operations.as_slice() else {
@@ -54,7 +54,9 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         let DeliveryTarget::Promise(sleep_id) = sleep_op.target else {
             panic!("sleep must target a Promise directly");
         };
-        let callback_id = *callback_id;
+        let yield_vm::ValueRef::Object(callback_id) = callback.view() else {
+            panic!("expected a callback object");
+        };
         assert!(
             snapshot
                 .objects
@@ -85,9 +87,9 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         host.advance(&mut vm, 100).unwrap();
         assert_eq!(
             vm.get_export("callbackResult").unwrap(),
-            Value::Number(if cancel { 0.0 } else { 40.0 }),
+            Value::number(if cancel { 0.0 } else { 40.0 }),
         );
-        assert_eq!(vm.get_export("reactionResult").unwrap(), Value::Number(2.0));
+        assert_eq!(vm.get_export("reactionResult").unwrap(), Value::number(2.0));
         assert!(host.errors().is_empty());
         assert!(host.clock().registrations().is_empty());
 
@@ -155,9 +157,9 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
             .unwrap();
     }
     assert!(host.clock().registrations().is_empty());
-    assert_eq!(vm.get_export("result").unwrap(), Value::Number(0.0));
+    assert_eq!(vm.get_export("result").unwrap(), Value::number(0.0));
     vm.run_until_idle(&mut host).unwrap();
-    assert_eq!(vm.get_export("result").unwrap(), Value::Number(427.0));
+    assert_eq!(vm.get_export("result").unwrap(), Value::number(427.0));
     assert!(host.errors().is_empty());
     let idle = vm.snapshot(&[]).unwrap();
     assert!(idle.host_tasks.is_empty());
@@ -242,7 +244,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     vm.complete_operation(*token, Completion::Fulfilled(JsValue::undefined()))
         .unwrap();
     vm.run_until_idle(&mut host).unwrap();
-    assert_eq!(vm.get_export("result").unwrap(), Value::Number(2.0));
+    assert_eq!(vm.get_export("result").unwrap(), Value::number(2.0));
     assert_eq!(clock.arm_count(), 1);
     assert!(clock.registrations().is_empty());
     let idle = vm.snapshot(&[]).unwrap();

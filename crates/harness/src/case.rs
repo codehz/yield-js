@@ -1,5 +1,5 @@
 use yield_compiler::compile;
-use yield_vm::{Completion, Host, JsString, JsValue, PromiseState, Snapshot, Value, Vm};
+use yield_vm::{Completion, Host, JsString, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
 
 use crate::{TestHost, compile_options};
 
@@ -592,12 +592,12 @@ fn values_equal_js(expected: &Expected, actual: &JsValue) -> bool {
 }
 
 fn values_equal(expected: &Expected, actual: &Value) -> bool {
-    match (expected, actual) {
-        (Expected::Undefined, Value::Undefined) => true,
-        (Expected::Null, Value::Null) => true,
-        (Expected::Bool(expected), Value::Bool(actual)) => expected == actual,
-        (Expected::Number(expected), Value::Number(actual)) => expected == actual,
-        (Expected::String(expected), Value::String(actual)) => expected == actual,
+    match (expected, actual.view()) {
+        (Expected::Undefined, ValueRef::Undefined) => true,
+        (Expected::Null, ValueRef::Null) => true,
+        (Expected::Bool(expected), ValueRef::Bool(actual)) => *expected == actual,
+        (Expected::Number(expected), ValueRef::Number(actual)) => *expected == actual,
+        (Expected::String(expected), ValueRef::String(actual)) => expected == actual,
         _ => false,
     }
 }
@@ -621,17 +621,17 @@ fn format_expected(value: &Expected) -> String {
 }
 
 fn format_value(value: &Value) -> String {
-    match value {
-        Value::Undefined => "undefined".to_owned(),
-        Value::Null => "null".to_owned(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => format_number(*value),
-        Value::String(value) => value
+    match value.view() {
+        ValueRef::Undefined => "undefined".to_owned(),
+        ValueRef::Null => "null".to_owned(),
+        ValueRef::Bool(value) => value.to_string(),
+        ValueRef::Number(value) => format_number(value),
+        ValueRef::String(value) => value
             .to_utf8()
             .map(|text| format!("{text:?}"))
             .unwrap_or_else(|_| format!("{value:?}")),
-        Value::Symbol(_) => "symbol".to_owned(),
-        Value::Object(_) => "object".to_owned(),
+        ValueRef::Symbol(_) => "symbol".to_owned(),
+        ValueRef::Object(_) => "object".to_owned(),
     }
 }
 

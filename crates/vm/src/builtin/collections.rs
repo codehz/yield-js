@@ -10,7 +10,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value};
+use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 #[derive(Clone, Copy)]
@@ -290,12 +290,13 @@ const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
 )];
 
 fn same_value_zero(a: &Value, b: &Value) -> bool {
-    a == b || matches!((a, b), (Value::Number(a), Value::Number(b)) if a.is_nan() && b.is_nan())
+    a == b
+        || matches!((a.view(), b.view()), (ValueRef::Number(a), ValueRef::Number(b)) if a.is_nan() && b.is_nan())
 }
 
 fn canonical_key(value: &Value) -> Value {
-    if matches!(value, Value::Number(x) if *x == 0.0) {
-        Value::Number(0.0)
+    if matches!(value.view(), ValueRef::Number(x) if x == 0.0) {
+        Value::number(0.0)
     } else {
         value.clone()
     }
@@ -315,7 +316,7 @@ impl Vm {
         let next = match kind {
             CollectionKind::Map => {
                 map_members::install_members(self, constructor, prototype);
-                let entries = Value::Object(self.collection_alias_source(prototype, "entries"));
+                let entries = Value::object(self.collection_alias_source(prototype, "entries"));
                 define_builtin_data(self, prototype, iterator_key, entries, Attributes::METHOD);
                 MAP_ITERATOR_NEXT
             }
@@ -326,14 +327,14 @@ impl Vm {
                     self,
                     prototype,
                     "keys",
-                    Value::Object(values),
+                    Value::object(values),
                     Attributes::METHOD,
                 );
                 define_builtin_data(
                     self,
                     prototype,
                     iterator_key,
-                    Value::Object(values),
+                    Value::object(values),
                     Attributes::METHOD,
                 );
                 set_entries::install_members(self, constructor, prototype);
@@ -342,7 +343,7 @@ impl Vm {
         };
         let next = self.alloc_intrinsic(next);
         self.heap
-            .define_data(iterator, "next", Value::Object(next), Attributes::METHOD)
+            .define_data(iterator, "next", Value::object(next), Attributes::METHOD)
             .expect("collection iterator next");
         self.heap
             .define_data(
@@ -361,10 +362,10 @@ impl Vm {
             .expect("collection prototype")
             .own_property(PropertyKeyRef::String(name))
             .expect("collection alias source");
-        let Some(Value::Object(id)) = property.data_value() else {
+        let Some(ValueRef::Object(id)) = property.data_value().map(Value::view) else {
             unreachable!("collection alias source is an own data property holding a function")
         };
-        *id
+        id
     }
 
     fn construct_weakmap(
@@ -376,7 +377,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let prototype = prototype.unwrap_or_else(|| self.builtins.get("weakmap.prototype"));
         let object = PlainObject::new(Some(prototype));
-        let collection = Value::Object(self.heap.alloc(Object::WeakMap {
+        let collection = Value::object(self.heap.alloc(Object::WeakMap {
             object,
             entries: Default::default(),
         }));
@@ -389,19 +390,18 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error("incompatible WeakMap receiver");
         };
         if !matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
             return self.throw_type_error("incompatible WeakMap receiver");
         }
-        let key = args.first().unwrap_or(&Value::Undefined);
-        let Some(key) = self.heap.weak_key(key) else {
+        let Some(key) = args.first().and_then(|value| self.heap.weak_key(value)) else {
             return match method {
                 WeakMapMethod::Set => self.throw_type_error(INVALID_WEAK_KEY),
-                WeakMapMethod::Get => Ok(Invocation::Value(Value::Undefined)),
+                WeakMapMethod::Get => Ok(Invocation::Value(Value::UNDEFINED)),
                 WeakMapMethod::Has | WeakMapMethod::Delete => {
-                    Ok(Invocation::Value(Value::Bool(false)))
+                    Ok(Invocation::Value(Value::boolean(false)))
                 }
             };
         };
@@ -409,13 +409,13 @@ impl Vm {
             unreachable!("receiver brand already checked");
         };
         Ok(Invocation::Value(match method {
-            WeakMapMethod::Get => entries.get(&key).cloned().unwrap_or(Value::Undefined),
+            WeakMapMethod::Get => entries.get(&key).cloned().unwrap_or(Value::UNDEFINED),
             WeakMapMethod::Set => {
-                entries.insert(key, args.get(1).cloned().unwrap_or(Value::Undefined));
+                entries.insert(key, args.get(1).cloned().unwrap_or(Value::UNDEFINED));
                 receiver.clone()
             }
-            WeakMapMethod::Has => Value::Bool(entries.contains_key(&key)),
-            WeakMapMethod::Delete => Value::Bool(entries.remove(&key).is_some()),
+            WeakMapMethod::Has => Value::boolean(entries.contains_key(&key)),
+            WeakMapMethod::Delete => Value::boolean(entries.remove(&key).is_some()),
         }))
     }
 
@@ -427,7 +427,7 @@ impl Vm {
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
         let prototype = prototype.unwrap_or_else(|| self.builtins.get("weakset.prototype"));
-        let collection = Value::Object(self.heap.alloc(Object::WeakSet {
+        let collection = Value::object(self.heap.alloc(Object::WeakSet {
             object: PlainObject::new(Some(prototype)),
             entries: Default::default(),
         }));
@@ -440,18 +440,17 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error("incompatible WeakSet receiver");
         };
         if !matches!(self.heap.get(id)?, Object::WeakSet { .. }) {
             return self.throw_type_error("incompatible WeakSet receiver");
         }
-        let key = args.first().unwrap_or(&Value::Undefined);
-        let Some(key) = self.heap.weak_key(key) else {
+        let Some(key) = args.first().and_then(|value| self.heap.weak_key(value)) else {
             return match method {
                 WeakSetMethod::Add => self.throw_type_error(INVALID_WEAK_KEY),
                 WeakSetMethod::Has | WeakSetMethod::Delete => {
-                    Ok(Invocation::Value(Value::Bool(false)))
+                    Ok(Invocation::Value(Value::boolean(false)))
                 }
             };
         };
@@ -463,8 +462,8 @@ impl Vm {
                 entries.insert(key);
                 receiver.clone()
             }
-            WeakSetMethod::Has => Value::Bool(entries.contains(&key)),
-            WeakSetMethod::Delete => Value::Bool(entries.remove(&key)),
+            WeakSetMethod::Has => Value::boolean(entries.contains(&key)),
+            WeakSetMethod::Delete => Value::boolean(entries.remove(&key)),
         }))
     }
 
@@ -481,7 +480,7 @@ impl Vm {
             CollectionKind::Set => (self.builtins.get("set.prototype"), "add"),
         };
         let object = PlainObject::new(prototype.or(Some(default_proto)));
-        let collection = Value::Object(self.heap.alloc(match kind {
+        let collection = Value::object(self.heap.alloc(match kind {
             CollectionKind::Map => Object::Map {
                 object,
                 entries: Vec::new(),
@@ -506,7 +505,7 @@ impl Vm {
         let roots = &roots.with(&root_view);
         let Some(iterable) = args
             .first()
-            .filter(|v| !matches!(v, Value::Null | Value::Undefined))
+            .filter(|v| !matches!(v.view(), ValueRef::Null | ValueRef::Undefined))
         else {
             return Ok(Invocation::Value(collection));
         };
@@ -561,7 +560,7 @@ impl Vm {
         item: Value,
     ) -> Result<Invocation, VmError> {
         let args = if entry_pairs {
-            if !matches!(item, Value::Object(_)) {
+            if !matches!(item.view(), ValueRef::Object(_)) {
                 return self.throw_type_error("collection entry must be an object");
             }
             let mut pair = Vec::with_capacity(2);
@@ -593,7 +592,7 @@ impl Vm {
         let roots = &roots.with(&root_view);
         use CollectionMethod::*;
         let invalid = "incompatible collection receiver";
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(invalid);
         };
         let object = self.heap.get_mut(id)?;
@@ -603,15 +602,16 @@ impl Vm {
         ) {
             return self.throw_type_error(invalid);
         }
-        let key = args.first().unwrap_or(&Value::Undefined);
-        let second = args.get(1).unwrap_or(&Value::Undefined);
+        let undefined = Value::UNDEFINED;
+        let key = args.first().unwrap_or(&undefined);
+        let second = args.get(1).unwrap_or(&undefined);
         let value = match method {
             Iterate(iteration) => {
                 let prototype = match kind {
                     CollectionKind::Map => self.builtins.get("mapIterator.prototype"),
                     CollectionKind::Set => self.builtins.get("setIterator.prototype"),
                 };
-                Value::Object(self.heap.alloc(Object::CollectionIterator {
+                Value::object(self.heap.alloc(Object::CollectionIterator {
                     object: PlainObject::new(Some(prototype)),
                     kind,
                     iteration,
@@ -631,7 +631,7 @@ impl Vm {
                         return Ok(result);
                     }
                 }
-                Value::Undefined
+                Value::UNDEFINED
             }
             _ => match object {
                 Object::Map { entries, .. } => collection_slot_method(
@@ -678,7 +678,7 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let invalid = "incompatible collection iterator receiver";
-        let Value::Object(id) = *receiver else {
+        let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(invalid);
         };
         let Object::CollectionIterator {
@@ -697,7 +697,7 @@ impl Vm {
         let (iteration, mut index) = (*iteration, *next_index);
         let pair = match *target {
             Some(target) => self.collection_pair(target, &mut index)?,
-            None => return self.iterator_result(Value::Undefined, true),
+            None => return self.iterator_result(Value::UNDEFINED, true),
         };
         let Object::CollectionIterator {
             target, next_index, ..
@@ -708,13 +708,13 @@ impl Vm {
         let Some((key, value)) = pair else {
             *target = None;
             *next_index = 0;
-            return self.iterator_result(Value::Undefined, true);
+            return self.iterator_result(Value::UNDEFINED, true);
         };
         *next_index = index;
         let value = match iteration {
             CollectionIteration::Keys => key,
             CollectionIteration::Values => value,
-            CollectionIteration::Entries => Value::Object(self.heap.alloc_array(vec![key, value])),
+            CollectionIteration::Entries => Value::object(self.heap.alloc_array(vec![key, value])),
         };
         self.iterator_result(value, false)
     }
@@ -743,9 +743,9 @@ fn collection_slot_method<T>(
     match method {
         Clear => {
             slots.fill_with(|| None);
-            return Value::Undefined;
+            return Value::UNDEFINED;
         }
-        Size => return Value::Number(slots.iter().flatten().count() as f64),
+        Size => return Value::number(slots.iter().flatten().count() as f64),
         _ => {}
     }
     let slot = slots
@@ -754,9 +754,9 @@ fn collection_slot_method<T>(
     match method {
         Get => slot
             .and_then(|slot| slot.as_ref())
-            .map_or(Value::Undefined, get),
-        Has => Value::Bool(slot.is_some()),
-        Delete => Value::Bool(slot.and_then(Option::take).is_some()),
+            .map_or(Value::UNDEFINED, get),
+        Has => Value::boolean(slot.is_some()),
+        Delete => Value::boolean(slot.and_then(Option::take).is_some()),
         Insert => {
             if let Some(entry) = slot.and_then(|slot| slot.as_mut()) {
                 update(entry);

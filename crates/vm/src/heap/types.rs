@@ -10,7 +10,9 @@ use crate::builtin::string::utf16_unit_string;
 use crate::error::VmError;
 use crate::ops::canonical_index_key;
 use crate::regexp::{RegExpFlags, compile_pattern};
-use crate::value::{BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value};
+use crate::value::{
+    BindingId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
+};
 
 /// Reserved well-known symbols. Ordinary symbols allocate after these IDs and
 /// are never interned by description; only the registry interns by key.
@@ -407,7 +409,7 @@ impl DescriptorUpdate {
         } else {
             let value = match old {
                 Some(Property::Data(value)) => value,
-                _ => &Value::Undefined,
+                _ => &Value::UNDEFINED,
             };
             if old.is_some()
                 && !attrs.configurable
@@ -435,14 +437,11 @@ impl DescriptorUpdate {
             && self
                 .value
                 .as_ref()
-                .is_none_or(|value| match (property, value) {
-                    (OwnProperty::StringLength(length), Value::Number(number)) => {
-                        crate::ops::same_value(
-                            &Value::Number(length as f64),
-                            &Value::Number(*number),
-                        )
+                .is_none_or(|value| match (property, value.view()) {
+                    (OwnProperty::StringLength(length), ValueRef::Number(_)) => {
+                        crate::ops::same_value(&Value::number(length as f64), value)
                     }
-                    (OwnProperty::StringIndex(unit), Value::String(text)) => {
+                    (OwnProperty::StringIndex(unit), ValueRef::String(text)) => {
                         text.unit_len() == 1 && text.unit_at(0) == Some(unit)
                     }
                     _ => false,
@@ -461,9 +460,9 @@ impl OwnProperty<'_> {
     pub(crate) fn into_owned(self) -> Property {
         match self {
             Self::Stored(property, _) => property.clone(),
-            Self::ArrayLength(length, _) => Property::Data(Value::Number(length as f64)),
-            Self::StringLength(length) => Property::Data(Value::Number(length as f64)),
-            Self::StringIndex(unit) => Property::Data(Value::String(utf16_unit_string(unit))),
+            Self::ArrayLength(length, _) => Property::Data(Value::number(length as f64)),
+            Self::StringLength(length) => Property::Data(Value::number(length as f64)),
+            Self::StringIndex(unit) => Property::Data(Value::string(utf16_unit_string(unit))),
         }
     }
 

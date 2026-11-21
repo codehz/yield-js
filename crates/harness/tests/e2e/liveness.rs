@@ -14,7 +14,10 @@ fn plain_tags(snapshot: &yield_vm::Snapshot) -> Vec<JsString> {
                 return None;
             };
             match plain.props.get(&JsString::from("tag")) {
-                Some(Property::Data(Value::String(tag))) => Some(tag.clone()),
+                Some(Property::Data(value)) => match value.view() {
+                    yield_vm::ValueRef::String(tag) => Some(tag.clone()),
+                    _ => None,
+                },
                 _ => None,
             }
         })
@@ -53,8 +56,8 @@ export async function run() {
         &baseline_at_first_await().continuations[0].values,
     )
     .into_iter()
-    .filter_map(|value| match value {
-        Value::Object(id) => Some(id),
+    .filter_map(|value| match value.view() {
+        yield_vm::ValueRef::Object(id) => Some(id),
         _ => None,
     })
     .collect();
@@ -65,12 +68,12 @@ export async function run() {
     );
     assert!(snapshot.objects.iter().any(|record| {
         record.id == saved_objects[0]
-            && matches!(&record.object, Object::Plain(plain) if plain.props.get(&JsString::from("n")) == Some(&Property::Data(Value::Number(7.0))))
+            && matches!(&record.object, Object::Plain(plain) if plain.props.get(&JsString::from("n")) == Some(&Property::Data(Value::number(7.0))))
     }));
 
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(7.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(7.0)));
 }
 
 #[test]
@@ -97,7 +100,7 @@ export async function run() {
 
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::boolean(true)));
 }
 
 #[test]
@@ -121,7 +124,7 @@ export async function run() {
     s.complete("wait:a", Completion::Rejected(JsValue::string("boom")));
     assert_eq!(
         s.state(),
-        PromiseState::Fulfilled(Value::String("kept".into()))
+        PromiseState::Fulfilled(Value::string("kept".into()))
     );
 }
 
@@ -157,7 +160,7 @@ export async function run() {
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Number(5.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(5.0)));
 }
 
 #[test]
@@ -194,5 +197,5 @@ export async function run() {
     );
     s.restore(snapshot).expect("restore");
     s.complete("wait:a", Completion::Fulfilled(number(0.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::Bool(true)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::boolean(true)));
 }

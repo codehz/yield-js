@@ -6,7 +6,7 @@ use super::types::{
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
-    ContinuationId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value,
+    ContinuationId, JsString, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -557,9 +557,9 @@ fn push_property(out: &mut Vec<OwnedEdge>, property: &Property) {
 }
 
 pub(crate) fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
-    match value {
-        Value::Object(id) => out.push(OwnedEdge::Object(*id)),
-        Value::Symbol(id) => out.push(OwnedEdge::Symbol(*id)),
+    match value.view() {
+        ValueRef::Object(id) => out.push(OwnedEdge::Object(id)),
+        ValueRef::Symbol(id) => out.push(OwnedEdge::Symbol(id)),
         _ => {}
     }
 }

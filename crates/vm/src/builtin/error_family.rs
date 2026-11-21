@@ -35,7 +35,7 @@ macro_rules! error_class {
                         vm,
                         prototype,
                         "name",
-                        Value::String($name.into()),
+                        Value::string($name.into()),
                         Attributes::METHOD,
                     );
                     if $base {
@@ -43,7 +43,7 @@ macro_rules! error_class {
                             vm,
                             prototype,
                             "message",
-                            Value::String(JsString::default()),
+                            Value::string(JsString::default()),
                             Attributes::METHOD,
                         );
                     }
