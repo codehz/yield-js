@@ -444,7 +444,10 @@ fn nonempty_string(meta: &Meta) -> Result<LitStr> {
 enum BuiltinMemberAction {
     Constant(Ident),
     Handler(TokenStream),
-    Direct { binding: Option<Ident>, call: Expr },
+    Direct {
+        binding: Option<Ident>,
+        call: Box<Expr>,
+    },
 }
 
 struct BuiltinMember {
@@ -475,7 +478,7 @@ fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMem
                 LitStr::new(&plain_ident(&ident), ident.span()),
                 BuiltinMemberAction::Direct {
                     binding: binding.clone(),
-                    call: call.clone(),
+                    call: Box::new(call.clone()),
                 },
             ));
         }
@@ -711,7 +714,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
             BuiltinMemberAction::Handler(handler) => handler,
             BuiltinMemberAction::Direct { binding, mut call } => {
                 if let Some(key) = binding {
-                    let Expr::Closure(closure) = &mut call else {
+                    let Expr::Closure(closure) = call.as_mut() else {
                         return Err(Error::new_spanned(
                             call,
                             "a bound builtin call requires a closure",
