@@ -92,7 +92,7 @@ struct HostActivation<'a> {
     owner: NativeTarget,
     receiver: &'a Value,
     construction: Option<HostConstruction>,
-    task: Option<u64>,
+    task: &'a mut Option<u64>,
 }
 
 pub(crate) struct RestoredState {
@@ -363,7 +363,8 @@ impl Vm {
                 declaration.2
             )));
         }
-        self.run_host_steps(
+        let mut task = None;
+        let result = self.run_host_steps(
             host,
             roots,
             HostActivation {
@@ -371,12 +372,18 @@ impl Vm {
                 owner: target,
                 receiver,
                 construction,
-                task: None,
+                task: &mut task,
             },
             HostEntry::Call(call),
             args,
-        )?
-        .ok_or_else(|| VmError::InvalidState("ordinary host call suspended".to_owned()))
+        );
+        if let Some(id) = task {
+            return Ok(match self.finish_host_task(id, result)? {
+                Some(Invocation::Thrown(error)) => Invocation::Thrown(error),
+                _ => Invocation::Value(Value::Number(id as f64)),
+            });
+        }
+        result?.ok_or_else(|| VmError::InvalidState("ordinary host call suspended".to_owned()))
     }
 
     fn run_host_steps(
@@ -420,7 +427,6 @@ impl Vm {
                 this: wrap(receiver.clone()),
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
-                task,
             };
             let step = match entry {
                 HostEntry::Resume(resume, outcome) => {
@@ -436,30 +442,46 @@ impl Vm {
                 Ok(HostStep::Return(value)) => {
                     return cx
                         .into_value(value)
-                        .map(|value| Some(Invocation::Value(value)))
+                        .map(Invocation::Value)
+                        .map(Some)
                         .map_err(|error| VmError::Host(error.0));
                 }
                 Err(JsError::Throw(value)) => {
                     return cx
                         .into_value(value)
-                        .map(|value| Some(Invocation::Thrown(value)))
+                        .map(Invocation::Thrown)
+                        .map(Some)
                         .map_err(|error| VmError::Host(error.0));
                 }
                 Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
                 Ok(HostStep::Suspend(request)) => request,
             };
-            let (action, saved, resume) = request
+            let (action, saved, resume, spawn) = request
                 .into_parts(cx)
                 .map_err(|fault| VmError::HostFault(fault.0))?;
             // A running task can cancel itself, including from a nested guest call.
             if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
                 return Ok(None);
             }
+            if spawn && (task.is_some() || construction.is_some() || bindings.cps(owner).is_none())
+            {
+                return Err(VmError::HostFault(
+                    "spawn requires an ordinary linked host function or method".to_owned(),
+                ));
+            }
             let boundary = match &action {
                 Action::Call { .. } => CpsBoundary::Call,
                 Action::Gc => CpsBoundary::Gc,
                 Action::External { .. } => CpsBoundary::External,
-                Action::Spawn => CpsBoundary::Spawn,
+                Action::FinishedSpawn => {
+                    if !spawn || !saved.is_empty() {
+                        return Err(VmError::HostFault(
+                            "invalid finished spawn request".to_owned(),
+                        ));
+                    }
+                    let id = self.alloc_host_task_id()?;
+                    return Ok(Some(Invocation::Value(Value::Number(id as f64))));
+                }
             };
             let (linked, resume) = match resume {
                 Resume::Linked(stage) => {
@@ -467,7 +489,7 @@ impl Vm {
                     (Some(stage), resume.resume)
                 }
                 Resume::Inline(resume)
-                    if matches!(boundary, CpsBoundary::Call | CpsBoundary::Gc) =>
+                    if !spawn && matches!(boundary, CpsBoundary::Call | CpsBoundary::Gc) =>
                 {
                     (None, resume)
                 }
@@ -477,6 +499,21 @@ impl Vm {
                     ));
                 }
             };
+            if spawn {
+                let stage = linked.expect("spawn has a linked stage");
+                let id = self.alloc_host_task_id()?;
+                self.host_tasks.insert(
+                    id,
+                    HostTask {
+                        owner,
+                        stage,
+                        receiver: Value::Undefined,
+                        saved: Vec::new(),
+                        state: HostTaskState::Running,
+                    },
+                );
+                *task = Some(id);
+            }
             let outcome = match action {
                 Action::Call {
                     callee,
@@ -488,7 +525,7 @@ impl Vm {
                     Invocation::Value(Value::Number(removed as f64))
                 }
                 Action::External { decl, state } => {
-                    let (Some(id), Some(stage)) = (task, linked) else {
+                    let (Some(id), Some(stage)) = (*task, linked) else {
                         return Err(VmError::HostFault(
                             "external await requires a background task".to_owned(),
                         ));
@@ -510,56 +547,22 @@ impl Vm {
                     frame.state = HostTaskState::Waiting(token.id);
                     return Ok(None);
                 }
-                Action::Spawn => {
-                    let Some(stage) = linked.filter(|_| {
-                        task.is_none()
-                            && construction.is_none()
-                            && !matches!(owner, NativeTarget::Accessor { .. })
-                    }) else {
-                        return Err(VmError::HostFault(
-                            "spawn requires an ordinary host function or method".to_owned(),
-                        ));
-                    };
-                    let id = self.next_host_task_id;
-                    if id >= HOST_TASK_ID_LIMIT {
-                        return Err(VmError::HostFault(
-                            "host task id space exhausted".to_owned(),
-                        ));
-                    }
-                    self.next_host_task_id += 1;
-                    self.host_tasks.insert(
-                        id,
-                        HostTask {
-                            owner,
-                            stage,
-                            receiver: Value::Undefined,
-                            saved: Vec::new(),
-                            state: HostTaskState::Running,
-                        },
-                    );
-                    let result = self.run_host_steps(
-                        host,
-                        roots,
-                        HostActivation {
-                            bindings,
-                            owner,
-                            receiver,
-                            construction: None,
-                            task: Some(id),
-                        },
-                        HostEntry::Resume(resume, Invocation::Value(Value::Undefined)),
-                        saved,
-                    );
-                    let outcome = self.finish_host_task(id, result)?;
-                    return Ok(Some(match outcome {
-                        Some(Invocation::Thrown(error)) => Invocation::Thrown(error),
-                        _ => Invocation::Value(Value::Number(id as f64)),
-                    }));
-                }
+                Action::FinishedSpawn => unreachable!("finished spawn handled before dispatch"),
             };
             entry = HostEntry::Resume(resume, outcome);
             args = saved;
         }
+    }
+
+    fn alloc_host_task_id(&mut self) -> Result<u64, VmError> {
+        let id = self.next_host_task_id;
+        if id >= HOST_TASK_ID_LIMIT {
+            return Err(VmError::HostFault(
+                "host task id space exhausted".to_owned(),
+            ));
+        }
+        self.next_host_task_id += 1;
+        Ok(id)
     }
 
     fn linked_stage(
@@ -624,6 +627,7 @@ impl Vm {
         let receiver = std::mem::replace(&mut frame.receiver, Value::Undefined);
         let saved = std::mem::take(&mut frame.saved);
         let bindings = self.bindings.clone();
+        let mut task = Some(id);
         let result =
             Self::linked_stage(&bindings, owner, stage, CpsBoundary::External, saved.len())
                 .and_then(|entry| {
@@ -639,7 +643,7 @@ impl Vm {
                             owner,
                             receiver: &receiver,
                             construction: None,
-                            task: Some(id),
+                            task: &mut task,
                         },
                         HostEntry::Resume(entry.resume, outcome),
                         saved,

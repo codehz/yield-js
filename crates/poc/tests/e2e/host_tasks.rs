@@ -68,7 +68,7 @@ impl Host for TaskHost {
     }
 }
 
-static STAGES: [CpsStage; 3] = [
+static STAGES: [CpsStage; 2] = [
     CpsStage {
         resume: fire,
         kind: CpsBoundary::External,
@@ -81,34 +81,24 @@ static STAGES: [CpsStage; 3] = [
         slots: &[],
         receiver: None,
     },
-    CpsStage {
-        resume: begin,
-        kind: CpsBoundary::Spawn,
-        slots: &[0],
-        receiver: None,
-    },
 ];
 
 fn spawn(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
     let cb = cx.arg(0)?;
-    cx.__spawn(vec![cb], 2)
+    let first = cx.__linked_effect(
+        Wait {
+            label: "task".into(),
+        },
+        vec![cb],
+        0,
+    )?;
+    cx.__spawn(first)
 }
 
 fn cancel(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
     let handle = cx.arg(0)?;
     cx.cancel_task(&handle)?;
     Ok(HostStep::Return(JsValue::undefined()))
-}
-
-fn begin(cx: &mut CallCx<'_>, _: GuestOutcome) -> JsResult<HostStep> {
-    let cb = cx.arg(0)?;
-    cx.__linked_effect(
-        Wait {
-            label: "task".into(),
-        },
-        vec![cb],
-        0,
-    )
 }
 
 fn fire(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
@@ -161,6 +151,33 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     drop(vm);
     assert_eq!(host.labels.token("wait:task"), None);
 
+    for corrupt in [
+        (
+            "non-external stage",
+            (|image: &mut yield_vm::Snapshot| image.host_tasks[0].stage = 1)
+                as fn(&mut yield_vm::Snapshot),
+        ),
+        ("missing slot", |image| image.host_tasks[0].saved.clear()),
+        ("missing operation", |image| {
+            image.host_tasks[0].waiting_on = 0
+        }),
+        ("invalid high-water mark", |image| {
+            image.next_host_task_id = image.host_tasks[0].id
+        }),
+    ] {
+        let (label, mutate) = corrupt;
+        let mut image = snapshot.clone();
+        mutate(&mut image);
+        assert!(
+            matches!(
+                Vm::restore(image, build.clone(), &mut host),
+                Err(VmError::InvalidSnapshot(_))
+            ),
+            "accepted {label}"
+        );
+        assert!(host.labels.pending_labels().is_empty());
+    }
+
     for cancel in [true, false] {
         let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
         assert_eq!(host.labels.token("wait:task"), None);
@@ -183,4 +200,193 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         );
         assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     }
+}
+
+#[yield_vm::host_module(name = "branch")]
+mod branch {
+    use super::*;
+
+    #[function(name = "choose")]
+    async fn choose(cx: &mut CallCx<'_>, cb: JsValue, mode: JsValue) -> JsResult<HostStep> {
+        let result = if cx.number(&mode)? == 1.0 {
+            cx.call(cb.clone(), JsValue::undefined(), vec![JsValue::number(7.0)])
+                .await?
+        } else {
+            return Ok(HostStep::Return(JsValue::number(99.0)));
+        };
+        let shadowed = match Some((result.clone(), JsValue::number(3.0))) {
+            Some((_, result)) => {
+                cx.gc().await?;
+                result
+            }
+            None => JsValue::undefined(),
+        };
+        Ok(HostStep::Return(JsValue::number(
+            cx.number(&result)? + cx.number(&shadowed)?,
+        )))
+    }
+
+    #[function(name = "spawn")]
+    fn spawn(cx: &mut CallCx<'_>, cb: JsValue, mode: JsValue) -> JsResult<JsValue> {
+        cx.spawn(async move {
+            hit(cx, "prefix");
+            let selected = match cx.number(&mode)? {
+                1.0 => {
+                    hit(cx, "one");
+                    cx.effect(Wait {
+                        label: "one".into(),
+                    })
+                    .await?
+                }
+                _ => {
+                    hit(cx, "other");
+                    cx.effect(Wait {
+                        label: "other".into(),
+                    })
+                    .await?
+                }
+            };
+            cx.call(cb.clone(), JsValue::undefined(), Vec::from([selected]))
+                .await?;
+            cx.effect(Wait {
+                label: "again".into(),
+            })
+            .await?;
+            cx.call(cb, JsValue::undefined(), Vec::from([JsValue::number(20.0)]))
+                .await?;
+            hit(cx, "tail");
+            Ok(())
+        })
+    }
+
+    fn hit(cx: &CallCx<'_>, name: &str) {
+        cx.service::<Arc<yield_poc::Counters>>("counters")
+            .unwrap()
+            .hit(name);
+    }
+
+    #[function(name = "cancel")]
+    fn cancel(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
+        cx.cancel_task(&handle)
+    }
+
+    #[function(name = "early")]
+    fn early(cx: &mut CallCx<'_>, mode: JsValue) -> JsResult<JsValue> {
+        if cx.number(&mode)? == 2.0 {
+            return Ok(JsValue::number(-1.0));
+        }
+        cx.spawn(async move {
+            if cx.number(&mode)? == 1.0 {
+                return Err(cx.throw_string("prefix failed"));
+            }
+            return Ok(());
+        })
+    }
+}
+
+#[test]
+fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
+    let labels = Arc::new(LabelService::default());
+    let counters = Arc::new(yield_poc::Counters::default());
+    let bindings = yield_vm::host_bindings! {
+        modules: [branch], classes: [], states: [], operations: [Wait],
+        services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],
+    }
+    .unwrap();
+    let mut host = TaskHost {
+        bindings: Arc::new(bindings),
+        labels,
+    };
+    let build = compile(
+        r#"
+        import { choose, spawn, cancel, early } from 'branch';
+        export let result = 0;
+        let handle;
+        function add(n) { result += n; return result; }
+        export function sync(mode) { return choose(add, mode); }
+        export function run() { handle = spawn(add, 1); return handle; }
+        export function immediate(mode) { return early(mode); }
+        export function clear() { cancel(handle); }
+    "#,
+        &CompileOptions {
+            imports: [(
+                "branch".into(),
+                [
+                    "choose".into(),
+                    "spawn".into(),
+                    "cancel".into(),
+                    "early".into(),
+                ]
+                .into(),
+            )]
+            .into(),
+        },
+    )
+    .unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "immediate", vec![JsValue::number(2.0)])
+            .unwrap(),
+        Value::Number(-1.0)
+    );
+    assert!(
+        matches!(vm.start(&mut host, "immediate", vec![JsValue::number(1.0)]), Err(VmError::Thrown(Value::String(message))) if message == "prefix failed")
+    );
+    assert!(
+        matches!(vm.start(&mut host, "immediate", vec![JsValue::number(0.0)]), Ok(Value::Number(id)) if id > 0.0)
+    );
+    assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
+    assert_eq!(
+        vm.start(&mut host, "sync", vec![JsValue::number(0.0)])
+            .unwrap(),
+        Value::Number(99.0)
+    );
+    assert_eq!(
+        vm.start(&mut host, "sync", vec![JsValue::number(1.0)])
+            .unwrap(),
+        Value::Number(10.0)
+    );
+    let handle = vm.start(&mut host, "run", vec![]).unwrap();
+    assert_eq!(host.labels.pending_labels(), ["wait:one"]);
+    let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
+    assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
+    vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
+    vm.start_recovered_operations().unwrap();
+    let first = host.labels.token("wait:one").unwrap();
+    vm.complete_operation(first, Completion::Fulfilled(JsValue::number(5.0)))
+        .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(vm.get_export("result").unwrap(), Value::Number(12.0));
+    assert_eq!(host.labels.pending_labels(), ["wait:again"]);
+    assert!(matches!(
+        vm.complete_operation(first, Completion::Fulfilled(JsValue::undefined())),
+        Err(VmError::UnknownOperation(_))
+    ));
+    let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
+    assert_eq!(Value::Number(snapshot.host_tasks[0].id as f64), handle);
+    for cancel in [true, false] {
+        let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
+        vm.start_recovered_operations().unwrap();
+        let token = host.labels.token("wait:again").unwrap();
+        if cancel {
+            vm.start(&mut host, "clear", vec![]).unwrap();
+            assert_eq!(host.labels.token("wait:again"), None);
+            assert!(matches!(
+                vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined())),
+                Err(VmError::UnknownOperation(_))
+            ));
+        } else {
+            vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
+                .unwrap();
+        }
+        vm.run_until_idle(&mut host).unwrap();
+        assert_eq!(
+            vm.get_export("result").unwrap(),
+            Value::Number(if cancel { 12.0 } else { 32.0 })
+        );
+    }
+    assert_eq!(counters.count("prefix"), 1);
+    assert_eq!(counters.count("one"), 1);
+    assert_eq!(counters.count("other"), 0);
+    assert_eq!(counters.count("tail"), 1);
 }

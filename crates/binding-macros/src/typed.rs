@@ -117,7 +117,12 @@ fn wrapped<'a>(ty: &'a Type, name: &str) -> Option<&'a Type> {
     None
 }
 
-fn lower_async(sig: &mut Signature, block: &mut syn::Block, kind: &str) -> Result<()> {
+fn lower_async(
+    sig: &mut Signature,
+    block: &mut syn::Block,
+    kind: &str,
+    class: Option<&Type>,
+) -> Result<()> {
     let Some(asyncness) = &sig.asyncness else {
         return Ok(());
     };
@@ -135,9 +140,74 @@ fn lower_async(sig: &mut Signature, block: &mut syn::Block, kind: &str) -> Resul
             "async bindings must return JsResult<HostStep>",
         ));
     }
-    *block = syn::parse2(cps::lower(sig, block)?)?;
+    let body = match class {
+        Some(class) => cps::lower_method(sig, block, class)?,
+        None => cps::lower(sig, block)?,
+    };
+    *block = syn::parse2(body)?;
     sig.asyncness = None;
     Ok(())
+}
+
+fn lower_binding(
+    sig: &mut Signature,
+    block: &mut syn::Block,
+    kind: &str,
+    class: Option<&Type>,
+) -> Result<(Call, Option<TokenStream>)> {
+    let spawn = block.stmts.split_last().and_then(|(tail, prefix)| {
+        let syn::Stmt::Expr(Expr::MethodCall(spawn), None) = tail else {
+            return None;
+        };
+        let Some(FnArg::Typed(cx)) = sig.inputs.first() else {
+            return None;
+        };
+        let syn::Pat::Ident(cx) = cx.pat.as_ref() else {
+            return None;
+        };
+        (spawn.method == "spawn"
+            && matches!(spawn.receiver.as_ref(), Expr::Path(receiver)
+                if receiver.qself.is_none() && receiver.path.is_ident(&cx.ident)))
+        .then_some((spawn, prefix))
+    });
+    let Some((spawn, prefix)) = spawn else {
+        lower_async(sig, block, kind, class)?;
+        return Ok((Call::parse(sig, class)?, None));
+    };
+    if sig.asyncness.is_some() || !matches!(kind, "function" | "method") {
+        return Err(Error::new_spanned(
+            spawn,
+            "spawn is only supported on synchronous #[function] and #[method] bindings",
+        ));
+    }
+    // Parse the JS-facing signature before changing the Rust entry to return HostStep.
+    let call = Call::parse(sig, class)?;
+    if !matches!(call.output, Output::Value) {
+        return Err(Error::new_spanned(
+            &sig.output,
+            "spawn bindings must return JsResult<JsValue>",
+        ));
+    }
+    let Some(Expr::Async(background)) = spawn
+        .args
+        .first()
+        .filter(|_| spawn.args.len() == 1 && spawn.turbofish.is_none())
+    else {
+        return Err(Error::new_spanned(
+            spawn,
+            "expected cx.spawn(async move { ... })",
+        ));
+    };
+    if background.capture.is_none() {
+        return Err(Error::new_spanned(
+            background,
+            "expected an async move block",
+        ));
+    }
+    let (body, stages) = cps::lower_spawn(sig, prefix, &background.block, class)?;
+    *block = syn::parse2(body)?;
+    sig.output = syn::parse_quote!(-> ::yield_vm::JsResult<::yield_vm::HostStep>);
+    Ok((call, Some(stages)))
 }
 
 fn same_type(left: &Type, right: &Type) -> bool {
@@ -288,7 +358,12 @@ impl Call {
         }
     }
 
-    fn adapter(&self, target: TokenStream, receiver: Option<&Type>) -> TokenStream {
+    fn adapter(
+        &self,
+        target: TokenStream,
+        receiver: Option<&Type>,
+        body_returns_step: bool,
+    ) -> TokenStream {
         let decode_this = receiver.map(|class| quote!(let receiver = cx.this::<#class>()?;));
         let pass_this = receiver.map(|_| quote!(receiver,));
         let names = (0..self.optional.len())
@@ -307,6 +382,7 @@ impl Call {
             });
         let call = quote!(#target(cx, #pass_this #(#names),*));
         let result = match &self.output {
+            Output::Value if body_returns_step => call,
             Output::Value => quote!(#call.map(::yield_vm::HostStep::Return)),
             Output::Void => {
                 quote!({ #call?; Ok(::yield_vm::HostStep::Return(::yield_vm::JsValue::undefined())) })
@@ -754,10 +830,9 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         }
         let (attrs, export) = match item {
             Item::Fn(item) if kind != "constant" => {
-                lower_async(&mut item.sig, &mut item.block, &kind)?;
+                let (call, stages) = lower_binding(&mut item.sig, &mut item.block, &kind, None)?;
                 let sig = &item.sig;
                 let ident = &sig.ident;
-                let call = Call::parse(sig, None)?;
                 let class = if let Some(class) = opts.get("class") {
                     let class_path = path(class)?;
                     let class_ty = Type::Path(syn::TypePath {
@@ -774,13 +849,18 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 } else {
                     quote!(None)
                 };
-                let adapter = call.adapter(quote!(self::#ident), None);
+                let adapter = call.adapter(quote!(self::#ident), None, stages.is_some());
                 let signature = call.signature();
+                let register = if let Some(stages) = stages {
+                    quote!(::yield_vm::__macro_support::function_cps(#name, #constructable, #class, __yield_call, #signature, #stages))
+                } else {
+                    quote!(::yield_vm::__macro_support::function(#name, #constructable, #class, __yield_call, #signature))
+                };
                 (
                     &item.attrs,
                     quote!({
                         #adapter
-                        ::yield_vm::__macro_support::function(#name, #constructable, #class, __yield_call, #signature)
+                        #register
                     }),
                 )
             }
@@ -1249,8 +1329,8 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
         };
         let opts = options(attr.parse_args()?, &["name", "symbol"])?;
         let (id, key) = member_key(&opts, attr.span())?;
-        lower_async(&mut method.sig, &mut method.block, &kind)?;
-        let call = Call::parse(&method.sig, Some(&class))?;
+        let (call, stages) =
+            lower_binding(&mut method.sig, &mut method.block, &kind, Some(&class))?;
         if kind == "get" && !call.optional.is_empty() {
             return Err(Error::new_spanned(
                 &method.sig,
@@ -1270,7 +1350,7 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
             ));
         }
         let name = &method.sig.ident;
-        let adapter = call.adapter(quote!(<#class>::#name), Some(&class));
+        let adapter = call.adapter(quote!(<#class>::#name), Some(&class), stages.is_some());
         let signature = call.signature();
         let cfg = method
             .attrs
@@ -1283,10 +1363,15 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
                     "duplicate or conflicting member key",
                 ));
             }
+            let register = if let Some(stages) = stages {
+                quote!(::yield_vm::__macro_support::method_cps(#key, __yield_call, #signature, #stages))
+            } else {
+                quote!(::yield_vm::__macro_support::method(#key, __yield_call, #signature))
+            };
             methods.push(quote! {
                 #(#cfg)* {
                     #adapter
-                    ::yield_vm::__macro_support::method(#key, __yield_call, #signature)
+                    #register
                 }
             });
         } else {
@@ -1353,6 +1438,131 @@ mod tests {
             error.contains(expected),
             "expected {expected:?}, got {error:?}"
         );
+    }
+
+    #[test]
+    fn spawn_function_keeps_original_js_signature() {
+        let expanded = host_module(
+            quote!(name = "x"),
+            quote! {
+                mod x {
+                    #[function(name = "spawn")]
+                    fn start(ctx: &mut CallCx<'_>, option: Option<JsValue>) -> JsResult<JsValue> {
+                        let op = operation(ctx, option)?;
+                        ctx.spawn(async move {
+                            ctx.effect(op).await?;
+                            Ok(())
+                        })
+                    }
+                    #[function(name = "promise")]
+                    fn promise(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+                        cx.promise(operation())
+                    }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert_eq!(expanded.matches("function_cps").count(), 1);
+        assert_eq!(expanded.matches("ReturnKind :: Value").count(), 2);
+        assert!(expanded.contains("ArgKind :: OptionalValue"));
+        assert!(expanded.contains("self :: promise (cx ,) . map"));
+        assert!(!expanded.contains("self :: start (cx , arg_0) . map"));
+        assert!(expanded.contains("__spawn"));
+    }
+
+    #[test]
+    fn spawn_method_registers_stages_and_preserves_this() {
+        let expanded = methods(
+            quote!(C),
+            quote! {
+                impl C {
+                    #[method(name = "start")]
+                    fn start(cx: &mut CallCx<'_>, this: This<Self>) -> JsResult<JsValue> {
+                        cx.spawn(async move {
+                            cx.effect(operation()).await?;
+                            Self::finish(cx, this)
+                        })
+                    }
+                }
+            },
+        )
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("method_cps"));
+        assert!(expanded.contains("ReturnKind :: Value"));
+        assert!(expanded.contains("cx . this :: < C >"));
+        assert!(expanded.contains(":: finish"));
+        assert!(!expanded.contains("Self :: finish"));
+    }
+
+    #[test]
+    fn rejects_spawn_in_constructors_and_accessors() {
+        let expected = "spawn is only supported on synchronous #[function] and #[method]";
+        diagnostic(
+            host_module(
+                quote!(name = "x"),
+                quote! {
+                    mod x {
+                        #[constructor(name = "C", class = C)]
+                        fn new(cx: &mut CallCx<'_>) -> JsResult<Instance<C>> {
+                            cx.spawn(async move { Ok(()) })
+                        }
+                    }
+                },
+            ),
+            expected,
+        );
+        for (marker, inputs, output) in [
+            (quote!(get), quote!(), quote!(JsValue)),
+            (quote!(set), quote!(, value: JsValue), quote!(())),
+        ] {
+            diagnostic(
+                methods(
+                    quote!(C),
+                    quote! {
+                        impl C {
+                            #[#marker(name = "x")]
+                            fn x(cx: &mut CallCx<'_>, this: This<Self> #inputs) -> JsResult<#output> {
+                                cx.spawn(async move { Ok(()) })
+                            }
+                        }
+                    },
+                ),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_requires_value_output_and_move_block() {
+        for (output, background, expected) in [
+            (
+                quote!(HostStep),
+                quote!(async move { Ok(()) }),
+                "spawn bindings must return JsResult<JsValue>",
+            ),
+            (
+                quote!(JsValue),
+                quote!(async { Ok(()) }),
+                "expected an async move block",
+            ),
+        ] {
+            diagnostic(
+                host_module(
+                    quote!(name = "x"),
+                    quote! {
+                        mod x {
+                            #[function(name = "start")]
+                            fn start(cx: &mut CallCx<'_>) -> JsResult<#output> {
+                                cx.spawn(#background)
+                            }
+                        }
+                    },
+                ),
+                expected,
+            );
+        }
     }
 
     #[test]
@@ -1611,9 +1821,9 @@ mod tests {
             quote! {
                 impl C {
                     #[method(name = "f")]
-                    async fn f(cx: &mut CallCx<'_>, this: This<C>, f: JsValue) -> JsResult<HostStep> {
+                    async fn f(cx: &mut CallCx<'_>, this: This<Self>, f: JsValue) -> JsResult<HostStep> {
                         let outcome = cx.call(f, JsValue::undefined(), Vec::new()).await;
-                        finish(cx, outcome)
+                        Self::finish(cx, this, outcome)
                     }
                 }
             },
@@ -1621,7 +1831,8 @@ mod tests {
         .unwrap()
         .to_string();
         assert!(method.contains("fn f"));
-        assert!(!method.contains("async"));
+        assert!(!method.contains("async fn f"));
+        assert!(!method.contains("Self :: finish"));
         assert!(method.contains("request_call"));
         assert!(!method.contains(". await"));
     }

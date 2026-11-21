@@ -220,7 +220,6 @@ pub struct CallCx<'a> {
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
-    pub(crate) task: Option<u64>,
 }
 
 impl<'a> CallCx<'a> {
@@ -303,11 +302,6 @@ impl<'a> CallCx<'a> {
         saved: Vec<JsValue>,
         stage: u32,
     ) -> JsResult<HostStep> {
-        if self.task.is_none() {
-            return Err(JsError::Fault(HostFault::new(
-                "external await requires a host task",
-            )));
-        }
         let (decl, state) = self.encode_operation(&state)?;
         self.suspend(
             Action::External { decl, state },
@@ -317,8 +311,21 @@ impl<'a> CallCx<'a> {
     }
 
     #[doc(hidden)]
-    pub fn __spawn(&self, saved: Vec<JsValue>, stage: u32) -> JsResult<HostStep> {
-        self.suspend(Action::Spawn, saved, Resume::Linked(stage))
+    pub fn __spawn(&self, first: HostStep) -> JsResult<HostStep> {
+        let request = match first {
+            HostStep::Suspend(request) => request,
+            HostStep::Return(value) => {
+                self.check_value(&value)?;
+                SuspendRequest::new(
+                    self.epoch,
+                    self.call,
+                    Action::FinishedSpawn,
+                    Vec::new(),
+                    Resume::Inline(|_, _| unreachable!("finished task cannot be resumed")),
+                )
+            }
+        };
+        Ok(HostStep::Suspend(request.spawning()))
     }
 
     fn call_action(

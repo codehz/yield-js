@@ -13,6 +13,7 @@
 - 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy` / `toThrow`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
+- `test` 的 `setTimeout` / `clearTimeout` 使用可取消后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 timer driver，只接受有限非负的 `u32` 整数毫秒。快照写剩余时长，恢复不计离线时间；`@advance` 按截止时间、同截止时按登记顺序投递，每次投递后排空微任务。
 - `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
@@ -84,8 +85,8 @@
 - 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
 - 宿主可在 VM 调用之间、排空微任务后显式调用 `Vm::collect_garbage(&[roots])`。它原地回收不可达对象（包括环）及其旁表、宿主实例和续体，清除不可达普通 Symbol，只返回删除的堆对象数；不改变存活 ID，也不复用被回收的 ID。宿主每次须显式提供仍要使用但不由 VM 持有的本 VM `Value`；这不延长临时宿主绑定 `JsValue` 的有效期。GC 不执行微任务、脚本或宿主绑定回调，标记失败不清扫。与快照不同，GC 可丢弃不可达且未调用的决议能力。
 - 宿主绑定可选择通过 `CallCx::request_gc` 暴露同步 GC。VM 在当前 `CallCx` 结束后追踪活动帧、跨调用的 Rust 值、排队及正在派发的微任务和 `Host::gc_roots()`，随后回收并以删除的对象数恢复宿主绑定。活动收集不会排空或重排微任务，也不改变快照边界；追踪失败直接返回 VM 错误，不清扫或恢复宿主绑定。
-- CPS 宏支持顶层 `let outcome = cx.gc().await;`，和 `cx.call(...).await` 共用跨阶段值保存规则。测试宿主通过 `import { gc } from "test"` 提供同步收集，返回删除的对象数，不创建 Promise。
-- 恢复校验：格式/字节码版本、构建 ID、绑定指纹、声明引用、类原型、实例槽种类与数量、payload schema 与解码、模块状态、槽值数量、函数/恢复点、异常表、Promise/续体关联、环境是否与函数布局一致、闭包引用、内建根、模块环境和导出绑定、operation 类型/schema/策略、Symbol 引用与注册表。平台资源在全部 payload 解码成功后才发布；任一失败整体拒绝，不启动脚本。
+- 宿主 CPS 宏支持 `call`、`gc`、后台块内的 `effect` 及结构化 `if` / `match` 分支；`await?` 将拒绝或 guest throw 沿当前宿主异常路径传播。只保存在等待边上存活的 guest 值，方法的 `This<T>` 从原接收者重建。绑定指纹包含持久 CPS 的阶段类别、活槽布局和接收者类标签，不包含 Rust 函数指针或函数体。
+- 恢复同时验证外部 operation 与宿主任务的双向关联、pending Promise 目标、任务高水位、owner / 恢复阶段、活槽值及方法接收者。只有外部等待阶段可以写入格式 49 的镜像。任一校验失败整体拒绝，不登记平台工作、不执行脚本。
 - `Number` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - 编译器接受溢出为无穷的数字字面量；`NaN` 和 `Infinity` 仍按作用域解析。字节码版本 **31** 的 Build 常量和快照值共用 JSON 数值编码：有限值保留数值形式和负零，非有限值用专用字符串标记，NaN 不保留 payload。宿主返回值、槽与异步操作的兑现值和拒绝原因均可包含非有限数。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。

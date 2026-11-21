@@ -129,7 +129,6 @@ pub enum CpsBoundary {
     Call,
     Gc,
     External,
-    Spawn,
 }
 
 #[derive(Debug)]
@@ -144,8 +143,7 @@ pub(crate) enum Action {
         decl: usize,
         state: Vec<u8>,
     },
-    /// Enter a new task immediately using its linked entry and saved slots.
-    Spawn,
+    FinishedSpawn,
 }
 
 #[derive(Debug)]
@@ -162,6 +160,7 @@ pub struct SuspendRequest {
     action: Action,
     saved: Vec<Value>,
     resume: Resume,
+    spawn: bool,
 }
 
 impl SuspendRequest {
@@ -178,19 +177,25 @@ impl SuspendRequest {
             action,
             saved,
             resume,
+            spawn: false,
         }
+    }
+
+    pub(crate) fn spawning(mut self) -> Self {
+        self.spawn = true;
+        self
     }
 
     pub(crate) fn into_parts(
         self,
         cx: CallCx<'_>,
-    ) -> Result<(Action, Vec<Value>, Resume), HostFault> {
+    ) -> Result<(Action, Vec<Value>, Resume, bool), HostFault> {
         if self.epoch != cx.epoch || self.call != cx.call {
             return Err(HostFault::new(
                 "SuspendRequest used outside the call that produced it",
             ));
         }
-        Ok((self.action, self.saved, self.resume))
+        Ok((self.action, self.saved, self.resume, self.spawn))
     }
 }
 
@@ -1400,7 +1405,6 @@ fn hash_cps(hasher: &mut Sha256, stages: Option<&[CpsStage]>) {
             CpsBoundary::Call => "call",
             CpsBoundary::Gc => "gc",
             CpsBoundary::External => "external",
-            CpsBoundary::Spawn => "spawn",
         };
         hash_line(
             hasher,
