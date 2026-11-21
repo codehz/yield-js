@@ -1,5 +1,5 @@
 use crate::builtin::promise::members::THEN;
-use crate::builtin::string::utf16_len;
+use crate::builtin::string::{utf16_len, utf16_unit_string};
 use crate::builtin::symbol_family;
 use crate::error::VmError;
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
@@ -1043,6 +1043,129 @@ impl Vm {
         Ok(Invocation::Value(Value::Object(
             self.heap.alloc_array(keys),
         )))
+    }
+
+    pub(crate) fn object_values_or_entries(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+        entries: bool,
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let mut result = Vec::new();
+        match args.first() {
+            None | Some(Value::Undefined | Value::Null) => {
+                return self.throw_type_error("Object.values/entries requires a non-nullish value");
+            }
+            Some(target @ Value::Object(id)) => {
+                let keys = match self.own_keys(host, roots, *id, false)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                let roots = &roots.with(&keys);
+                for key in &keys {
+                    let PropertyKey::String(name) = key else {
+                        continue;
+                    };
+                    let roots = &roots.with(&result);
+                    match self.own_descriptor(host, roots, *id, key.borrowed())? {
+                        Ok(Some((_, attrs))) if attrs.enumerable => {}
+                        Ok(_) => continue,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                    let value = match self.read_property(host, roots, target, key.borrowed())? {
+                        Invocation::Value(value) => value,
+                        thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                    };
+                    result.push(if entries {
+                        Value::Object(
+                            self.heap
+                                .alloc_array(vec![Value::String(name.clone()), value]),
+                        )
+                    } else {
+                        value
+                    });
+                }
+            }
+            Some(Value::String(text)) => {
+                for (index, unit) in text.units().enumerate() {
+                    let value = Value::String(utf16_unit_string(unit));
+                    result.push(if entries {
+                        Value::Object(
+                            self.heap
+                                .alloc_array(vec![Value::String(index.to_string().into()), value]),
+                        )
+                    } else {
+                        value
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(Invocation::Value(Value::Object(
+            self.heap.alloc_array(result),
+        )))
+    }
+
+    pub(crate) fn object_from_entries(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let result = self.heap.alloc_plain();
+        let root_view = (args, result);
+        let roots = &roots.with(&root_view);
+        let iterable = args.first().unwrap_or(&Value::Undefined);
+        let iterator_pair = match self.get_iterator(host, roots, iterable)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&iterator_pair);
+        let (iterator, next) = &iterator_pair;
+        loop {
+            let item = match self.iterator_step(host, roots, iterator, next)? {
+                Ok(Some(item)) => item,
+                Ok(None) => return Ok(Invocation::Value(Value::Object(result))),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&item);
+            if let Err(error) = self.add_object_entry(host, roots, result, &item)? {
+                // IteratorClose preserves the original throw over a return-method throw.
+                self.close_iterator(host, &roots.with(&error), iterator)?;
+                return Ok(Invocation::Thrown(error));
+            }
+        }
+    }
+
+    fn add_object_entry(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        result: ObjectId,
+        item: &Value,
+    ) -> Result<Result<(), Value>, VmError> {
+        if !matches!(item, Value::Object(_)) {
+            return Ok(Err(
+                self.type_error("Object.fromEntries entry must be an object")?
+            ));
+        }
+        let key = match self.read_property(host, roots, item, PropertyKeyRef::String("0"))? {
+            Invocation::Value(key) => key,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let roots = &roots.with(&key);
+        let value = match self.read_property(host, roots, item, PropertyKeyRef::String("1"))? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let key = match self.coerce_property_key(host, &roots.with(&value), &key)? {
+            Ok(key) => key,
+            Err(error) => return Ok(Err(error)),
+        };
+        self.heap.set_own(result, key, value)?;
+        Ok(Ok(()))
     }
 
     pub(crate) fn get_own_property_descriptor(

@@ -24,7 +24,7 @@
 | 语义点 | 现状 |
 | --- | --- |
 | `queueMicrotask` / Promise 拒绝 | `queueMicrotask` 回调抛出的异常通过 `Host::report_error` 交给宿主；未处理的 Promise 拒绝仍不跟踪 |
-| 函数对象 | 多数函数的 `name` / `length` 是只读虚拟属性：可读取并用 `in` / `Reflect.has` 检查，但不出现在自有键或自有描述符中；脚本类构造器和方法提供实际的元数据属性。匿名函数与箭头函数分别使用占位名 `function` 和 `arrow`，不从上下文推断。内建函数 `length` 大多为 `0`，例外：`RegExp` 构造器为 `2`，`RegExp.prototype.exec` / `test` 及 `RegExp.escape` 为 `1`。共享的 `Function.prototype` 不可调用；`call` / `apply` / `bind` 是共享的虚拟方法，读取时不会重新分配，也不是共享原型的自有方法。 |
+| 函数对象 | 多数函数的 `name` / `length` 是只读虚拟属性：可读取并用 `in` / `Reflect.has` 检查，但不出现在自有键或自有描述符中；脚本类构造器和方法提供实际的元数据属性。匿名函数与箭头函数分别使用占位名 `function` 和 `arrow`，不从上下文推断。内建函数 `length` 大多为 `0`，例外：`RegExp` 构造器为 `2`，`RegExp.prototype.exec` / `test`、`RegExp.escape`、`Object.values` / `entries` / `fromEntries` 及 `Object.prototype.isPrototypeOf` / `propertyIsEnumerable` 为 `1`。共享的 `Function.prototype` 不可调用；`call` / `apply` / `bind` 是共享的虚拟方法，读取时不会重新分配，也不是共享原型的自有方法。 |
 
 ## 4. 内建 API 的限制与缺项
 
@@ -32,7 +32,7 @@
 
 | 内建 | 限制与缺项 |
 | --- | --- |
-| `Object` | `values` / `entries` / `fromEntries`；原型上的 `isPrototypeOf` / `propertyIsEnumerable` / `toLocaleString` / `__proto__` 访问器。不提供完整隐式装箱，见第 1 节 |
+| `Object` | 不提供完整隐式装箱，见第 1 节 |
 | `Function` | 没有 `Function` 全局或动态函数构造；共享原型不可调用，元数据偏差见第 3 节 |
 | `Array` | 缺少 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries` 等方法。`map` 等多数原型方法只接受数组接收者；借用 `join` 时接收者须是对象。不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
 | 错误构造器 | 缺少专用的 `Error.prototype.toString`；`stack` 是简化文本，不包含调用帧 |
@@ -61,6 +61,7 @@
 - `BigInt`：design 未列入
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
+- 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配。
 
 ## 7. 无效 JavaScript（拒绝不是实现缺口）

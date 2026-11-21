@@ -1782,9 +1782,15 @@ impl Vm {
             }
             Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
                 let key = intrinsic.definition().key;
-                let length = match (key.owner, key.member) {
-                    ("RegExp", "") => 2,
-                    ("RegExp", "exec" | "test" | "escape") => 1,
+                let length = match (key.owner, key.slot, key.member) {
+                    ("RegExp", _, "") => 2,
+                    ("RegExp", _, "exec" | "test" | "escape") => 1,
+                    ("Object", IntrinsicSlot::Static, "values" | "entries" | "fromEntries") => 1,
+                    (
+                        "Object",
+                        IntrinsicSlot::Prototype,
+                        "isPrototypeOf" | "propertyIsEnumerable",
+                    ) => 1,
                     _ => 0,
                 };
                 let name = if key.member.is_empty() {

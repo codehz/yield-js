@@ -42,6 +42,9 @@ pub(crate) mod members {
             args.first().unwrap_or(&Value::Undefined), args.get(1).unwrap_or(&Value::Undefined),
         ))));
         keys => |vm, host, roots, args, _| vm.object_keys(host, roots, &args);
+        values => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, false);
+        entries => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
+        fromEntries => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);
         create => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
         getPrototypeOf => |vm, _, _, args, _| vm.get_prototype_of(&args, false);
         setPrototypeOf => |vm, _, _, args, _| vm.set_prototype_of(&args, false);
@@ -76,6 +79,61 @@ pub(crate) mod members {
                 Ok(descriptor) => Ok(Invocation::Value(Value::Bool(descriptor.is_some()))),
                 Err(error) => Ok(Invocation::Thrown(error)),
             }
+        };
+        isPrototypeOf => |vm, _, _, args, receiver| {
+            let result = |value| Ok(Invocation::Value(Value::Bool(value)));
+            let Some(Value::Object(target)) = args.first() else {
+                return result(false);
+            };
+            let receiver = match *receiver {
+                Value::Object(id) => id,
+                Value::Null | Value::Undefined => {
+                    return vm.throw_type_error("incompatible Object.prototype.isPrototypeOf receiver");
+                }
+                _ => return result(false),
+            };
+            let mut prototype = vm.heap.prototype_of(*target)?;
+            while let Some(id) = prototype {
+                if id == receiver {
+                    return result(true);
+                }
+                prototype = vm.heap.prototype_of(id)?;
+            }
+            result(false)
+        };
+        propertyIsEnumerable => |vm, host, roots, args, receiver| {
+            let roots = &roots.with(receiver);
+            let key = match vm.coerce_property_key(host, roots, args.first().unwrap_or(&Value::Undefined))? {
+                Ok(key) => key,
+                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+            };
+            let id = match receiver {
+                Value::Object(id) => *id,
+                Value::String(text) if !text.is_empty() => {
+                    let Invocation::Value(Value::Object(id)) = vm.construct_object(std::slice::from_ref(receiver))? else {
+                        unreachable!("Object(string) returns a boxed string");
+                    };
+                    id
+                }
+                Value::Null | Value::Undefined => {
+                    return vm.throw_type_error("incompatible Object.prototype.propertyIsEnumerable receiver");
+                }
+                _ => return Ok(Invocation::Value(Value::Bool(false))),
+            };
+            match vm.own_descriptor(host, roots, id, key.borrowed())? {
+                Ok(descriptor) => Ok(Invocation::Value(Value::Bool(
+                    descriptor.is_some_and(|(_, attributes)| attributes.enumerable),
+                ))),
+                Err(error) => Ok(Invocation::Thrown(error)),
+            }
+        };
+        toLocaleString => |vm, host, roots, _, receiver| {
+            let roots = &roots.with(receiver);
+            let method = match vm.read_member(host, roots, receiver, &Value::String("toString".into()))? {
+                Invocation::Value(method) => method,
+                thrown @ Invocation::Thrown(_) => return Ok(thrown),
+            };
+            vm.invoke(host, roots, &method, Vec::new(), receiver)
         };
         valueOf => |vm, _, _, _, receiver| match *receiver {
             Value::Object(id) if vm.heap.is_environment(id) == Some(false) => {

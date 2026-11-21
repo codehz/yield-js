@@ -51,7 +51,7 @@
 
 ### VM 内建与可观察语义
 
-- 支持普通对象和原型链、属性描述符、getter/setter、字符串与 Symbol 属性键、标准枚举顺序、稀疏数组、严格模式赋值失败。实现 `Object` 的创建、原型/描述符查询、`defineProperty`/`defineProperties`、枚举、`assign`、`is`、冻结及冻结检查。
+- 支持普通对象和原型链、属性描述符、getter/setter、字符串与 Symbol 属性键、标准枚举顺序、稀疏数组、严格模式赋值失败。实现 `Object` 的创建、原型/描述符查询、`defineProperty`/`defineProperties`、枚举、`assign`、`is`、冻结及冻结检查。不安装旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。`"__proto__"` 仍可用作普通自有属性键，对象字面量的语义不变。
 - 函数的 `call` / `apply` / `bind` 当前以脚本函数的虚拟属性提供，不是 `Function.prototype` 的自有方法；函数元数据与绑定构造的实现范围见 [`implemented.md`](implemented.md)。
 - 函数转字符串按设计返回固定的通用文本（`function () { [native code] }`），不保留、也不反编译源码：共享的 `Function.prototype` 上的 `toString`、以及以函数为接收者的字符串 hint 转换（如 `String(fn)`、模板与拼接）都走该文本。这是有意选择，不是缺口。
 - 支持 `Array`/`String` 的常用访问、转换、搜索、切片与迭代，以及 `Array.isArray/from`、`push/pop/shift/unshift/splice`、`map/filter/reduce/forEach/some/every/flat`；提供 `Number`、`Math`、`RegExp`、`JSON` 和标准 `Error` 类型。具体方法和正则用法以锁定构建和回归用例补齐，不以整个内建对象的存在宣称完整兼容。
