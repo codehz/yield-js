@@ -66,6 +66,50 @@ pub enum ReactionJob {
     },
 }
 
+/// Project a field of the ordinary-object record an object kind stores.
+///
+/// `$storage` binds the record (`PlainObject` for the plain-carrying kinds), so
+/// `$projection` always reads the same field names. `None` means the kind has
+/// no ordinary-object storage at all. This is the single list of kinds that
+/// answers "where does this object keep its prototype, extensibility, and
+/// property tables"; adding a variant without deciding this fails to compile.
+#[rustfmt::skip]
+macro_rules! map_object_storage {
+    ($receiver:expr, |$storage:ident| $projection:expr) => {
+        match $receiver {
+            Object::Plain($storage)
+            | Object::Boxed { object: $storage, .. }
+            | Object::RegExp { object: $storage, .. }
+            | Object::Proxy { object: $storage, .. }
+            | Object::Map { object: $storage, .. }
+            | Object::Date { object: $storage, .. }
+            | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
+            | Object::TypedArray(TypedArrayObject { object: $storage, .. })
+            | Object::DataView(DataViewObject { object: $storage, .. })
+            | Object::TextEncoder { object: $storage }
+            | Object::TextDecoder(TextDecoderObject { object: $storage, .. })
+            | Object::Set { object: $storage, .. }
+            | Object::WeakMap { object: $storage, .. }
+            | Object::WeakSet { object: $storage, .. }
+            | Object::CollectionIterator { object: $storage, .. }
+            | Object::ArrayIterator { object: $storage, .. }
+            | Object::StringIterator { object: $storage, .. }
+            | Object::RegExpStringIterator { object: $storage, .. }
+            | Object::Bound(BoundObject { object: $storage, .. })
+            | Object::PromiseCallback { object: $storage, .. }
+            | Object::Resolution(Resolution { object: $storage, .. })
+            | Object::Native(
+                NativeObject::Intrinsic { object: $storage, .. }
+                | NativeObject::Host { object: $storage, .. },
+            ) => Some($projection),
+            Object::Array($storage) => Some($projection),
+            Object::Function($storage) => Some($projection),
+            Object::Promise($storage) => Some($projection),
+            Object::Environment(_) | Object::ForInIterator { .. } => None,
+        }
+    };
+}
+
 impl Object {
     pub fn as_promise(&self) -> Option<&PromiseObject> {
         match self {
@@ -103,69 +147,11 @@ impl Object {
     }
 
     fn extensible_mut(&mut self) -> Option<&mut bool> {
-        Some(match self {
-            Self::Plain(o)
-            | Self::Boxed { object: o, .. }
-            | Self::RegExp { object: o, .. }
-            | Self::Proxy { object: o, .. }
-            | Self::Map { object: o, .. }
-            | Self::Date { object: o, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
-            | Self::TypedArray(TypedArrayObject { object: o, .. })
-            | Self::DataView(DataViewObject { object: o, .. })
-            | Self::TextEncoder { object: o }
-            | Self::TextDecoder(TextDecoderObject { object: o, .. })
-            | Self::Set { object: o, .. }
-            | Self::WeakMap { object: o, .. }
-            | Self::WeakSet { object: o, .. }
-            | Self::CollectionIterator { object: o, .. }
-            | Self::ArrayIterator { object: o, .. }
-            | Self::StringIterator { object: o, .. }
-            | Self::RegExpStringIterator { object: o, .. }
-            | Self::Bound(BoundObject { object: o, .. })
-            | Self::PromiseCallback { object: o, .. }
-            | Self::Resolution(Resolution { object: o, .. }) => &mut o.extensible,
-            Self::Array(o) => &mut o.extensible,
-            Self::Function(o) => &mut o.extensible,
-            Self::Promise(o) => &mut o.extensible,
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => &mut object.extensible,
-            Self::Environment(_) | Self::ForInIterator { .. } => return None,
-        })
+        map_object_storage!(self, |o| &mut o.extensible)
     }
 
     pub(crate) fn is_extensible(&self) -> bool {
-        match self {
-            Self::Plain(o)
-            | Self::Boxed { object: o, .. }
-            | Self::RegExp { object: o, .. }
-            | Self::Proxy { object: o, .. }
-            | Self::Map { object: o, .. }
-            | Self::Date { object: o, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
-            | Self::TypedArray(TypedArrayObject { object: o, .. })
-            | Self::DataView(DataViewObject { object: o, .. })
-            | Self::TextEncoder { object: o }
-            | Self::TextDecoder(TextDecoderObject { object: o, .. })
-            | Self::Set { object: o, .. }
-            | Self::WeakMap { object: o, .. }
-            | Self::WeakSet { object: o, .. }
-            | Self::CollectionIterator { object: o, .. }
-            | Self::ArrayIterator { object: o, .. }
-            | Self::StringIterator { object: o, .. }
-            | Self::RegExpStringIterator { object: o, .. }
-            | Self::Bound(BoundObject { object: o, .. })
-            | Self::PromiseCallback { object: o, .. }
-            | Self::Resolution(Resolution { object: o, .. }) => o.extensible,
-            Self::Array(o) => o.extensible,
-            Self::Function(o) => o.extensible,
-            Self::Promise(o) => o.extensible,
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => object.extensible,
-            Self::Environment(_) | Self::ForInIterator { .. } => false,
-        }
+        map_object_storage!(self, |o| o.extensible).unwrap_or(false)
     }
 
     pub(crate) fn prevent_extensions(&mut self) {
@@ -205,69 +191,11 @@ impl Object {
     }
 
     pub(super) fn tables(&self) -> Option<PropertyTables<'_>> {
-        Some(match self {
-            Self::Plain(o)
-            | Self::Boxed { object: o, .. }
-            | Self::RegExp { object: o, .. }
-            | Self::Proxy { object: o, .. }
-            | Self::Map { object: o, .. }
-            | Self::Date { object: o, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
-            | Self::TypedArray(TypedArrayObject { object: o, .. })
-            | Self::DataView(DataViewObject { object: o, .. })
-            | Self::TextEncoder { object: o }
-            | Self::TextDecoder(TextDecoderObject { object: o, .. })
-            | Self::Set { object: o, .. }
-            | Self::WeakMap { object: o, .. }
-            | Self::WeakSet { object: o, .. }
-            | Self::CollectionIterator { object: o, .. }
-            | Self::ArrayIterator { object: o, .. }
-            | Self::StringIterator { object: o, .. }
-            | Self::RegExpStringIterator { object: o, .. }
-            | Self::Bound(BoundObject { object: o, .. })
-            | Self::PromiseCallback { object: o, .. }
-            | Self::Resolution(Resolution { object: o, .. }) => (&o.props, &o.symbol_props),
-            Self::Array(o) => (&o.props, &o.symbol_props),
-            Self::Function(o) => (&o.props, &o.symbol_props),
-            Self::Promise(o) => (&o.props, &o.symbol_props),
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => (&object.props, &object.symbol_props),
-            Self::Environment(_) | Self::ForInIterator { .. } => return None,
-        })
+        map_object_storage!(self, |o| (&o.props, &o.symbol_props))
     }
 
     pub(super) fn tables_mut(&mut self) -> Option<PropertyTablesMut<'_>> {
-        Some(match self {
-            Self::Plain(o)
-            | Self::Boxed { object: o, .. }
-            | Self::RegExp { object: o, .. }
-            | Self::Proxy { object: o, .. }
-            | Self::Map { object: o, .. }
-            | Self::Date { object: o, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
-            | Self::TypedArray(TypedArrayObject { object: o, .. })
-            | Self::DataView(DataViewObject { object: o, .. })
-            | Self::TextEncoder { object: o }
-            | Self::TextDecoder(TextDecoderObject { object: o, .. })
-            | Self::Set { object: o, .. }
-            | Self::WeakMap { object: o, .. }
-            | Self::WeakSet { object: o, .. }
-            | Self::CollectionIterator { object: o, .. }
-            | Self::ArrayIterator { object: o, .. }
-            | Self::StringIterator { object: o, .. }
-            | Self::RegExpStringIterator { object: o, .. }
-            | Self::Bound(BoundObject { object: o, .. })
-            | Self::PromiseCallback { object: o, .. }
-            | Self::Resolution(Resolution { object: o, .. }) => (&mut o.props, &mut o.symbol_props),
-            Self::Array(o) => (&mut o.props, &mut o.symbol_props),
-            Self::Function(o) => (&mut o.props, &mut o.symbol_props),
-            Self::Promise(o) => (&mut o.props, &mut o.symbol_props),
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => (&mut object.props, &mut object.symbol_props),
-            Self::Environment(_) | Self::ForInIterator { .. } => return None,
-        })
+        map_object_storage!(self, |o| (&mut o.props, &mut o.symbol_props))
     }
 
     fn boxed_string(&self) -> Option<&JsString> {
@@ -391,69 +319,11 @@ impl Object {
     }
 
     pub(crate) fn prototype(&self) -> Option<ObjectId> {
-        match self {
-            Self::Plain(plain)
-            | Self::Boxed { object: plain, .. }
-            | Self::RegExp { object: plain, .. }
-            | Self::Proxy { object: plain, .. }
-            | Self::Map { object: plain, .. }
-            | Self::Date { object: plain, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: plain, .. })
-            | Self::TypedArray(TypedArrayObject { object: plain, .. })
-            | Self::DataView(DataViewObject { object: plain, .. })
-            | Self::TextEncoder { object: plain }
-            | Self::TextDecoder(TextDecoderObject { object: plain, .. })
-            | Self::Set { object: plain, .. }
-            | Self::WeakMap { object: plain, .. }
-            | Self::WeakSet { object: plain, .. }
-            | Self::CollectionIterator { object: plain, .. }
-            | Self::ArrayIterator { object: plain, .. }
-            | Self::StringIterator { object: plain, .. }
-            | Self::RegExpStringIterator { object: plain, .. } => plain.prototype,
-            Self::Array(array) => array.prototype,
-            Self::Function(function) => function.prototype,
-            Self::Promise(promise) => promise.prototype,
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => object.prototype,
-            Self::Bound(bound) => bound.object.prototype,
-            Self::Resolution(resolution) => resolution.object.prototype,
-            Self::PromiseCallback { object, .. } => object.prototype,
-            Self::Environment(_) | Self::ForInIterator { .. } => None,
-        }
+        map_object_storage!(self, |o| o.prototype).flatten()
     }
 
     pub(super) fn prototype_mut(&mut self) -> Option<&mut Option<ObjectId>> {
-        Some(match self {
-            Self::Plain(o)
-            | Self::Boxed { object: o, .. }
-            | Self::RegExp { object: o, .. }
-            | Self::Proxy { object: o, .. }
-            | Self::Map { object: o, .. }
-            | Self::Date { object: o, .. }
-            | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
-            | Self::TypedArray(TypedArrayObject { object: o, .. })
-            | Self::DataView(DataViewObject { object: o, .. })
-            | Self::TextEncoder { object: o }
-            | Self::TextDecoder(TextDecoderObject { object: o, .. })
-            | Self::Set { object: o, .. }
-            | Self::WeakMap { object: o, .. }
-            | Self::WeakSet { object: o, .. }
-            | Self::CollectionIterator { object: o, .. }
-            | Self::ArrayIterator { object: o, .. }
-            | Self::StringIterator { object: o, .. }
-            | Self::RegExpStringIterator { object: o, .. }
-            | Self::Bound(BoundObject { object: o, .. })
-            | Self::PromiseCallback { object: o, .. }
-            | Self::Resolution(Resolution { object: o, .. }) => &mut o.prototype,
-            Self::Array(o) => &mut o.prototype,
-            Self::Function(o) => &mut o.prototype,
-            Self::Promise(o) => &mut o.prototype,
-            Self::Native(
-                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
-            ) => &mut object.prototype,
-            Self::Environment(_) | Self::ForInIterator { .. } => return None,
-        })
+        map_object_storage!(self, |o| &mut o.prototype)
     }
 
     /// Replace `out` with this object's outgoing strong references.
