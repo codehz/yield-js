@@ -16,6 +16,16 @@ enum Pattern<'ast> {
     Assignment(&'ast AssignmentTarget<'ast>),
 }
 
+impl<'ast> Pattern<'ast> {
+    fn identifier_name(&self) -> &'ast str {
+        match *self {
+            Self::Binding(BindingPattern::BindingIdentifier(id)) => id.name.as_str(),
+            Self::Assignment(AssignmentTarget::AssignmentTargetIdentifier(id)) => id.name.as_str(),
+            _ => "",
+        }
+    }
+}
+
 enum Destination<'ast> {
     Pattern(Pattern<'ast>),
     AssignmentBinding(BindingId),
@@ -103,7 +113,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(())
             }
             Pattern::Binding(BindingPattern::AssignmentPattern(pattern)) => {
-                let value = self.compile_pattern_default(value, &pattern.right)?;
+                let name = Pattern::Binding(&pattern.left).identifier_name();
+                let value = self.compile_pattern_default(value, &pattern.right, name)?;
                 self.compile_binding_pattern(&pattern.left, value)
             }
             Pattern::Binding(BindingPattern::ObjectPattern(pattern)) => {
@@ -127,23 +138,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.assert_pattern_object(value);
                 let mut excluded = Vec::new();
                 for property in &pattern.properties {
-                    let (key, destination, init) = match property {
+                    let (key, destination, init, name) = match property {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(property) => (
                             self.emit_constant(Constant::String(
                                 property.binding.name.as_str().into(),
                             ))?,
                             self.assignment_binding(&property.binding)?,
                             property.init.as_ref(),
+                            property.binding.name.as_str(),
                         ),
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
                             let key =
                                 self.compile_property_key(&property.name, property.computed)?;
                             let (target, init) = assignment_element(&property.binding);
-                            (key, self.prepare_pattern(target)?, init)
+                            let name = target.identifier_name();
+                            (key, self.prepare_pattern(target)?, init, name)
                         }
                     };
                     let item = self.read_pattern_property(value, key)?;
-                    self.write_pattern_element(destination, item, init)?;
+                    self.write_pattern_element(destination, item, init, name)?;
                     if pattern.rest.is_some() {
                         excluded.push(self.slot(key));
                     }
@@ -190,6 +203,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         value: Reg,
         initializer: &'ast Expression<'ast>,
+        name: &str,
     ) -> Result<Reg, CompileError> {
         let undefined = self.emit_undefined()?;
         let is_undefined = self.alloc_reg()?;
@@ -205,7 +219,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             src: self.slot(value),
         });
         let keep = self.branch_false(is_undefined);
-        let fallback = self.compile_expression(initializer)?;
+        let fallback = self.compile_named_expression(initializer, name)?;
         self.emit(Instr::Move {
             dst: self.slot(result),
             src: self.slot(fallback),
@@ -219,9 +233,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         destination: Destination<'ast>,
         value: Reg,
         init: Option<&'ast Expression<'ast>>,
+        name: &str,
     ) -> Result<(), CompileError> {
         let value = if let Some(init) = init {
-            self.compile_pattern_default(value, init)?
+            self.compile_pattern_default(value, init, name)?
         } else {
             value
         };
@@ -276,10 +291,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let start = self.pc();
         for element in elements {
             if let Some((target, init)) = element {
+                let name = target.identifier_name();
                 let destination = self.prepare_pattern(target)?;
                 let value = self.emit_undefined()?;
                 self.step_pattern_iterator(iterator, next, done, closed, Some(value))?;
-                self.write_pattern_element(destination, value, init)?;
+                self.write_pattern_element(destination, value, init, name)?;
             } else {
                 self.step_pattern_iterator(iterator, next, done, closed, None)?;
             }

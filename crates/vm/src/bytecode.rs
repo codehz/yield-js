@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsString};
 
-pub const BYTECODE_VERSION: u32 = 38;
+pub const BYTECODE_VERSION: u32 = 39;
 
 pub use crate::builtin::BUILTINS;
 
@@ -128,6 +128,13 @@ pub enum PropertyDefinition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AccessorPrefix {
+    Get,
+    Set,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrivateDefinition {
     Field,
     Method,
@@ -199,6 +206,11 @@ pub enum Instr {
         function: Slot,
         home: Slot,
     },
+    SetFunctionName {
+        function: Slot,
+        key: Slot,
+        prefix: Option<AccessorPrefix>,
+    },
     GetSuperBase {
         dst: Slot,
         home: Slot,
@@ -252,6 +264,7 @@ pub enum Instr {
         dst: Slot,
         scope: Option<Slot>,
         heritage: Option<Slot>,
+        name_key: Option<Slot>,
         constructor: u32,
         default_constructor: bool,
         private_count: u32,
@@ -495,6 +508,8 @@ pub enum ParamTarget {
 pub struct Function {
     pub func_id: u32,
     pub name: String,
+    /// Initial JavaScript name, independent of the function-table identifier.
+    pub initial_name: String,
     pub is_async: bool,
     pub is_arrow: bool,
     pub is_method: bool,
@@ -1075,6 +1090,10 @@ impl Build {
                     check_slot(*function, "SetHome.function")?;
                     check_slot(*home, "SetHome.home")?;
                 }
+                Instr::SetFunctionName { function, key, .. } => {
+                    check_slot(*function, "SetFunctionName.function")?;
+                    check_slot(*key, "SetFunctionName.key")?;
+                }
                 Instr::GetSuperBase { dst, home } => {
                     check_slot(*dst, "GetSuperBase.dst")?;
                     check_slot(*home, "GetSuperBase.home")?;
@@ -1144,6 +1163,7 @@ impl Build {
                     dst,
                     scope,
                     heritage,
+                    name_key,
                     constructor,
                     ..
                 } => {
@@ -1153,6 +1173,9 @@ impl Build {
                     }
                     if let Some(heritage) = heritage {
                         check_slot(*heritage, "CreateClass.heritage")?;
+                    }
+                    if let Some(key) = name_key {
+                        check_slot(*key, "CreateClass.name_key")?;
                     }
                     if self.is_initializer(*constructor)
                         || !self

@@ -7,7 +7,7 @@ pub(crate) mod namespace {
     use crate::value::{PropertyKey, Value, ValueRef};
     use crate::vm::Vm;
 
-    #[function(name = "ownKeys")]
+    #[function(name = "ownKeys", length = 1)]
     fn own_keys(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -32,7 +32,7 @@ pub(crate) mod namespace {
         Ok(Invocation::Value(Value::object(vm.heap.alloc_array(keys))))
     }
 
-    #[function(name = "deleteProperty")]
+    #[function(name = "deleteProperty", length = 2)]
     fn delete_property(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -54,7 +54,7 @@ pub(crate) mod namespace {
         )
     }
 
-    #[function(name = "defineProperty")]
+    #[function(name = "defineProperty", length = 3)]
     fn define_property(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -65,7 +65,7 @@ pub(crate) mod namespace {
         vm.define_property_builtin(host, roots, args, true)
     }
 
-    #[function(name = "preventExtensions")]
+    #[function(name = "preventExtensions", length = 1)]
     fn prevent_extensions(
         vm: &mut Vm,
         _host: &mut dyn Host,
@@ -75,7 +75,7 @@ pub(crate) mod namespace {
         vm.prevent_extensions_builtin_impl(args, true)
     }
 
-    #[function(name = "isExtensible")]
+    #[function(name = "isExtensible", length = 1)]
     fn is_extensible(
         vm: &mut Vm,
         _host: &mut dyn Host,
@@ -85,7 +85,7 @@ pub(crate) mod namespace {
         vm.is_extensible_builtin_impl(args, true)
     }
 
-    #[function(name = "getPrototypeOf")]
+    #[function(name = "getPrototypeOf", length = 1)]
     fn get_prototype_of(
         vm: &mut Vm,
         _host: &mut dyn Host,
@@ -95,7 +95,7 @@ pub(crate) mod namespace {
         vm.get_prototype_of(args, true)
     }
 
-    #[function(name = "setPrototypeOf")]
+    #[function(name = "setPrototypeOf", length = 2)]
     fn set_prototype_of(
         vm: &mut Vm,
         _host: &mut dyn Host,
@@ -105,7 +105,7 @@ pub(crate) mod namespace {
         vm.set_prototype_of(args, true)
     }
 
-    #[function(name = "get")]
+    #[function(name = "get", length = 2)]
     fn get(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -130,7 +130,7 @@ pub(crate) mod namespace {
         )
     }
 
-    #[function(name = "set")]
+    #[function(name = "set", length = 3)]
     fn set(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -151,7 +151,7 @@ pub(crate) mod namespace {
         vm.set_property(host, roots, target, receiver, key, value, false)
     }
 
-    #[function(name = "has")]
+    #[function(name = "has", length = 2)]
     fn has(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -170,7 +170,7 @@ pub(crate) mod namespace {
         vm.has_property_key(host, roots, target, key.borrowed())
     }
 
-    #[function(name = "getOwnPropertyDescriptor")]
+    #[function(name = "getOwnPropertyDescriptor", length = 2)]
     fn get_own_property_descriptor(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -181,7 +181,7 @@ pub(crate) mod namespace {
         vm.get_own_property_descriptor(host, roots, args)
     }
 
-    #[function(name = "apply")]
+    #[function(name = "apply", length = 3)]
     fn apply(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -192,7 +192,7 @@ pub(crate) mod namespace {
         vm.reflect_call(host, roots, args, false)
     }
 
-    #[function(name = "construct")]
+    #[function(name = "construct", length = 2)]
     fn construct(
         vm: &mut Vm,
         host: &mut dyn Host,

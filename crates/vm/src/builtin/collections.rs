@@ -151,34 +151,34 @@ mod map_members {
     use super::{CollectionIteration::*, CollectionKind, CollectionMethod::*};
 
     prototype_calls! {
-        get => |vm, host, roots, args, receiver| {
+        get: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Get, receiver, &args)
         };
-        set => |vm, host, roots, args, receiver| {
+        set: 2 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Insert, receiver, &args)
         };
-        keys => |vm, host, roots, args, receiver| {
+        keys: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Iterate(Keys), receiver, &args)
         };
-        has => |vm, host, roots, args, receiver| {
+        has: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Has, receiver, &args)
         };
-        delete => |vm, host, roots, args, receiver| {
+        delete: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Delete, receiver, &args)
         };
-        clear => |vm, host, roots, args, receiver| {
+        clear: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Clear, receiver, &args)
         };
-        get size => |vm, host, roots, args, receiver| {
+        get size: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Size, receiver, &args)
         };
-        forEach => |vm, host, roots, args, receiver| {
+        forEach: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, ForEach, receiver, &args)
         };
-        values => |vm, host, roots, args, receiver| {
+        values: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Iterate(Values), receiver, &args)
         };
-        entries => |vm, host, roots, args, receiver| {
+        entries: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Iterate(Entries), receiver, &args)
         };
     }
@@ -189,25 +189,25 @@ mod set_members {
     use super::{CollectionIteration::Values, CollectionKind, CollectionMethod::*};
 
     prototype_calls! {
-        add => |vm, host, roots, args, receiver| {
+        add: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Insert, receiver, &args)
         };
-        has => |vm, host, roots, args, receiver| {
+        has: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Has, receiver, &args)
         };
-        delete => |vm, host, roots, args, receiver| {
+        delete: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Delete, receiver, &args)
         };
-        clear => |vm, host, roots, args, receiver| {
+        clear: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Clear, receiver, &args)
         };
-        get size => |vm, host, roots, args, receiver| {
+        get size: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Size, receiver, &args)
         };
-        forEach => |vm, host, roots, args, receiver| {
+        forEach: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, ForEach, receiver, &args)
         };
-        values => |vm, host, roots, args, receiver| {
+        values: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Iterate(Values), receiver, &args)
         };
     }
@@ -219,7 +219,7 @@ mod set_entries {
     use super::{CollectionIteration::Entries, CollectionKind, CollectionMethod::Iterate};
 
     prototype_calls! {
-        entries => |vm, host, roots, args, receiver| {
+        entries: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Iterate(Entries), receiver, &args)
         };
     }
@@ -231,12 +231,13 @@ const SET_ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("SetIterator", Slot::P
 const MAP_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         MAP,
+        1,
         |vm, _, _, _, _| vm.throw_type_error("Map and Set require new"),
         |vm, host, roots, args, prototype| {
             vm.construct_collection(host, roots, CollectionKind::Map, &args, prototype)
         },
     ),
-    IntrinsicDef::call(MAP_ITERATOR_NEXT, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(MAP_ITERATOR_NEXT, 0, |vm, _, _, _, receiver| {
         vm.collection_next(CollectionKind::Map, receiver)
     }),
 ];
@@ -244,12 +245,13 @@ const MAP_INTRINSICS: &[IntrinsicDef] = &[
 const SET_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         SET,
+        1,
         |vm, _, _, _, _| vm.throw_type_error("Map and Set require new"),
         |vm, host, roots, args, prototype| {
             vm.construct_collection(host, roots, CollectionKind::Set, &args, prototype)
         },
     ),
-    IntrinsicDef::call(SET_ITERATOR_NEXT, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(SET_ITERATOR_NEXT, 0, |vm, _, _, _, receiver| {
         vm.collection_next(CollectionKind::Set, receiver)
     }),
 ];
@@ -259,15 +261,16 @@ mod weak_map_members {
     use super::WeakMapMethod::*;
 
     prototype_calls! {
-        get => |vm, _, _, args, receiver| vm.weakmap_method(Get, receiver, &args);
-        set => |vm, _, _, args, receiver| vm.weakmap_method(Set, receiver, &args);
-        has => |vm, _, _, args, receiver| vm.weakmap_method(Has, receiver, &args);
-        delete => |vm, _, _, args, receiver| vm.weakmap_method(Delete, receiver, &args);
+        get: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Get, receiver, &args);
+        set: 2 => |vm, _, _, args, receiver| vm.weakmap_method(Set, receiver, &args);
+        has: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Has, receiver, &args);
+        delete: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Delete, receiver, &args);
     }
 }
 
 const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     WEAK_MAP,
+    1,
     |vm, _, _, _, _| vm.throw_type_error("WeakMap requires new"),
     |vm, host, roots, args, prototype| vm.construct_weakmap(host, roots, &args, prototype),
 )];
@@ -277,14 +280,15 @@ mod weak_set_members {
     use super::WeakSetMethod::*;
 
     prototype_calls! {
-        add => |vm, _, _, args, receiver| vm.weakset_method(Add, receiver, &args);
-        has => |vm, _, _, args, receiver| vm.weakset_method(Has, receiver, &args);
-        delete => |vm, _, _, args, receiver| vm.weakset_method(Delete, receiver, &args);
+        add: 1 => |vm, _, _, args, receiver| vm.weakset_method(Add, receiver, &args);
+        has: 1 => |vm, _, _, args, receiver| vm.weakset_method(Has, receiver, &args);
+        delete: 1 => |vm, _, _, args, receiver| vm.weakset_method(Delete, receiver, &args);
     }
 }
 
 const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     WEAK_SET,
+    1,
     |vm, _, _, _, _| vm.throw_type_error("WeakSet requires new"),
     |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
 )];

@@ -17,6 +17,7 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
 
 pub(crate) const PROXY_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     CONSTRUCTOR,
+    2,
     |vm, _, _, _, _| vm.throw_type_error("Proxy requires new"),
     |vm, _, _, args, _| vm.construct_proxy(&args),
 )

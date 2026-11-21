@@ -29,6 +29,7 @@ pub(crate) struct AwaitSite {
 pub(crate) struct LoweredFunction {
     pub(crate) func_id: u32,
     pub(crate) name: String,
+    pub(crate) initial_name: String,
     pub(crate) is_async: bool,
     pub(crate) is_arrow: bool,
     pub(crate) is_method: bool,

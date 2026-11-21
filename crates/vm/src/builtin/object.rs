@@ -18,6 +18,7 @@ pub(crate) mod members {
     ];
     const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
         CONSTRUCTOR,
+        1,
         |vm, _, _, args, _| vm.construct_object(&args),
         |vm, _, _, args, prototype| match prototype {
             Some(prototype) => Ok(Invocation::Value(Value::object(
@@ -37,36 +38,36 @@ pub(crate) mod members {
     }
 
     static_calls! {
-        assign => |vm, host, roots, args, _| vm.object_assign(host, roots, &args);
-        is => |_, _, _, args, _| Ok(Invocation::Value(Value::boolean(ops::same_value(
+        assign: 2 => |vm, host, roots, args, _| vm.object_assign(host, roots, &args);
+        is: 2 => |_, _, _, args, _| Ok(Invocation::Value(Value::boolean(ops::same_value(
             args.first().unwrap_or(&Value::UNDEFINED), args.get(1).unwrap_or(&Value::UNDEFINED),
         ))));
-        keys => |vm, host, roots, args, _| vm.object_keys(host, roots, &args);
-        values => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, false);
-        entries => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
-        fromEntries => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);
-        create => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
-        getPrototypeOf => |vm, _, _, args, _| vm.get_prototype_of(&args, false);
-        setPrototypeOf => |vm, _, _, args, _| vm.set_prototype_of(&args, false);
-        getOwnPropertyDescriptor => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args);
-        getOwnPropertyDescriptors => |vm, host, roots, args, _| vm.get_own_property_descriptors(host, roots, &args);
-        defineProperty => |vm, host, roots, args, _| vm.define_property_builtin(host, roots, &args, false);
-        defineProperties => |vm, host, roots, args, _| {
+        keys: 1 => |vm, host, roots, args, _| vm.object_keys(host, roots, &args);
+        values: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, false);
+        entries: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
+        fromEntries: 1 => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);
+        create: 2 => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
+        getPrototypeOf: 1 => |vm, _, _, args, _| vm.get_prototype_of(&args, false);
+        setPrototypeOf: 2 => |vm, _, _, args, _| vm.set_prototype_of(&args, false);
+        getOwnPropertyDescriptor: 2 => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args);
+        getOwnPropertyDescriptors: 1 => |vm, host, roots, args, _| vm.get_own_property_descriptors(host, roots, &args);
+        defineProperty: 3 => |vm, host, roots, args, _| vm.define_property_builtin(host, roots, &args, false);
+        defineProperties: 2 => |vm, host, roots, args, _| {
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
                 return vm.throw_type_error("Object.defineProperties requires an object target");
             };
             vm.define_properties(host, roots, target, args.get(1))
         };
-        preventExtensions => |vm, _, _, args, _| vm.prevent_extensions_builtin_impl(&args, false);
-        isExtensible => |vm, _, _, args, _| vm.is_extensible_builtin_impl(&args, false);
-        seal => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Sealed);
-        isSealed => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Sealed);
-        freeze => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Frozen);
-        isFrozen => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Frozen);
+        preventExtensions: 1 => |vm, _, _, args, _| vm.prevent_extensions_builtin_impl(&args, false);
+        isExtensible: 1 => |vm, _, _, args, _| vm.is_extensible_builtin_impl(&args, false);
+        seal: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Sealed);
+        isSealed: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Sealed);
+        freeze: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Frozen);
+        isFrozen: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Frozen);
     }
 
     prototype_calls! {
-        hasOwnProperty => |vm, host, roots, args, receiver| {
+        hasOwnProperty: 1 => |vm, host, roots, args, receiver| {
             let id = match receiver.view() {
                 ValueRef::Object(id) if vm.heap.is_environment(id) == Some(false) => id,
                 _ => return vm.throw_type_error("incompatible Object.prototype receiver"),
@@ -80,7 +81,7 @@ pub(crate) mod members {
                 Err(error) => Ok(Invocation::Thrown(error)),
             }
         };
-        isPrototypeOf => |vm, _, _, args, receiver| {
+        isPrototypeOf: 1 => |vm, _, _, args, receiver| {
             let result = |value| Ok(Invocation::Value(Value::boolean(value)));
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
                 return result(false);
@@ -101,7 +102,7 @@ pub(crate) mod members {
             }
             result(false)
         };
-        propertyIsEnumerable => |vm, host, roots, args, receiver| {
+        propertyIsEnumerable: 1 => |vm, host, roots, args, receiver| {
             let roots = &roots.with(receiver);
             let key = match vm.coerce_property_key(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
                 Ok(key) => key,
@@ -130,7 +131,7 @@ pub(crate) mod members {
                 Err(error) => Ok(Invocation::Thrown(error)),
             }
         };
-        toLocaleString => |vm, host, roots, _, receiver| {
+        toLocaleString: 0 => |vm, host, roots, _, receiver| {
             let roots = &roots.with(receiver);
             let method = match vm.read_member(host, roots, receiver, &Value::string("toString".into()))? {
                 Invocation::Value(method) => method,
@@ -138,13 +139,13 @@ pub(crate) mod members {
             };
             vm.invoke(host, roots, &method, Vec::new(), receiver)
         };
-        valueOf => |vm, _, _, _, receiver| match receiver.view() {
+        valueOf: 0 => |vm, _, _, _, receiver| match receiver.view() {
             ValueRef::Object(id) if vm.heap.is_environment(id) == Some(false) => {
                 Ok(Invocation::Value(Value::object(id)))
             }
             _ => vm.throw_type_error("incompatible Object.prototype receiver"),
         };
-        toString => |vm, _, _, _, receiver| match receiver.view() {
+        toString: 0 => |vm, _, _, _, receiver| match receiver.view() {
             ValueRef::Object(id) if vm.heap.is_environment(id) == Some(true) => {
                 vm.throw_type_error("incompatible Object.prototype receiver")
             }

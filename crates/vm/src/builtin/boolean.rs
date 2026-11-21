@@ -21,6 +21,7 @@ pub(crate) mod members {
         &[
             &[IntrinsicDef::constructor(
                 KEY,
+                1,
                 |_, _, _, args, _| {
                     Ok(Invocation::Value(Value::boolean(
                         args.first().is_some_and(Value::truthy),
@@ -69,7 +70,7 @@ pub(crate) mod members {
     }
 
     prototype_calls! {
-        valueOf => |vm, _, _, _, receiver| boolean_value(vm, receiver, false);
-        toString => |vm, _, _, _, receiver| boolean_value(vm, receiver, true);
+        valueOf: 0 => |vm, _, _, _, receiver| boolean_value(vm, receiver, false);
+        toString: 0 => |vm, _, _, _, receiver| boolean_value(vm, receiver, true);
     }
 }

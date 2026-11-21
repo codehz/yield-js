@@ -22,6 +22,41 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub(crate) fn host_function_metadata(
+    bindings: &Bindings,
+    target: NativeTarget,
+) -> Option<(JsString, usize)> {
+    use crate::binding::MemberName;
+    let (member, prefix, arity) = match target {
+        NativeTarget::Export(id) => match bindings.export_decl(id)? {
+            ExportDecl::Function(f) => return Some((f.name.as_str().into(), f.arity)),
+            _ => return None,
+        },
+        NativeTarget::Method(id) => {
+            let method = bindings.method(id)?;
+            (method.name, "", method.arity)
+        }
+        NativeTarget::Accessor {
+            class,
+            accessor,
+            set,
+        } => {
+            let decl = bindings.accessor(class as usize, accessor as usize)?;
+            if set {
+                (decl.name, "set ", decl.set?.arity())
+            } else {
+                (decl.name, "get ", decl.get?.arity())
+            }
+        }
+    };
+    let name = match member {
+        MemberName::Name(name) if prefix.is_empty() => name.into(),
+        MemberName::Name(name) => format!("{prefix}{name}").into(),
+        MemberName::Symbol(symbol) => format!("{prefix}[{}]", symbol.label()).into(),
+    };
+    Some((name, arity))
+}
+
 static NEXT_EPOCH: AtomicU32 = AtomicU32::new(1);
 
 fn next_epoch() -> u32 {
@@ -226,7 +261,9 @@ impl Vm {
                     class: class as u32,
                     method: method as u32,
                 });
-                let function = self.heap.intern_native(target, false);
+                let (name, arity) =
+                    host_function_metadata(bindings, target).expect("method exists");
+                let function = self.heap.intern_native(target, false, arity, name);
                 let name = bindings
                     .method(crate::binding::MethodId {
                         class: class as u32,
@@ -244,24 +281,24 @@ impl Vm {
             for accessor in 0..bindings.accessor_count(class) {
                 let declaration = bindings.accessor(class, accessor).expect("accessor exists");
                 let get = declaration.get.as_ref().map(|_| {
-                    self.heap.intern_native(
-                        NativeTarget::Accessor {
-                            class: class as u32,
-                            accessor: accessor as u32,
-                            set: false,
-                        },
-                        false,
-                    )
+                    let target = NativeTarget::Accessor {
+                        class: class as u32,
+                        accessor: accessor as u32,
+                        set: false,
+                    };
+                    let (name, arity) =
+                        host_function_metadata(bindings, target).expect("getter exists");
+                    self.heap.intern_native(target, false, arity, name)
                 });
                 let set = declaration.set.as_ref().map(|_| {
-                    self.heap.intern_native(
-                        NativeTarget::Accessor {
-                            class: class as u32,
-                            accessor: accessor as u32,
-                            set: true,
-                        },
-                        false,
-                    )
+                    let target = NativeTarget::Accessor {
+                        class: class as u32,
+                        accessor: accessor as u32,
+                        set: true,
+                    };
+                    let (name, arity) =
+                        host_function_metadata(bindings, target).expect("setter exists");
+                    self.heap.intern_native(target, false, arity, name)
                 });
                 self.heap.define_property(
                     prototype,
@@ -673,10 +710,16 @@ impl Vm {
                     bindings.export_decl(id),
                     Some(ExportDecl::Function(function)) if function.constructable
                 );
-                Ok(Value::object(
-                    self.heap
-                        .intern_native(NativeTarget::Export(id), constructable),
-                ))
+                let target = NativeTarget::Export(id);
+                let (name, arity) = host_function_metadata(bindings, target).ok_or_else(|| {
+                    VmError::InvalidState("missing host function declaration".into())
+                })?;
+                Ok(Value::object(self.heap.intern_native(
+                    target,
+                    constructable,
+                    arity,
+                    name,
+                )))
             }
         }
     }

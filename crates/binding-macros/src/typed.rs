@@ -444,8 +444,12 @@ fn nonempty_string(meta: &Meta) -> Result<LitStr> {
 
 enum BuiltinMemberAction {
     Constant(Ident),
-    Handler(TokenStream),
+    Handler {
+        length: u32,
+        call: TokenStream,
+    },
     Direct {
+        length: u32,
         binding: Option<Ident>,
         getter: bool,
         symbol: Option<Box<Expr>>,
@@ -460,7 +464,7 @@ struct BuiltinMember {
     action: BuiltinMemberAction,
 }
 
-// Entries are `name | name as key => handler;`, optionally prefixed with
+// Entries are `name: length | name: length as key => handler;`, optionally prefixed with
 // `get` for an accessor and `symbol(SYMBOL_ID)` for a symbol property.
 fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMemberAction)>> {
     if input.is_empty() {
@@ -491,8 +495,11 @@ fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMem
         } else {
             None
         };
-        let names =
-            Punctuated::<Ident, Token![|]>::parse_separated_nonempty_with(input, Ident::parse_any)?;
+        let names = Punctuated::<_, Token![|]>::parse_separated_nonempty_with(input, |input| {
+            let ident = input.call(Ident::parse_any)?;
+            input.parse::<Token![:]>()?;
+            Ok((ident, input.parse::<LitInt>()?))
+        })?;
         let binding = if input.peek(Token![as]) {
             input.parse::<Token![as]>()?;
             Some(input.parse::<Ident>()?)
@@ -502,10 +509,18 @@ fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMem
         input.parse::<Token![=>]>()?;
         let call: Expr = input.parse()?;
         input.parse::<Token![;]>()?;
-        for ident in names {
+        for (ident, length) in names {
+            let value = builtin_length(&length)?;
+            if getter && value != 0 {
+                return Err(Error::new_spanned(
+                    length,
+                    "a builtin getter must have length 0",
+                ));
+            }
             members.push((
                 LitStr::new(&plain_ident(&ident), ident.span()),
                 BuiltinMemberAction::Direct {
+                    length: value,
                     binding: binding.clone(),
                     getter,
                     symbol: symbol.clone(),
@@ -515,6 +530,14 @@ fn parse_builtin_calls(input: ParseStream<'_>) -> Result<Vec<(LitStr, BuiltinMem
         }
     }
     Ok(members)
+}
+
+fn builtin_length(lit: &LitInt) -> Result<u32> {
+    if !matches!(lit.suffix(), "" | "u32") {
+        return Err(Error::new_spanned(lit, "expected a u32 length literal"));
+    }
+    lit.base10_parse()
+        .map_err(|_| Error::new_spanned(lit, "expected a u32 length literal"))
 }
 
 fn builtin_member_cfg(attrs: &[Attribute]) -> Vec<Attribute> {
@@ -613,6 +636,8 @@ fn parse_builtin_marker(
             input.parse_terminated(
                 |input| {
                     let ident: Ident = input.parse()?;
+                    input.parse::<Token![:]>()?;
+                    let length = builtin_length(&input.parse()?)?;
                     let mapped = if input.peek(Token![=]) {
                         input.parse::<Token![=]>()?;
                         Some(input.parse::<Path>()?)
@@ -620,7 +645,7 @@ fn parse_builtin_marker(
                         None
                     };
                     let name = LitStr::new(&plain_ident(&ident), ident.span());
-                    Ok((name, mapped))
+                    Ok((name, Some(length), mapped))
                 },
                 Token![,],
             )
@@ -633,34 +658,58 @@ fn parse_builtin_marker(
         }
         names.into_iter().collect::<Vec<_>>()
     } else {
-        let opts = options(marker.parse_args()?, &["name"])?;
+        let opts = options(
+            marker.parse_args()?,
+            if kind == "constant" {
+                &["name"]
+            } else {
+                &["name", "length"]
+            },
+        )?;
+        let length = if kind == "constant" {
+            None
+        } else {
+            let meta = required(&opts, "length", marker.span())?;
+            let Expr::Lit(expr) = value(meta)? else {
+                return Err(Error::new_spanned(meta, "expected a u32 length literal"));
+            };
+            let Lit::Int(lit) = &expr.lit else {
+                return Err(Error::new_spanned(meta, "expected a u32 length literal"));
+            };
+            Some(builtin_length(lit)?)
+        };
         vec![(
             nonempty_string(required(&opts, "name", marker.span())?)?,
+            length,
             None,
         )]
     };
     let mut actions = Vec::new();
-    for (member, mapped) in members {
-        let action = match (&*item, kind.as_str()) {
-            (Item::Const(item), "constant") => BuiltinMemberAction::Constant(item.ident.clone()),
-            (Item::Fn(item), "function") => {
+    for (member, length, mapped) in members {
+        let action = match (&*item, kind.as_str(), length) {
+            (Item::Const(item), "constant", _) => BuiltinMemberAction::Constant(item.ident.clone()),
+            (Item::Fn(item), "function", Some(length)) => {
                 let ident = &item.sig.ident;
                 let context = builtin_call_context(item, 2);
-                BuiltinMemberAction::Handler(
-                    quote!(|vm, host, roots, args, _| self::#ident(vm, #context &args)),
-                )
+                BuiltinMemberAction::Handler {
+                    length,
+                    call: quote!(|vm, host, roots, args, _| self::#ident(vm, #context &args)),
+                }
             }
-            (Item::Fn(item), "functions" | "methods") => {
+            (Item::Fn(item), "functions" | "methods", Some(length)) => {
                 let ident = &item.sig.ident;
                 let key = mapped.map_or_else(|| quote!(#member), |path| quote!(#path));
                 let context = builtin_call_context(item, if prototype { 4 } else { 3 });
-                BuiltinMemberAction::Handler(if prototype {
-                    quote!(|vm, host, roots, args, receiver| self::#ident(vm, #context #key, receiver, &args))
-                } else {
-                    quote!(|vm, host, roots, args, _| self::#ident(vm, #context #key, &args))
-                })
+                BuiltinMemberAction::Handler {
+                    length,
+                    call: if prototype {
+                        quote!(|vm, host, roots, args, receiver| self::#ident(vm, #context #key, receiver, &args))
+                    } else {
+                        quote!(|vm, host, roots, args, _| self::#ident(vm, #context #key, &args))
+                    },
+                }
             }
-            (_, "constant") => {
+            (_, "constant", _) => {
                 return Err(Error::new_spanned(
                     &marker,
                     "constant marker requires a const item",
@@ -751,7 +800,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
             None => quote!(#member),
         };
         let key = quote!(crate::intrinsic::IntrinsicKey::new(NAME, crate::intrinsic::Slot::#slot, #member));
-        let call = match action {
+        let (length, call) = match action {
             BuiltinMemberAction::Constant(ident) => {
                 install.push(quote! {
                     #(#cfg)*
@@ -764,9 +813,12 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                 });
                 continue;
             }
-            BuiltinMemberAction::Handler(handler) => handler,
+            BuiltinMemberAction::Handler { length, call } => (length, call),
             BuiltinMemberAction::Direct {
-                binding, mut call, ..
+                length,
+                binding,
+                mut call,
+                ..
             } => {
                 if let Some(key) = binding {
                     let Expr::Closure(closure) = call.as_mut() else {
@@ -778,7 +830,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
                     let body = &closure.body;
                     closure.body = syn::parse_quote!({ let #key: &'static str = #member; #body });
                 }
-                quote!(#call)
+                (length, quote!(#call))
             }
         };
         install.push(if getter {
@@ -802,7 +854,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
         });
         descriptors.push(quote! {
             #(#cfg)*
-            crate::intrinsic::IntrinsicDef::call(#key, #call),
+            crate::intrinsic::IntrinsicDef::call(#key, #length, #call),
         });
     }
 
@@ -1652,9 +1704,9 @@ mod tests {
                 args.clone(),
                 quote! {
                     mod namespace {
-                        #[function(name = "parse")]
+                        #[function(name = "parse", length = 2)]
                         fn first() {}
-                        #[function(name = "parse")]
+                        #[function(name = "parse", length = 2)]
                         fn second() {}
                     }
                 },
@@ -1675,7 +1727,7 @@ mod tests {
                 args,
                 quote! {
                     mod namespace {
-                        #[function(name = "parse")]
+                        #[function(name = "parse", length = 2)]
                         struct Parse;
                     }
                 },
@@ -1718,7 +1770,7 @@ mod tests {
                 quote! {
                     #[constant(name = "abs")]
                     const ABS: f64 = 1.0;
-                    #[functions(abs, acos)]
+                    #[functions(abs: 1, acos: 1)]
                     fn dispatch() {}
                 },
                 "duplicate builtin member name",
@@ -1732,7 +1784,7 @@ mod tests {
             ),
             (
                 quote!(
-                    #[functions(abs)]
+                    #[functions(abs: 1)]
                     const ABS: f64 = 1.0;
                 ),
                 "functions marker requires a function",
@@ -1746,8 +1798,8 @@ mod tests {
             ),
             (
                 quote!(
-                    #[functions(abs)]
-                    #[function(name = "abs")]
+                    #[functions(abs: 1)]
+                    #[function(name = "abs", length = 1)]
                     fn dispatch() {}
                 ),
                 "conflicting or repeated binding attributes",
@@ -1779,9 +1831,9 @@ mod tests {
             args.clone(),
             quote! {
                 mod members {
-                    #[functions(shared = Static::Shared)]
+                    #[functions(shared: 2 = Static::Shared)]
                     fn call_static() {}
-                    #[methods(shared = Method::Shared)]
+                    #[methods(shared: 1 = Method::Shared)]
                     fn call_method() {}
                 }
             },
@@ -1797,7 +1849,7 @@ mod tests {
             ),
             (
                 quote! {
-                    #[methods(charAt)]
+                    #[methods(charAt: 1)]
                     const CHAR_AT: f64 = 0.0;
                 },
                 "methods marker requires a function",
@@ -1813,7 +1865,7 @@ mod tests {
                 quote!(name = "String", root = "string"),
                 quote! {
                     mod members {
-                        #[methods(charAt)]
+                        #[methods(charAt: 1)]
                         fn call_method() {}
                     }
                 },
@@ -1836,13 +1888,13 @@ mod tests {
         let constructor = quote!(name = "Example", root = "example", kind = "constructor");
         for items in [
             quote! {
-                #[function(name = "shared")]
+                #[function(name = "shared", length = 1)]
                 fn shared() {}
-                static_calls! { get shared => example; }
+                static_calls! { get shared: 0 => example; }
             },
             quote! {
-                prototype_calls! { symbol(MATCH_SYMBOL) r#match => example; }
-                prototype_calls! { get symbol(MATCH_SYMBOL) other => example; }
+                prototype_calls! { symbol(MATCH_SYMBOL) r#match: 1 => example; }
+                prototype_calls! { get symbol(MATCH_SYMBOL) other: 0 => example; }
             },
         ] {
             diagnostic(
@@ -1853,7 +1905,7 @@ mod tests {
         diagnostic(
             builtin_global(
                 quote!(name = "Example", root = "example"),
-                quote! { mod members { prototype_calls! { f => example; } } },
+                quote! { mod members { prototype_calls! { f: 0 => example; } } },
             ),
             "methods marker requires a constructor builtin",
         );
@@ -1865,20 +1917,68 @@ mod tests {
 
     #[test]
     fn builtin_global_accepts_grouped_direct_calls_with_binding() {
-        builtin_global(
+        let expanded = builtin_global(
             quote!(name = "Example", root = "example", kind = "constructor"),
             quote! {
                 mod members {
-                    static_calls! { create => create_handler; }
+                    static_calls! { create: 2 => create_handler; }
                     #[cfg(feature = "example")]
                     prototype_calls! {
-                        then | r#match as key => |vm, host, roots, args, receiver| method(vm, host, roots, args, receiver, key);
-                        other => other_handler;
+                        then: 2 | r#match: 1 as key => |vm, host, roots, args, receiver| method(vm, host, roots, args, receiver, key);
+                        other: 0 => other_handler;
                     }
                 }
             },
         )
-        .expect("grouped builtin calls should expand");
+        .expect("grouped builtin calls should expand")
+        .to_string();
+        assert!(expanded.contains("Slot :: Prototype , \"then\") , 2u32 ,"));
+        assert!(expanded.contains("Slot :: Prototype , \"match\") , 1u32 ,"));
+    }
+
+    #[test]
+    fn builtin_global_requires_explicit_lengths() {
+        let args = quote!(name = "Example", root = "example", kind = "constructor");
+        for (items, message) in [
+            (
+                quote!(
+                    #[function(name = "f")]
+                    fn f() {}
+                ),
+                "missing `length` option",
+            ),
+            (
+                quote!(
+                    #[function(name = "f", length = -1)]
+                    fn f() {}
+                ),
+                "expected a u32 length literal",
+            ),
+            (
+                quote!(
+                    #[functions(f)]
+                    fn dispatch() {}
+                ),
+                "expected `:`",
+            ),
+            (
+                quote!(
+                    #[methods(f = Method::F)]
+                    fn dispatch() {}
+                ),
+                "expected `:`",
+            ),
+            (quote!(static_calls! { f => handler; }), "expected `:`"),
+            (
+                quote!(prototype_calls! { get f: 1 => handler; }),
+                "a builtin getter must have length 0",
+            ),
+        ] {
+            diagnostic(
+                builtin_global(args.clone(), quote!(mod members { #items })),
+                message,
+            );
+        }
     }
 
     #[test]
@@ -1888,15 +1988,15 @@ mod tests {
             quote! {
                 mod members {
                     static_calls! {
-                        match => call;
-                        get symbol(crate::heap::SPECIES_SYMBOL) species => species;
-                        get as key => |_, _, _, _, _| handler(key);
+                        match: 1 => call;
+                        get symbol(crate::heap::SPECIES_SYMBOL) species: 0 => species;
+                        get: 2 as key => |_, _, _, _, _| handler(key);
                     }
                     #[cfg(feature = "example")]
                     prototype_calls! {
-                        r#match => call;
-                        symbol(MATCH_SYMBOL) r#match => symbol_call;
-                        get source | flags as key => |_, _, _, _, _| handler(key);
+                        r#match: 1 => call;
+                        symbol(MATCH_SYMBOL) r#match: 1 => symbol_call;
+                        get source: 0 | flags: 0 as key => |_, _, _, _, _| handler(key);
                     }
                 }
             },

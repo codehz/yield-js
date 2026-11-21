@@ -6,7 +6,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{JsString, Value};
 
 macro_rules! error_class {
-    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal) => {
+    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal) => {
         pub(crate) const $owner: Owner = {
             const PROTOTYPE: &str = concat!($root, ".prototype");
             const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
@@ -20,6 +20,7 @@ macro_rules! error_class {
                 ],
                 &[&[IntrinsicDef::constructor(
                     KEY,
+                    $length,
                     |vm, host, roots, args, _| {
                         vm.construct_error(host, roots, $name, PROTOTYPE, args)
                     },
@@ -54,53 +55,60 @@ macro_rules! error_class {
     };
 }
 
-error_class!(ERROR, "Error", "error", OBJECT_PARENT, true);
+error_class!(ERROR, "Error", "error", OBJECT_PARENT, true, 1);
 error_class!(
     TYPE_ERROR,
     "TypeError",
     "typeerror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     RANGE_ERROR,
     "RangeError",
     "rangeerror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     REFERENCE_ERROR,
     "ReferenceError",
     "referenceerror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     SYNTAX_ERROR,
     "SyntaxError",
     "syntaxerror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     EVAL_ERROR,
     "EvalError",
     "evalerror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     URI_ERROR,
     "URIError",
     "urierror",
     Some("error.prototype"),
-    false
+    false,
+    1
 );
 error_class!(
     AGGREGATE_ERROR,
     "AggregateError",
     "aggregateerror",
     Some("error.prototype"),
-    false
+    false,
+    2
 );

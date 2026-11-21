@@ -18,19 +18,19 @@ const MAX_LENGTH: usize = u32::MAX as usize;
 #[yield_binding_macros::builtin_global(name = "Array", root = "array", kind = "constructor")]
 mod members {
     static_calls! {
-        isArray | from | of as name => |vm, host, roots, args, receiver| {
+        isArray: 1 | from: 1 | of: 0 as name => |vm, host, roots, args, receiver| {
             vm.array_operation(host, roots, name, receiver, args)
         };
     }
 
     prototype_calls! {
-        push | pop | shift | unshift | splice | slice | fill | map | filter | reduce | forEach
-            | some | every | flat | indexOf | lastIndexOf | includes | concat | find | findIndex
-            | flatMap as name => |vm, host, roots, args, receiver| {
+        push: 1 | pop: 0 | shift: 0 | unshift: 1 | splice: 2 | slice: 2 | fill: 1 | map: 1 | filter: 1 | reduce: 1 | forEach: 1
+            | some: 1 | every: 1 | flat: 0 | indexOf: 1 | lastIndexOf: 1 | includes: 1 | concat: 1 | find: 1 | findIndex: 1
+            | flatMap: 1 as name => |vm, host, roots, args, receiver| {
                 vm.array_operation(host, roots, name, receiver, args)
             };
-        join => |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args);
-        toString => |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver);
+        join: 1 => |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args);
+        toString: 0 => |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver);
     }
 }
 
@@ -77,16 +77,17 @@ pub(crate) const ARRAY_ROOTS: &[RootSpec] = &[
 pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         ARRAY_CONSTRUCTOR,
+        1,
         |vm, _, _, args, _| vm.construct_array(args),
         |vm, _, _, args, prototype| {
             let result = vm.construct_array(args)?;
             vm.with_result_prototype(result, prototype)
         },
     ),
-    IntrinsicDef::call(ARRAY_VALUES, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(ARRAY_VALUES, 0, |vm, _, _, _, receiver| {
         vm.array_values(receiver)
     }),
-    IntrinsicDef::call(ARRAY_ITERATOR_NEXT, |vm, host, roots, _, receiver| {
+    IntrinsicDef::call(ARRAY_ITERATOR_NEXT, 0, |vm, host, roots, _, receiver| {
         vm.array_iterator_next(host, roots, receiver)
     }),
 ];

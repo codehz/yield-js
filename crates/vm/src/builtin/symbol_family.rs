@@ -17,16 +17,16 @@ mod members {
     use crate::vm::Vm;
 
     prototype_calls! {
-        valueOf | toString as name => |vm, _, _, _, receiver| vm.symbol_method(receiver, name);
+        valueOf: 0 | toString: 0 as name => |vm, _, _, _, receiver| vm.symbol_method(receiver, name);
     }
 
     static_calls! {
-        r#for => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args);
-        keyFor => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args);
+        r#for: 1 => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args);
+        keyFor: 1 => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args);
     }
 
     prototype_calls! {
-        get description => |vm, _, _, _, receiver| vm.symbol_method(receiver, "get description");
+        get description: 0 => |vm, _, _, _, receiver| vm.symbol_method(receiver, "get description");
     }
 }
 
@@ -44,6 +44,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     &[
         &[IntrinsicDef::call(
             CONSTRUCTOR,
+            0,
             |vm, host, roots, args, _| vm.symbol_constructor(host, roots, args),
         )],
         members::INTRINSICS,

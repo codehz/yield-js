@@ -66,6 +66,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetImport { .. }
         | Instr::Closure { .. }
         | Instr::SetHome { .. }
+        | Instr::SetFunctionName { .. }
         | Instr::AddClassPrivate { .. }
         | Instr::GetSuperBase { .. }
         | Instr::GetSuperConstructor { .. }
@@ -155,6 +156,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::SetHome { function, home } => {
             uses.extend([function.index, home.index]);
         }
+        Instr::SetFunctionName { function, key, .. } => {
+            uses.extend([function.index, key.index]);
+        }
         Instr::GetSuperBase { dst, home } => {
             defs.insert(dst.index);
             uses.insert(home.index);
@@ -197,9 +201,16 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             dst,
             scope,
             heritage,
+            name_key,
             ..
         } => {
-            uses.extend(scope.iter().chain(heritage).map(|slot| slot.index));
+            uses.extend(
+                scope
+                    .iter()
+                    .chain(heritage)
+                    .chain(name_key)
+                    .map(|slot| slot.index),
+            );
             defs.insert(dst.index);
         }
         Instr::ScopedClosure { dst, scope, .. } => {
@@ -417,6 +428,15 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             function: remap(function),
             home: remap(home),
         },
+        Instr::SetFunctionName {
+            function,
+            key,
+            prefix,
+        } => Instr::SetFunctionName {
+            function: remap(function),
+            key: remap(key),
+            prefix,
+        },
         Instr::GetSuperBase { dst, home } => Instr::GetSuperBase {
             dst: remap(dst),
             home: remap(home),
@@ -492,6 +512,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst,
             scope,
             heritage,
+            name_key,
             constructor,
             default_constructor,
             private_count,
@@ -500,6 +521,7 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             scope: scope.map(remap),
             heritage: heritage.map(remap),
+            name_key: name_key.map(remap),
             constructor,
             default_constructor,
             private_count,

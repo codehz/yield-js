@@ -91,6 +91,7 @@ pub enum NativeObject {
     Host {
         target: crate::binding::NativeTarget,
         constructable: bool,
+        object: PlainObject,
     },
     Intrinsic {
         intrinsic: crate::intrinsic::IntrinsicId,
@@ -179,6 +180,10 @@ impl Attributes {
         writable: false,
         enumerable: false,
         configurable: false,
+    };
+    pub(crate) const FUNCTION_METADATA: Self = Self {
+        configurable: true,
+        ..Self::FIXED
     };
     pub const FUNCTION_PROTOTYPE: Self = Self {
         writable: true,
@@ -518,6 +523,21 @@ impl PlainObject {
             is_error: false,
         }
     }
+
+    pub(crate) fn callable(prototype: Option<ObjectId>, length: f64, name: JsString) -> Self {
+        let mut object = Self::new(prototype);
+        object
+            .props
+            .update("length".into(), Some(Attributes::FUNCTION_METADATA), |_| {
+                Property::Data(Value::number(length))
+            });
+        object
+            .props
+            .update("name".into(), Some(Attributes::FUNCTION_METADATA), |_| {
+                Property::Data(Value::string(name))
+            });
+        object
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -606,7 +626,7 @@ pub struct FunctionObject {
     pub func_id: u32,
     pub env: ObjectId,
     pub(crate) home: Option<ObjectId>,
-    pub(crate) has_class_metadata: bool,
+    pub(crate) dynamic_name: Option<JsString>,
     pub(crate) class: Option<ScriptClass>,
     #[serde(with = "property_pairs")]
     pub props: PropertyTable<JsString, Property>,
@@ -716,6 +736,7 @@ pub struct BoundObject {
     pub target: ObjectId,
     pub bound_this: Value,
     pub args: Vec<Value>,
+    pub(crate) initial_name: JsString,
     pub object: PlainObject,
 }
 

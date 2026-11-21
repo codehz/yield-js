@@ -8,8 +8,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Pending operations can target persisted host tasks as well as Promises.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 49;
+// Callable records persist their mutable descriptors and creation names.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 50;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

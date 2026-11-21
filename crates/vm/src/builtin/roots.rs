@@ -156,6 +156,17 @@ impl BuiltinRoots {
                 }
             }
         }
+        let function_proto = heap.get(result.get("function.prototype"))?;
+        let has_instance =
+            function_proto.own_property(PropertyKeyRef::Symbol(crate::heap::HAS_INSTANCE_SYMBOL));
+        if !has_instance.is_some_and(|prop| {
+            prop.attributes() == Attributes::FIXED
+                && matches!(prop.data_value().map(Value::view), Some(crate::value::ValueRef::Object(id))
+                    if matches!(heap.get(id), Ok(Object::Native(NativeObject::Intrinsic { intrinsic, .. }))
+                        if *intrinsic == crate::exec::FUNCTION_HAS_INSTANCE.link()))
+        }) {
+            return Err(VmError::InvalidSnapshot("invalid Function.prototype[Symbol.hasInstance]".into()));
+        }
         Ok(result)
     }
 }

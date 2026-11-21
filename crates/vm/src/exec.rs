@@ -8,8 +8,8 @@ use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::string::utf16_unit_string;
 use crate::bytecode::{
-    BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition, Slot, SlotKind,
-    UnaryOp,
+    AccessorPrefix, BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition,
+    Slot, SlotKind, UnaryOp,
 };
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -29,59 +29,77 @@ use crate::vm::Vm;
 
 const FUNCTION_CALL: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call"),
+    1,
     Vm::function_call,
 );
 const FUNCTION_APPLY: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "apply"),
+    2,
     Vm::function_apply,
 );
 const FUNCTION_BIND: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind"),
+    1,
     Vm::function_bind,
 );
 pub(crate) const FUNCTION_HAS_INSTANCE: IntrinsicKey =
     IntrinsicKey::new("Function", IntrinsicSlot::PrototypeSymbol, "hasInstance");
 
+pub(crate) const FUNCTION_CTOR: IntrinsicKey =
+    IntrinsicKey::new("Function", IntrinsicSlot::Global, "");
+const FUNCTION_PROTO: IntrinsicKey = IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "");
+pub(crate) const THROW_TYPE_ERROR: IntrinsicKey =
+    IntrinsicKey::new("ThrowTypeError", IntrinsicSlot::Prototype, "");
+pub(crate) const FUNCTION_METHODS: [IntrinsicKey; 4] = [
+    FUNCTION_CALL.key,
+    FUNCTION_APPLY.key,
+    FUNCTION_BIND.key,
+    IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
+];
 pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        FUNCTION_CTOR,
+        1,
+        |vm, _, _, _, _| vm.throw_type_error("Dynamic function construction is disabled"),
+        |vm, _, _, _, _| vm.throw_type_error("Dynamic function construction is disabled"),
+    )
+    .without_new_target_prototype(),
+    IntrinsicDef::call(FUNCTION_PROTO, 0, |_, _, _, _, _| {
+        Ok(Invocation::Value(Value::UNDEFINED))
+    }),
+    IntrinsicDef::call(THROW_TYPE_ERROR, 0, |vm, _, _, _, _| {
+        vm.throw_type_error("Restricted function property")
+    }),
     FUNCTION_CALL,
     FUNCTION_APPLY,
     FUNCTION_BIND,
-    IntrinsicDef::call(FUNCTION_HAS_INSTANCE, |vm, host, roots, args, receiver| {
-        vm.ordinary_has_instance(
-            host,
-            roots,
-            args.first().unwrap_or(&Value::UNDEFINED),
-            receiver,
-        )
-    }),
     IntrinsicDef::call(
-        IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "toString"),
-        Vm::function_to_string,
+        FUNCTION_HAS_INSTANCE,
+        1,
+        |vm, host, roots, args, receiver| {
+            vm.ordinary_has_instance(
+                host,
+                roots,
+                args.first().unwrap_or(&Value::UNDEFINED),
+                receiver,
+            )
+        },
     ),
+    IntrinsicDef::call(FUNCTION_METHODS[3], 0, Vm::function_to_string),
 ];
-
-// Virtual methods have no property slot of their own, so root their shared
-// identities directly instead of allocating a function on every read.
-const VIRTUAL_FUNCTION_METHODS: [(&str, IntrinsicKey); 3] = [
-    ("function.call", FUNCTION_CALL.key),
-    ("function.apply", FUNCTION_APPLY.key),
-    ("function.bind", FUNCTION_BIND.key),
-];
-
-const fn virtual_function_root(index: usize) -> RootSpec {
-    let (name, key) = VIRTUAL_FUNCTION_METHODS[index];
-    RootSpec::new(name, RootKind::Native(key), Some("function.prototype"))
-}
 
 pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
     RootSpec::new(
         "function.prototype",
-        RootKind::Plain,
+        RootKind::Native(FUNCTION_PROTO),
         Some("object.prototype"),
     ),
-    virtual_function_root(0),
-    virtual_function_root(1),
-    virtual_function_root(2),
+    RootSpec::new(
+        "function",
+        RootKind::Native(FUNCTION_CTOR),
+        Some("function.prototype"),
+    )
+    .fixed("function.prototype"),
 ];
 
 impl Vm {
@@ -128,8 +146,8 @@ impl Vm {
 
     fn function_bind(
         &mut self,
-        _: &mut dyn Host,
-        _: &ActiveRoots<'_>,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -137,12 +155,42 @@ impl Vm {
             ValueRef::Object(id) if self.heap.get(id).is_ok_and(is_callable_object) => id,
             _ => return self.throw_type_error("incompatible Function receiver"),
         };
+        let object = self.heap.get(target)?;
+        let prototype = object.prototype();
+        let own_length = object
+            .own_property(PropertyKeyRef::String("length"))
+            .is_some();
+        let live = (&args, prototype);
+        let roots = &roots.with(&live);
+        let length = if own_length {
+            match self.read_property(host, roots, receiver, PropertyKeyRef::String("length"))? {
+                Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+                Invocation::Value(value) => match value.view() {
+                    ValueRef::Number(n) => {
+                        (n.trunc() - args.len().saturating_sub(1) as f64).max(0.0)
+                    }
+                    _ => 0.0,
+                },
+            }
+        } else {
+            0.0
+        };
+        let mut name = JsString::from("bound ");
+        match self.read_property(host, roots, receiver, PropertyKeyRef::String("name"))? {
+            Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+            Invocation::Value(value) => {
+                if let ValueRef::String(target_name) = value.view() {
+                    name.push_str(target_name);
+                }
+            }
+        }
         let mut args = args.into_iter();
         let id = self.heap.alloc(Object::Bound(BoundObject {
             target,
             bound_this: args.next().unwrap_or(Value::UNDEFINED),
             args: args.collect(),
-            object: PlainObject::new(self.heap.function_prototype),
+            object: PlainObject::callable(prototype, length, name.clone()),
+            initial_name: name,
         }));
         Ok(Invocation::Value(Value::object(id)))
     }
@@ -154,13 +202,62 @@ impl Vm {
         _: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
-        if self.is_callable(receiver) {
-            Ok(Invocation::Value(Value::string(
-                "function () { [native code] }".into(),
-            )))
-        } else {
-            self.throw_type_error("incompatible Function.prototype.toString receiver")
+        let ValueRef::Object(id) = receiver.view() else {
+            return self.throw_type_error("incompatible Function.prototype.toString receiver");
+        };
+        if !is_callable_object(self.heap.get(id)?) {
+            return self.throw_type_error("incompatible Function.prototype.toString receiver");
         }
+        let name = self.initial_function_name(id)?;
+        let mut text = JsString::from("function ");
+        text.push_str(&name);
+        text.push_str(&"() { [native code] }".into());
+        Ok(Invocation::Value(Value::string(text)))
+    }
+
+    fn initial_function_name(&self, id: ObjectId) -> Result<JsString, VmError> {
+        Ok(match self.heap.get(id)? {
+            Object::Function(function) => match &function.dynamic_name {
+                Some(name) => name.clone(),
+                None => self.build.functions[self.function_index(function.func_id)?]
+                    .initial_name
+                    .as_str()
+                    .into(),
+            },
+            Object::Bound(bound) => bound.initial_name.clone(),
+            Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
+                intrinsic.definition().key.initial_name()
+            }
+            Object::Native(NativeObject::Host { target, .. }) => {
+                crate::vm::host_function_metadata(&self.bindings, *target)
+                    .ok_or_else(|| {
+                        VmError::InvalidState("missing host function declaration".into())
+                    })?
+                    .0
+            }
+            _ => "".into(),
+        })
+    }
+
+    pub(crate) fn install_script_metadata(
+        &mut self,
+        id: ObjectId,
+        func_id: u32,
+    ) -> Result<(), VmError> {
+        let length = self.build.functions[self.function_index(func_id)?].length;
+        let name = self.initial_function_name(id)?;
+        self.heap.define_data(
+            id,
+            "length",
+            Value::number(f64::from(length)),
+            Attributes::FUNCTION_METADATA,
+        )?;
+        self.heap.define_data(
+            id,
+            "name",
+            Value::string(name),
+            Attributes::FUNCTION_METADATA,
+        )
     }
 }
 
@@ -446,6 +543,28 @@ impl Vm {
                 let invocation = self.construct_with(host, frame_roots, &callee, args, &callee)?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::SetFunctionName {
+                function,
+                key,
+                prefix,
+            } => {
+                let id = object_id(frame.read_ref(function)?, "named function")?;
+                let name = self
+                    .property_function_name(converted_property_key(frame.read_ref(key)?)?, prefix);
+                let Object::Function(function) = self.heap.get_mut(id)? else {
+                    return Err(VmError::InvalidState(
+                        "name requires a script function".into(),
+                    ));
+                };
+                function.dynamic_name = Some(name.clone());
+                self.heap.define_data(
+                    id,
+                    "name",
+                    Value::string(name),
+                    Attributes::FUNCTION_METADATA,
+                )?;
+                Ok(Step::Next)
+            }
             Instr::SetHome { function, home } => {
                 let function = object_id(frame.read_ref(function)?, "method function")?;
                 let home = object_id(frame.read_ref(home)?, "method home")?;
@@ -599,6 +718,7 @@ impl Vm {
                 scope,
                 constructor,
                 heritage,
+                name_key,
                 default_constructor,
                 private_count,
                 private_binding,
@@ -638,12 +758,21 @@ impl Vm {
                             }
                         }
                     };
+                let dynamic_name = name_key
+                    .map(|slot| {
+                        Ok::<_, VmError>(self.property_function_name(
+                            converted_property_key(frame.read_ref(slot)?)?,
+                            None,
+                        ))
+                    })
+                    .transpose()?;
                 let class = self.heap.alloc_function(constructor, env);
                 let prototype = self.heap.alloc_plain_with(instance_parent);
                 let Object::Function(function) = self.heap.get_mut(class)? else {
                     unreachable!()
                 };
                 function.prototype = Some(static_parent);
+                function.dynamic_name = dynamic_name;
                 function.class = Some(ScriptClass {
                     prototype,
                     source: ScriptClassSource {
@@ -656,14 +785,7 @@ impl Vm {
                     },
                 });
                 function.home = Some(prototype);
-                let name = self.function_metadata(class, "name")?;
-                let length = self.function_metadata(class, "length")?;
-                let metadata = Attributes {
-                    configurable: true,
-                    ..Attributes::FIXED
-                };
-                self.heap.define_data(class, "name", name, metadata)?;
-                self.heap.define_data(class, "length", length, metadata)?;
+                self.install_script_metadata(class, constructor)?;
                 self.heap.define_data(
                     class,
                     "prototype",
@@ -1497,17 +1619,10 @@ impl Vm {
             {
                 return self.proxy_get(host, roots, target, handler, key, receiver);
             }
-            if self.has_own_function_metadata(id, key)? {
-                let name = if key.is_str("name") { "name" } else { "length" };
-                return Ok(Invocation::Value(self.function_metadata(id, name)?));
-            }
             if let Some(property) = object.own_property(key) {
                 return self.read_property_value(host, roots, receiver, property.into_owned());
             }
             current = object.prototype();
-        }
-        if let Some(method) = self.virtual_function_method(target, key) {
-            return Ok(Invocation::Value(Value::object(method)));
         }
         Ok(Invocation::Value(Value::UNDEFINED))
     }
@@ -1712,14 +1827,12 @@ impl Vm {
             {
                 return self.proxy_presence(host, roots, target, handler, key, false);
             }
-            if self.has_own_function_metadata(id, key)? || object.own_property(key).is_some() {
+            if object.own_property(key).is_some() {
                 return Ok(Invocation::Value(Value::boolean(true)));
             }
             current = object.prototype();
         }
-        Ok(Invocation::Value(Value::boolean(
-            self.virtual_function_method(target, key).is_some(),
-        )))
+        Ok(Invocation::Value(Value::boolean(false)))
     }
 
     pub(crate) fn delete_property(
@@ -1753,7 +1866,6 @@ impl Vm {
             return self.proxy_presence(host, roots, target, handler, key, true);
         }
         let deleted = match (target.view(), key) {
-            (ValueRef::Object(id), key) if self.has_own_function_metadata(id, key)? => false,
             (ValueRef::Object(id), key) => self.heap.delete_own(id, key)?,
             // ToObject on a string would expose fixed UTF-16 indices and length.
             (ValueRef::String(string), key) => {
@@ -1763,86 +1875,6 @@ impl Vm {
             _ => true,
         };
         Ok(Invocation::Value(Value::boolean(deleted)))
-    }
-
-    pub(crate) fn has_own_function_metadata(
-        &self,
-        id: ObjectId,
-        key: PropertyKeyRef<'_>,
-    ) -> Result<bool, VmError> {
-        Ok((key.is_str("name") || key.is_str("length"))
-            && (id == self.builtins.get("function.prototype")
-                || (is_callable_object(self.heap.get(id)?)
-                    && !self.heap.function(id).is_some_and(|function| {
-                        function.class.is_some() || function.has_class_metadata
-                    }))))
-    }
-
-    pub(crate) fn function_metadata(&self, id: ObjectId, key: &str) -> Result<Value, VmError> {
-        let (object, bound_args, prefix) = match self.heap.get(id)? {
-            Object::Bound(bound) => (self.heap.get(bound.target)?, bound.args.len(), "bound "),
-            object => (object, 0, ""),
-        };
-        if key == "name"
-            && !prefix.is_empty()
-            && let Some(OwnProperty::Stored(Property::Data(value), _)) =
-                object.own_property(PropertyKeyRef::String("name"))
-            && let ValueRef::String(name) = value.view()
-        {
-            let mut result = JsString::from(prefix);
-            result.push_str(name);
-            return Ok(Value::string(result));
-        }
-        let (name, length) = match object {
-            Object::Function(function) => {
-                let function = self.build.function(function.func_id).ok_or_else(|| {
-                    VmError::InvalidState("function metadata without bytecode".into())
-                })?;
-                // The compiler appends the function ID to nested bytecode names.
-                let name = match function.name.rsplit_once('@') {
-                    Some((name, id)) if id.parse::<u32>() == Ok(function.func_id) => name,
-                    _ => &function.name,
-                };
-                (name, function.length)
-            }
-            Object::Native(NativeObject::Intrinsic { intrinsic, .. }) => {
-                let key = intrinsic.definition().key;
-                let length = match (key.owner, key.slot, key.member) {
-                    ("RegExp", _, "") => 2,
-                    ("RegExp", _, "exec" | "test" | "escape") => 1,
-                    ("Object", IntrinsicSlot::Static, "values" | "entries" | "fromEntries") => 1,
-                    (
-                        "Object",
-                        IntrinsicSlot::Prototype,
-                        "isPrototypeOf" | "propertyIsEnumerable",
-                    ) => 1,
-                    _ => 0,
-                };
-                let name = if key.member.is_empty() {
-                    key.owner
-                } else {
-                    key.member
-                };
-                (name, length)
-            }
-            _ => ("", 0), // The shared prototype and Promise resolving functions.
-        };
-        Ok(if key == "name" {
-            Value::string([prefix, name].concat().into())
-        } else {
-            let bound_args = u16::try_from(bound_args).unwrap_or(u16::MAX);
-            Value::number(f64::from(length.saturating_sub(bound_args)))
-        })
-    }
-
-    fn virtual_function_method(&self, id: ObjectId, key: PropertyKeyRef<'_>) -> Option<ObjectId> {
-        if !self.heap.get(id).is_ok_and(is_callable_object) {
-            return None;
-        }
-        VIRTUAL_FUNCTION_METHODS
-            .iter()
-            .find(|(_, intrinsic)| key.is_str(intrinsic.member))
-            .map(|(root, _)| self.builtins.get(root))
     }
 
     fn write_member(
@@ -1922,9 +1954,6 @@ impl Vm {
                     strict,
                 );
             }
-            if self.has_own_function_metadata(id, key.borrowed())? {
-                return reject(self, "Cannot assign to read only function metadata");
-            }
             property = object.own_property(key.borrowed());
             if property.is_some() {
                 break;
@@ -1955,9 +1984,6 @@ impl Vm {
                 "Cannot write a data property on a non-object receiver",
             );
         };
-        if id != target && self.has_own_function_metadata(id, key.borrowed())? {
-            return reject(self, "Cannot overwrite receiver function metadata");
-        }
         if matches!(self.heap.get(id)?, Object::Proxy { .. }) {
             let live = (&key, &value, receiver);
             let exists = match self.own_descriptor(host, &roots.with(&live), id, key.borrowed())? {
@@ -2229,11 +2255,24 @@ impl Vm {
                 _ => continue,
             };
             let value = if let Some(closure) = closure {
+                // Only field initializers with a dynamic name take a key parameter.
+                let needs_key = key.is_some()
+                    && self
+                        .heap
+                        .function(closure)
+                        .and_then(|function| self.build.function(function.func_id))
+                        .is_some_and(|code| !code.params.is_empty());
                 match self.invoke(
                     host,
                     &roots.with(&key),
                     &Value::object(closure),
-                    Vec::new(),
+                    key.iter()
+                        .filter(|_| needs_key)
+                        .map(|key| match key {
+                            PropertyKey::String(key) => Value::string(key.clone()),
+                            PropertyKey::Symbol(key) => Value::symbol(*key),
+                        })
+                        .collect(),
                     &Value::object(receiver),
                 )? {
                     Invocation::Value(value) => value,
@@ -2266,6 +2305,30 @@ impl Vm {
         Ok(None)
     }
 
+    fn property_function_name(
+        &self,
+        key: PropertyKeyRef<'_>,
+        prefix: Option<AccessorPrefix>,
+    ) -> JsString {
+        let mut name = JsString::from(match prefix {
+            Some(AccessorPrefix::Get) => "get ",
+            Some(AccessorPrefix::Set) => "set ",
+            None => "",
+        });
+        match key {
+            PropertyKeyRef::String(key) => name.push_str(&key.into()),
+            PropertyKeyRef::JsString(key) => name.push_str(key),
+            PropertyKeyRef::Symbol(symbol) => {
+                if let Some(Some(description)) = self.heap.symbols.get(&symbol) {
+                    name.push_str(&"[".into());
+                    name.push_str(description);
+                    name.push_str(&"]".into());
+                }
+            }
+        }
+        name
+    }
+
     fn define_class_method(
         &mut self,
         class: ObjectId,
@@ -2292,34 +2355,10 @@ impl Vm {
                 "class member requires a script method".into(),
             ));
         }
-        let mut name = JsString::from(match kind {
-            PropertyDefinition::Data => "",
-            PropertyDefinition::Get => "get ",
-            PropertyDefinition::Set => "set ",
-        });
-        match &key {
-            PropertyKey::String(key) => name.push_str(key),
-            PropertyKey::Symbol(symbol) => {
-                if let Some(Some(description)) = self.heap.symbols.get(symbol) {
-                    name.push_str(&"[".into());
-                    name.push_str(description);
-                    name.push_str(&"]".into());
-                }
-            }
-        }
-        let length = self.function_metadata(src, "length")?;
         let Object::Function(function) = self.heap.get_mut(src)? else {
             unreachable!()
         };
         function.home = Some(target);
-        function.has_class_metadata = true;
-        let metadata = Attributes {
-            configurable: true,
-            ..Attributes::FIXED
-        };
-        self.heap
-            .define_data(src, "name", Value::string(name), metadata)?;
-        self.heap.define_data(src, "length", length, metadata)?;
         let mut update = DescriptorUpdate {
             enumerable: Some(false),
             configurable: Some(true),

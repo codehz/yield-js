@@ -698,7 +698,6 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 )));
             };
             if (code.home_param.is_some() && function.home.is_none())
-                || (function.has_class_metadata && (!code.is_method || function.home.is_none()))
                 || function.home.is_some_and(|home| {
                     !matches!(heap.get(home), Ok(Object::Function(_) | Object::Plain(_)))
                 })
@@ -1035,6 +1034,7 @@ fn validate_native_targets(bindings: &Bindings, heap: &Heap) -> Result<(), VmErr
             Object::Native(NativeObject::Host {
                 target,
                 constructable,
+                ..
             }) => {
                 if !valid_native_target(bindings, *target) {
                     return Err(VmError::InvalidSnapshot(format!(
@@ -1069,6 +1069,7 @@ fn validate_native_import_objects(
                 && let Object::Native(NativeObject::Host {
                     target,
                     constructable,
+                    ..
                 }) = heap.get(id)?
                 && !identities.insert((*target, *constructable))
             {

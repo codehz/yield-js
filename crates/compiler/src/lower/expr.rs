@@ -6,7 +6,9 @@ use oxc::span::GetSpan;
 use oxc::syntax::operator::{
     AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
 };
-use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp};
+use yield_vm::bytecode::{
+    AccessorPrefix, BinaryOp, CallArgs, Constant, Instr, PropertyDefinition, UnaryOp,
+};
 use yield_vm::{BindingId, JsString};
 
 use super::{FunctionSource, HOME_BINDING, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
@@ -45,17 +47,61 @@ impl PropertyRef {
 impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     pub(super) fn compile_named_expression(
         &mut self,
+        expression: &'ast Expression<'ast>,
+        name: &str,
+    ) -> Result<Reg, CompileError> {
+        self.compile_named_expression_with_key(expression, name, None)
+    }
+
+    pub(super) fn compile_named_expression_with_key(
+        &mut self,
         mut expression: &'ast Expression<'ast>,
         name: &str,
+        key: Option<Reg>,
     ) -> Result<Reg, CompileError> {
         while let Expression::ParenthesizedExpression(paren) = expression {
             expression = &paren.expression;
         }
-        if let Expression::ClassExpression(class) = expression {
-            self.compile_class(class, name)
-        } else {
-            self.compile_expression(expression)
+        let function = match expression {
+            Expression::ClassExpression(class) if class.id.is_none() => {
+                return self.compile_class(class, name, key);
+            }
+            Expression::FunctionExpression(function) if function.id.is_none() => {
+                let id = self.enqueue_named_function(
+                    FunctionSource::Function(function),
+                    "function",
+                    name.to_owned(),
+                    function.span,
+                )?;
+                self.emit_function_value(id)?
+            }
+            Expression::ArrowFunctionExpression(arrow) => {
+                let id = self.enqueue_named_function(
+                    FunctionSource::Arrow(arrow),
+                    "arrow",
+                    name.to_owned(),
+                    arrow.span,
+                )?;
+                self.emit_function_value(id)?
+            }
+            _ => return self.compile_expression(expression),
+        };
+        if let Some(key) = key {
+            self.emit_function_name(function, key, PropertyDefinition::Data);
         }
+        Ok(function)
+    }
+
+    pub(super) fn emit_function_name(&mut self, function: Reg, key: Reg, kind: PropertyDefinition) {
+        self.emit(Instr::SetFunctionName {
+            function: self.slot(function),
+            key: self.slot(key),
+            prefix: match kind {
+                PropertyDefinition::Data => None,
+                PropertyDefinition::Get => Some(AccessorPrefix::Get),
+                PropertyDefinition::Set => Some(AccessorPrefix::Set),
+            },
+        });
     }
 
     pub(super) fn compile_expression<'node>(
@@ -165,7 +211,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ChainExpression(expression) => Ok(self.compile_chain(expression, false)?.0),
             Expression::AssignmentExpression(expression) => self.compile_assignment(expression),
             Expression::UpdateExpression(expression) => self.compile_update(expression),
-            Expression::ClassExpression(class) => self.compile_class(class, ""),
+            Expression::ClassExpression(class) => self.compile_class(class, "", None),
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
             expression if let Some(member) = expression.as_member_expression() => {
@@ -280,6 +326,25 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let quoted = span.source_text(self.source_text());
         decode_string_body(&quoted[1..quoted.len() - 1], false)
             .ok_or_else(|| unsupported(self.source_text(), span, "invalid string escape"))
+    }
+
+    pub(super) fn static_key_name(
+        &self,
+        key: &PropertyKey<'_>,
+    ) -> Result<Option<String>, CompileError> {
+        Ok(match key {
+            PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name)),
+            PropertyKey::StringLiteral(literal) => {
+                self.string_literal_text(literal)?.to_utf8().ok()
+            }
+            PropertyKey::NumericLiteral(literal) => {
+                Some(ryu_js::Buffer::new().format(literal.value).to_owned())
+            }
+            key => key
+                .static_name()
+                .and_then(|name| name.into_cow_str())
+                .map(|name| name.into_owned()),
+        })
     }
 
     fn emit_to_string(&mut self, src: Reg) -> Result<Reg, CompileError> {
@@ -1385,11 +1450,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 continue;
             };
             let key = self.compile_property_key(&property.key, property.computed)?;
-            let mut buffer = ryu_js::Buffer::new();
-            let name = match &property.key {
-                PropertyKey::NumericLiteral(literal) => Some(buffer.format(literal.value).into()),
-                key => key.static_name().and_then(|name| name.into_cow_str()),
-            };
+            let name = self.static_key_name(&property.key)?;
+            let name_from_key = property.computed || name.is_none();
             let kind = match property.kind {
                 PropertyKind::Init => PropertyDefinition::Data,
                 PropertyKind::Get => PropertyDefinition::Get,
@@ -1423,19 +1485,33 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     (PropertyDefinition::Set, Some(name)) => ("set ", name),
                     (_, None) => ("", hint),
                 };
-                let id = self.enqueue_function(
+                let initial_name = if name_from_key {
+                    String::new()
+                } else {
+                    format!("{prefix}{name}")
+                };
+                let id = self.enqueue_named_function(
                     FunctionSource::Method(function),
                     format_args!("{prefix}{name}"),
+                    initial_name,
                     function.span,
                 )?;
                 let function = self.emit_function_value(id)?;
+                if name_from_key {
+                    self.emit_function_name(function, key, kind);
+                }
                 self.emit(Instr::SetHome {
                     function: self.slot(function),
                     home: self.slot(dst),
                 });
                 function
             } else {
-                self.compile_named_expression(&property.value, name.as_deref().unwrap_or(""))?
+                let name = if name_from_key { None } else { name.as_deref() };
+                self.compile_named_expression_with_key(
+                    &property.value,
+                    name.unwrap_or(""),
+                    name_from_key.then_some(key),
+                )?
             };
             self.emit(Instr::DefineProperty {
                 object: self.slot(dst),

@@ -24,8 +24,9 @@
 - `const` 声明正常初始化（含解构与 `for…of` 的每轮写入）。之后对该绑定写入时才抛出可捕获的 `TypeError`（`Assignment to constant variable.`）：包括普通、复合、逻辑赋值、自增减、解构赋值和闭包中的写入。逻辑赋值短路时不写入、不抛错；解构按赋值顺序在第一个实际写入的 `const` 目标处抛错，之前的副作用与写入保留。内层同名绑定按自身的声明规则处理；`const` 不冻结对象或数组。绑定的可变性在编译期解析，不需要写入快照。
 - 函数与箭头函数支持 rest 形参（含解构模式）。每次调用把超出位置形参的实参收集到一个新数组；没有剩余实参时得到空数组。普通绑定和槽位的快照机制保留跨 `await` 使用的 rest 数组。
 - 普通函数和方法按需创建严格模式的非映射 `arguments` 对象：它继承 `Object.prototype`，不是数组，包含所有实参的索引和不可枚举的 `length`，以原始 `Array.prototype.values` 为自有迭代方法。形参与索引的写入互不影响；不提供 `callee` 或 `caller`。默认参数可以读取它，箭头函数沿词法链读取，名为 `arguments` 的形参会遮蔽隐式绑定。此子集中的函数体 `var arguments` 复用已有的函数绑定，不为非简单形参创建独立的函数体绑定。对象身份和迭代位置可跨 `await` 恢复。
-- 共享的 `Function.prototype` 可通过 `Object.getPrototypeOf(fn)` 获取（不可调用，`name` 为 `""`，`length` 为 `0`；没有 `Function` 全局）。函数的 `name` / `length` 是只读虚拟属性，支持属性读取、`in` 与 `Reflect.has`，但不出现在自有键或自有属性描述符中。声明与显式命名的表达式保留名称，方法使用静态已知的键或编译期提示；匿名函数和箭头使用 `function` 和 `arrow`，不推断名称。`length` 统计首个默认形参前的位置形参（不含 rest，解构形参计一个）；内建函数提供名称，`length` 统一为 `0`。函数转字符串（共享 `Function.prototype` 上的 `toString` 及字符串 hint 转换）返回固定通用文本 `function () { [native code] }`，不保留源码；这是有意设计（见 [`design.md`](design.md)）。
-- 脚本函数支持 `call`、`apply`（参数表接受任意类数组对象，`null` 或 `undefined` 表示空参数列表）与 `bind`。绑定函数的 `name` 加上 `bound ` 前缀，`length` 扣除预置实参数量后最低为 `0`。目标、绑定的 `this`、预置参数及脚本定义的自有属性可跨 `await` 快照恢复。绑定函数不自动创建 `prototype` 属性。
+- 函数的 `length` / `name` 是不可写、不可枚举、可配置的自有数据属性。声明与显式命名的表达式保留名字；支持的匿名函数、箭头和类按绑定、默认值或属性键推断名字，不创建额外词法绑定。计算键只转换一次。脚本 `length` 统计首个默认形参前的位置形参（不含 rest）；内建和宿主函数使用各自声明的元数据。
+- `Function.prototype` 可调用并返回 `undefined`，不可构造；它提供共享的 `call`、`apply`、`bind`、`toString` 和严格模式的 `caller` / `arguments` 访问器。全局 `Function` 的调用和构造都抛出 `TypeError`，不转换实参、不编译字符串。`toString` 返回 `function <初始名>() { [native code] }`，不读取公开 `name`，也不保留源码。
+- `bind` 捕获目标当时的内部原型，依次读取自有 `length` 和普通 `name`；结果写入绑定函数的自有描述符，不随目标变化。绑定函数不自动创建 `prototype`，其目标、参数、描述符和初始显示名可跨快照恢复。
 - 对象/数组字面量、计算属性键、简写方法（含 `async`）、getter/setter、成员读写、数组 `length` 与索引、复合成员赋值。数组字面量的省略项产生真正的稀疏空洞：只增长 `length`，不创建索引属性，`map` / `forEach` / `JSON.stringify` / `join` 等按稀疏语义处理；展开 `[...a]` 仍通过迭代协议将洞读成显式 `undefined`。`new` 创建实例并沿构造函数的 `prototype` 查找属性；自有属性优先，继承访问器中的 `this` 是实际接收者。简写方法不能用作构造函数。
 - 对象字面量支持展开：按自有键顺序复制可枚举的字符串键和 Symbol 键，每次复制前重查描述符。来源 getter 以来源对象为 `this`，异常可捕获；结果总是自有数据属性，不调用目标 setter。跳过空值和无可枚举键的原始值；字符串按 UTF-16 索引逐码元复制。字面量在展开表达式中挂起时，已构建的属性可跨快照恢复。
 - `in` 检查对象自身及原型链上的属性（包括 Symbol 键），不执行 getter；右操作数不是对象时抛出 `TypeError`。
@@ -82,7 +83,7 @@
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `join` 时，对象接收者的 `length` 先按数字 hint 转换、截断并限制在 `0..=2^53−1`，再转换分隔符。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
-- 宿主导出函数、原型方法和访问器都是 VM 自有函数对象，只保存声明 ID；没有 `NativeKey`、`HostValue` 或只读投影类型。函数对象可被脚本传递、`bind`、`call` / `apply`，快照只保存声明目标。
+- 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `queueMicrotask` 回调没有结果 Promise；回调抛出的异常通过 `Host::report_error` 按微任务执行顺序交给宿主，由宿主决定是否以及如何记录。未处理的 Promise 拒绝仍不跟踪。
 - 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。

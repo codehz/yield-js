@@ -28,4 +28,36 @@ export function run() {
   expect(alternate.args).toBe('1,2,6');
   expect(Object.getPrototypeOf(alternate)).toBe(Alternate.prototype);
   expect(receiver.args).toBe(undefined);
+  const reads = [];
+  const parent = Object.create(Function.prototype);
+  Object.setPrototypeOf(Target, parent);
+  Object.defineProperty(Target, 'length', {get() { reads.push('length'); return 4.9; }});
+  Object.defineProperty(Target, 'name', {get() { reads.push('name'); return 'custom'; }});
+  const first = Target.bind(null, 8);
+  expect(reads.join(',')).toBe('length,name');
+  expect(first.length).toBe(3);
+  expect(first.name).toBe('bound custom');
+  expect(Object.getPrototypeOf(first)).toBe(parent);
+  Object.setPrototypeOf(Target, Function.prototype);
+  Object.defineProperty(Target, 'name', {value: 'changed'});
+  Object.defineProperty(Target, 'length', {value: Infinity});
+  expect(Target.bind(null, 1).length).toBe(Infinity);
+  const second = first.bind(null, 9);
+  expect(second.name).toBe('bound bound custom');
+  expect(second.length).toBe(2);
+  Object.defineProperty(first, 'name', {value: 'rewritten'});
+  Object.defineProperty(first, 'length', {value: 12});
+  expect(second.name).toBe('bound bound custom');
+  expect(second.length).toBe(2);
+  expect(first.toString()).toBe('function bound custom() { [native code] }');
+  const layered = new second(10);
+  expect(layered.args).toBe('8,9,10');
+  expect(layered instanceof second && layered instanceof first && layered instanceof Target).toBe(true);
+  Object.defineProperty(parent, 'length', {get() { throw 'inherited length read'; }});
+  delete first.length;
+  expect(first.bind(null).length).toBe(0);
+  Object.defineProperty(Target, 'length', {get() { throw 41; }});
+  let caught;
+  try { Target.bind(null); } catch (e) { caught = e; }
+  expect(caught).toBe(41);
 }

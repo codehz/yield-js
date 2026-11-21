@@ -46,6 +46,33 @@ impl IntrinsicKey {
         }
     }
 
+    pub fn initial_name(self) -> crate::value::JsString {
+        use Slot::*;
+        if self.slot == Global {
+            return self.owner.into();
+        }
+        let prefix = match self.slot {
+            StaticGetter | PrototypeGetter | StaticSymbolGetter | PrototypeSymbolGetter => "get ",
+            StaticSetter | PrototypeSetter | StaticSymbolSetter | PrototypeSymbolSetter => "set ",
+            _ => "",
+        };
+        if matches!(
+            self.slot,
+            StaticSymbol
+                | PrototypeSymbol
+                | StaticSymbolGetter
+                | PrototypeSymbolGetter
+                | StaticSymbolSetter
+                | PrototypeSymbolSetter
+        ) {
+            format!("{prefix}[Symbol.{}]", self.member).into()
+        } else if prefix.is_empty() {
+            self.member.into()
+        } else {
+            format!("{prefix}{}", self.member).into()
+        }
+    }
+
     pub fn link(self) -> IntrinsicId {
         table().ids[&(self.owner, self.slot, self.member)]
     }
@@ -63,25 +90,32 @@ type Construct = fn(
 
 pub(crate) struct IntrinsicDef {
     pub key: IntrinsicKey,
+    pub length: u32,
     pub call: Call,
     pub construct: Option<Construct>,
     pub skip_new_target_prototype: bool,
 }
 
 impl IntrinsicDef {
-    pub const fn call(key: IntrinsicKey, call: Call) -> Self {
+    pub const fn call(key: IntrinsicKey, length: u32, call: Call) -> Self {
         Self {
             key,
+            length,
             call,
             construct: None,
             skip_new_target_prototype: false,
         }
     }
 
-    pub const fn constructor(key: IntrinsicKey, call: Call, construct: Construct) -> Self {
+    pub const fn constructor(
+        key: IntrinsicKey,
+        length: u32,
+        call: Call,
+        construct: Construct,
+    ) -> Self {
         Self {
             construct: Some(construct),
-            ..Self::call(key, call)
+            ..Self::call(key, length, call)
         }
     }
 

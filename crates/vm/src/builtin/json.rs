@@ -12,7 +12,7 @@ use crate::vm::Vm;
 pub(crate) mod namespace {
     use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
-    #[function(name = "parse")]
+    #[function(name = "parse", length = 2)]
     fn parse(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -22,7 +22,7 @@ pub(crate) mod namespace {
         vm.json_parse(host, roots, args)
     }
 
-    #[function(name = "stringify")]
+    #[function(name = "stringify", length = 3)]
     fn stringify(
         vm: &mut Vm,
         host: &mut dyn Host,

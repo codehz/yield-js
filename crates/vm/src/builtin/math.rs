@@ -33,7 +33,7 @@ pub(crate) mod namespace {
     #[constant(name = "SQRT2")]
     const SQRT2: f64 = consts::SQRT_2;
 
-    #[function(name = "abs")]
+    #[function(name = "abs", length = 1)]
     fn abs(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -47,9 +47,11 @@ pub(crate) mod namespace {
     }
 
     #[functions(
-        acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, ceil, clz32, cos, cosh, exp, expm1,
-        floor, fround, hypot, imul, log, log1p, log10, log2, max, min, pow, random, round, sign,
-        sin, sinh, sqrt, tan, tanh, trunc
+        acos: 1, acosh: 1, asin: 1, asinh: 1, atan: 1, atan2: 2, atanh: 1, cbrt: 1,
+        ceil: 1, clz32: 1, cos: 1, cosh: 1, exp: 1, expm1: 1, floor: 1, fround: 1,
+        hypot: 2, imul: 2, log: 1, log1p: 1, log10: 1, log2: 1, max: 2, min: 2,
+        pow: 2, random: 0, round: 1, sign: 1, sin: 1, sinh: 1, sqrt: 1, tan: 1,
+        tanh: 1, trunc: 1
     )]
     fn dispatch(
         vm: &mut Vm,

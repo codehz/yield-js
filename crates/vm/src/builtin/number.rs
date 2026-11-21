@@ -23,7 +23,7 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 pub(crate) mod members {
     use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
-    #[functions(isFinite, isInteger, isNaN, isSafeInteger, parseFloat, parseInt)]
+    #[functions(isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1, parseFloat: 1, parseInt: 2)]
     fn call_static(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -35,7 +35,7 @@ pub(crate) mod members {
         vm.call_number_static(host, roots, key, args)
     }
 
-    #[methods(toString, valueOf, toFixed, toExponential, toPrecision, toLocaleString)]
+    #[methods(toString: 1, valueOf: 0, toFixed: 1, toExponential: 1, toPrecision: 1, toLocaleString: 0)]
     fn call_method(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -71,6 +71,7 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Number", Slot::Global, "");
 
 pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     CONSTRUCTOR,
+    1,
     |vm, host, roots, args, _| vm.call_number(host, roots, &args),
     |vm, host, roots, args, prototype| {
         let result = match vm.call_number(host, roots, &args)? {

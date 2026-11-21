@@ -61,6 +61,7 @@ impl Vm {
         let id = self.heap.alloc_function(func_id, env);
         let index = self.function_index(func_id)?;
         let constructable = self.build.functions[index].is_constructable();
+        self.install_script_metadata(id, func_id)?;
         if constructable {
             let prototype = self.heap.alloc_plain();
             self.heap.define_data(
@@ -556,7 +557,7 @@ impl Vm {
             },
             Object::Array(_) => "Array",
             Object::Function(_)
-            | Object::Native(crate::heap::NativeObject::Intrinsic { .. })
+            | Object::Native(_)
             | Object::Bound(_)
             | Object::PromiseCallback { .. }
             | Object::Resolution(_) => "Function",
@@ -1515,9 +1516,6 @@ impl Vm {
     ) -> Result<Result<bool, Value>, VmError> {
         let target = self.heap.proxy_target(target)?;
         let roots = &roots.with(&target);
-        if self.has_own_function_metadata(target, key.borrowed())? {
-            return Ok(Ok(false));
-        }
         if key.borrowed().is_str("length")
             && matches!(self.heap.get(target)?, Object::Array(_))
             && let Some(value) = &mut update.value
@@ -1964,8 +1962,13 @@ impl Vm {
     }
 
     pub(crate) fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
+        let length = match callback {
+            PromiseCallback::Executor(_) => 2.0,
+            PromiseCallback::Finally { .. } => 1.0,
+            PromiseCallback::Restore { .. } => 0.0,
+        };
         Value::object(self.heap.alloc(Object::PromiseCallback {
-            object: PlainObject::new(self.heap.function_prototype),
+            object: PlainObject::callable(self.heap.function_prototype, length, "".into()),
             callback,
         }))
     }
@@ -2198,7 +2201,7 @@ impl Vm {
             direct,
             track_unreachable,
             called: false,
-            object: PlainObject::new(self.heap.function_prototype),
+            object: PlainObject::callable(self.heap.function_prototype, 1.0, "".into()),
         }));
         let reject_id = self.heap.alloc(Object::Resolution(Resolution {
             promise,
@@ -2207,7 +2210,7 @@ impl Vm {
             direct,
             track_unreachable,
             called: false,
-            object: PlainObject::new(self.heap.function_prototype),
+            object: PlainObject::callable(self.heap.function_prototype, 1.0, "".into()),
         }));
         match self.heap.get_mut(resolve_id)? {
             Object::Resolution(resolution) => resolution.pair = reject_id,

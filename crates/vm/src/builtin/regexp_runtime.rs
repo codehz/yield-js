@@ -46,6 +46,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     &[
         &[IntrinsicDef::constructor(
             REGEXP,
+            2,
             |vm, host, roots, args, _| vm.construct_regexp(host, roots, &args, None, true),
             |vm, host, roots, args, prototype| {
                 vm.construct_regexp(host, roots, &args, prototype, false)
@@ -54,6 +55,7 @@ pub(crate) const OWNER: Owner = Owner::new(
         members::INTRINSICS,
         &[IntrinsicDef::call(
             ITERATOR_NEXT,
+            0,
             |vm, host, roots, _, receiver| vm.regexp_string_iterator_next(host, roots, receiver),
         )],
     ],
@@ -87,31 +89,31 @@ mod members {
     };
 
     prototype_calls! {
-        exec => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Exec, receiver, &args);
-        test => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Test, receiver, &args);
-        toString => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, ToString, receiver, &args);
-        get source => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Source, receiver, &args);
-        get flags => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Flags, receiver, &args);
-        get global => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Global, receiver, &args);
-        get ignoreCase => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, IgnoreCase, receiver, &args);
-        get multiline => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Multiline, receiver, &args);
-        get dotAll => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, DotAll, receiver, &args);
-        get unicode => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Unicode, receiver, &args);
-        get hasIndices => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, HasIndices, receiver, &args);
-        get unicodeSets => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, UnicodeSets, receiver, &args);
-        get sticky => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Sticky, receiver, &args);
+        exec: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Exec, receiver, &args);
+        test: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Test, receiver, &args);
+        toString: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, ToString, receiver, &args);
+        get source: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Source, receiver, &args);
+        get flags: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Flags, receiver, &args);
+        get global: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Global, receiver, &args);
+        get ignoreCase: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, IgnoreCase, receiver, &args);
+        get multiline: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Multiline, receiver, &args);
+        get dotAll: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, DotAll, receiver, &args);
+        get unicode: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Unicode, receiver, &args);
+        get hasIndices: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, HasIndices, receiver, &args);
+        get unicodeSets: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, UnicodeSets, receiver, &args);
+        get sticky: 0 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Sticky, receiver, &args);
     }
 
     static_calls! {
-        escape => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Escape, receiver, &args);
+        escape: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Escape, receiver, &args);
     }
 
     prototype_calls! {
-        symbol(MATCH_SYMBOL) r#match => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Match, receiver, &args);
-        symbol(MATCH_ALL_SYMBOL) matchAll => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, MatchAll, receiver, &args);
-        symbol(REPLACE_SYMBOL) replace => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Replace, receiver, &args);
-        symbol(SEARCH_SYMBOL) search => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Search, receiver, &args);
-        symbol(SPLIT_SYMBOL) split => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Split, receiver, &args);
+        symbol(MATCH_SYMBOL) r#match: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Match, receiver, &args);
+        symbol(MATCH_ALL_SYMBOL) matchAll: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, MatchAll, receiver, &args);
+        symbol(REPLACE_SYMBOL) replace: 2 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Replace, receiver, &args);
+        symbol(SEARCH_SYMBOL) search: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Search, receiver, &args);
+        symbol(SPLIT_SYMBOL) split: 2 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Split, receiver, &args);
     }
 }
 

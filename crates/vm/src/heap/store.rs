@@ -284,7 +284,7 @@ impl Heap {
             func_id,
             env,
             home: None,
-            has_class_metadata: false,
+            dynamic_name: None,
             class: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
@@ -294,9 +294,14 @@ impl Heap {
     }
 
     pub(crate) fn alloc_intrinsic(&mut self, intrinsic: crate::intrinsic::IntrinsicId) -> ObjectId {
+        let def = intrinsic.definition();
         self.alloc(Object::Native(NativeObject::Intrinsic {
             intrinsic,
-            object: PlainObject::new(self.function_prototype),
+            object: PlainObject::callable(
+                self.function_prototype,
+                f64::from(def.length),
+                def.key.initial_name(),
+            ),
         }))
     }
 
@@ -422,11 +427,14 @@ impl Heap {
         &mut self,
         target: crate::binding::NativeTarget,
         constructable: bool,
+        length: usize,
+        name: JsString,
     ) -> ObjectId {
         if let Some(id) = self.objects.iter().find_map(|(id, object)| match object {
             Object::Native(NativeObject::Host {
                 target: current,
                 constructable: flag,
+                ..
             }) if *current == target && *flag == constructable => Some(*id),
             _ => None,
         }) {
@@ -435,6 +443,7 @@ impl Heap {
         self.alloc(Object::Native(NativeObject::Host {
             target,
             constructable,
+            object: PlainObject::callable(self.function_prototype, length as f64, name),
         }))
     }
 

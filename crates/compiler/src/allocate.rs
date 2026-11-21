@@ -90,6 +90,7 @@ pub(crate) fn allocate(
     Ok(BytecodeFunction {
         func_id: lowered.func_id,
         name: lowered.name,
+        initial_name: lowered.initial_name,
         is_async: lowered.is_async,
         is_arrow: lowered.is_arrow,
         is_method: lowered.is_method,

@@ -68,34 +68,34 @@ pub(crate) mod members {
     use super::{ActiveRoots, Host, Invocation, StringMethod, StringStatic, Value, Vm, VmError};
 
     #[methods(
-        charAt = StringMethod::CharAt,
-        charCodeAt = StringMethod::CharCodeAt,
-        codePointAt = StringMethod::CodePointAt,
-        at = StringMethod::At,
-        indexOf = StringMethod::IndexOf,
-        lastIndexOf = StringMethod::LastIndexOf,
-        includes = StringMethod::Includes,
-        startsWith = StringMethod::StartsWith,
-        endsWith = StringMethod::EndsWith,
-        slice = StringMethod::Slice,
-        substring = StringMethod::Substring,
-        toUpperCase = StringMethod::ToUpperCase,
-        toLowerCase = StringMethod::ToLowerCase,
-        trim = StringMethod::Trim,
-        trimStart = StringMethod::TrimStart,
-        trimEnd = StringMethod::TrimEnd,
-        split = StringMethod::Split,
-        concat = StringMethod::Concat,
-        repeat = StringMethod::Repeat,
-        padStart = StringMethod::PadStart,
-        padEnd = StringMethod::PadEnd,
-        replace = StringMethod::Replace,
-        replaceAll = StringMethod::ReplaceAll,
-        matchAll = StringMethod::MatchAll,
-        r#match = StringMethod::Match,
-        search = StringMethod::Search,
-        toString = StringMethod::ToString,
-        valueOf = StringMethod::ValueOf,
+        charAt: 1 = StringMethod::CharAt,
+        charCodeAt: 1 = StringMethod::CharCodeAt,
+        codePointAt: 1 = StringMethod::CodePointAt,
+        at: 1 = StringMethod::At,
+        indexOf: 1 = StringMethod::IndexOf,
+        lastIndexOf: 1 = StringMethod::LastIndexOf,
+        includes: 1 = StringMethod::Includes,
+        startsWith: 1 = StringMethod::StartsWith,
+        endsWith: 1 = StringMethod::EndsWith,
+        slice: 2 = StringMethod::Slice,
+        substring: 2 = StringMethod::Substring,
+        toUpperCase: 0 = StringMethod::ToUpperCase,
+        toLowerCase: 0 = StringMethod::ToLowerCase,
+        trim: 0 = StringMethod::Trim,
+        trimStart: 0 = StringMethod::TrimStart,
+        trimEnd: 0 = StringMethod::TrimEnd,
+        split: 2 = StringMethod::Split,
+        concat: 1 = StringMethod::Concat,
+        repeat: 1 = StringMethod::Repeat,
+        padStart: 1 = StringMethod::PadStart,
+        padEnd: 1 = StringMethod::PadEnd,
+        replace: 2 = StringMethod::Replace,
+        replaceAll: 2 = StringMethod::ReplaceAll,
+        matchAll: 1 = StringMethod::MatchAll,
+        r#match: 1 = StringMethod::Match,
+        search: 1 = StringMethod::Search,
+        toString: 0 = StringMethod::ToString,
+        valueOf: 0 = StringMethod::ValueOf,
     )]
     fn call_method(
         vm: &mut Vm,
@@ -111,9 +111,9 @@ pub(crate) mod members {
     }
 
     #[functions(
-        fromCharCode = StringStatic::FromCharCode,
-        fromCodePoint = StringStatic::FromCodePoint,
-        raw = StringStatic::Raw,
+        fromCharCode: 1 = StringStatic::FromCharCode,
+        fromCodePoint: 1 = StringStatic::FromCodePoint,
+        raw: 1 = StringStatic::Raw,
     )]
     fn call_static(
         vm: &mut Vm,
@@ -134,6 +134,7 @@ const ITERATOR_NEXT: IntrinsicKey = IntrinsicKey::new("StringIterator", Slot::Pr
 pub(crate) const STRING_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         CONSTRUCTOR,
+        1,
         |vm, host, roots, args, _| vm.call_string(host, roots, &args),
         |vm, host, roots, args, prototype| {
             let result = match vm.call_string(host, roots, &args)? {
@@ -143,10 +144,10 @@ pub(crate) const STRING_INTRINSICS: &[IntrinsicDef] = &[
             vm.with_result_prototype(result, prototype)
         },
     ),
-    IntrinsicDef::call(ITERATOR, |vm, host, roots, _, receiver| {
+    IntrinsicDef::call(ITERATOR, 0, |vm, host, roots, _, receiver| {
         vm.string_iterator(host, roots, receiver)
     }),
-    IntrinsicDef::call(ITERATOR_NEXT, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(ITERATOR_NEXT, 0, |vm, _, _, _, receiver| {
         vm.string_iterator_next(receiver)
     }),
 ];

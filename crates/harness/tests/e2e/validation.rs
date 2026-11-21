@@ -567,7 +567,7 @@ fn host_value_serde_preserves_utf16_units() {
 fn restore_rejects_previous_snapshot_format_version() {
     let mut s = Suspended::start(RUN, vec![]);
     let snapshot = s.snapshot();
-    for version in [7, 32, 37] {
+    for version in [7, 32, 37, 49] {
         let mut previous = snapshot.clone();
         previous.format_version = version;
         let error = s.restore(previous).expect_err("previous snapshot format");
@@ -575,6 +575,12 @@ fn restore_rejects_previous_snapshot_format_version() {
             matches!(error, VmError::InvalidSnapshot(message) if message.contains("unsupported snapshot format"))
         );
     }
+    let mut previous = snapshot;
+    previous.bytecode_version = 38;
+    let error = s.restore(previous).expect_err("previous bytecode version");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("bytecode version"))
+    );
 }
 
 #[test]

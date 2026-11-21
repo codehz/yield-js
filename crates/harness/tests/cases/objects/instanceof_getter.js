@@ -6,14 +6,16 @@ export function run() {
   let order = '';
   const thrown = {};
   const arrow = () => {};
-  Object.setPrototypeOf(arrow, {
+  const parent = {
     get prototype() {
       order += 'g';
       if (this !== arrow) return {};
       throw thrown;
     }
-  });
-  const bound = arrow.bind(null);
+  };
+  Object.setPrototypeOf(arrow, parent);
+  const bound = Function.prototype.bind.call(arrow, null);
+  expect(bound.bind).toBe(undefined);
   expect(1 instanceof bound).toBe(false);
   expect(order).toBe('');
 

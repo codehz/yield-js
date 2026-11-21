@@ -108,8 +108,10 @@ impl Object {
             Self::Array(o) => &mut o.extensible,
             Self::Function(o) => &mut o.extensible,
             Self::Promise(o) => &mut o.extensible,
-            Self::Native(NativeObject::Intrinsic { object, .. }) => &mut object.extensible,
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => &mut object.extensible,
+            Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -133,9 +135,10 @@ impl Object {
             Self::Array(o) => o.extensible,
             Self::Function(o) => o.extensible,
             Self::Promise(o) => o.extensible,
-            Self::Native(NativeObject::Intrinsic { object, .. }) => object.extensible,
-            // Opaque native handles have no script property storage.
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => false,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => object.extensible,
+            Self::Environment(_) | Self::ForInIterator { .. } => false,
         }
     }
 
@@ -195,10 +198,10 @@ impl Object {
             Self::Array(o) => (&o.props, &o.symbol_props),
             Self::Function(o) => (&o.props, &o.symbol_props),
             Self::Promise(o) => (&o.props, &o.symbol_props),
-            Self::Native(NativeObject::Intrinsic { object, .. }) => {
-                (&object.props, &object.symbol_props)
-            }
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => (&object.props, &object.symbol_props),
+            Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -222,10 +225,10 @@ impl Object {
             Self::Array(o) => (&mut o.props, &mut o.symbol_props),
             Self::Function(o) => (&mut o.props, &mut o.symbol_props),
             Self::Promise(o) => (&mut o.props, &mut o.symbol_props),
-            Self::Native(NativeObject::Intrinsic { object, .. }) => {
-                (&mut object.props, &mut object.symbol_props)
-            }
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => (&mut object.props, &mut object.symbol_props),
+            Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 
@@ -360,11 +363,13 @@ impl Object {
             Self::Array(array) => array.prototype,
             Self::Function(function) => function.prototype,
             Self::Promise(promise) => promise.prototype,
-            Self::Native(NativeObject::Intrinsic { object, .. }) => object.prototype,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => object.prototype,
             Self::Bound(bound) => bound.object.prototype,
             Self::Resolution(resolution) => resolution.object.prototype,
             Self::PromiseCallback { object, .. } => object.prototype,
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => None,
+            Self::Environment(_) | Self::ForInIterator { .. } => None,
         }
     }
 
@@ -388,8 +393,10 @@ impl Object {
             Self::Array(o) => &mut o.prototype,
             Self::Function(o) => &mut o.prototype,
             Self::Promise(o) => &mut o.prototype,
-            Self::Native(NativeObject::Intrinsic { object, .. }) => &mut object.prototype,
-            Self::Native(_) | Self::Environment(_) | Self::ForInIterator { .. } => return None,
+            Self::Native(
+                NativeObject::Intrinsic { object, .. } | NativeObject::Host { object, .. },
+            ) => &mut object.prototype,
+            Self::Environment(_) | Self::ForInIterator { .. } => return None,
         })
     }
 

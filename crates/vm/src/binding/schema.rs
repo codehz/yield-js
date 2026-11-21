@@ -439,6 +439,12 @@ pub struct AccessorCall {
     signature: CallSignature,
 }
 
+impl AccessorCall {
+    pub(crate) fn arity(self) -> usize {
+        self.signature.args.len()
+    }
+}
+
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
 /// hidden typed slots, and an optional non-JS payload.
 pub trait HostClass: Sized + 'static {

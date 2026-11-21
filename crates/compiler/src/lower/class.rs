@@ -61,7 +61,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             )
         })?;
         let (binding, _) = self.declare(id.name.as_str(), VariableDeclarationKind::Let, id.span)?;
-        let value = self.compile_class(class, "")?;
+        let value = self.compile_class(class, "", None)?;
         self.emit(Instr::SetBinding {
             binding,
             src: self.slot(value),
@@ -74,6 +74,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         class: &'ast Class<'ast>,
         inferred_name: &str,
+        name_key: Option<Reg>,
     ) -> Result<Reg, CompileError> {
         if let Some(decorator) = class.decorators.first() {
             return Err(unsupported(
@@ -219,7 +220,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             })
         });
         let depth = self.private_scopes.len();
-        let result = self.emit_class(class, name, constructor, inner, private_scope);
+        let result = self.emit_class(class, (name, name_key), constructor, inner, private_scope);
         for scope in self.private_scopes.drain(depth..) {
             self.class_bindings.remove(&scope.brand);
         }
@@ -234,7 +235,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     fn emit_class(
         &mut self,
         class: &'ast Class<'ast>,
-        name: &str,
+        (name, name_key): (&str, Option<Reg>),
         constructor: FunctionSource<'ast>,
         inner: Option<BindingId>,
         private_scope: Option<Rc<PrivateScope<'ast>>>,
@@ -251,7 +252,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             self.private_scopes.push(Rc::clone(scope));
         }
         let default_constructor = matches!(constructor, FunctionSource::DefaultConstructor(_));
-        let constructor = self.enqueue_function(constructor, name, constructor.span())?;
+        let constructor =
+            self.enqueue_named_function(constructor, name, name.to_owned(), constructor.span())?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::CreateClass {
             dst: self.slot(dst),
@@ -259,6 +261,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             constructor,
             default_constructor,
             heritage: heritage.map(|reg| self.slot(reg)),
+            name_key: name_key.map(|reg| self.slot(reg)),
             private_count: private_scope
                 .as_ref()
                 .map_or(0, |scope| scope.names.len() as u32),
@@ -279,9 +282,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         PropertyKey::PrivateIdentifier(_) => None,
                         key => Some(self.compile_property_key(key, field.computed)?),
                     };
+                    let name_from_key =
+                        field.computed || self.static_key_name(&field.key)?.is_none();
                     let initializer = if let Some(value) = &field.value {
                         let function = self.enqueue_function(
-                            FunctionSource::ClassField(value),
+                            FunctionSource::ClassField(value, &field.key, name_from_key),
                             "<class field>",
                             value.span(),
                         )?;
@@ -333,18 +338,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 PropertyKey::PrivateIdentifier(_) => None,
                 key => Some(self.compile_property_key(key, method.computed)?),
             };
-            let mut buffer = ryu_js::Buffer::new();
-            let name = match &method.key {
-                PropertyKey::PrivateIdentifier(id) => Some(format!("#{}", id.name).into()),
-                PropertyKey::NumericLiteral(literal) => Some(buffer.format(literal.value).into()),
-                key => key.static_name().and_then(|name| name.into_cow_str()),
+            let name = self.static_key_name(&method.key)?;
+            let name_from_key = method.computed || name.is_none();
+            let initial_name = if name_from_key {
+                String::new()
+            } else {
+                format!("{prefix}{}", name.as_deref().unwrap_or(""))
             };
-            let function = self.enqueue_function(
+            let function = self.enqueue_named_function(
                 FunctionSource::Method(&method.value),
                 format_args!("{prefix}{}", name.as_deref().unwrap_or("")),
+                initial_name,
                 method.value.span,
             )?;
             let src = self.emit_function_value(function)?;
+            if name_from_key {
+                self.emit_function_name(src, key.expect("computed key"), kind);
+            }
             if let Some(key) = key {
                 self.emit(Instr::DefineClassMethod {
                     class: self.slot(dst),

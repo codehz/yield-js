@@ -14,7 +14,7 @@ use crate::builtin::string;
 use crate::builtin::{error_family, queue_family, symbol_family};
 use crate::error::VmError;
 use crate::exec;
-use crate::heap::{Attributes, HAS_INSTANCE_SYMBOL};
+use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{PropertyKey, Value};
 use crate::vm::Vm;
@@ -58,9 +58,10 @@ macro_rules! builtin_globals {
 
 // Foundational roots and non-global functions are not bytecode globals.
 const ITERATOR_IDENTITY: IntrinsicKey =
-    IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "identity");
+    IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "iterator");
 const ITERATOR_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
     ITERATOR_IDENTITY,
+    0,
     |_, _, _, _, receiver| Ok(crate::runtime::Invocation::Value(receiver.clone())),
 )];
 const GLOBAL_THIS: &str = "globalThis";
@@ -99,6 +100,7 @@ builtin_globals! {
     GLOBAL_THIS => Global::Owner(Owner::new(GLOBAL_THIS, GLOBAL_THIS_ROOTS, &[], None)),
     "RegExp" => Global::Owner(regexp::OWNER),
     "WeakSet" => Global::Owner(collections::WEAK_SET_OWNER),
+    "Function" => Global::Owner(Owner::new("function", &[], &[], None)),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -142,16 +144,44 @@ impl Vm {
     pub(crate) fn init_builtins(&mut self) {
         self.allocate_builtin_roots();
         let function_prototype = self.builtins.get("function.prototype");
-        let to_string =
-            self.alloc_intrinsic(IntrinsicKey::new("Function", Slot::Prototype, "toString"));
-        self.heap
-            .define_data(
+        super::link_constructor(self, self.builtins.get("function"), function_prototype);
+        for key in exec::FUNCTION_METHODS {
+            let method = self.alloc_intrinsic(key);
+            super::define_builtin_data(
+                self,
                 function_prototype,
-                "toString",
-                Value::object(to_string),
+                key.member,
+                Value::object(method),
                 Attributes::METHOD,
-            )
-            .expect("Function.prototype stores toString");
+            );
+        }
+        let poison = self.alloc_intrinsic(exec::THROW_TYPE_ERROR);
+        for (key, value) in [
+            ("length", Value::number(0.0)),
+            ("name", Value::string("".into())),
+        ] {
+            super::define_builtin_data(self, poison, key, value, Attributes::FIXED);
+        }
+        self.heap
+            .get_mut(poison)
+            .expect("poison function")
+            .prevent_extensions();
+        for key in ["caller", "arguments"] {
+            assert!(
+                self.heap
+                    .apply_descriptor(
+                        function_prototype,
+                        key.into(),
+                        DescriptorUpdate {
+                            get: Some(Some(poison)),
+                            set: Some(Some(poison)),
+                            configurable: Some(true),
+                            ..Default::default()
+                        }
+                    )
+                    .expect("restricted function accessor")
+            );
+        }
         let has_instance = self.alloc_intrinsic(exec::FUNCTION_HAS_INSTANCE);
         super::define_builtin_data(
             self,

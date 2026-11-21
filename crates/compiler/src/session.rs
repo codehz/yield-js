@@ -182,6 +182,7 @@ impl<'src> Session<'src> {
                     self.push_function(BytecodeFunction {
                         func_id,
                         name: format!("\0preload_getter@{func_id}"),
+                        initial_name: String::new(),
                         is_async: false,
                         is_arrow: false,
                         is_method: true,

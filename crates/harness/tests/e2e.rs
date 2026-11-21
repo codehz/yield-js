@@ -77,6 +77,22 @@ fn build_round_trips_special_numbers() {
 }
 
 #[test]
+fn callable_initial_names_participate_in_build_identity() {
+    let mut build = yield_harness::build("export function run() { return 0; }");
+    let id = build.build_id.clone();
+    let function = build
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    function.initial_name = "different".into();
+    assert_ne!(build.compute_id(), id);
+    build.bytecode_version = 38;
+    build.finalize();
+    assert!(build.validate().unwrap_err().contains("bytecode version"));
+}
+
+#[test]
 fn non_finite_operation_completions_survive_restore() {
     use yield_harness::{TestHost, build};
     use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm};

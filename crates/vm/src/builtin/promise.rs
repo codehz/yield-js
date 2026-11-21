@@ -18,6 +18,7 @@ pub(crate) mod members {
     ];
     const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
         CONSTRUCTOR,
+        1,
         |vm, _, _, _, _| vm.throw_type_error("Promise constructor requires new"),
         |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
     )];
@@ -44,10 +45,10 @@ pub(crate) mod members {
     }
 
     static_calls! {
-        get symbol(SPECIES_SYMBOL) species => |_, _, _, _, receiver| {
+        get symbol(SPECIES_SYMBOL) species: 0 => |_, _, _, _, receiver| {
             Ok(Invocation::Value(receiver.clone()))
         };
-        resolve | reject | all | allSettled | race | any as key => |vm, host, roots, args, receiver| {
+        resolve: 1 | reject: 1 | all: 1 | allSettled: 1 | race: 1 | any: 1 as key => |vm, host, roots, args, receiver| {
             if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(ROOT)) {
                 return vm.throw_type_error("incompatible Promise receiver");
             }
@@ -56,7 +57,7 @@ pub(crate) mod members {
     }
 
     prototype_calls! {
-        then | catch | finally as key => |vm, host, roots, args, receiver| {
+        then: 2 | catch: 1 | finally: 1 as key => |vm, host, roots, args, receiver| {
             let ValueRef::Object(id) = receiver.view() else {
                 return vm.throw_type_error("incompatible Promise receiver");
             };

@@ -44,6 +44,7 @@ pub(crate) fn lower_program<'ast>(
             source: FunctionSource::Script(&program.body),
             func_id: initializer,
             name: name.to_owned(),
+            initial_name: String::new(),
             outer: CapturedEnv::default(),
             class_bindings: BTreeSet::new(),
             private_scopes: Vec::new(),
@@ -76,7 +77,7 @@ enum FunctionSource<'ast> {
     DerivedConstructor(&'ast Function<'ast>),
     Arrow(&'ast ArrowFunctionExpression<'ast>),
     DefaultConstructor(Span),
-    ClassField(&'ast Expression<'ast>),
+    ClassField(&'ast Expression<'ast>, &'ast PropertyKey<'ast>, bool),
     ClassBlock(&'ast StaticBlock<'ast>),
 }
 
@@ -89,7 +90,7 @@ impl FunctionSource<'_> {
             | Self::DerivedConstructor(function) => function.span,
             Self::Arrow(arrow) => arrow.span,
             Self::DefaultConstructor(span) => span,
-            Self::ClassField(expression) => expression.span(),
+            Self::ClassField(expression, ..) => expression.span(),
             Self::ClassBlock(block) => block.span,
             Self::Script(statements) => statements
                 .first()
@@ -107,7 +108,7 @@ impl FunctionSource<'_> {
             Self::Arrow(arrow) => arrow.r#async,
             Self::Script(_)
             | Self::DefaultConstructor(_)
-            | Self::ClassField(_)
+            | Self::ClassField(..)
             | Self::ClassBlock(_) => false,
         }
     }
@@ -121,6 +122,7 @@ struct Task<'ast> {
     source: FunctionSource<'ast>,
     func_id: u32,
     name: String,
+    initial_name: String,
     outer: CapturedEnv,
     class_bindings: BTreeSet<BindingId>,
     private_scopes: Vec<std::rc::Rc<class::PrivateScope<'ast>>>,
@@ -132,6 +134,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     tasks: &'borrow mut VecDeque<Task<'ast>>,
     func_id: u32,
     name: String,
+    initial_name: String,
     source: FunctionSource<'ast>,
     span: Span,
     is_async: bool,
@@ -182,6 +185,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             tasks,
             func_id: task.func_id,
             name: task.name,
+            initial_name: task.initial_name,
             source: task.source,
             span,
             is_async,
@@ -189,7 +193,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             is_method: matches!(
                 task.source,
                 FunctionSource::Method(_)
-                    | FunctionSource::ClassField(_)
+                    | FunctionSource::ClassField(..)
                     | FunctionSource::ClassBlock(_)
             ),
             is_script: matches!(task.source, FunctionSource::Script(_)),
@@ -219,7 +223,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let length = self.compile_parameters(source)?;
         match source {
             FunctionSource::DefaultConstructor(_) => self.emit_implicit_return()?,
-            FunctionSource::ClassField(_) | FunctionSource::ClassBlock(_)
+            FunctionSource::ClassField(..) | FunctionSource::ClassBlock(_)
                 if function_uses_arguments(source) =>
             {
                 return Err(unsupported(
@@ -228,8 +232,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     "arguments in a class initializer",
                 ));
             }
-            FunctionSource::ClassField(expression) => {
-                let value = self.compile_expression(expression)?;
+            FunctionSource::ClassField(expression, key, name_from_key) => {
+                let (name, key) = if name_from_key {
+                    // The initializer receives the already-converted field key.
+                    let binding = self.alloc_binding();
+                    self.param_bindings.push(binding);
+                    let key = self.alloc_reg()?;
+                    self.emit_binding_read(key, binding);
+                    (String::new(), Some(key))
+                } else {
+                    (self.static_key_name(key)?.expect("static field name"), None)
+                };
+                let value = self.compile_named_expression_with_key(expression, &name, key)?;
                 self.emit(Instr::Return {
                     src: self.slot(value),
                 });
@@ -304,6 +318,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(LoweredFunction {
             func_id: self.func_id,
             name: self.name.clone(),
+            initial_name: std::mem::take(&mut self.initial_name),
             is_async: self.is_async,
             is_arrow: self.is_arrow,
             is_method: self.is_method,
@@ -344,7 +359,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     scan.visit_function_body(body);
                 }
             }
-            FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+            FunctionSource::ClassField(expression, ..) => scan.visit_expression(expression),
             FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
             _ => return,
         }
@@ -367,7 +382,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     scan.visit_function_body(body);
                 }
             }
-            FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+            FunctionSource::ClassField(expression, ..) => scan.visit_expression(expression),
             FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
             _ => return,
         }
@@ -393,7 +408,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             FunctionSource::Arrow(arrow) => self.compile_parameter_list(&arrow.params),
             FunctionSource::Script(_)
             | FunctionSource::DefaultConstructor(_)
-            | FunctionSource::ClassField(_)
+            | FunctionSource::ClassField(..)
             | FunctionSource::ClassBlock(_) => Ok(0),
         }
     }
@@ -459,7 +474,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     binding,
                 });
                 let value = if let Some(initializer) = &parameter.initializer {
-                    self.compile_pattern_default(value, initializer)?
+                    let name = match &parameter.pattern {
+                        BindingPattern::BindingIdentifier(id) => id.name.as_str(),
+                        _ => "",
+                    };
+                    self.compile_pattern_default(value, initializer, name)?
                 } else {
                     value
                 };
@@ -610,11 +629,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         hint: impl std::fmt::Display,
         span: Span,
     ) -> Result<u32, CompileError> {
+        let initial_name = match source {
+            FunctionSource::Function(function) => function
+                .id
+                .as_ref()
+                .map_or_else(String::new, |id| id.name.as_str().to_owned()),
+            _ => String::new(),
+        };
+        self.enqueue_named_function(source, hint, initial_name, span)
+    }
+
+    pub(super) fn enqueue_named_function(
+        &mut self,
+        source: FunctionSource<'ast>,
+        hint: impl std::fmt::Display,
+        initial_name: String,
+        span: Span,
+    ) -> Result<u32, CompileError> {
         let func_id = self.session.alloc_func_id(span)?;
         self.tasks.push_back(Task {
             source,
             func_id,
             name: format!("{hint}@{func_id}"),
+            initial_name,
             outer: self.capture_for(source),
             class_bindings: self.class_bindings.clone(),
             private_scopes: self.private_scopes.clone(),
@@ -678,6 +715,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             } else {
                 format!("{name}@{func_id}")
             },
+            initial_name: name.to_owned(),
             outer: self.capture_for(FunctionSource::Function(function)),
             class_bindings: self.class_bindings.clone(),
             private_scopes: self.private_scopes.clone(),
@@ -1200,7 +1238,7 @@ fn function_uses_this(source: FunctionSource<'_>) -> bool {
                 scan.visit_function_body(body);
             }
         }
-        FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+        FunctionSource::ClassField(expression, ..) => scan.visit_expression(expression),
         FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
         _ => {}
     }
@@ -1232,7 +1270,7 @@ fn function_uses_arguments(source: FunctionSource<'_>) -> bool {
                 scan.visit_function_body(body);
             }
         }
-        FunctionSource::ClassField(expression) => scan.visit_expression(expression),
+        FunctionSource::ClassField(expression, ..) => scan.visit_expression(expression),
         FunctionSource::ClassBlock(block) => scan.visit_statements(&block.body),
         _ => {}
     }

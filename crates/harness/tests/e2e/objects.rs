@@ -49,13 +49,19 @@ export async function run() {
 "#;
     let mut suspended = Suspended::start(source, vec![]);
     let snapshot = suspended.snapshot();
+    let build = yield_harness::build(source);
+    let method = build
+        .functions
+        .iter()
+        .find(|code| code.is_method && code.home_param.is_some())
+        .expect("method using super");
     let mut corrupt = serde_json::to_value(&snapshot).expect("serialize snapshot");
     let records = corrupt["objects"].as_array_mut().expect("object records");
     let record = records
         .iter_mut()
         .find_map(|record| {
             let function = record.get_mut("object")?.get_mut("function")?;
-            (function["has_class_metadata"] == true && function["home"].is_number())
+            (function["func_id"] == method.func_id && function["home"].is_number())
                 .then_some(function)
         })
         .expect("class method record");
