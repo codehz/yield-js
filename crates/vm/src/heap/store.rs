@@ -1,7 +1,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::object::{OwnedEdge, push_state, push_value};
+use super::object::{OwnedEdge, push_value};
 use super::types::{
     ArrayObject, Attributes, CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject,
     HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION,
@@ -185,16 +185,8 @@ impl Heap {
     ) -> Result<(), VmError> {
         self.get(id)?.write_edges(out);
         if let Some(state) = self.combines.get(&id) {
-            for element in &state.elements {
-                out.push(OwnedEdge::Object(*element));
-            }
+            push_value(out, &state.capability);
             for value in &state.results {
-                push_value(out, value);
-            }
-            for recorded in &state.states {
-                push_state(out, recorded);
-            }
-            if let Some(value) = &state.first {
                 push_value(out, value);
             }
         }

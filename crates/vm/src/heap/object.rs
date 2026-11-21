@@ -1,8 +1,8 @@
 use super::store::lookup_tables;
 use super::types::{
-    BoundObject, BoxedPrimitive, CombineKind, EnvironmentObject, FunctionObject, IntegrityLevel,
-    NativeObject, Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property,
-    PropertyTables, PropertyTablesMut, Resolution, array_index, collect_own_keys,
+    BoundObject, BoxedPrimitive, EnvironmentObject, FunctionObject, IntegrityLevel, NativeObject,
+    Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables,
+    PropertyTablesMut, Resolution, array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -40,7 +40,7 @@ pub(crate) fn string_own_property(
 }
 
 /// One waiter on a promise. `Await` is the original continuation reaction.
-/// The other variants are script handlers, adoption, and combinators.
+/// The other variants are script handlers and adoption.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReactionJob {
@@ -55,11 +55,6 @@ pub enum ReactionJob {
     /// Copy the source settlement onto `result`; `result.adopting` points back here.
     Adopt {
         result: ObjectId,
-    },
-    Combine {
-        result: ObjectId,
-        index: usize,
-        kind: CombineKind,
     },
 }
 
@@ -453,6 +448,9 @@ impl Object {
                     push_value(out, species);
                 }
                 PromiseCallback::Restore { value, .. } => push_value(out, value),
+                PromiseCallback::CombineElement { state, .. } => {
+                    out.push(OwnedEdge::Object(*state))
+                }
                 PromiseCallback::Executor(None) => {}
             },
             Self::Resolution(resolution) => {
@@ -577,12 +575,6 @@ pub(crate) fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
     }
 }
 
-pub(super) fn push_state(out: &mut Vec<OwnedEdge>, state: &PromiseState) {
-    if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) = state {
-        push_value(out, value);
-    }
-}
-
 impl ReactionJob {
     pub(crate) fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
         match self {
@@ -602,7 +594,7 @@ impl ReactionJob {
                     push_value(out, value);
                 }
             }
-            Self::Adopt { result } | Self::Combine { result, .. } => {
+            Self::Adopt { result } => {
                 out.push(OwnedEdge::Object(*result));
             }
         }

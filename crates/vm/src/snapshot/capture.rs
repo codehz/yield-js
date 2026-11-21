@@ -7,13 +7,13 @@ use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
 use crate::heap::{
-    EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
-    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
-    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object, OwnProperty,
-    OwnedEdge, PrivateElement, PrivateMemberKind, PromiseState, Property, REPLACE_DESCRIPTION,
-    REPLACE_SYMBOL, ReactionJob, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION,
-    SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
-    WeakKey,
+    CombineKind, EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap,
+    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
+    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
+    NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind,
+    PromiseCallback, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
+    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
+    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, WeakKey,
 };
 use crate::host::Host;
 use crate::regexp::compile_pattern;
@@ -1545,7 +1545,7 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                                 }
                             }
                         }
-                        ReactionJob::Adopt { result } | ReactionJob::Combine { result, .. } => {
+                        ReactionJob::Adopt { result } => {
                             require_promise(heap, *result, &format!("Promise {id} reaction"))?;
                         }
                     }
@@ -1597,33 +1597,65 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
 
 fn validate_combines(heap: &Heap) -> Result<(), VmError> {
     for (id, state) in &heap.combines {
-        let promise = heap.promise(*id).map_err(|_| {
-            VmError::InvalidSnapshot(format!("combine key {id} is not a pending Promise"))
-        })?;
-        if !matches!(promise.state, PromiseState::Pending) {
+        if !matches!(heap.get(*id), Ok(Object::Plain(_))) {
             return Err(VmError::InvalidSnapshot(format!(
-                "combine key {id} is not a pending Promise"
+                "combine key {id} is not a plain object"
             )));
         }
-        if state.remaining > state.count
-            || state.results.len() != state.count
-            || state.elements.len() != state.count
+        if state.kind == CombineKind::Race {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine {id} has invalid Race kind"
+            )));
+        }
+        if !matches!(state.capability.view(), ValueRef::Object(target) if heap.get(target).is_ok_and(is_callable_object))
         {
             return Err(VmError::InvalidSnapshot(format!(
-                "combine {id} has inconsistent remaining/count/results"
+                "combine {id} capability is not callable"
             )));
         }
-        let states_ok = match state.kind {
-            crate::heap::CombineKind::AllSettled => state.states.len() == state.count,
-            _ => state.states.is_empty(),
-        };
-        if !states_ok {
+        let uncalled = state.called.iter().filter(|&&called| !called).count();
+        // An abrupt iteration leaves the sentinel in place after suspension.
+        if state.results.len() != state.called.len()
+            || !matches!(state.remaining.checked_sub(uncalled), Some(0 | 1))
+        {
             return Err(VmError::InvalidSnapshot(format!(
-                "combine {id} has inconsistent state records"
+                "combine {id} has inconsistent results, called flags, or remaining count"
             )));
         }
-        for element in &state.elements {
-            require_promise(heap, *element, &format!("combine {id} element"))?;
+    }
+    for (id, object) in heap.iter() {
+        let Object::PromiseCallback {
+            callback:
+                PromiseCallback::CombineElement {
+                    state,
+                    index,
+                    rejected,
+                },
+            ..
+        } = object
+        else {
+            continue;
+        };
+        let combine = heap.combines.get(state).ok_or_else(|| {
+            VmError::InvalidSnapshot(format!(
+                "combine element callback {id} has missing state {state}"
+            ))
+        })?;
+        if *index >= combine.called.len() {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine element callback {id} index {index} is out of bounds for state {state}"
+            )));
+        }
+        let direction_ok = match combine.kind {
+            CombineKind::All => !*rejected,
+            CombineKind::AllSettled => true,
+            CombineKind::Any => *rejected,
+            CombineKind::Race => false,
+        };
+        if !direction_ok {
+            return Err(VmError::InvalidSnapshot(format!(
+                "combine element callback {id} has invalid direction for state {state}"
+            )));
         }
     }
     Ok(())

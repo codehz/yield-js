@@ -1002,12 +1002,6 @@ impl Vm {
                     result,
                     ref settlement,
                 } => self.run_adopt(host, roots, result, settlement)?,
-                Microtask::Combine {
-                    result,
-                    index,
-                    kind,
-                    settlement,
-                } => self.run_combine(result, index, kind, settlement)?,
                 Microtask::Call {
                     ref function,
                     ref args,
@@ -1265,18 +1259,6 @@ impl Vm {
             ReactionJob::Adopt { result } => {
                 self.microtasks
                     .push_back(Microtask::Adopt { result, settlement });
-            }
-            ReactionJob::Combine {
-                result,
-                index,
-                kind,
-            } => {
-                self.microtasks.push_back(Microtask::Combine {
-                    result,
-                    index,
-                    kind,
-                    settlement,
-                });
             }
         }
         Ok(())

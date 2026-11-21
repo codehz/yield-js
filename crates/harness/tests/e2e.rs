@@ -4,20 +4,20 @@ mod suite;
 use yield_vm::ValueRef;
 
 #[test]
-fn restore_rejects_the_previous_array_iterator_format() {
+fn restore_rejects_the_previous_snapshot_format() {
     use yield_harness::{TestHost, build};
-    use yield_vm::{Vm, VmError};
+    use yield_vm::{SNAPSHOT_FORMAT_VERSION, Vm, VmError};
 
     let build = build("export function run() { return [1].entries(); }");
     let mut host = TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host).unwrap();
     let cursor = vm.start(&mut host, "run", vec![]).unwrap();
     let mut snapshot = vm.snapshot(&[cursor]).unwrap();
-    assert_eq!(snapshot.format_version, 51);
+    assert_eq!(snapshot.format_version, SNAPSHOT_FORMAT_VERSION);
     snapshot.format_version -= 1;
     assert!(matches!(
         Vm::restore(snapshot, build, &mut host),
-        Err(VmError::InvalidSnapshot(message)) if message.contains("unsupported snapshot format 50")
+        Err(VmError::InvalidSnapshot(message)) if message.contains(&format!("unsupported snapshot format {}", SNAPSHOT_FORMAT_VERSION - 1))
     ));
 }
 

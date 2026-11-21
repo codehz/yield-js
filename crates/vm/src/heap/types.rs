@@ -54,18 +54,14 @@ pub enum CombineKind {
     Any,
 }
 
-/// In-progress `Promise.all` / `allSettled` / `race` / `any`. Keyed by the
-/// result promise. `elements` keeps each slot promise reachable from that
-/// result so a snapshot does not drop a still-pending input.
+/// Shared element state keyed by an internal object, not the constructor result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CombineState {
     pub kind: CombineKind,
-    pub count: usize,
     pub remaining: usize,
     pub results: Vec<Value>,
-    pub states: Vec<PromiseState>,
-    pub first: Option<Value>,
-    pub elements: Vec<ObjectId>,
+    pub called: Vec<bool>,
+    pub capability: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -725,8 +721,6 @@ pub struct Resolution {
     pub promise: ObjectId,
     pub pair: ObjectId,
     pub resolve: bool,
-    /// Combinator element callbacks fulfill without assimilating their argument.
-    pub direct: bool,
     /// Only pre-existing executor/thenable capabilities need the orphan guard.
     pub track_unreachable: bool,
     pub called: bool,
@@ -1142,6 +1136,11 @@ pub enum PromiseCallback {
     },
     Restore {
         value: Value,
+        rejected: bool,
+    },
+    CombineElement {
+        state: ObjectId,
+        index: usize,
         rejected: bool,
     },
 }

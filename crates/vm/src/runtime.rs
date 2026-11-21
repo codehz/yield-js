@@ -6,7 +6,7 @@ use std::any::Any;
 use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
 use crate::error::VmError;
 use crate::gc::{TraceRoots, Tracer};
-use crate::heap::{CombineKind, PromiseState};
+use crate::heap::PromiseState;
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 
@@ -203,14 +203,7 @@ pub(crate) enum Microtask {
         result: ObjectId,
         settlement: Settlement,
     },
-    Combine {
-        result: ObjectId,
-        index: usize,
-        kind: CombineKind,
-        settlement: Settlement,
-    },
-    /// `queueMicrotask`. A throw has no result promise and is not reported:
-    /// this slice does not track unhandled rejections.
+    /// `queueMicrotask`. A throw is reported separately from Promise rejections.
     Call {
         function: Value,
         args: Vec<Value>,
@@ -248,13 +241,7 @@ impl TraceRoots for Microtask {
                 then,
             } => (result, receiver, then).trace(tracer),
             Self::BeginAdopt { result, source } => (result, source).trace(tracer),
-            Self::Adopt { result, settlement }
-            | Self::Combine {
-                result,
-                index: _,
-                kind: _,
-                settlement,
-            } => (result, settlement).trace(tracer),
+            Self::Adopt { result, settlement } => (result, settlement).trace(tracer),
             Self::Call { function, args } => (function, args).trace(tracer),
         }
     }

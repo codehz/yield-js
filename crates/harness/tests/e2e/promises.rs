@@ -1,7 +1,8 @@
 //! Promise reactions and combination state survive suspension and restore.
 
-use super::support::{RUN, Suspended, baseline_at_first_await, count_delta};
+use super::support::{RUN, Suspended};
 use yield_harness::{TestHost, build};
+use yield_vm::heap::PromiseCallback;
 use yield_vm::{Completion, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]
@@ -98,26 +99,70 @@ export async function run() {
     assert!(matches!(error, VmError::InvalidSnapshot(_)));
 }
 
-#[test]
-fn promise_all_combine_state_survives_a_partial_fulfill() {
-    let source = r#"
+const CUSTOM_ALL: &str = r#"
 import { wait } from "test";
+function Custom(executor) {
+  return new Promise(function (resolve, reject) {
+    executor(function (values) {
+      resolve(values[0] + 10 * values[1]);
+    }, reject);
+  });
+}
+Custom.resolve = function (value) { return value; };
 export async function run() {
-  const values = await Promise.all([wait("a"), wait("b")]);
-  return values[0] + values[1];
+  return await Promise.all.call(Custom, [wait("a"), wait("b")]);
 }
 "#;
-    let mut s = Suspended::start(source, vec![]);
+
+#[test]
+fn promise_all_combine_state_survives_a_partial_fulfill() {
+    let mut s = Suspended::start(CUSTOM_ALL, vec![]);
     s.complete("wait:a", Completion::Fulfilled(JsValue::number(2.0)));
+    s.vm.collect_garbage(&[]).expect("collect while suspended");
     let snapshot = s.snapshot();
-    assert_eq!(
-        count_delta(
-            snapshot.combines.len(),
-            baseline_at_first_await().combines.len()
-        ),
-        1
-    );
+    assert_eq!(snapshot.combines.len(), 1);
+    let state = snapshot.combines.values().next().expect("combine state");
+    assert_eq!(state.called.as_slice(), &[true, false]);
+    assert_eq!(state.remaining, 1);
     s.restore(snapshot).expect("restore");
     s.complete("wait:b", Completion::Fulfilled(JsValue::number(3.0)));
-    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(5.0)));
+    assert_eq!(s.state(), PromiseState::Fulfilled(Value::number(32.0)));
+}
+
+#[test]
+fn restore_rejects_a_combine_element_index_out_of_bounds() {
+    let mut s = Suspended::start(CUSTOM_ALL, vec![]);
+    let mut snapshot = s.snapshot();
+    let index = snapshot
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::PromiseCallback {
+                callback: PromiseCallback::CombineElement { index, .. },
+                ..
+            } => Some(index),
+            _ => None,
+        })
+        .expect("combine element callback");
+    *index = 2;
+    let error = s
+        .restore(snapshot)
+        .expect_err("out-of-bounds element index");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("index 2 is out of bounds"))
+    );
+}
+
+#[test]
+fn restore_rejects_a_non_callable_combine_capability() {
+    let mut s = Suspended::start(CUSTOM_ALL, vec![]);
+    let mut snapshot = s.snapshot();
+    let (id, state) = snapshot.combines.iter_mut().next().expect("combine state");
+    state.capability = Value::object(*id);
+    let error = s
+        .restore(snapshot)
+        .expect_err("non-callable combine capability");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("capability is not callable"))
+    );
 }

@@ -2037,7 +2037,7 @@ impl Vm {
     ) -> Result<Result<(Value, Value, Value), Value>, VmError> {
         if species.view() == ValueRef::Object(self.builtins.get("promise")) {
             let result = self.heap.alloc_promise();
-            let (resolve, reject) = self.alloc_resolution_pair(result, false, false)?;
+            let (resolve, reject) = self.alloc_resolution_pair(result, false)?;
             return Ok(Ok((
                 Value::object(result),
                 Value::object(resolve),
@@ -2069,7 +2069,7 @@ impl Vm {
     pub(crate) fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
         let length = match callback {
             PromiseCallback::Executor(_) => 2.0,
-            PromiseCallback::Finally { .. } => 1.0,
+            PromiseCallback::Finally { .. } | PromiseCallback::CombineElement { .. } => 1.0,
             PromiseCallback::Restore { .. } => 0.0,
         };
         Value::object(self.heap.alloc(Object::PromiseCallback {
@@ -2106,6 +2106,14 @@ impl Vm {
             } else {
                 Invocation::Value(value.clone())
             }),
+            PromiseCallback::CombineElement {
+                state,
+                index,
+                rejected,
+            } => {
+                let (state, index, rejected) = (*state, *index, *rejected);
+                self.call_combine_element(host, roots, state, index, rejected, argument)
+            }
             PromiseCallback::Finally {
                 handler,
                 species,
@@ -2193,129 +2201,131 @@ impl Vm {
         let root_view = (&args, receiver);
         let roots = &roots.with(&root_view);
         let iterable = args.first().unwrap_or(&UNDEFINED_VALUE);
-        let result = self.heap.alloc_promise();
-        let roots = &roots.with(&result);
-        let resolve =
+        let (result, resolve, reject) = match self.new_promise_capability(host, roots, receiver)? {
+            Ok(capability) => capability,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let capability_roots = (&result, &resolve, &reject);
+        let roots = &roots.with(&capability_roots);
+        let reject_result = |vm: &mut Self, host: &mut dyn Host, roots: &ActiveRoots<'_>, error| {
+            vm.call_promise_capability(host, roots, result.clone(), &reject, error)
+        };
+        let input_resolve =
             match self.read_property(host, roots, receiver, PropertyKeyRef::String("resolve"))? {
                 Invocation::Value(resolve) if self.is_callable(&resolve) => resolve,
-                invocation => {
-                    let reason = match invocation {
-                        Invocation::Thrown(reason) => reason,
-                        Invocation::Value(_) => {
-                            self.type_error("Promise.resolve is not callable")?
-                        }
-                    };
-                    self.settle(result, Settlement::Rejected(reason))?;
-                    return Ok(Invocation::Value(Value::object(result)));
+                Invocation::Value(_) => {
+                    let error = self.type_error("Promise.resolve is not callable")?;
+                    return reject_result(self, host, roots, error);
                 }
+                Invocation::Thrown(error) => return reject_result(self, host, roots, error),
             };
-        let roots = &roots.with(&resolve);
+        let roots = &roots.with(&input_resolve);
         let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
             Ok(record) => record,
-            Err(error) => {
-                self.settle(result, Settlement::Rejected(error))?;
-                return Ok(Invocation::Value(Value::object(result)));
-            }
+            Err(error) => return reject_result(self, host, roots, error),
         };
-        let root_view = (&iterator, &next);
-        let roots = &roots.with(&root_view);
-        let mut state = CombineState {
-            kind,
-            count: 0,
-            remaining: 0,
-            results: Vec::new(),
-            states: Vec::new(),
-            first: None,
-            elements: Vec::new(),
+        let state = if kind == CombineKind::Race {
+            None
+        } else {
+            let id = self.heap.alloc_plain_with(None);
+            self.heap.combines.insert(
+                id,
+                CombineState {
+                    kind,
+                    // Keep synchronous element callbacks from finishing before iteration ends.
+                    remaining: 1,
+                    results: Vec::new(),
+                    called: Vec::new(),
+                    capability: if kind == CombineKind::Any {
+                        reject.clone()
+                    } else {
+                        resolve.clone()
+                    },
+                },
+            );
+            Some(id)
         };
+        let iteration_roots = (&iterator, &next, state);
+        let roots = &roots.with(&iteration_roots);
         loop {
-            let roots = &roots.with(&state.elements);
             let element = match self.iterator_step(host, roots, &iterator, &next)? {
                 Ok(Some(element)) => element,
                 Ok(None) => break,
-                Err(error) => {
-                    self.settle(result, Settlement::Rejected(error))?;
-                    return Ok(Invocation::Value(Value::object(result)));
-                }
+                Err(error) => return reject_result(self, host, roots, error),
             };
-            let resolved = match self.invoke(host, roots, &resolve, vec![element], receiver)? {
-                Invocation::Value(value) => value,
-                Invocation::Thrown(error) => {
-                    let _ = self.close_iterator(host, &roots.with(&error), &iterator)?;
-                    self.settle(result, Settlement::Rejected(error))?;
-                    return Ok(Invocation::Value(Value::object(result)));
-                }
+            let resolved =
+                match self.invoke(host, roots, &input_resolve, vec![element], receiver)? {
+                    Invocation::Value(value) => value,
+                    Invocation::Thrown(error) => {
+                        let _ = self.close_iterator(host, &roots.with(&error), &iterator)?;
+                        return reject_result(self, host, roots, error);
+                    }
+                };
+            let (fulfill_element, reject_element) = if let Some(state) = state {
+                let data = self.combine_state_mut(state)?;
+                let index = data.results.len();
+                data.results.push(Value::UNDEFINED);
+                data.called.push(false);
+                data.remaining += 1;
+                let fulfill_element = if kind == CombineKind::Any {
+                    resolve.clone()
+                } else {
+                    self.alloc_promise_callback(PromiseCallback::CombineElement {
+                        state,
+                        index,
+                        rejected: false,
+                    })
+                };
+                let reject_element = if kind == CombineKind::All {
+                    reject.clone()
+                } else {
+                    self.alloc_promise_callback(PromiseCallback::CombineElement {
+                        state,
+                        index,
+                        rejected: true,
+                    })
+                };
+                (fulfill_element, reject_element)
+            } else {
+                (resolve.clone(), reject.clone())
             };
-            let index = state.elements.len();
-            let slot = self.heap.alloc_promise();
-            self.react(
-                slot,
-                ReactionJob::Combine {
-                    result,
-                    index,
-                    kind,
-                },
-            )?;
-            let (fulfill, reject) = self.alloc_resolution_pair(slot, true, false)?;
-            let root_view = (slot, fulfill, reject);
-            let roots = &roots.with(&root_view);
             if let Invocation::Thrown(error) = self.invoke_promise_then(
                 host,
                 roots,
                 &resolved,
-                vec![Value::object(fulfill), Value::object(reject)],
+                vec![fulfill_element, reject_element],
             )? {
                 let _ = self.close_iterator(host, &roots.with(&error), &iterator)?;
-                self.mark_resolution_called(fulfill)?;
-                self.mark_resolution_called(reject)?;
-                self.settle(result, Settlement::Rejected(error))?;
-                return Ok(Invocation::Value(Value::object(result)));
-            }
-            state.elements.push(slot);
-            state.results.push(Value::UNDEFINED);
-            if kind == CombineKind::AllSettled {
-                state.states.push(PromiseState::Pending);
+                return reject_result(self, host, roots, error);
             }
         }
-        if state.elements.is_empty() {
-            match kind {
-                CombineKind::All | CombineKind::AllSettled => {
-                    let array = self.heap.alloc_array(Vec::new());
-                    self.settle(result, Settlement::Fulfilled(Value::object(array)))?;
-                }
-                CombineKind::Race => {}
-                CombineKind::Any => {
-                    let error = self.alloc_aggregate_error(Vec::new())?;
-                    self.settle(result, Settlement::Rejected(error))?;
-                }
+        if let Some(state) = state
+            && let Invocation::Thrown(error) = self.finish_combine_element(host, roots, state)?
+        {
+            if kind == CombineKind::Any {
+                return Ok(Invocation::Thrown(error));
             }
-        } else {
-            // Reactions cannot run until this synchronous builtin returns.
-            state.count = state.elements.len();
-            state.remaining = state.count;
-            self.heap.combines.insert(result, state);
+            return reject_result(self, host, roots, error);
         }
-        Ok(Invocation::Value(Value::object(result)))
+        Ok(Invocation::Value(result))
     }
 
     pub(crate) fn alloc_capability_pair(
         &mut self,
         promise: ObjectId,
     ) -> Result<(ObjectId, ObjectId), VmError> {
-        self.alloc_resolution_pair(promise, false, true)
+        self.alloc_resolution_pair(promise, true)
     }
 
     pub(crate) fn alloc_resolution_pair(
         &mut self,
         promise: ObjectId,
-        direct: bool,
         track_unreachable: bool,
     ) -> Result<(ObjectId, ObjectId), VmError> {
         let resolve_id = self.heap.alloc(Object::Resolution(Resolution {
             promise,
             pair: 0,
             resolve: true,
-            direct,
             track_unreachable,
             called: false,
             object: PlainObject::callable(self.heap.function_prototype, 1.0, "".into()),
@@ -2324,7 +2334,6 @@ impl Vm {
             promise,
             pair: resolve_id,
             resolve: false,
-            direct,
             track_unreachable,
             called: false,
             object: PlainObject::callable(self.heap.function_prototype, 1.0, "".into()),
@@ -2351,12 +2360,11 @@ impl Vm {
         id: ObjectId,
         value: Value,
     ) -> Result<(), VmError> {
-        let (promise, pair, resolve, direct, called) = match self.heap.get(id)? {
+        let (promise, pair, resolve, called) = match self.heap.get(id)? {
             Object::Resolution(resolution) => (
                 resolution.promise,
                 resolution.pair,
                 resolution.resolve,
-                resolution.direct,
                 resolution.called,
             ),
             _ => {
@@ -2370,9 +2378,7 @@ impl Vm {
         }
         self.mark_resolution_called(id)?;
         self.mark_resolution_called(pair)?;
-        if resolve && direct {
-            self.settle(promise, Settlement::Fulfilled(value))
-        } else if resolve {
+        if resolve {
             self.resolve_promise(host, roots, promise, value)
         } else {
             self.reject_if_open(promise, value)
@@ -2458,91 +2464,79 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn run_combine(
+    fn combine_state_mut(&mut self, id: ObjectId) -> Result<&mut CombineState, VmError> {
+        self.heap
+            .combines
+            .get_mut(&id)
+            .ok_or_else(|| VmError::InvalidState(format!("missing Promise combinator state {id}")))
+    }
+
+    fn call_combine_element(
         &mut self,
-        result: ObjectId,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        state: ObjectId,
         index: usize,
-        kind: CombineKind,
-        settlement: Settlement,
-    ) -> Result<(), VmError> {
-        let Some(mut state) = self.heap.combines.get(&result).cloned() else {
-            return Ok(());
+        rejected: bool,
+        argument: Value,
+    ) -> Result<Invocation, VmError> {
+        let data = self.combine_state_mut(state)?;
+        let called = data.called.get_mut(index).ok_or_else(|| {
+            VmError::InvalidState(format!("invalid Promise combinator index {index}"))
+        })?;
+        if *called {
+            return Ok(Invocation::Value(Value::UNDEFINED));
+        }
+        *called = true;
+        let all_settled = data.kind == CombineKind::AllSettled;
+        let value = if all_settled {
+            if rejected {
+                self.settlement_record("rejected", ("reason", argument))?
+            } else {
+                self.settlement_record("fulfilled", ("value", argument))?
+            }
+        } else {
+            argument
         };
-        if index >= state.count {
-            return Err(VmError::InvalidState(format!(
-                "combine reaction index {index} is outside {}",
-                state.count
-            )));
+        self.combine_state_mut(state)?.results[index] = value;
+        match self.finish_combine_element(host, roots, state)? {
+            Invocation::Value(_) if all_settled => Ok(Invocation::Value(Value::UNDEFINED)),
+            completion => Ok(completion),
         }
-        state.remaining = state.remaining.saturating_sub(1);
-        let pending = matches!(self.heap.promise(result)?.state, PromiseState::Pending);
-        match kind {
-            CombineKind::Race => {
-                self.heap.combines.remove(&result);
-                if pending {
-                    self.settle(result, settlement)?;
-                }
-                return Ok(());
-            }
-            CombineKind::All => match settlement {
-                Settlement::Rejected(reason) => {
-                    self.heap.combines.remove(&result);
-                    if pending {
-                        self.settle(result, Settlement::Rejected(reason))?;
-                    }
-                    return Ok(());
-                }
-                Settlement::Fulfilled(value) => {
-                    state.results[index] = value;
-                    if state.remaining == 0 && pending {
-                        let values = state.results.clone();
-                        self.heap.combines.remove(&result);
-                        let array = self.heap.alloc_array(values);
-                        self.settle(result, Settlement::Fulfilled(Value::object(array)))?;
-                        return Ok(());
-                    }
-                }
-            },
-            CombineKind::AllSettled => {
-                state.states[index] = settlement.to_state();
-                state.results[index] = settlement_value(&settlement);
-                if state.remaining == 0 && pending {
-                    let records = state
-                        .states
-                        .iter()
-                        .map(record_from_state)
-                        .collect::<Vec<_>>();
-                    self.heap.combines.remove(&result);
-                    let mut objects = Vec::with_capacity(records.len());
-                    for (status, payload) in records {
-                        objects.push(self.settlement_record(status, payload)?);
-                    }
-                    let array = self.heap.alloc_array(objects);
-                    self.settle(result, Settlement::Fulfilled(Value::object(array)))?;
-                    return Ok(());
-                }
-            }
-            CombineKind::Any => match settlement {
-                Settlement::Fulfilled(value) => {
-                    self.heap.combines.remove(&result);
-                    if pending {
-                        self.settle(result, Settlement::Fulfilled(value))?;
-                    }
-                    return Ok(());
-                }
-                Settlement::Rejected(reason) => {
-                    state.results[index] = reason;
-                    if state.remaining == 0 && pending {
-                        self.heap.combines.remove(&result);
-                        let error = self.alloc_aggregate_error(state.results)?;
-                        self.settle(result, Settlement::Rejected(error))?;
-                        return Ok(());
-                    }
-                }
-            },
+    }
+
+    // Release one remaining count, either for an element or for iterator exhaustion.
+    fn finish_combine_element(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        state: ObjectId,
+    ) -> Result<Invocation, VmError> {
+        let data = self.combine_state_mut(state)?;
+        data.remaining -= 1;
+        if data.remaining != 0 {
+            return Ok(Invocation::Value(Value::UNDEFINED));
         }
-        self.heap.combines.insert(result, state);
-        Ok(())
+        let kind = data.kind;
+        let capability = data.capability.clone();
+        // Keep the array lengths intact for previously retained element callbacks.
+        let values = data
+            .results
+            .iter_mut()
+            .map(|value| std::mem::replace(value, Value::UNDEFINED))
+            .collect();
+        let value = if kind == CombineKind::Any {
+            self.alloc_aggregate_error(values)?
+        } else {
+            Value::object(self.heap.alloc_array(values))
+        };
+        self.invoke(
+            host,
+            &roots.with(&state),
+            &capability,
+            vec![value],
+            &Value::UNDEFINED,
+        )
     }
 
     pub(crate) fn settlement_record(
@@ -2589,19 +2583,5 @@ impl TraceRoots for Invocation {
         match self {
             Invocation::Value(value) | Invocation::Thrown(value) => value.trace(tracer),
         }
-    }
-}
-
-fn settlement_value(settlement: &Settlement) -> Value {
-    match settlement {
-        Settlement::Fulfilled(value) | Settlement::Rejected(value) => value.clone(),
-    }
-}
-
-fn record_from_state(state: &PromiseState) -> (&'static str, (&'static str, Value)) {
-    match state {
-        PromiseState::Fulfilled(value) => ("fulfilled", ("value", value.clone())),
-        PromiseState::Rejected(value) => ("rejected", ("reason", value.clone())),
-        PromiseState::Pending => ("pending", ("value", Value::UNDEFINED)),
     }
 }
