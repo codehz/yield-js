@@ -884,7 +884,10 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 )
             }) || (current.is_none() && pending.is_some())
                 || string_indices.start > string_indices.end
-                || (!string_indices.is_empty() && (pending.is_some() || !visited.is_empty())))
+                || (!string_indices.is_empty()
+                    && (pending.is_some()
+                        || visited.len() != 1
+                        || !visited.first().is_some_and(|key| key == "length"))))
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "for-in iterator {id} has invalid cursor state"

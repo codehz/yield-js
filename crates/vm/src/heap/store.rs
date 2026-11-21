@@ -244,21 +244,30 @@ impl Heap {
         self.alloc(Object::Plain(PlainObject::new(prototype)))
     }
 
-    pub(crate) fn alloc_for_in_iterator(&mut self, source: &Value) -> ObjectId {
+    pub(crate) fn alloc_for_in_iterator(
+        &mut self,
+        source: &Value,
+        primitive_prototype: Option<ObjectId>,
+    ) -> ObjectId {
         let current = match source.view() {
             ValueRef::Undefined | ValueRef::Null => None,
             ValueRef::Object(id) => Some(id),
-            // The primitive wrapper prototypes do not exist in this subset.
-            _ => self.object_prototype,
+            _ => primitive_prototype,
         };
+        let mut visited = BTreeSet::new();
         let string_length = match source.view() {
-            ValueRef::String(string) => string.unit_len(),
+            ValueRef::String(string) => {
+                // String indices use the range below; the non-enumerable own length
+                // must also shadow prototype properties, even for an empty string.
+                visited.insert(JsString::from("length"));
+                string.unit_len()
+            }
             _ => 0,
         };
         self.alloc(Object::ForInIterator {
             current,
             pending: None,
-            visited: BTreeSet::new(),
+            visited,
             string_indices: 0..string_length,
         })
     }

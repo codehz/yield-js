@@ -390,6 +390,10 @@ impl JsString {
         }
     }
 
+    pub(crate) fn push_unit(&mut self, unit: u16) {
+        self.push_units(&[unit]);
+    }
+
     fn push_units(&mut self, units: &[u16]) {
         if self.is_empty() {
             *self = Self::from_units(units.to_vec());

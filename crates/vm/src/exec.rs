@@ -17,7 +17,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, BoundObject, ClassElement, DescriptorUpdate, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL,
     NativeObject, Object, OwnProperty, PlainObject, PrivateElement, Property, ScriptClass,
-    ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id,
+    ScriptClassSource, TO_PRIMITIVE_SYMBOL, object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -1028,7 +1028,9 @@ impl Vm {
                 store_invocation(frame, dst, invocation)
             }
             Instr::GetForInIterator { dst, source } => {
-                let iterator = self.heap.alloc_for_in_iterator(frame.read_ref(source)?);
+                let source = frame.read_ref(source)?;
+                let prototype = self.primitive_prototype(source);
+                let iterator = self.heap.alloc_for_in_iterator(source, prototype);
                 frame.write(dst, Value::object(iterator))?;
                 Ok(Step::Next)
             }
@@ -1573,14 +1575,10 @@ impl Vm {
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
         // Primitive strings resolve indexed reads without allocating wrappers.
-        if let ValueRef::String(text) = object.view() {
-            if key.is_str("length") {
-                return Ok(Invocation::Value(Value::number(text.unit_len() as f64)));
-            }
-            if let Some(unit) = ops::canonical_index_key(key).and_then(|index| text.unit_at(index))
-            {
-                return Ok(Invocation::Value(Value::string(utf16_unit_string(unit))));
-            }
+        if let ValueRef::String(text) = object.view()
+            && let Some(property) = string_own_property(text, key)
+        {
+            return self.read_property_value(host, roots, object, property.into_owned());
         }
         if let Some(prototype) = self.primitive_prototype(object) {
             return self.read_property_with_receiver(host, roots, prototype, object, key);
@@ -1598,6 +1596,48 @@ impl Vm {
         target: ObjectId,
         receiver: &Value,
         key: PropertyKeyRef<'_>,
+    ) -> Result<Invocation, VmError> {
+        self.read_property_from_chain(host, roots, target, key, |_| Cow::Borrowed(receiver))
+    }
+
+    /// Get on a ToObject result. Keep the same wrapper across accesses, but
+    /// defer creating it until an accessor or proxy can observe the receiver.
+    pub(crate) fn read_to_object_property(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+        boxed: &mut Option<ObjectId>,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<Invocation, VmError> {
+        if let Some(id) = *boxed {
+            return self.read_property(host, &roots.with(&id), &Value::object(id), key);
+        }
+        if let ValueRef::Object(_) = value.view() {
+            return self.read_property(host, roots, value, key);
+        }
+        if let ValueRef::String(text) = value.view()
+            && let Some(property) = string_own_property(text, key)
+        {
+            return self.read_property_value(host, roots, value, property.into_owned());
+        }
+        let prototype = self
+            .primitive_prototype(value)
+            .expect("validated ToObject operand");
+        self.read_property_from_chain(host, roots, prototype, key, |vm| {
+            let id = vm.coercible_object(value);
+            *boxed = Some(id);
+            Cow::Owned(Value::object(id))
+        })
+    }
+
+    fn read_property_from_chain<'a>(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        target: ObjectId,
+        key: PropertyKeyRef<'_>,
+        receiver: impl FnOnce(&mut Self) -> Cow<'a, Value>,
     ) -> Result<Invocation, VmError> {
         let mut current = Some(target);
         while let Some(id) = current {
@@ -1617,10 +1657,18 @@ impl Vm {
                 target, handler, ..
             } = *object
             {
-                return self.proxy_get(host, roots, target, handler, key, receiver);
+                let receiver = receiver(self);
+                return self.proxy_get(host, roots, target, handler, key, &receiver);
             }
             if let Some(property) = object.own_property(key) {
-                return self.read_property_value(host, roots, receiver, property.into_owned());
+                return match property.into_owned() {
+                    Property::Data(value) => Ok(Invocation::Value(value)),
+                    Property::Accessor { get: Some(get), .. } => {
+                        let receiver = receiver(self);
+                        self.invoke(host, roots, &Value::object(get), Vec::new(), &receiver)
+                    }
+                    Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::UNDEFINED)),
+                };
             }
             current = object.prototype();
         }

@@ -280,13 +280,12 @@ impl Vm {
         if matches!(items.view(), ValueRef::Null | ValueRef::Undefined) {
             return Ok(Err(self.type_error("Array.from requires items")?));
         }
-        let method =
-            match items.view() {
-                ValueRef::Object(_) | ValueRef::String(_) => script!(completion(
-                    self.read_property(host, roots, items, PropertyKeyRef::Symbol(ITERATOR_SYMBOL))
-                )),
-                _ => Value::UNDEFINED,
-            };
+        let method = script!(completion(self.read_property(
+            host,
+            roots,
+            items,
+            PropertyKeyRef::Symbol(ITERATOR_SYMBOL)
+        )));
         let mut values = Vec::new();
         if !matches!(method.view(), ValueRef::Null | ValueRef::Undefined) {
             let (iter, next) = script!(self.get_iterator_from_method(host, roots, items, &method));
@@ -319,14 +318,16 @@ impl Vm {
                 }
                 values.push(value);
             }
-        } else if matches!(items.view(), ValueRef::Object(_)) {
-            let length = script!(completion(self.read_property(
+        } else {
+            let mut boxed = None;
+            let length = script!(completion(self.read_to_object_property(
                 host,
                 roots,
                 items,
+                &mut boxed,
                 PropertyKeyRef::String("length")
             )));
-            let length = script!(self.coerce_number(host, roots, &length))
+            let length = script!(self.coerce_number(host, &roots.with(&boxed), &length))
                 .trunc()
                 .max(0.0);
             if length > MAX_LENGTH as f64 {
@@ -334,13 +335,15 @@ impl Vm {
             }
             for index in 0..length as usize {
                 let roots = &roots.with(&values);
-                let mut value = script!(completion(self.read_property(
+                let mut value = script!(completion(self.read_to_object_property(
                     host,
                     roots,
                     items,
+                    &mut boxed,
                     PropertyKeyRef::String(&index.to_string())
                 )));
                 if mapping {
+                    let roots = &roots.with(&boxed);
                     value = script!(completion(self.invoke(
                         host,
                         roots,

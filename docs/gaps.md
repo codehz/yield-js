@@ -9,8 +9,6 @@
 `Value` 仍是 `Undefined / Null / Bool / Number(f64) / String / Symbol(SymbolId) / Object(ObjectId)`。`RegExp` 实例与显式包装对象通过堆对象表示，不是新的 `Value` 变体。
 
 - 尚未提供部分 well-known Symbol（如 `Symbol.asyncIterator`）及其协议。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
-- 原始值装箱只实现了部分场景：成员读取可沿各自的共享原型查找并保留原始接收者，但并非所有需要 `ToObject` 的内建入口都会接受原始值（例如 `Object.assign` 的目标）。对象转原始值和严格相等不属于隐式装箱。
-- `for…in` 枚举原始值时仍从 `Object.prototype` 开始查找原型属性。
 - 名称策略保留一个偏差：没有同名 preload 导出时，`typeof` 对被局部绑定遮蔽的宿主导入或顶层函数仍可能折叠为 `"function"`（`names.rs`）。
 
 ## 2. 合法输入的编译期限制
@@ -31,9 +29,8 @@
 
 | 内建 | 限制与缺项 |
 | --- | --- |
-| `Object` | 不提供完整隐式装箱，见第 1 节 |
 | `Function` | `Function` 可反射，但调用和构造均抛出 `TypeError`，不编译字符串；`toString` 返回带初始名字的占位文本，不暴露源码 |
-| `Array` | 缺少 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries` 等方法。`map` 等多数原型方法只接受数组接收者；借用 `join` 时接收者须是对象。不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
+| `Array` | 缺少 `at`、`sort`、`reverse`、`copyWithin`、`findLast` / `findLastIndex`、`keys` / `entries` 等方法。`map` 等多数原型方法只接受数组接收者。不支持 species、自定义 `from` / `of` 构造器或 `concat` 展开协议 |
 | 错误构造器 | 缺少专用的 `Error.prototype.toString`；`stack` 是简化文本，不包含调用帧 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |

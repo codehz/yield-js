@@ -10,7 +10,7 @@ mod store;
 mod types;
 
 pub use object::ReactionJob;
-pub(crate) use object::{EnvRole, OwnedEdge, push_value};
+pub(crate) use object::{EnvRole, OwnedEdge, push_value, string_own_property};
 pub(crate) use store::{Heap, object_id};
 pub use types::{
     ArrayObject, BoundObject, BoxedPrimitive, CollectionIteration, CollectionKind, CombineKind,

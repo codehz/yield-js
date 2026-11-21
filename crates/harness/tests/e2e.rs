@@ -46,6 +46,39 @@ export async function run() {
 }
 
 #[test]
+fn restore_rejects_a_string_for_in_cursor_missing_length_shadow() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Object, Vm, VmError};
+
+    let build = build(
+        r#"
+import { wait } from "test";
+export async function run() {
+  for (const key in "ab") await wait(key);
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let result = vm.start(&mut host, "run", vec![]).expect("start run");
+    vm.run_until_idle(&mut host).expect("suspend run");
+    let mut snapshot = vm.snapshot(&[result]).expect("capture string cursor");
+    let visited = snapshot
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::ForInIterator { visited, .. } => Some(visited),
+            _ => None,
+        })
+        .expect("string cursor");
+    visited.clear();
+    assert!(matches!(
+        Vm::restore(snapshot, build, &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("invalid cursor state")
+    ));
+}
+
+#[test]
 fn build_round_trips_special_numbers() {
     use yield_vm::{Build, bytecode::Constant};
 

@@ -3,7 +3,10 @@ pub(crate) mod members {
     use crate::builtin::globals::Owner;
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, link_constructor};
-    use crate::heap::IntegrityLevel;
+    use crate::error::VmError;
+    use crate::gc::ActiveRoots;
+    use crate::heap::{IntegrityLevel, string_own_property};
+    use crate::host::Host;
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::ops;
     use crate::runtime::Invocation;
@@ -49,7 +52,7 @@ pub(crate) mod members {
         create: 2 => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
         getPrototypeOf: 1 => |vm, _, _, args, _| vm.get_prototype_of(&args, false);
         setPrototypeOf: 2 => |vm, _, _, args, _| vm.set_prototype_of(&args, false);
-        getOwnPropertyDescriptor: 2 => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args);
+        getOwnPropertyDescriptor: 2 => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args, false);
         getOwnPropertyDescriptors: 1 => |vm, host, roots, args, _| vm.get_own_property_descriptors(host, roots, &args);
         defineProperty: 3 => |vm, host, roots, args, _| vm.define_property_builtin(host, roots, &args, false);
         defineProperties: 2 => |vm, host, roots, args, _| {
@@ -67,20 +70,7 @@ pub(crate) mod members {
     }
 
     prototype_calls! {
-        hasOwnProperty: 1 => |vm, host, roots, args, receiver| {
-            let id = match receiver.view() {
-                ValueRef::Object(id) if vm.heap.is_environment(id) == Some(false) => id,
-                _ => return vm.throw_type_error("incompatible Object.prototype receiver"),
-            };
-            let key = match vm.coerce_property_key(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
-                Ok(key) => key,
-                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-            };
-            match vm.own_descriptor(host, roots, id, key.borrowed())? {
-                Ok(descriptor) => Ok(Invocation::Value(Value::boolean(descriptor.is_some()))),
-                Err(error) => Ok(Invocation::Thrown(error)),
-            }
-        };
+        hasOwnProperty: 1 => |vm, host, roots, args, receiver| test_own_property(vm, host, roots, &args, receiver, false);
         isPrototypeOf: 1 => |vm, _, _, args, receiver| {
             let result = |value| Ok(Invocation::Value(Value::boolean(value)));
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
@@ -102,35 +92,7 @@ pub(crate) mod members {
             }
             result(false)
         };
-        propertyIsEnumerable: 1 => |vm, host, roots, args, receiver| {
-            let roots = &roots.with(receiver);
-            let key = match vm.coerce_property_key(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
-                Ok(key) => key,
-                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
-            };
-            let id = match receiver.view() {
-                ValueRef::Object(id) => id,
-                ValueRef::String(text) if !text.is_empty() => {
-                    let Invocation::Value(value) = vm.construct_object(std::slice::from_ref(receiver))? else {
-                        unreachable!("Object(string) returns a boxed string");
-                    };
-                    let ValueRef::Object(id) = value.view() else {
-                        unreachable!("Object(string) returns a boxed string");
-                    };
-                    id
-                }
-                ValueRef::Null | ValueRef::Undefined => {
-                    return vm.throw_type_error("incompatible Object.prototype.propertyIsEnumerable receiver");
-                }
-                _ => return Ok(Invocation::Value(Value::boolean(false))),
-            };
-            match vm.own_descriptor(host, roots, id, key.borrowed())? {
-                Ok(descriptor) => Ok(Invocation::Value(Value::boolean(
-                    descriptor.is_some_and(|(_, attributes)| attributes.enumerable),
-                ))),
-                Err(error) => Ok(Invocation::Thrown(error)),
-            }
-        };
+        propertyIsEnumerable: 1 => |vm, host, roots, args, receiver| test_own_property(vm, host, roots, &args, receiver, true);
         toLocaleString: 0 => |vm, host, roots, _, receiver| {
             let roots = &roots.with(receiver);
             let method = match vm.read_member(host, roots, receiver, &Value::string("toString".into()))? {
@@ -140,19 +102,45 @@ pub(crate) mod members {
             vm.invoke(host, roots, &method, Vec::new(), receiver)
         };
         valueOf: 0 => |vm, _, _, _, receiver| match receiver.view() {
+            ValueRef::Null | ValueRef::Undefined => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),
+            ValueRef::Object(id) if vm.heap.is_environment(id) != Some(false) => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),
+            _ => Ok(Invocation::Value(Value::object(vm.coercible_object(receiver)))),
+        };
+        toString: 0 => |vm, _, _, _, receiver| vm.object_to_string(receiver);
+    }
+
+    fn test_own_property(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+        receiver: &Value,
+        enumerable_only: bool,
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(receiver);
+        // Both methods convert the key before coercing the receiver.
+        let key =
+            match vm.coerce_property_key(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
+                Ok(key) => key,
+                Err(thrown) => return Ok(Invocation::Thrown(thrown)),
+            };
+        let attributes = match receiver.view() {
             ValueRef::Object(id) if vm.heap.is_environment(id) == Some(false) => {
-                Ok(Invocation::Value(Value::object(id)))
+                match vm.own_descriptor(host, roots, id, key.borrowed())? {
+                    Ok(descriptor) => descriptor.map(|(_, attributes)| attributes),
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
             }
-            _ => vm.throw_type_error("incompatible Object.prototype receiver"),
-        };
-        toString: 0 => |vm, _, _, _, receiver| match receiver.view() {
-            ValueRef::Object(id) if vm.heap.is_environment(id) == Some(true) => {
-                vm.throw_type_error("incompatible Object.prototype receiver")
+            ValueRef::String(text) => {
+                string_own_property(text, key.borrowed()).map(|property| property.attributes())
             }
-            ValueRef::Object(id) => Ok(Invocation::Value(Value::string(
-                format!("[object {}]", vm.object_tag(id)?).into(),
-            ))),
-            _ => Ok(Invocation::Value(Value::string("[object Undefined]".into()))),
+            ValueRef::Null | ValueRef::Undefined | ValueRef::Object(_) => {
+                return vm.throw_type_error("incompatible Object.prototype receiver");
+            }
+            _ => None,
         };
+        Ok(Invocation::Value(Value::boolean(attributes.is_some_and(
+            |attributes| !enumerable_only || attributes.enumerable,
+        ))))
     }
 }

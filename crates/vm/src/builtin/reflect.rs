@@ -178,7 +178,7 @@ pub(crate) mod namespace {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        vm.get_own_property_descriptor(host, roots, args)
+        vm.get_own_property_descriptor(host, roots, args, true)
     }
 
     #[function(name = "apply", length = 3)]

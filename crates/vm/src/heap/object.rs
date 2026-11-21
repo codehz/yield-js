@@ -28,6 +28,17 @@ pub(crate) enum OwnedEdge {
     Symbol(SymbolId),
 }
 
+pub(crate) fn string_own_property(
+    text: &JsString,
+    key: PropertyKeyRef<'_>,
+) -> Option<OwnProperty<'static>> {
+    if key.is_str("length") {
+        return Some(OwnProperty::StringLength(text.unit_len()));
+    }
+    text.unit_at(canonical_index_key(key)?)
+        .map(OwnProperty::StringIndex)
+}
+
 /// One waiter on a promise. `Await` is the original continuation reaction.
 /// The other variants are script handlers, adoption, and combinators.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,12 +257,7 @@ impl Object {
         &self,
         key: PropertyKeyRef<'_>,
     ) -> Option<OwnProperty<'static>> {
-        let text = self.boxed_string()?;
-        if key.is_str("length") {
-            return Some(OwnProperty::StringLength(text.unit_len()));
-        }
-        text.unit_at(canonical_index_key(key)?)
-            .map(OwnProperty::StringIndex)
+        string_own_property(self.boxed_string()?, key)
     }
 
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {

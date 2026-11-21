@@ -6,8 +6,8 @@ use crate::error::VmError;
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{
     Attributes, BoundObject, BoxedPrimitive, CombineKind, CombineState, DescriptorUpdate,
-    ITERATOR_SYMBOL, IntegrityLevel, Object, PlainObject, PromiseCallback, PromiseState, Property,
-    ReactionJob, Resolution, SPECIES_SYMBOL,
+    ITERATOR_SYMBOL, IntegrityLevel, Object, OwnProperty, PlainObject, PromiseCallback,
+    PromiseState, Property, ReactionJob, Resolution, SPECIES_SYMBOL, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::CallableTarget;
@@ -529,22 +529,45 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
-        let join =
-            match self.read_property(host, roots, receiver, PropertyKeyRef::String("join"))? {
-                Invocation::Value(value) => value,
-                thrown => return Ok(thrown),
-            };
-        if self.is_callable(&join) {
-            self.invoke(host, roots, &join, Vec::new(), receiver)
-        } else {
-            let tag = match receiver.view() {
-                ValueRef::Object(id) => self.object_tag(id)?,
-                _ => "Object",
-            };
-            Ok(Invocation::Value(Value::string(
-                format!("[object {tag}]").into(),
-            )))
+        if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
+            return self.throw_type_error("Array.prototype.toString called on null or undefined");
         }
+        let roots = &roots.with(receiver);
+        let mut boxed = None;
+        let join = match self.read_to_object_property(
+            host,
+            roots,
+            receiver,
+            &mut boxed,
+            PropertyKeyRef::String("join"),
+        )? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        if self.is_callable(&join) {
+            let receiver = Value::object(boxed.unwrap_or_else(|| self.coercible_object(receiver)));
+            self.invoke(host, roots, &join, Vec::new(), &receiver)
+        } else {
+            self.object_to_string(receiver)
+        }
+    }
+
+    pub(crate) fn object_to_string(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
+        let tag = match receiver.view() {
+            ValueRef::Object(id) if self.heap.is_environment(id) == Some(true) => {
+                return self.throw_type_error("incompatible Object.prototype receiver");
+            }
+            ValueRef::Object(id) => self.object_tag(id)?,
+            ValueRef::Undefined => "Undefined",
+            ValueRef::Null => "Null",
+            ValueRef::String(_) => "String",
+            ValueRef::Number(_) => "Number",
+            ValueRef::Bool(_) => "Boolean",
+            ValueRef::Symbol(_) => "Symbol",
+        };
+        Ok(Invocation::Value(Value::string(
+            format!("[object {tag}]").into(),
+        )))
     }
 
     pub(crate) fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
@@ -575,31 +598,57 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let root_view = (receiver, args);
         let roots = &roots.with(&root_view);
-        let ValueRef::Object(id) = receiver.view() else {
+        if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
             return self.throw_type_error("Array.prototype.join called on null or undefined");
-        };
-        let length =
-            match self.read_property(host, roots, receiver, PropertyKeyRef::String("length"))? {
-                Invocation::Value(value) => value,
-                thrown => return Ok(thrown),
-            };
-        let length = match self.coerce_number(host, roots, &length)? {
-            Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as u64,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let separator = match args.first().unwrap_or(&UNDEFINED_VALUE) {
-            value if matches!(value.view(), ValueRef::Undefined) => ",".into(),
-            value => match self.coerce_string(host, roots, value)? {
-                Ok(string) => string,
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            },
-        };
-        let array = matches!(self.heap.get(id)?, Object::Array(_));
-        if array && self.active_array_joins.contains(&id) {
-            return Ok(Invocation::Value(Value::string(JsString::default())));
         }
-        if array {
-            self.active_array_joins.insert(id);
+        let mut boxed = None;
+        let length = match self.read_to_object_property(
+            host,
+            roots,
+            receiver,
+            &mut boxed,
+            PropertyKeyRef::String("length"),
+        )? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        let (length, separator) = {
+            let roots = &roots.with(&boxed);
+            let length = match self.coerce_number(host, roots, &length)? {
+                Ok(number) => number.trunc().clamp(0.0, 9_007_199_254_740_991.0) as u64,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let separator = match args.first().unwrap_or(&UNDEFINED_VALUE) {
+                value if matches!(value.view(), ValueRef::Undefined) => ",".into(),
+                value => match self.coerce_string(host, roots, value)? {
+                    Ok(string) => string,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                },
+            };
+            (length, separator)
+        };
+        if let ValueRef::String(text) = receiver.view() {
+            // Every index below the string's fixed length is an own data property.
+            if separator.is_empty() {
+                return Ok(Invocation::Value(receiver.clone()));
+            }
+            let mut output = JsString::default();
+            for (index, unit) in text.units().enumerate() {
+                if index > 0 {
+                    output.push_str(&separator);
+                }
+                output.push_unit(unit);
+            }
+            return Ok(Invocation::Value(Value::string(output)));
+        }
+        let array = match receiver.view() {
+            ValueRef::Object(id) if matches!(self.heap.get(id)?, Object::Array(_)) => Some(id),
+            _ => None,
+        };
+        if let Some(id) = array
+            && !self.active_array_joins.insert(id)
+        {
+            return Ok(Invocation::Value(Value::string(JsString::default())));
         }
         let result = (|| {
             let mut output = JsString::default();
@@ -607,13 +656,14 @@ impl Vm {
                 if index > 0 {
                     output.push_str(&separator);
                 }
-                let item = if array {
+                let item = if let Some(id) = array {
                     self.read_array_index(host, roots, id, index as usize)?
                 } else {
-                    self.read_property(
+                    self.read_to_object_property(
                         host,
                         roots,
                         receiver,
+                        &mut boxed,
                         PropertyKeyRef::String(&index.to_string()),
                     )?
                 };
@@ -624,6 +674,7 @@ impl Vm {
                 if matches!(value.view(), ValueRef::Undefined | ValueRef::Null) {
                     continue;
                 }
+                let roots = &roots.with(&boxed);
                 match self.coerce_string(host, roots, &value)? {
                     Ok(value) => output.push_str(&value),
                     Err(error) => return Ok(Invocation::Thrown(error)),
@@ -631,7 +682,7 @@ impl Vm {
             }
             Ok(Invocation::Value(Value::string(output)))
         })();
-        if array {
+        if let Some(id) = array {
             self.active_array_joins.remove(&id);
         }
         result
@@ -798,24 +849,26 @@ impl Vm {
             ValueRef::Undefined | ValueRef::Null => {
                 Ok(Invocation::Value(Value::object(self.heap.alloc_plain())))
             }
-            ValueRef::Object(_) => Ok(Invocation::Value(value.clone())),
-            primitive => {
-                let prototype = self.primitive_prototype(value);
-                let primitive = match primitive {
-                    ValueRef::String(text) => BoxedPrimitive::String(text.clone()),
-                    ValueRef::Number(number) => BoxedPrimitive::Number(number),
-                    ValueRef::Bool(value) => BoxedPrimitive::Bool(value),
-                    ValueRef::Symbol(id) => BoxedPrimitive::Symbol(id),
-                    _ => unreachable!("only boxable primitives reach this arm"),
-                };
-                Ok(Invocation::Value(Value::object(self.heap.alloc(
-                    Object::Boxed {
-                        primitive,
-                        object: PlainObject::new(prototype),
-                    },
-                ))))
-            }
+            _ => Ok(Invocation::Value(Value::object(
+                self.coercible_object(value),
+            ))),
         }
+    }
+
+    /// Materialize an already validated ToObject operand, preserving object identity.
+    pub(crate) fn coercible_object(&mut self, value: &Value) -> ObjectId {
+        let primitive = match value.view() {
+            ValueRef::Object(id) => return id,
+            ValueRef::String(text) => BoxedPrimitive::String(text.clone()),
+            ValueRef::Number(number) => BoxedPrimitive::Number(number),
+            ValueRef::Bool(value) => BoxedPrimitive::Bool(value),
+            ValueRef::Symbol(id) => BoxedPrimitive::Symbol(id),
+            _ => unreachable!("ToObject requires a non-nullish operand"),
+        };
+        self.heap.alloc(Object::Boxed {
+            primitive,
+            object: PlainObject::new(self.primitive_prototype(value)),
+        })
     }
 
     pub(crate) fn primitive_prototype(&self, value: &Value) -> Option<ObjectId> {
@@ -1189,24 +1242,43 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
+        reflect: bool,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
+        let target = args.first().unwrap_or(&UNDEFINED_VALUE);
+        if reflect && !matches!(target.view(), ValueRef::Object(_)) {
+            return self.throw_type_error("Reflect.getOwnPropertyDescriptor requires an object");
+        }
+        if matches!(target.view(), ValueRef::Null | ValueRef::Undefined) {
             return self
-                .throw_type_error("Object.getOwnPropertyDescriptor requires an object in this VM");
-        };
+                .throw_type_error("Object.getOwnPropertyDescriptor requires a non-nullish value");
+        }
         let key =
             match self.coerce_property_key(host, roots, args.get(1).unwrap_or(&UNDEFINED_VALUE))? {
                 Ok(key) => key,
                 Err(thrown) => return Ok(Invocation::Thrown(thrown)),
             };
-        match self.own_descriptor(host, roots, target, key.borrowed())? {
-            Ok(Some((property, attributes))) => Ok(Invocation::Value(Value::object(
-                self.descriptor_object(property, attributes)?,
-            ))),
-            Ok(None) => Ok(Invocation::Value(Value::UNDEFINED)),
-            Err(error) => Ok(Invocation::Thrown(error)),
-        }
+        let descriptor = match target.view() {
+            ValueRef::Object(id) => match self.own_descriptor(host, roots, id, key.borrowed())? {
+                Ok(descriptor) => descriptor,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            },
+            ValueRef::String(text) => {
+                return Ok(Invocation::Value(
+                    match string_own_property(text, key.borrowed()) {
+                        Some(property) => Value::object(self.string_descriptor(property)?),
+                        None => Value::UNDEFINED,
+                    },
+                ));
+            }
+            _ => None,
+        };
+        Ok(Invocation::Value(match descriptor {
+            Some((property, attributes)) => {
+                Value::object(self.descriptor_object(property, attributes)?)
+            }
+            None => Value::UNDEFINED,
+        }))
     }
 
     pub(crate) fn descriptor_object(
@@ -1254,10 +1326,32 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return self.throw_type_error(
-                "Object.getOwnPropertyDescriptors requires an object in this VM",
-            );
+        let target = args.first().unwrap_or(&UNDEFINED_VALUE);
+        let target = match target.view() {
+            ValueRef::Object(id) => id,
+            ValueRef::Null | ValueRef::Undefined => {
+                return self.throw_type_error(
+                    "Object.getOwnPropertyDescriptors requires a non-nullish value",
+                );
+            }
+            primitive => {
+                let result = self.heap.alloc_plain();
+                if let ValueRef::String(text) = primitive {
+                    for (index, unit) in text.units().enumerate() {
+                        let descriptor = self.string_descriptor(OwnProperty::StringIndex(unit))?;
+                        self.heap.set_own_string(
+                            result,
+                            &index.to_string(),
+                            Value::object(descriptor),
+                        )?;
+                    }
+                    let length =
+                        self.string_descriptor(OwnProperty::StringLength(text.unit_len()))?;
+                    self.heap
+                        .set_own_string(result, "length", Value::object(length))?;
+                }
+                return Ok(Invocation::Value(Value::object(result)));
+            }
         };
         let keys = match self.own_keys(host, roots, target, false)? {
             Ok(keys) => keys,
@@ -1278,6 +1372,11 @@ impl Vm {
                 .set_own(result, key.clone(), Value::object(descriptor))?;
         }
         Ok(Invocation::Value(Value::object(result)))
+    }
+
+    fn string_descriptor(&mut self, property: OwnProperty<'_>) -> Result<ObjectId, VmError> {
+        let attributes = property.attributes();
+        self.descriptor_object(property.into_owned(), attributes)
     }
 
     pub(crate) fn define_property_builtin(
@@ -1328,12 +1427,31 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let Some(ValueRef::Object(target_id)) = args.first().map(Value::view) else {
-            return self.throw_type_error("Object.assign requires an object target");
-        };
+        let target = args.first().unwrap_or(&UNDEFINED_VALUE);
+        if matches!(target.view(), ValueRef::Null | ValueRef::Undefined) {
+            return self.throw_type_error("Object.assign requires a non-nullish target");
+        }
+        let target_id = self.coercible_object(target);
+        let target = Value::object(target_id);
+        let roots = &roots.with(&target);
         for source in args.iter().skip(1) {
             let ValueRef::Object(source_id) = source.view() else {
-                // Primitive sources currently have no enumerable own keys.
+                if let ValueRef::String(text) = source.view() {
+                    for (index, unit) in text.units().enumerate() {
+                        let invocation = self.set_property(
+                            host,
+                            roots,
+                            target_id,
+                            &target,
+                            PropertyKey::String(index.to_string().into()),
+                            Value::string(utf16_unit_string(unit)),
+                            true,
+                        )?;
+                        if let thrown @ Invocation::Thrown(_) = invocation {
+                            return Ok(thrown);
+                        }
+                    }
+                }
                 continue;
             };
             let keys = match self.own_keys(host, roots, source_id, false)? {
@@ -1351,21 +1469,14 @@ impl Vm {
                     Invocation::Value(value) => value,
                     thrown @ Invocation::Thrown(_) => return Ok(thrown),
                 };
-                let invocation = self.set_property(
-                    host,
-                    roots,
-                    target_id,
-                    &Value::object(target_id),
-                    key.clone(),
-                    value,
-                    true,
-                )?;
+                let invocation =
+                    self.set_property(host, roots, target_id, &target, key.clone(), value, true)?;
                 if let thrown @ Invocation::Thrown(_) = invocation {
                     return Ok(thrown);
                 }
             }
         }
-        Ok(Invocation::Value(Value::object(target_id)))
+        Ok(Invocation::Value(target))
     }
 
     pub(crate) fn define_properties(

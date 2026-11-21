@@ -4,7 +4,10 @@
 // @pending ["wait:proto"]
 // @restore
 // @fulfill ["wait:proto", "P"]
-// @fulfilled "seen|Otail|firstProto|PlastProto|"
+// @pending ["wait:string"]
+// @restore
+// @fulfill ["wait:string", "S"]
+// @fulfilled "seen|Otail|firstProto|PlastProto|;0|S1|3|stringKey|lateStringKey|;0|3|stringKey|lateStringKey|;numberKey|;booleanKey|;symbolKey|"
 
 import { wait } from 'test';
 
@@ -27,6 +30,31 @@ export async function run() {
       delete parent.removed; // The cursor must still refer to this prototype.
       parent.late = true;
     }
+  }
+
+  Object.prototype.length = true;
+  String.prototype[0] = true;
+  String.prototype[3] = true;
+  String.prototype.stringKey = true;
+  Number.prototype.numberKey = true;
+  Boolean.prototype.booleanKey = true;
+  Symbol.prototype.symbolKey = true;
+
+  trace += ";";
+  for (const key in "😀") {
+    trace += key + "|";
+    if (key === "0") {
+      trace += await wait("string");
+      String.prototype.lateStringKey = true;
+    }
+  }
+  trace += ";";
+  for (const key in "") trace += key + "|";
+  delete Object.prototype.length;
+
+  for (const primitive of [1, false, Symbol("primitive")]) {
+    trace += ";";
+    for (const key in primitive) trace += key + "|";
   }
   return trace;
 }
