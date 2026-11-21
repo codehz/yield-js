@@ -441,6 +441,28 @@ fn rejects_non_lvalue_update_targets() {
 }
 
 #[test]
+fn rejects_compound_destructuring_assignment() {
+    for (target, operator) in [
+        ("[a]", "+="),
+        ("[a]", "&&="),
+        ("[a]", "??="),
+        ("{a}", "+="),
+        ("{a}", "&&="),
+        ("{a}", "??="),
+    ] {
+        let source = format!("function run(a,b) {{\n  ({target} {operator} b);\n}}");
+        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        assert_eq!(error.line(), 2, "{source}: {error}");
+        assert!(
+            error
+                .message()
+                .contains("Invalid left-hand side in assignment"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_unsupported_optional_chain_syntax_with_location() {
     for (source, message, column) in [
         (

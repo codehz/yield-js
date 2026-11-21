@@ -21,7 +21,6 @@
 
 ### 2.2 表达式
 
-- 解构赋值只支持 `=`
 - 标签模板。非标签模板已支持
 - 不支持的正则字面量模式与标志在编译时拒绝；若未被 Oxc 提前拒绝，报告带行列的 `unsupported syntax: ...`。模式子集见第 4 节。
 - 未单列的表达式形式落到 `expression form outside the PoC subset`：`import.meta`、`import()`、`yield`、`bigint`。`new.target` 可在函数中使用，但不能在模块顶层或其箭头函数中使用。
@@ -75,5 +74,6 @@
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
 - 快照迁移：只接受当前快照格式与字节码版本（`record.rs` / `bytecode.rs` 中的常量），拒绝旧记录。
+- 数组、对象解构赋值模式只能配 `=`；复合及逻辑赋值要求简单赋值目标，按语法错误拒绝。
 - 重复 `default`、匿名函数声明：按语法错误拒绝，不是未实现的特性
 - 严格模式下删除裸标识符（包括加括号的标识符）：按语法错误拒绝。
