@@ -4,7 +4,7 @@
 //! handler PCs stay put. Expression temps are left alone; a later store cannot
 //! overwrite an operand that a compound expression still needs.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use yield_vm::BindingId;
 use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry, Slot, SlotKind};
@@ -44,9 +44,23 @@ pub(crate) fn promote(
         awaits: &resumes,
         generators: &generators,
     };
+    // A per-iteration environment copies these bindings from the heap, so they
+    // must keep their environment slot even when no nested function shares them.
+    let iteration_bindings: BTreeSet<BindingId> = function
+        .code
+        .iter()
+        .filter_map(|instruction| match instruction {
+            Instr::NewIterationEnv { bindings, .. } => Some(bindings.iter().copied()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
     let mut accepted: Vec<(BindingId, BTreeMap<usize, bool>)> = Vec::new();
     for (binding, owner) in &facts.owners {
-        if *owner != function.func_id || facts.shared.contains(binding) {
+        if *owner != function.func_id
+            || facts.shared.contains(binding)
+            || iteration_bindings.contains(binding)
+        {
             continue;
         }
         if let Some(inits) = promotion_inits(function, suspensions, *binding)? {

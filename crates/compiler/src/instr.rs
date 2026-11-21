@@ -95,6 +95,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
         | Instr::DeclareBinding { .. }
+        | Instr::SaveEnv { .. }
+        | Instr::NewIterationEnv { .. }
+        | Instr::RestoreEnv { .. }
         | Instr::Yield { .. }
         | Instr::GeneratorStart
         | Instr::LoadGeneratorReturn { .. }
@@ -373,6 +376,15 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(src.index);
         }
         Instr::DeclareBinding { .. } => {}
+        Instr::SaveEnv { dst } => {
+            defs.insert(dst.index);
+        }
+        Instr::NewIterationEnv { parent, .. } => {
+            uses.insert(parent.index);
+        }
+        Instr::RestoreEnv { src } => {
+            uses.insert(src.index);
+        }
         Instr::Await { dst, input, .. } => {
             uses.insert(input.index);
             defs.insert(dst.index);
@@ -799,6 +811,12 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             src: remap(src),
         },
         Instr::DeclareBinding { binding } => Instr::DeclareBinding { binding },
+        Instr::SaveEnv { dst } => Instr::SaveEnv { dst: remap(dst) },
+        Instr::NewIterationEnv { parent, bindings } => Instr::NewIterationEnv {
+            parent: remap(parent),
+            bindings,
+        },
+        Instr::RestoreEnv { src } => Instr::RestoreEnv { src: remap(src) },
         Instr::Await { dst, input, resume } => Instr::Await {
             dst: remap(dst),
             input: remap(input),

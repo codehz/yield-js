@@ -3,6 +3,7 @@
 
 use oxc::ast::ast::*;
 use oxc::span::GetSpan;
+use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::{CloseMode, JumpTarget};
@@ -119,6 +120,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         }
                     }
                 }
+                let bindings = self.for_init_bindings(&statement.init)?;
+                let saved = self.save_iteration_env(&bindings)?;
+                if let Some(saved) = saved {
+                    self.enter_iteration_env(saved, &bindings);
+                }
                 let test_pc = self.emit.loop_header();
                 let exit_branch = if let Some(test) = &statement.test {
                     let test = self.compile_expression(test)?;
@@ -133,6 +139,12 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 for jump in loop_context.continue_jumps.drain(..) {
                     self.patch_jump(jump, update_pc)?;
                 }
+                // The fresh iteration environment is created before the
+                // increment, so closures created in the body keep the value
+                // the body observed while the update mutates the next copy.
+                if let Some(saved) = saved {
+                    self.enter_iteration_env(saved, &bindings);
+                }
                 if let Some(update) = &statement.update {
                     self.compile_expression(update)?;
                 }
@@ -143,6 +155,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 loop_context.continue_target = Some(update_pc);
                 self.patch_loop(loop_context, end)?;
+                if let Some(saved) = saved {
+                    self.leave_iteration_env(saved);
+                }
                 self.env.exit_block();
                 Ok(())
             }
@@ -284,7 +299,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         statement: &'ast ForInStatement<'ast>,
     ) -> Result<(), CompileError> {
         self.env.enter_block();
-        self.declare_iteration_bindings(&statement.left, "for-in")?;
+        let bindings = self.declare_iteration_bindings(&statement.left, "for-in")?;
         let source = self.compile_expression(&statement.right)?;
 
         let iterator = self.alloc_reg()?;
@@ -292,7 +307,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             dst: self.slot(iterator),
             source: self.slot(source),
         });
+        let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
+        if let Some(saved) = saved {
+            self.enter_iteration_env(saved, &bindings);
+        }
         let done = self.alloc_reg()?;
         let value = self.alloc_reg()?;
         self.emit(Instr::ForInNext {
@@ -313,6 +332,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let end = self.pc();
         self.patch_jump(exhausted, end)?;
         self.patch_loop(loop_context, end)?;
+        if let Some(saved) = saved {
+            self.leave_iteration_env(saved);
+        }
         self.env.exit_block();
         Ok(())
     }
@@ -325,7 +347,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             return self.compile_for_await_of(statement);
         }
         self.env.enter_block();
-        self.declare_iteration_bindings(&statement.left, "for-of")?;
+        let bindings = self.declare_iteration_bindings(&statement.left, "for-of")?;
 
         let iterable = self.compile_expression(&statement.right)?;
         let iterator = self.alloc_reg()?;
@@ -335,7 +357,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             next: self.slot(next),
             iterable: self.slot(iterable),
         });
+        let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
+        if let Some(saved) = saved {
+            self.enter_iteration_env(saved, &bindings);
+        }
         let done = self.alloc_reg()?;
         let value = self.alloc_reg()?;
         self.emit(Instr::IteratorNext {
@@ -356,6 +382,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let end = self.pc();
         self.patch_jump(exhausted, end)?;
         self.patch_loop(loop_context, end)?;
+        if let Some(saved) = saved {
+            self.leave_iteration_env(saved);
+        }
         self.env.exit_block();
         Ok(())
     }
@@ -385,12 +414,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             ));
         }
         self.env.enter_block();
-        self.declare_iteration_bindings(&statement.left, "for-await-of")?;
+        let bindings = self.declare_iteration_bindings(&statement.left, "for-await-of")?;
 
         let iterable = self.compile_expression(&statement.right)?;
         let (iterator, next, sync) = self.emit_async_iterator_setup(iterable)?;
 
+        let saved = self.save_iteration_env(&bindings)?;
         let step_pc = self.pc();
+        if let Some(saved) = saved {
+            self.enter_iteration_env(saved, &bindings);
+        }
         let result = self.alloc_reg()?;
         let async_step = self.branch_false(sync);
         self.emit(Instr::IteratorCall {
@@ -428,6 +461,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let end = self.pc();
         self.patch_jump(exhausted, end)?;
         self.patch_loop(loop_context, end)?;
+        if let Some(saved) = saved {
+            self.leave_iteration_env(saved);
+        }
         self.env.exit_block();
         Ok(())
     }
@@ -436,9 +472,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         target: &'ast ForStatementLeft<'ast>,
         loop_kind: &str,
-    ) -> Result<(), CompileError> {
+    ) -> Result<Vec<BindingId>, CompileError> {
         let ForStatementLeft::VariableDeclaration(declaration) = target else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let [declarator] = declaration.declarations.as_slice() else {
             return Err(unsupported(
@@ -465,8 +501,66 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 Ok::<(), CompileError>(())
             })?;
+            return Ok(Vec::new());
         }
-        Ok(())
+        let mut bindings = Vec::new();
+        for_each_binding_name(&declarator.id, &mut |identifier| {
+            if let Some(binding) = self.env.current_binding(identifier.name.as_str()) {
+                bindings.push(binding);
+            }
+            Ok::<(), CompileError>(())
+        })?;
+        Ok(bindings)
+    }
+
+    /// Save the outer environment once before a per-iteration loop. `None`
+    /// when the loop needs no fresh binding environment.
+    fn save_iteration_env(&mut self, bindings: &[BindingId]) -> Result<Option<Reg>, CompileError> {
+        if bindings.is_empty() {
+            return Ok(None);
+        }
+        let saved = self.alloc_reg()?;
+        self.emit(Instr::SaveEnv {
+            dst: self.slot(saved),
+        });
+        Ok(Some(saved))
+    }
+
+    fn enter_iteration_env(&mut self, saved: Reg, bindings: &[BindingId]) {
+        self.emit(Instr::NewIterationEnv {
+            parent: self.slot(saved),
+            bindings: bindings.to_vec(),
+        });
+    }
+
+    fn leave_iteration_env(&mut self, saved: Reg) {
+        self.emit(Instr::RestoreEnv {
+            src: self.slot(saved),
+        });
+    }
+
+    /// Loop bindings declared by a C-style `for` initializer. `var` stays
+    /// function-scoped and is shared by every iteration, so it is excluded.
+    fn for_init_bindings(
+        &mut self,
+        init: &Option<ForStatementInit<'ast>>,
+    ) -> Result<Vec<BindingId>, CompileError> {
+        let Some(ForStatementInit::VariableDeclaration(declaration)) = init else {
+            return Ok(Vec::new());
+        };
+        if declaration.kind == VariableDeclarationKind::Var {
+            return Ok(Vec::new());
+        }
+        let mut bindings = Vec::new();
+        for declarator in &declaration.declarations {
+            for_each_binding_name(&declarator.id, &mut |identifier| {
+                if let Some(binding) = self.env.current_binding(identifier.name.as_str()) {
+                    bindings.push(binding);
+                }
+                Ok::<(), CompileError>(())
+            })?;
+        }
+        Ok(bindings)
     }
 
     fn assign_iteration_value(

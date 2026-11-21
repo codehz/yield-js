@@ -2,7 +2,7 @@
 //! Handlers run in one place; call sites do not each reimplement catch.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
@@ -1253,6 +1253,40 @@ impl Vm {
                     VmError::InvalidState("binding declaration without env".to_owned())
                 })?;
                 self.heap.declare_binding(env, binding)?;
+                Ok(Step::Next)
+            }
+            Instr::SaveEnv { dst } => {
+                let env = frame.env.ok_or_else(|| {
+                    VmError::InvalidState("loop without an invocation environment".to_owned())
+                })?;
+                frame.write(dst, Value::object(env))?;
+                Ok(Step::Next)
+            }
+            Instr::NewIterationEnv { parent, bindings } => {
+                let parent = object_id(&frame.read(parent)?, "iteration environment parent")?;
+                if !matches!(self.heap.get(parent)?, Object::Environment(_)) {
+                    return Err(VmError::InvalidState(
+                        "iteration environment parent is not an environment".to_owned(),
+                    ));
+                }
+                let current = frame.env.ok_or_else(|| {
+                    VmError::InvalidState("iteration environment without a current env".to_owned())
+                })?;
+                let mut values = BTreeMap::new();
+                for binding in bindings {
+                    values.insert(binding, self.heap.get_binding(current, binding)?);
+                }
+                frame.env = Some(self.heap.alloc_environment(Some(parent), values));
+                Ok(Step::Next)
+            }
+            Instr::RestoreEnv { src } => {
+                let env = object_id(&frame.read(src)?, "restored environment")?;
+                if !matches!(self.heap.get(env)?, Object::Environment(_)) {
+                    return Err(VmError::InvalidState(
+                        "restored loop environment is not an environment".to_owned(),
+                    ));
+                }
+                frame.env = Some(env);
                 Ok(Step::Next)
             }
             Instr::Await { input, resume, .. } => self.suspend(host, roots, frame, input, resume),

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 44;
+pub const BYTECODE_VERSION: u32 = 45;
 
 pub use crate::builtin::BUILTINS;
 
@@ -406,6 +406,25 @@ pub enum Instr {
     DeclareBinding {
         binding: BindingId,
     },
+    /// Writes the frame's current environment to `dst`. Used by loops that
+    /// need a fresh per-iteration environment and must restore the outer one.
+    SaveEnv {
+        dst: Slot,
+    },
+    /// Allocates a fresh environment whose parent is `parent` and copies the
+    /// listed bindings from the frame's current environment, then installs the
+    /// new environment for the loop body. Generator and async-generator bodies
+    /// keep the same environment object across a yield only when it is the one
+    /// selected by this instruction, so closures created in an iteration keep
+    /// that iteration's values.
+    NewIterationEnv {
+        parent: Slot,
+        bindings: Vec<BindingId>,
+    },
+    /// Restores the frame's environment from `src` after a loop.
+    RestoreEnv {
+        src: Slot,
+    },
     /// Suspends the current async frame. The VM writes the awaited value to
     /// either resume destination and branches to the matching resume PC.
     Await {
@@ -663,6 +682,9 @@ impl Function {
                 Instr::GetBinding { .. }
                     | Instr::SetBinding { .. }
                     | Instr::DeclareBinding { .. }
+                    | Instr::SaveEnv { .. }
+                    | Instr::NewIterationEnv { .. }
+                    | Instr::RestoreEnv { .. }
                     | Instr::Closure { .. }
                     | Instr::NewClassScope { .. }
                     | Instr::LoadClassBinding { .. }
@@ -1679,6 +1701,20 @@ impl Build {
                         return Err(format!("{location}: redeclares module binding {binding}"));
                     }
                 }
+                Instr::SaveEnv { dst } => check_slot(*dst, "SaveEnv.dst")?,
+                Instr::NewIterationEnv { parent, bindings } => {
+                    check_slot(*parent, "NewIterationEnv.parent")?;
+                    let mut seen = BTreeSet::new();
+                    for binding in bindings {
+                        check_binding(*binding)?;
+                        if !seen.insert(*binding) {
+                            return Err(format!(
+                                "{location}: NewIterationEnv repeats binding {binding}"
+                            ));
+                        }
+                    }
+                }
+                Instr::RestoreEnv { src } => check_slot(*src, "RestoreEnv.src")?,
                 Instr::Await { dst, input, resume } => {
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));

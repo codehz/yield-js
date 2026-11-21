@@ -16,6 +16,9 @@ export async function run() {
     let x;
     x = 9;
   }
+  // TDZ is not implemented: entering the body block initializes `x` to
+  // undefined before the statements run.
   expect(first).toBe(undefined);
-  expect(second).toBe(undefined);
+  // The first closure keeps iteration 0's block binding, including its write.
+  expect(second).toBe(9);
 }

@@ -7,7 +7,8 @@
 //! function but have not finished initializing. [`Env::capture`] copies the
 //! scope chain and const binding IDs, but not the pending set. A nested function
 //! therefore does not reject an early read of an outer binding. This is not full
-//! ECMAScript TDZ, and loop iterations do not get fresh bindings.
+//! ECMAScript TDZ. Loop-head `let` / `const` bindings are copied into a fresh
+//! runtime environment per iteration by the lowerer; scopes do not do that here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
