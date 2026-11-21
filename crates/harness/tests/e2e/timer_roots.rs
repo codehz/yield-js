@@ -210,6 +210,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
 
     let clock = Arc::new(FakeClock::default());
     let bindings = yield_vm::host_bindings! {
+        dts: "tests/dts/repeat_timer.d.ts",
         modules: [repeat_timer], classes: [], states: [], operations: [Timer],
         services: [("clock", 1, Arc::clone(&clock))],
     }

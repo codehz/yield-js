@@ -1,4 +1,7 @@
-use proc_macro2::TokenStream;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use proc_macro2::{Span as MacroSpan, TokenStream};
 use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
@@ -223,6 +226,7 @@ impl Parse for Service {
 }
 
 struct Registry {
+    dts: LitStr,
     modules: Vec<Path>,
     classes: Vec<syn::TypePath>,
     states: Vec<syn::TypePath>,
@@ -233,9 +237,13 @@ struct Registry {
 impl Parse for Registry {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let span = input.span();
-        let (mut modules, mut classes, mut states, mut operations, mut services) =
-            (None, None, None, None, None);
+        let (mut dts, mut modules, mut classes, mut states, mut operations, mut services) =
+            (None, None, None, None, None, None);
         entries(input, |key, input| match key.to_string().as_str() {
+            "dts" => set(&mut dts, &key, || {
+                input.parse::<Token![:]>()?;
+                input.parse()
+            }),
             "modules" => set(&mut modules, &key, || list(input)),
             "classes" => set(&mut classes, &key, || list(input)),
             "states" => set(&mut states, &key, || list(input)),
@@ -244,6 +252,7 @@ impl Parse for Registry {
             _ => Err(Error::new(key.span(), "unknown host_bindings section")),
         })?;
         Ok(Self {
+            dts: required(dts, span, "dts")?,
             modules: required(modules, span, "modules")?,
             classes: required(classes, span, "classes")?,
             states: required(states, span, "states")?,
@@ -255,24 +264,109 @@ impl Parse for Registry {
 
 pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
     let Registry {
+        dts,
         modules,
         classes,
         states,
         operations,
         services,
     } = syn::parse2(input)?;
+    let (path, declarations) = read_declarations(&dts)?;
+    let include = LitStr::new(&path.to_string_lossy(), dts.span());
+    let checks = declaration_checks(&declarations, &modules);
     let services = services.into_iter().map(|Service { id, version, value }| {
         quote!(::yield_vm::__macro_support::service(#id, #version, #value))
     });
     Ok(quote! {
-        ::yield_vm::__macro_support::link(
-            [#(#modules::__yield_module()),*],
-            [#(::yield_vm::__macro_support::class::<#classes>()),*],
-            [#(::yield_vm::__macro_support::state::<#states>()),*],
-            [#(::yield_vm::__macro_support::operation::<#operations>()),*],
-            [#(#services),*],
-        )
+        {
+            const _: &str = include_str!(#include);
+            #(#checks)*
+            ::yield_vm::__macro_support::link(
+                [#(#modules::__yield_module()),*],
+                [#(::yield_vm::__macro_support::class::<#classes>()),*],
+                [#(::yield_vm::__macro_support::state::<#states>()),*],
+                [#(::yield_vm::__macro_support::operation::<#operations>()),*],
+                [#(#services),*],
+            )
+        }
     })
+}
+
+fn read_declarations(literal: &LitStr) -> Result<(PathBuf, BTreeMap<String, BTreeSet<String>>)> {
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let path = root.join(literal.value());
+    let source = std::fs::read_to_string(&path)
+        .map_err(|error| Error::new(literal.span(), format!("{}: {error}", path.display())))?;
+    let declarations = yield_host_dts::parse(&source).map_err(|error| {
+        let (line, column) = line_column(&source, error.start);
+        Error::new(
+            literal.span(),
+            format!("{}:{line}:{column}: {}", path.display(), error.message),
+        )
+    })?;
+    Ok((path, declarations))
+}
+
+fn line_column(source: &str, offset: u32) -> (usize, usize) {
+    let prefix = &source[..(offset as usize).min(source.len())];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    (line, prefix[start..].chars().count() + 1)
+}
+
+fn declaration_checks(
+    declarations: &BTreeMap<String, BTreeSet<String>>,
+    modules: &[Path],
+) -> Vec<TokenStream> {
+    let mut checks = Vec::new();
+    for (module, names) in declarations {
+        for name in names {
+            let module = LitStr::new(module, MacroSpan::call_site());
+            let name = LitStr::new(name, MacroSpan::call_site());
+            let message = format!("missing host export: {}:{}", module.value(), name.value());
+            checks.push(quote! {
+                const _: () = {
+                    const fn __yield_str_eq(left: &str, right: &str) -> bool {
+                        let left = left.as_bytes();
+                        let right = right.as_bytes();
+                        if left.len() != right.len() {
+                            return false;
+                        }
+                        let mut index = 0;
+                        while index < left.len() {
+                            if left[index] != right[index] {
+                                return false;
+                            }
+                            index += 1;
+                        }
+                        true
+                    }
+                    let modules: &[(&str, &[&str])] = &[#(#modules::__YIELD_NAMES),*];
+                    let mut module_index = 0;
+                    let mut found = false;
+                    while module_index < modules.len() {
+                        if __yield_str_eq(modules[module_index].0, #module) {
+                            let names = modules[module_index].1;
+                            let mut name_index = 0;
+                            while name_index < names.len() {
+                                if __yield_str_eq(names[name_index], #name) {
+                                    found = true;
+                                }
+                                name_index += 1;
+                            }
+                        }
+                        module_index += 1;
+                    }
+                    if !found {
+                        panic!(#message);
+                    }
+                };
+            });
+        }
+    }
+    checks
 }
 
 #[cfg(test)]
@@ -351,17 +445,55 @@ mod tests {
     #[test]
     fn host_bindings_requires_all_sections_exactly_once() {
         diagnostic(
-            host_bindings(quote!(modules: [], classes: [], states: [], operations: [])),
+            host_bindings(quote!(
+                dts: "tests/dts/empty.d.ts",
+                modules: [],
+                classes: [],
+                states: [],
+                operations: []
+            )),
             "missing `services`",
         );
         diagnostic(
-            host_bindings(quote!(modules: [], modules: [])),
-            "duplicate `modules`",
+            host_bindings(quote!(dts: "a.d.ts", dts: "b.d.ts")),
+            "duplicate `dts`",
         );
         diagnostic(
             host_bindings(quote!(exports: [])),
             "unknown host_bindings section",
         );
+    }
+
+    #[test]
+    fn host_bindings_reads_and_validates_the_declaration_file() {
+        let error = host_bindings(quote!(
+            dts: "tests/dts/missing.d.ts",
+            modules: [],
+            classes: [],
+            states: [],
+            operations: [],
+            services: []
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("missing.d.ts"), "{error}");
+        assert!(
+            error.contains("No such file") || error.contains("cannot find"),
+            "{error}"
+        );
+
+        let error = host_bindings(quote!(
+            dts: "tests/dts/reexport.d.ts",
+            modules: [x],
+            classes: [],
+            states: [],
+            operations: [],
+            services: []
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("tests/dts/reexport.d.ts:2:5"), "{error}");
+        assert!(error.contains("unsupported syntax: `export *`"), "{error}");
     }
 
     #[test]
@@ -383,13 +515,19 @@ mod tests {
     #[test]
     fn host_bindings_accepts_empty_lists_and_service_expressions() {
         assert!(
-            host_bindings(
-                quote!(modules: [], classes: [], states: [], operations: [], services: [],)
-            )
+            host_bindings(quote!(
+                dts: "tests/dts/empty.d.ts",
+                modules: [],
+                classes: [],
+                states: [],
+                operations: [],
+                services: [],
+            ))
             .is_ok()
         );
         assert!(
             host_bindings(quote! {
+                dts: "tests/dts/empty.d.ts",
                 services: [("id", 1, make_service(1, 2),),],
                 operations: [work::Wait,],
                 states: [data::Counter],

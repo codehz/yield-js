@@ -558,6 +558,7 @@ fn test_bindings(
     clock: &Arc<FakeClock>,
 ) -> Result<Bindings, String> {
     host_bindings! {
+        dts: "test.d.ts",
         modules: [test, console],
         classes: [Node, Matcher],
         states: [],
@@ -772,7 +773,8 @@ mod console {
 
 fn compile_source(source: &str) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).expect("valid fixture path");
-    let options = CompileOptions::from_bindings(&TestHost::new().bindings());
+    let options =
+        CompileOptions::from_dts(include_str!("../test.d.ts")).expect("test declarations parse");
     compile("main.js", None, &resolver, &options)
 }
 

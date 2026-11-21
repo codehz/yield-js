@@ -35,6 +35,7 @@ mod session;
 use std::collections::{BTreeMap, BTreeSet};
 
 use oxc::allocator::Allocator;
+use oxc::span::Span;
 use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
@@ -48,19 +49,15 @@ pub struct CompileOptions {
 }
 
 impl CompileOptions {
-    /// Builds the host import manifest from binding declarations.
-    pub fn from_bindings(bindings: &yield_vm::Bindings) -> Self {
-        Self {
-            imports: bindings
-                .module_names()
-                .map(|module| {
-                    (
-                        module.to_owned(),
-                        bindings.export_names(module).map(str::to_owned).collect(),
-                    )
-                })
-                .collect(),
-        }
+    /// Reads the host import manifest from a declaration file.
+    ///
+    /// Only direct value declarations inside string-named module blocks count;
+    /// the parser rejects export lists, aliases and re-exports it cannot read.
+    pub fn from_dts(source: &str) -> Result<Self, CompileError> {
+        let imports = yield_host_dts::parse(source).map_err(|error| {
+            CompileError::new(source, Span::new(error.start, error.end), error.message)
+        })?;
+        Ok(Self { imports })
     }
 }
 

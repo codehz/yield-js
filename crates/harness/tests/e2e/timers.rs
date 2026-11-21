@@ -225,6 +225,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
 
     let clock = Arc::new(yield_harness::FakeClock::default());
     let bindings = yield_vm::host_bindings! {
+        dts: "tests/dts/chain.d.ts",
         modules: [chain], classes: [], states: [], operations: [Timer],
         services: [("clock", 1, Arc::clone(&clock))],
     }

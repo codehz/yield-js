@@ -918,6 +918,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     };
     let mut exports = Vec::new();
     let mut keys = HashSet::new();
+    let mut names = Vec::new();
     for item in items {
         let attrs = match item {
             Item::Fn(item) => {
@@ -929,7 +930,15 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 }
                 &mut item.attrs
             }
-            Item::Const(item) => &mut item.attrs,
+            Item::Const(item) => {
+                if item.ident == "__YIELD_NAMES" {
+                    return Err(Error::new_spanned(
+                        &item.ident,
+                        "reserved module declaration constant name",
+                    ));
+                }
+                &mut item.attrs
+            }
             other => {
                 let attrs = item_attrs(other);
                 reject_markers(
@@ -959,6 +968,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         if !keys.insert(name.value()) {
             return Err(Error::new_spanned(name, "duplicate module export name"));
         }
+        names.push(name.value());
         let (attrs, export) = match item {
             Item::Fn(item) if kind != "constant" => {
                 let (call, stages) = lower_binding(&mut item.sig, &mut item.block, &kind, None)?;
@@ -1018,6 +1028,12 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         pub fn __yield_module() -> ::yield_vm::__macro_support::ModuleDecl {
             ::yield_vm::__macro_support::module(#module_name, ::std::vec![#(#exports),*])
         }
+    });
+    items.push(syn::parse_quote! {
+        /// Host declaration metadata: module name and declared value exports.
+        #[doc(hidden)]
+        pub const __YIELD_NAMES: (&'static str, &'static [&'static str]) =
+            (#module_name, &[#(#names),*]);
     });
     Ok(quote!(#module))
 }

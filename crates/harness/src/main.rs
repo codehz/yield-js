@@ -140,6 +140,7 @@ fn demo_bindings(
     labels: Arc<LabelService>,
 ) -> Result<Bindings, String> {
     host_bindings! {
+        dts: "demo.d.ts",
         modules: [demo],
         classes: [],
         states: [],
@@ -185,12 +186,7 @@ mod demo {
 }
 
 fn compile_options() -> CompileOptions {
-    let bindings = demo_bindings(
-        Arc::new(DemoCounters::default()),
-        Arc::new(LabelService::default()),
-    )
-    .expect("demo bindings");
-    CompileOptions::from_bindings(&bindings)
+    CompileOptions::from_dts(include_str!("../demo.d.ts")).expect("demo declarations parse")
 }
 
 fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {

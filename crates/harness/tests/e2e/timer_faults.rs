@@ -268,6 +268,7 @@ macro_rules! timer_contract {
 
             pub(super) fn bindings(clock: &Arc<FakeClock>) -> Bindings {
                 host_bindings! {
+                    dts: "tests/dts/contract.d.ts",
                     modules: [api],
                     classes: [],
                     states: [],

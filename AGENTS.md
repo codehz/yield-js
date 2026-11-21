@@ -10,9 +10,11 @@ Workspace crates, one direction of dependency:
 
 ```text
 yield-harness  →  yield-compiler  →  yield-vm
+                       ↓
+                  yield-host-dts   ←  yield-binding-macros  (expansion only)
 ```
 
-`yield-vm` owns the bytecode contract and never imports the compiler. Oxc AST stays inside `yield-compiler` (`frontend` and `lower` only). The only Oxc type on the public compiler surface is `oxc::span::Span` on `CompileError`.
+`yield-vm` owns the bytecode contract and never imports the compiler. Oxc AST stays inside `yield-compiler` (`frontend` and `lower` only) and inside `yield-host-dts`; the latter exposes only plain name tables and byte spans. The only Oxc type on the public compiler surface is `oxc::span::Span` on `CompileError`.
 
 ```text
 source roots and synchronous resolver (strict ES modules)
@@ -28,7 +30,7 @@ source roots and synchronous resolver (strict ES modules)
 
 Public entry points:
 
-- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` links explicit roots; `CompileOptions::from_bindings` derives the separate host import manifest.
+- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` links explicit roots; `CompileOptions::from_dts(source)` reads the separate host import manifest from the host's `.d.ts`.
 - `Vm::new(build, &mut host)` validates the build and imports, instantiates all source modules, evaluates the optional preload graph and installs its live global getters, then evaluates entry and drains initialization microtasks.
 - `Vm::get_export("name")` reads the current value of an unambiguous linked entry export, including re-exports.
 - `Vm::start(host, "run", args)` reads the public binding and calls it with an `undefined` receiver; `args` are `JsValue` constants, then the host calls `Vm::run_until_idle(host)`
@@ -57,6 +59,8 @@ Host binding functions are synchronous and must not re-enter the VM. Declaration
 | --- | --- |
 | `crates/vm/src` | Bytecode contract, loader checks, interpreter, heap/object table, Promise/microtasks, host protocol, snapshot |
 | `crates/compiler/src` | Oxc frontend, lowering, liveness, slot allocation |
+| `crates/host-dts/src` | Host `.d.ts` inventory: direct value exports per string module block, located unsupported-syntax diagnostics |
+| `crates/binding-macros/src` | Typed authoring macros; `host_bindings!` reads `dts` and checks declared names at expansion |
 | `crates/compiler/src/lower` | Only body walker: `stmt`, `expr`, `control`, `pattern` |
 | `crates/harness/src` | `TestHost`, directive case runner, demo binary |
 | `crates/harness/tests/e2e.rs` | Hand-written snapshot/restore and loader tests |
@@ -94,7 +98,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-harness` (not the directo
 - Ordered maps are `BTreeMap` / `BTreeSet` (imports, globals, operations, natives). Keep that when identity or snapshot order matters.
 - `const` mutability is resolved by binding ID at compile time, including through closures. Initialization writes (including loop declarations) are allowed. Assignment to a `const` throws a catchable runtime `TypeError` at the write, after preceding evaluation effects; logical assignment can short-circuit without a write. This does not freeze the bound value. Static TDZ for the current function lives in `compiler/src/env.rs` (`pending_lexicals`), not the emitter. A closure does not inherit that set, so an early cross-closure read is `undefined`. This is not full ECMAScript TDZ, and loop iterations do not get fresh bindings.
 - Name policy (`compiler/src/names.rs`): local bindings, static imports (source and host), eligible preload globals, then builtins. Bare preload names read getter-only properties through `globalThis` outside the preload subgraph.
-- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest, derived from `Bindings`. Fixture declarations are `test_bindings()` in `harness/src/lib.rs`; DemoHost declarations in `main.rs` remain separate (`inspect`, `seed`, `wait`).
+- Host modules use the sorted `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` manifest. `CompileOptions::from_dts` reads it from the host's `.d.ts`, and `host_bindings! { dts: "path" }` (path relative to the caller's `Cargo.toml`) re-parses the same file during macro expansion, comparing each declared `module:export` against the generated `__YIELD_NAMES` tables. A declared name missing from the implementing `#[host_module]` is `missing host export: module:export` at compile time; extra implementations are allowed and stay out of namespace exports. Harness declarations are `harness/test.d.ts` and `harness/demo.d.ts`; e2e fixtures live in `harness/tests/dts/`, named by their sorted module combination.
 - `TestHost` semantics: `seed()` → `10`; `wait(label)` starts the `Wait` operation (display label `wait:{label}`, default recovery `Resume`); `bind(label)` allocates a `Node` instance with payload `label` and method `label()`; `expect(actual)` allocates a `Matcher` instance with slot `actual`, shared methods, and a `value` accessor; `inspect` / `setLabel` → `undefined`. Inject recovery failure with `host.labels().set_reject_restore_operation(true)`; corrupt snapshot payloads by editing the record.
 
 Where to edit:
@@ -107,6 +111,7 @@ Where to edit:
 | New heap kind | `vm/src/heap/object.rs` `write_edges`; GC and snapshot capture share the tracer in `vm/src/gc.rs` |
 | Snapshot or restore checks | `vm/src/snapshot/` (`record.rs` shapes, `capture.rs` restore); add a rejection test in `harness/tests/e2e.rs` |
 | Host protocol | `vm/src/host.rs`, `vm/src/binding/` (`schema.rs` declarations, `call.rs` `CallCx`); implementors: `harness/src/lib.rs`, `harness/src/main.rs` |
+| Host declaration syntax | `host-dts/src/lib.rs` (inventory and rejections), `compiler/src/lib.rs` (`from_dts`), `binding-macros/src/registry.rs` (`dts`, const checks), `binding-macros/src/typed.rs` (`__YIELD_NAMES`) |
 | Observable JS behavior | a `.js` case, not a new Rust harness |
 
 Easy to break:
@@ -122,6 +127,7 @@ Easy to break:
 
 - `Cargo.toml` — workspace members and pinned deps (`oxc = "=0.159.0"` with `ast_visit`)
 - `crates/compiler/src/lib.rs` — pipeline and `compile`
+- `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`, located rejections
 - `crates/vm/src/lib.rs` — re-exports: `Build`, `Vm`, `Host`, `Snapshot`, `Value`, `VmError`
 - `crates/vm/src/bytecode.rs` — `Instr`, `ResumeEntry`, `ExceptionHandler`, `Build::validate`
 - `crates/vm/src/vm.rs` — `get_export`, `start`, `run_until_idle`, `complete_operation`
@@ -140,11 +146,14 @@ Easy to break:
 
 ## Testing & QA
 
-Three layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[should_panic]`, no unit-test modules inside `vm` or `compiler` sources. The VM is tested through `yield-harness`.
+Four layers, all `cargo test`. No insta, no coverage gate, no `#[ignore]` / `#[should_panic]`, no unit-test modules inside `vm` or `compiler` sources. The VM is tested through `yield-harness`.
 
 1. `crates/compiler/tests/compile.rs` — bytecode shape of the two-await example and unsupported-syntax location.
 2. `crates/harness/tests/e2e.rs` — snapshot identity, loader rejection, finally-across-await, reachability. Assert `VmError` with `matches!`.
 3. `crates/harness/tests/cases/*.js` — generated tests. `build.rs` requires a non-empty dir of `*.js` whose stems match `[a-z][a-z0-9_]*`. Test function is `case_<stem>`.
+4. `crates/host-dts/src/lib.rs` unit tests plus `crates/binding-macros/tests/host_dts_fixture.rs`, which builds a throwaway consumer crate and runs `cargo check` against it to prove declared-but-missing exports fail at macro expansion.
+
+Host declaration fixtures: `crates/harness/test.d.ts` and `crates/harness/demo.d.ts` for the real hosts, `crates/harness/tests/dts/<modules>.d.ts` for e2e hosts (sorted module names joined by `-`), `crates/binding-macros/tests/dts/` for macro tests.
 
 Case contract (`yield_harness::run_case`):
 

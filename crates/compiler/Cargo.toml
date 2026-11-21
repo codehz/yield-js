@@ -9,3 +9,4 @@ oxc.workspace = true
 ryu-js.workspace = true
 serde.workspace = true
 yield-vm = { path = "../vm" }
+yield-host-dts = { path = "../host-dts" }

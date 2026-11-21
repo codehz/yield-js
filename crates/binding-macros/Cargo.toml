@@ -11,6 +11,7 @@ proc-macro = true
 syn = { version = "2", features = ["fold", "full", "visit"] }
 quote = "1"
 proc-macro2 = "1"
+yield-host-dts = { path = "../host-dts" }
 
 [dev-dependencies]
 proc-macro2 = { version = "1", features = ["span-locations"] }

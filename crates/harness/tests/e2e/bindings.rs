@@ -17,8 +17,8 @@ use yield_vm::{
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
 
-fn options(bindings: &Bindings) -> CompileOptions {
-    CompileOptions::from_bindings(bindings)
+fn options(dts: &str) -> CompileOptions {
+    CompileOptions::from_dts(dts).expect("declarations parse")
 }
 
 struct StrategyHost {
@@ -135,6 +135,7 @@ mod strategy_fixture {
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
+            dts: "tests/dts/ops.d.ts",
             modules: [ops],
             classes: [],
             states: [],
@@ -168,7 +169,7 @@ export async function run() {
 "#;
     let labels = Arc::new(LabelService::default());
     let bindings = strategy_fixture::bindings(&labels);
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(include_str!("../dts/ops.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -315,6 +316,7 @@ mod stale_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
+            dts: "tests/dts/stale.d.ts",
             modules: [stale],
             classes: [Sink],
             states: [],
@@ -335,7 +337,7 @@ export function run() {
   return unstash();
 }
 "#;
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(include_str!("../dts/stale.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -463,6 +465,7 @@ mod guest_call_fixture {
     pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
         let runs = Arc::new(AtomicUsize::new(0));
         let bindings = host_bindings! {
+            dts: "tests/dts/guest.d.ts",
             modules: [guest],
             classes: [],
             states: [],
@@ -470,7 +473,8 @@ mod guest_call_fixture {
             services: [("stash", 1, Stash::default()), ("runs", 1, runs.clone())],
         }
         .expect("guest bindings");
-        let build = compile_main(source, &options(&bindings)).expect("compile");
+        let build =
+            compile_main(source, &options(include_str!("../dts/guest.d.ts"))).expect("compile");
         let mut host = StrategyHost::new(bindings);
         let mut vm = Vm::new(build, &mut host).expect("create VM");
         let result = vm.start(&mut host, "run", vec![]);
@@ -633,6 +637,7 @@ mod counter_fixture {
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
+            dts: "tests/dts/counter-test.d.ts",
             modules: [counter, test],
             classes: [],
             states: [CounterState],
@@ -658,7 +663,8 @@ export async function run() {
 "#;
     let labels = Arc::new(LabelService::default());
     let bindings = counter_fixture::bindings(&labels);
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build =
+        compile_main(source, &options(include_str!("../dts/counter-test.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -726,6 +732,7 @@ mod geom_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
+            dts: "tests/dts/geom.d.ts",
             modules: [geom],
             classes: [Point],
             states: [],
@@ -748,7 +755,7 @@ export function run() {
   return point.x();
 }
 "#;
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(include_str!("../dts/geom.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     assert_eq!(
@@ -777,6 +784,7 @@ mod loose_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
+            dts: "tests/dts/loose.d.ts",
             modules: [loose],
             classes: [Loose],
             states: [],
@@ -796,7 +804,7 @@ export function run() {
   return make();
 }
 "#;
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build = compile_main(source, &options(include_str!("../dts/loose.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build, &mut host).expect("create VM");
     let error = vm
@@ -955,6 +963,7 @@ mod inherit_fixture {
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
+            dts: "tests/dts/inherit.d.ts",
             modules: [inherit],
             classes: [Base, Derived],
             states: [],
@@ -994,7 +1003,8 @@ export async function run() {
   return true;
 }
 "#;
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build =
+        compile_main(source, &options(include_str!("../dts/inherit.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -1075,7 +1085,8 @@ export async function run() {
   return true;
 }
 "#;
-    let build = compile_main(source, &options(&bindings)).expect("compile");
+    let build =
+        compile_main(source, &options(include_str!("../dts/inherit.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
     let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
@@ -1121,4 +1132,56 @@ export function run() {
     );
     assert_eq!(host.count("wait"), 1);
     assert!(host.pending_labels().is_empty());
+}
+
+mod subset_fixture {
+    use super::*;
+
+    #[host_module(name = "subset")]
+    mod subset {
+        use super::*;
+
+        #[function(name = "hidden")]
+        fn hidden(_cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            Ok(JsValue::number(1.0))
+        }
+
+        #[function(name = "alpha")]
+        fn alpha(_cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+            Ok(JsValue::number(4.0))
+        }
+    }
+
+    pub(super) fn bindings() -> Bindings {
+        host_bindings! {
+            dts: "tests/dts/subset.d.ts",
+            modules: [subset],
+            classes: [],
+            states: [],
+            operations: [],
+            services: [],
+        }
+        .expect("subset bindings")
+    }
+}
+
+#[test]
+fn declared_names_select_implementations_and_hide_extra_exports() {
+    let bindings = subset_fixture::bindings();
+    let source = r#"
+import * as shared from "subset";
+export function run() {
+  if (shared.hidden !== undefined) return -1;
+  if ("hidden" in shared) return -2;
+  return shared.alpha();
+}
+"#;
+    let build =
+        compile_main(source, &options(include_str!("../dts/subset.d.ts"))).expect("compile");
+    let mut host = StrategyHost::new(bindings);
+    let mut vm = Vm::new(build, &mut host).expect("create VM");
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).expect("start"),
+        Value::number(4.0)
+    );
 }

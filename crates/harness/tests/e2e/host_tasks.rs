@@ -417,6 +417,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let labels = Arc::new(LabelService::default());
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
+        dts: "tests/dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],
     }
@@ -527,6 +528,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     let labels = Arc::new(LabelService::default());
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
+        dts: "tests/dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: [("labels", 1, Arc::clone(&labels)), ("counters", 1, Arc::clone(&counters))],
     }

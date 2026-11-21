@@ -48,6 +48,7 @@ mod original {
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
         host_bindings! {
+            dts: "tests/dts/auxiliary-contract.d.ts",
             modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
             services: [("labels", 1, Arc::clone(labels))],
         }
@@ -90,6 +91,7 @@ macro_rules! independent_contract {
 
             pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
                 host_bindings! {
+                    dts: "tests/dts/auxiliary-contract.d.ts",
                     modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
                     services: [("labels", 1, Arc::clone(labels))],
                 }
@@ -131,7 +133,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
           return probe(42);
         }
         "#,
-        &options(&bindings),
+        &options(include_str!("../dts/auxiliary-contract.d.ts")),
     )
     .expect("compile");
     let mut host = StrategyHost::new(bindings);

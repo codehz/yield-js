@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-模块描述由 `#[host_module]` 生成，`host_bindings!` 一次性链接模块、类、状态、operation 与服务。VM、编译器和未来的 TypeScript 生成器消费同一份规范声明，不要求宿主实现统一的字符串分派入口。
+模块描述由 `#[host_module]` 生成，`host_bindings!` 一次性链接模块、类、状态、operation 与服务，并读取 `dts` 指定的声明文件。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
 ```rust
 ModuleDecl {
@@ -65,7 +65,7 @@ ModuleDecl {
 }
 ```
 
-- 编译器只从描述中取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。
+- 编译器用 `CompileOptions::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与 `#[host_module]` 生成的 `__YIELD_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的值（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
 - 声明可以在多个 VM 之间共享，但**实例、原型和模块状态每 VM 一份**。声明的数据结构必须 `Send + Sync`。
 

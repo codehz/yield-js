@@ -1650,3 +1650,52 @@ fn names_nested_in_exported_patterns_are_public() {
         ["a", "rest"]
     );
 }
+
+#[test]
+fn host_declarations_supply_the_import_manifest() {
+    let dts = r#"
+declare module "a" {
+    interface Box<T> { value: T }
+    type Alias<T> = Box<T>;
+    export function id<T extends Box<string>>(x: T): T;
+}
+"#;
+    let options = CompileOptions::from_dts(dts).unwrap();
+    compile(
+        "import { id } from 'a';\nexport function run() { return id(1); }",
+        &options,
+    )
+    .unwrap();
+
+    for (name, source) in [
+        ("Box", "import { Box } from 'a';\nexport function run() {}"),
+        (
+            "Alias",
+            "import { Alias } from 'a';\nexport function run() {}",
+        ),
+        (
+            "seed",
+            "import { seed } from 'a';\nexport function run() {}",
+        ),
+    ] {
+        let error = compile(source, &options).unwrap_err();
+        assert_eq!(
+            error.message(),
+            format!("host module \"a\" has no export {name:?}")
+        );
+    }
+
+    let error = CompileOptions::from_dts("declare module \"a\" {\n  export * from \"./b\";\n}")
+        .unwrap_err();
+    assert_eq!(error.message(), "unsupported syntax: `export *`");
+    assert_eq!(error.line(), 2);
+}
+
+#[test]
+fn host_declaration_type_only_module_keeps_an_empty_manifest_entry() {
+    let options =
+        CompileOptions::from_dts("declare module \"types\" { export interface Shape { a: 1 } }")
+            .unwrap();
+    assert!(options.imports["types"].is_empty());
+    compile("export function run() {}", &options).unwrap();
+}

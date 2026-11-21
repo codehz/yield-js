@@ -115,7 +115,10 @@ pub fn parse(source: &str) -> Result<BTreeMap<String, BTreeSet<String>>, Error> 
                 return Err(Error::unsupported(declaration.span, "`export =`"));
             }
             Statement::TSNamespaceExportDeclaration(declaration) => {
-                return Err(Error::unsupported(declaration.span, "`export as namespace`"));
+                return Err(Error::unsupported(
+                    declaration.span,
+                    "`export as namespace`",
+                ));
             }
             Statement::ExportAllDeclaration(declaration) => {
                 return Err(Error::unsupported(declaration.span, "`export *`"));
@@ -239,7 +242,10 @@ fn collect_module_body(
                 return Err(Error::unsupported(declaration.span, "`export *`"));
             }
             Statement::TSNamespaceExportDeclaration(declaration) => {
-                return Err(Error::unsupported(declaration.span, "`export as namespace`"));
+                return Err(Error::unsupported(
+                    declaration.span,
+                    "`export as namespace`",
+                ));
             }
             other => {
                 return Err(Error::unsupported(
@@ -252,7 +258,10 @@ fn collect_module_body(
     Ok(())
 }
 
-fn collect_export(declaration: &Declaration<'_>, exports: &mut BTreeSet<String>) -> Result<(), Error> {
+fn collect_export(
+    declaration: &Declaration<'_>,
+    exports: &mut BTreeSet<String>,
+) -> Result<(), Error> {
     match declaration {
         Declaration::FunctionDeclaration(declaration) => {
             if let Some(id) = &declaration.id {
@@ -312,7 +321,9 @@ fn statement_has_value(statement: &Statement<'_>) -> bool {
         Statement::VariableDeclaration(declaration) => !declaration.declarations.is_empty(),
         Statement::TSEnumDeclaration(declaration) => !declaration.r#const,
         Statement::TSNamespaceDeclaration(declaration) => namespace_has_value(declaration),
-        Statement::ExportDeclaration(declaration) => declaration_has_value(&declaration.declaration),
+        Statement::ExportDeclaration(declaration) => {
+            declaration_has_value(&declaration.declaration)
+        }
         Statement::ExportDefaultDeclaration(declaration) => matches!(
             &declaration.declaration,
             ExportDefaultDeclarationKind::FunctionDeclaration(_)
@@ -425,7 +436,11 @@ declare module "f" { export default interface Shape { a: 1 } }"#,
     #[test]
     fn rejects_value_export_lists_and_export_assignment() {
         let error = parse("declare module \"a\" {\n  export { x };\n}\n").unwrap_err();
-        assert!(error.message.starts_with("unsupported syntax: value export list"));
+        assert!(
+            error
+                .message
+                .starts_with("unsupported syntax: value export list")
+        );
         assert_eq!(error.start, 32);
         let error = parse("declare module \"a\" {}\nexport = 1;\n").unwrap_err();
         assert_eq!(error.message, "unsupported syntax: `export =`");

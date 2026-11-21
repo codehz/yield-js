@@ -833,6 +833,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+ "yield-host-dts",
  "yield-vm",
 ]
 
@@ -843,6 +844,7 @@ dependencies = [
  "oxc",
  "ryu-js",
  "serde",
+ "yield-host-dts",
  "yield-vm",
 ]
 

@@ -68,14 +68,17 @@ impl OperationDriver for Work {
 fn registers_state_operation_and_services() -> Result<(), String> {
     let evaluations = Cell::new(0);
     let first = host_bindings! {
+        dts: "tests/dts/state.d.ts",
         modules: [state], classes: [], states: [State], operations: [Work],
         services: [("clock", 2, { evaluations.set(evaluations.get() + 1); 17u64 })],
     }?;
     let second = host_bindings! {
+        dts: "tests/dts/state.d.ts",
         modules: [state], classes: [], states: [State], operations: [Work],
         services: [("clock", 2, String::from("different resource"))],
     }?;
     let third = host_bindings! {
+        dts: "tests/dts/state.d.ts",
         modules: [state], classes: [], states: [State], operations: [Work],
         services: [("clock", 3, 17u64)],
     }?;
@@ -91,12 +94,16 @@ fn registers_state_operation_and_services() -> Result<(), String> {
 #[test]
 fn rejects_duplicate_service_ids_even_across_versions() {
     let duplicate = host_bindings! {
+        dts: "tests/dts/state.d.ts",
         modules: [], classes: [], states: [], operations: [],
         services: [("clock", 2, 17u64), ("clock", 3, "other")],
     };
     assert_eq!(duplicate.unwrap_err(), "duplicate host service \"clock\"");
     assert!(
-        host_bindings! { modules: [], classes: [], states: [], operations: [], services: [] }
-            .is_ok()
+        host_bindings! {
+            dts: "tests/dts/state.d.ts",
+            modules: [], classes: [], states: [], operations: [], services: []
+        }
+        .is_ok()
     );
 }
