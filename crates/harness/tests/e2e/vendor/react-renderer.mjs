@@ -1,5 +1,6 @@
 import ReactReconciler from "react-reconciler-0.31.0.mjs";
-import { inspect } from "test";
+import { clearTimeout, inspect, setTimeout } from "test";
+import * as console from "console";
 
 
 const hostConfig = {

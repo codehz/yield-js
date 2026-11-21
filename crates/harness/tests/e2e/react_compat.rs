@@ -49,10 +49,17 @@ fn react_reconciler_custom_renderer_attempts_headless_host_execution() {
     ])
     .expect("valid React probe module paths");
     let options = CompileOptions {
-        imports: BTreeMap::from([(
-            "console".to_owned(),
-            BTreeSet::from(["debug", "error", "info", "log", "warn"].map(str::to_owned)),
-        )]),
+        imports: BTreeMap::from([
+            (
+                "console".to_owned(),
+                BTreeSet::from(["debug", "error", "info", "log", "warn"].map(str::to_owned)),
+            ),
+            (
+                "test".to_owned(),
+                BTreeSet::from(["clearTimeout", "inspect", "setTimeout"].map(str::to_owned)),
+            ),
+            ("console".to_owned(), BTreeSet::from(["error".to_owned()])),
+        ]),
     };
     match compile("main.js", Some("preload.js"), &resolver, &options) {
         Ok(build) => {
