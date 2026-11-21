@@ -724,6 +724,25 @@ pub struct DataViewObject {
     pub byte_length: Option<usize>,
 }
 
+/// A UTF-8 `TextDecoder` instance: the ordinary object header plus the
+/// decoder state that survives a snapshot boundary.
+///
+/// `prefix` holds the trailing bytes of an incomplete UTF-8 sequence from a
+/// streaming call; `pending` holds the bytes after a consumed fatal error while
+/// the stream is still open. A non-streaming call always clears both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextDecoderObject {
+    pub object: PlainObject,
+    pub fatal: bool,
+    pub ignore_bom: bool,
+    /// The `stream` flag of the most recent `decode` call.
+    pub streaming: bool,
+    pub bom_seen: bool,
+    pub prefix: [u8; 3],
+    pub prefix_len: u8,
+    pub pending: Vec<u8>,
+}
+
 /// Current byte extent of one view, resolved against the live buffer.
 ///
 /// `Detached` and `OutOfBounds` are distinct: a detached buffer makes every
@@ -1102,6 +1121,11 @@ pub enum Object {
     ArrayBuffer(ArrayBufferObject),
     TypedArray(TypedArrayObject),
     DataView(DataViewObject),
+    /// A branded `TextEncoder` instance. It has no state beyond properties.
+    TextEncoder {
+        object: PlainObject,
+    },
+    TextDecoder(TextDecoderObject),
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
         target: ObjectId,

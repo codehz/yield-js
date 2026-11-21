@@ -3,7 +3,7 @@ use super::types::{
     ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, EnvironmentObject,
     FunctionObject, IntegrityLevel, NativeObject, Object, OwnProperty, PromiseCallback,
     PromiseObject, PromiseState, Property, PropertyTables, PropertyTablesMut, Resolution,
-    TypedArrayObject, array_index, collect_own_keys,
+    TextDecoderObject, TypedArrayObject, array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -113,6 +113,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
             | Self::TypedArray(TypedArrayObject { object: o, .. })
             | Self::DataView(DataViewObject { object: o, .. })
+            | Self::TextEncoder { object: o }
+            | Self::TextDecoder(TextDecoderObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -144,6 +146,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
             | Self::TypedArray(TypedArrayObject { object: o, .. })
             | Self::DataView(DataViewObject { object: o, .. })
+            | Self::TextEncoder { object: o }
+            | Self::TextDecoder(TextDecoderObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -211,6 +215,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
             | Self::TypedArray(TypedArrayObject { object: o, .. })
             | Self::DataView(DataViewObject { object: o, .. })
+            | Self::TextEncoder { object: o }
+            | Self::TextDecoder(TextDecoderObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -242,6 +248,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
             | Self::TypedArray(TypedArrayObject { object: o, .. })
             | Self::DataView(DataViewObject { object: o, .. })
+            | Self::TextEncoder { object: o }
+            | Self::TextDecoder(TextDecoderObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -393,6 +401,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: plain, .. })
             | Self::TypedArray(TypedArrayObject { object: plain, .. })
             | Self::DataView(DataViewObject { object: plain, .. })
+            | Self::TextEncoder { object: plain }
+            | Self::TextDecoder(TextDecoderObject { object: plain, .. })
             | Self::Set { object: plain, .. }
             | Self::WeakMap { object: plain, .. }
             | Self::WeakSet { object: plain, .. }
@@ -424,6 +434,8 @@ impl Object {
             | Self::ArrayBuffer(ArrayBufferObject { object: o, .. })
             | Self::TypedArray(TypedArrayObject { object: o, .. })
             | Self::DataView(DataViewObject { object: o, .. })
+            | Self::TextEncoder { object: o }
+            | Self::TextDecoder(TextDecoderObject { object: o, .. })
             | Self::Set { object: o, .. }
             | Self::WeakMap { object: o, .. }
             | Self::WeakSet { object: o, .. }
@@ -511,6 +523,8 @@ impl Object {
             | Self::Plain(_)
             | Self::RegExp { .. }
             | Self::Date { .. }
+            | Self::TextEncoder { .. }
+            | Self::TextDecoder(_)
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}

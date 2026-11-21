@@ -31,5 +31,5 @@ pub use types::{
     BoxedPrimitive, CollectionIteration, CollectionKind, CombineKind, CombineState, DataViewObject,
     ElementKind, EnvironmentObject, FunctionObject, GeneratorObject, GeneratorStatus, NativeObject,
     Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    RejectionStatus, Resolution, TypedArrayObject, WeakKey,
+    RejectionStatus, Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
 };

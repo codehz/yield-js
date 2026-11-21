@@ -123,6 +123,8 @@ builtin_globals! {
     "Float64Array" => Global::Root("float64Array"),
     "BigInt64Array" => Global::Root("bigInt64Array"),
     "BigUint64Array" => Global::Root("bigUint64Array"),
+    "TextEncoder" => Global::Owner(binary::text::ENCODER_OWNER),
+    "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

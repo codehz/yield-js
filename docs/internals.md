@@ -67,7 +67,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
 | 可观察的 JS 行为 | 一个 `.js` 用例，不是新的 Rust harness |
-| ArrayBuffer / DataView / TypedArray 成员 | `vm/src/builtin/binary/`（`buffer.rs`、`view.rs`、`typed.rs`、`element.rs`、`codec.rs`）；异形索引查找在 `vm/src/heap/binary.rs` |
+| ArrayBuffer / DataView / TypedArray / TextEncoder / TextDecoder 成员 | `vm/src/builtin/binary/`（`buffer.rs`、`view.rs`、`typed.rs`、`element.rs`、`codec.rs`、`text.rs`）；异形索引查找在 `vm/src/heap/binary.rs` |
 
 ## 4. 易错点
 

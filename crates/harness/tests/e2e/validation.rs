@@ -550,6 +550,82 @@ fn string_iterator_snapshot_rejects_invalid_offsets() {
 }
 
 #[test]
+fn text_decoder_snapshot_rejects_invalid_stream_state() {
+    let source = r#"
+import { wait } from "test";
+export async function run() {
+  const decoder = new TextDecoder();
+  decoder.decode(Uint8Array.from([0xe2]), { stream: true });
+  await wait("a");
+  return decoder.decode();
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    let decoder = snapshot
+        .objects
+        .iter()
+        .position(|record| matches!(record.object, Object::TextDecoder(_)))
+        .expect("live decoder");
+
+    let mut too_long = snapshot.clone();
+    let Object::TextDecoder(state) = &mut too_long.objects[decoder].object else {
+        unreachable!();
+    };
+    state.prefix_len = 4;
+    let error = s.restore(too_long).expect_err("prefix length 4");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
+    );
+
+    let mut invalid_prefix = snapshot.clone();
+    let Object::TextDecoder(state) = &mut invalid_prefix.objects[decoder].object else {
+        unreachable!();
+    };
+    state.prefix_len = 1;
+    state.prefix[0] = 0xff;
+    let error = s.restore(invalid_prefix).expect_err("invalid prefix bytes");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
+    );
+
+    let mut closed_with_pending = snapshot;
+    let Object::TextDecoder(state) = &mut closed_with_pending.objects[decoder].object else {
+        unreachable!();
+    };
+    state.streaming = false;
+    state.prefix_len = 0;
+    state.pending = vec![0x41];
+    let error = s
+        .restore(closed_with_pending)
+        .expect_err("pending bytes on a closed stream");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
+    );
+}
+
+#[test]
+fn text_decoder_snapshot_restores_a_streaming_prefix() {
+    let source = r#"
+import { wait } from "test";
+export async function run() {
+  const decoder = new TextDecoder();
+  decoder.decode(Uint8Array.from([0xe2]), { stream: true });
+  const x = await wait("a");
+  return decoder.decode(Uint8Array.from([0x82, 0xac])) + x;
+}
+"#;
+    let mut s = Suspended::start(source, vec![]);
+    let snapshot = s.snapshot();
+    s.restore(json_round_trip(&snapshot)).expect("restore");
+    s.complete("wait:a", Completion::Fulfilled(JsValue::string("!")));
+    assert_eq!(
+        s.state(),
+        PromiseState::Fulfilled(Value::string("€!".into()))
+    );
+}
+
+#[test]
 fn host_value_serde_preserves_utf16_units() {
     for (units, payload) in [
         (vec![0xD83D, 0xDE00], serde_json::json!("😀")),

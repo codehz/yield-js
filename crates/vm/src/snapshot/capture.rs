@@ -1211,6 +1211,25 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 "string iterator {id} has an invalid UTF-16 position"
             )));
         }
+        if let Object::TextDecoder(decoder) = heap.get(id)? {
+            let prefix_len = usize::from(decoder.prefix_len);
+            // A saved prefix must be the beginning of one scalar, not a
+            // complete or plainly invalid sequence.
+            let prefix_valid = prefix_len <= decoder.prefix.len()
+                && (prefix_len == 0
+                    || std::str::from_utf8(&decoder.prefix[..prefix_len]).is_err_and(|error| {
+                        error.valid_up_to() == 0 && error.error_len().is_none()
+                    }));
+            // Only an open stream can leave a prefix, and only a fatal error
+            // in an open stream retains unprocessed bytes.
+            let stream_valid = decoder.streaming || prefix_len == 0 && decoder.pending.is_empty();
+            let pending_valid = decoder.pending.is_empty() || decoder.fatal && decoder.streaming;
+            if !prefix_valid || !stream_valid || !pending_valid {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "TextDecoder {id} has invalid stream state"
+                )));
+            }
+        }
         if let Object::RegExpStringIterator { regexp, .. } = heap.get(id)?
             && heap.get(*regexp).is_err()
         {

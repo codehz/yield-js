@@ -9,7 +9,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Binary arrays persist one byte sequence per buffer and a buffer reference per view.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 59;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 60;
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;

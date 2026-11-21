@@ -322,7 +322,7 @@ impl Vm {
         }
     }
 
-    fn boolean_option(
+    pub(super) fn boolean_option(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -341,7 +341,7 @@ impl Vm {
     }
 
     /// RequireInternalSlot plus the Uint8Array name check.
-    fn validate_uint8(&mut self, value: &Value) -> Completion<ObjectId> {
+    pub(super) fn validate_uint8(&mut self, value: &Value) -> Completion<ObjectId> {
         let (id, kind) = match self.require_typed(value)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
@@ -363,7 +363,7 @@ impl Vm {
 
     /// Allocate a fresh `%Uint8Array%` and fill it with decoded bytes. The
     /// codec always uses the intrinsic constructor, never the receiver's.
-    fn uint8_from_bytes(
+    pub(super) fn uint8_from_bytes(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -608,7 +608,7 @@ impl Vm {
     }
 
     /// The `{ read, written }` result, or the SyntaxError after any partial write.
-    fn codec_result(
+    pub(super) fn codec_result(
         &mut self,
         read: usize,
         written: usize,

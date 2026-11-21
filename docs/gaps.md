@@ -37,6 +37,7 @@
 | `Map` / `Set` | 已覆盖基础集合操作和同步迭代；不提供较新的 `Map.groupBy` 或 `Set.prototype.union` 等集合运算 |
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
+| `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
 
 ## 5. 结构性缺口
 
@@ -85,15 +86,14 @@ React 19 bundle 通过 preload 提供空实现 `reportError`，并将未实现�
 
 ### 8.2 React reconciler 编译缺口
 
-测试 `react_reconciler_custom_renderer_headless_smoke` 使用真实 React 19、`react-reconciler` 与原 renderer；首个阻断仍按源码实际编译顺序固定。`typeof` 探测缺名会折叠可证明的条件并跳过不可达子树，但不推断可达的环境依赖：
+测试 `react_reconciler_custom_renderer_headless_smoke` 使用真实 React 19、`react-reconciler` 与原 renderer；首个阻断仍按编译器实际报告顺序固定。`typeof` 探测缺名会折叠可证明的条件并跳过不可达子树，但不推断可达的环境依赖：
 
 | 顺序 | 首个诊断 | 归属 | 位置与原因 |
 | --- | --- | --- | --- |
-| 1 | `unknown binding "TextDecoder"` | 框架 | `6:2701`；unenv 的 `process.stdout.write` 可达地调用 `new TextDecoder().decode(...)` |
+| 1 | `unknown callee "encodeURIComponent"` | 框架 | `6:13754`；React 构造压缩错误 URL 时调用；`decodeURIComponent` 也未实现 |
 | 2 | `unknown callee "setTimeout"` | 宿主 | `6:8835`；unenv 的 `nextTick` fallback；`clearTimeout` 同样需要 |
-| 3 | `unknown callee "encodeURIComponent"` | 框架 | `6:13754`；React 构造压缩错误 URL 时调用；`decodeURIComponent` 也未实现 |
 
-`performance`、`MessageChannel`、`AbortController` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。它们不属于此编译路径的实际可达依赖。额外 e2e 编译探针不再从 preload 导出 `window` / `process`，同时保留 `console`、`reportError` 与 `kEvents`；这不等于 renderer 可运行。实际可达的 timer 依赖仍须宿主提供，`TextDecoder` 与 URI 编码 API 仍须框架实现。
+`performance`、`MessageChannel`、`AbortController` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。它们不属于此编译路径的实际可达依赖。额外 e2e 编译探针不再从 preload 导出 `window` / `process`，同时保留 `console`、`reportError` 与 `kEvents`；这不等于 renderer 可运行。实际可达的 timer 依赖仍须宿主提供，URI 编码 API 仍须框架实现。
 
 ### 8.3 React reconciler 运行时缺口
 

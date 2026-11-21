@@ -13,6 +13,7 @@ pub(crate) mod element;
 
 mod buffer;
 mod codec;
+pub(crate) mod text;
 mod typed;
 mod view;
 

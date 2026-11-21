@@ -40,7 +40,7 @@ fn react_bundle_compiles_without_window_or_process_preload_exports() {
 }
 
 #[test]
-fn react_reconciler_without_window_or_process_still_stops_at_text_decoder() {
+fn react_reconciler_without_window_or_process_still_stops_at_encode_uri_component() {
     let main = r#"
         import React from "react.mjs";
         import { render } from "renderer.mjs";
@@ -68,10 +68,10 @@ fn react_reconciler_without_window_or_process_still_stops_at_text_decoder() {
     assert_eq!(error.module(), "react-reconciler-0.31.0.mjs", "{error}");
     assert_eq!(
         error.message(),
-        "unknown binding \"TextDecoder\"",
+        "unknown callee \"encodeURIComponent\"",
         "{error}"
     );
-    assert_eq!((error.line(), error.column()), (6, 2701), "{error}");
+    assert_eq!((error.line(), error.column()), (6, 13754), "{error}");
 }
 
 #[test]
@@ -107,10 +107,10 @@ fn react_reconciler_custom_renderer_headless_smoke() {
             assert_eq!(error.module(), "react-reconciler-0.31.0.mjs", "{error}");
             assert_eq!(
                 error.message(),
-                "unknown binding \"TextDecoder\"",
+                "unknown callee \"encodeURIComponent\"",
                 "{error}"
             );
-            assert_eq!((error.line(), error.column()), (6, 2701), "{error}");
+            assert_eq!((error.line(), error.column()), (6, 13754), "{error}");
             return;
         }
     };
