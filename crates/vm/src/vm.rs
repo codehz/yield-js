@@ -22,6 +22,7 @@ use crate::runtime::{
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -288,7 +289,7 @@ impl FunctionTable {
 
 #[derive(Debug)]
 pub struct Vm {
-    pub(crate) build: Arc<Build>,
+    pub(crate) build: Rc<Build>,
     functions: FunctionTable,
     pub(crate) bindings: Arc<Bindings>,
     pub(crate) heap: Heap,
@@ -424,7 +425,7 @@ impl Vm {
         Self {
             functions: FunctionTable::from_validated(&build),
             property_caches: caches,
-            build: Arc::new(build),
+            build: Rc::new(build),
             bindings,
             heap: Heap::new(),
             host_tasks: BTreeMap::new(),
@@ -1966,7 +1967,7 @@ impl Vm {
         Self {
             functions: FunctionTable::from_validated(&build),
             property_caches: caches,
-            build: Arc::new(build),
+            build: Rc::new(build),
             bindings,
             heap,
             continuations,

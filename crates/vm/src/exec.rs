@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
@@ -317,7 +316,7 @@ impl Vm {
     ) -> Result<ExecOutcome, VmError> {
         // Own a read-only build handle so dispatch can borrow the code across
         // mutable VM operations, including nested calls.
-        let build = Arc::clone(&self.build);
+        let build = std::rc::Rc::clone(&self.build);
         let code = &build.functions[frame.function].code;
         loop {
             let pc = frame.pc;
