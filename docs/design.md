@@ -47,7 +47,7 @@
 | 表达式 | `number` 与 `bigint` 字面量（BigInt 支持十进制、`0x` / `0o` / `0b` 前缀及数字分隔符，不带小数点或指数）、布尔、字符串、`null`、正则字面量与数组/对象字面量（含空洞、计算属性、展开）；模板字面量与标签模板（标签函数按调用点取得缓存且冻结的模板对象，替换值原样传递）；普通/成员/构造调用与实参展开；算术、位运算、比较、赋值、自增减、短路、三元、逗号、可选链、`??` 与逻辑赋值；`typeof`、`void`、`delete`、`in`、`instanceof`。 |
 | 控制流 | `if`、`switch`、`for`、`while`、`do…while`、`for…in`、同步 `for…of`（含提前退出时的 iterator close）、`for await…of`（含异步 iterator close）；标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。 |
 | 异步 | `async` 函数与 `await`；generator（`function*`、`yield`、`yield*`）、async generator（`async function*`）；thenable 同化、异常拒绝、Promise 微任务顺序与已结算 Promise 的异步恢复。 |
-| 显式资源管理 | 块级 `using` / `await using` 声明，`for…of` / `for await…of` 头部的 `using void`，以及模块顶层的同步 `using`；清理协议与内建见下文专节。顶层 `await using` 随顶层 `await` 一起不支持。 |
+| 显式资源管理 | `using` / `await using` 单名声明、C 风格 `for` 声明头、同步与异步 `for…of` 资源头，以及项目扩展 `using void` 迭代头。模块求值仅支持同步 `using`；清理协议与内建见下文。 |
 
 `class`（含 `extends`、字段和私有成员）是一等支持的语法：字节码编译器直接编译类声明与类表达式，不经离线转译降级——转译私有字段会生成额外的弱映射/闭包代码，破坏快照可恢复性和代码量目标。类语义（构造器、继承链、`super`、静态成员、字段初始化、私有字段/方法/访问器）在编译器与 VM 内建层面实现；宿主类声明（`#[host_class]`）与脚本类共用同一套 VM 类对象表示。标签模板同样由编译器直接编译，不经离线构建降级：每个调用点分配一个模板对象，包含冻结的 cooked 字符串数组、冻结的 raw 字符串数组以及只读的 `raw` 属性；cooked 元素在非法转义处为 `undefined`，替换表达式按源码顺序求值并原样作为实参传入，不做字符串转换。模板对象的调用点身份与冻结状态属于堆状态，随快照保存并恢复；动态模块加载、`eval`、`Function` 动态构造、`with` 不在首版契约内。直接输入中不支持的语法在编译期报告特性名和源码位置；缺失声明的宿主绑定在装载时拒绝。普通 JS 的可选全局探测保留标准语义（如未声明的 `MessageChannel` 在 `typeof` 中返回 `"undefined"`）。
 
@@ -63,13 +63,13 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 
 ### 显式资源管理：`using` 与 `await using`
 
-`using` / `await using` 由编译器直接编译，不经离线转译降级。支持块级 `using x = e` / `await using x = e`、`for…of` / `for await…of` 头部的 `using void`，以及模块顶层的同步 `using`；声明必须带初始化器，`using void` 仅限 for 头。`await using` 只允许出现在 `await` 合法的位置（async 函数、async generator 等）；模块初始化是同步帧，顶层 `await` 与顶层 `await using` 均在编译期拒绝，顶层同步 `using` 属于模块求值的一部分。
+`using` / `await using` 由编译器直接编译。声明只接受单名绑定，一般声明和 C 风格 `for` 头必须带初始化器，`for…of` / `for await…of` 头必须无初始化器。迭代方式与资源释放 hint 独立，`await using` 不隐式等待初始化器。项目扩展仅允许 `for (using void of expr)` / `for await (using void of expr)`：登记当前迭代值，使用同步 hint，不创建绑定。模块求值为同步帧，即使在嵌套块或循环中也拒绝 `await using`；同步函数同样拒绝，不可达语句不例外。模块顶层同步 `using` 在求值时登记和清理。
 
-清理协议由 VM 内建提供：`Symbol.dispose` / `Symbol.asyncDispose` 是 well-known Symbol。声明在资源值求值后立即进入当前作用域的待清理列表，且声明立即完成绑定（初始化器抛出的异常不登记后续资源）。作用域以正常或 abrupt completion 方式离开时，按 LIFO 对每个资源执行清理：`null` / `undefined` 跳过；其余在清理时读取 `Symbol.dispose`（异步作用域读 `Symbol.asyncDispose`）并以资源为 `this` 无参调用。方法缺失或不可调用抛出可捕获的 `TypeError`。出现多个清理错误时，第一个继续传播，后续错误包成 `SuppressedError(error, cause)`：`error` 是新错误，`cause` 是先前已传播的错误。
+依据 ECMA-262 的 [CreateDisposableResource](https://tc39.es/ecma262/#sec-createdisposableresource)、[AddDisposableResource](https://tc39.es/ecma262/#sec-adddisposableresource) 和 [DisposeResources](https://tc39.es/ecma262/#sec-disposeresources)：初始化器求值后、绑定初始化前，对对象按普通属性访问查找并捕获释放方法。同步只查 `Symbol.dispose`；异步先查 `Symbol.asyncDispose`，仅在其为 `null` 或 `undefined` 时回退至 `Symbol.dispose`。非对象资源、缺失或不可调用的方法抛 `TypeError`，访问器异常原样传递，不登记失败的资源。同步空值不登记；异步空值登记无方法记录。退出时按 LIFO 先弹出记录，再以资源为 `this` 无参调用已捕获的方法。同步忽略返回值；异步等待真正异步方法的结果，回退包装忽略同步返回值但将同步抛错转为拒绝。按 `needsAwait` / `hasAwaited` 合并异步空记录的等待边界，不在每条记录后无条件等待。释放失败继续处理其余记录；若已有 throw completion，使用内建 `SuppressedError` 原型构造新异常，`error` 是新错误，`suppressed` 是此前异常（即使为 `undefined`），不设置 `cause`。
 
 降级复用现有 finally 机制：编译器为每个声明作用域生成隐式 `try/finally`，资源进入该作用域的待清理列表，离开路径经 finally 以 LIFO 顺序逐个清理。待清理列表和列表游标是普通活跃逻辑值，按现有活性分析进持久槽；`await using` 的清理调用是普通 `AWAIT` 挂起点，挂起期间快照后，恢复从清理列表的当前位置继续，不重放已完成的清理，也不重新执行声明。生成器在 `using` 块内 `yield` 时，`return()` / `throw()` 的完成路径先执行 pending 的清理，复用 finally 待完成状态；async generator 中 `await using` 的清理挂起期间请求留在队首。`for…of` / `for await…of` 头部的 `using` 按每轮独立作用域清理：每轮结束时清理当轮资源，先于该轮的迭代器关闭；循环提前退出时按同样顺序处理当轮资源。顶层同步 `using` 在模块求值结束前 LIFO 清理；快照只发生在初始化帧之后，清理已全部完成。不引入新 opcode，字节码指令集与恢复表形状不变；well-known Symbol 与 `SuppressedError` 进入快照根集合，按契约升相应版本号。
 
-`DisposableStack` / `AsyncDisposableStack` 是 VM 内建类，提供 `use` / `adopt` / `defer` / `move` / `dispose`，异步版本另有 `disposeAsync`。实例是 VM 堆对象，持有自身有序待清理列表（`defer` 登记回调值），条目按普通强边遍历并随快照保存。实例自带 `Symbol.dispose` / `Symbol.asyncDispose` 方法，可直接用于 `using` / `await using`；清理顺序与抑制错误语义和块级声明一致。宿主类通过 `WellKnownSymbol::{Dispose, AsyncDispose}` 显式声明 `[Symbol.dispose]` / `[Symbol.asyncDispose]` 原型成员，方法入口照常校验内部类标签；`asyncDispose` 需要异步收尾时以 `cx.promise(op)` 起始 operation，挂起、恢复与快照沿用现有 operation 契约，不新增宿主协议。
+两个栈遵循 ECMA-262 的 [DisposableStack](https://tc39.es/ecma262/#sec-disposablestack-objects) 和 [AsyncDisposableStack](https://tc39.es/ecma262/#sec-asyncdisposablestack-objects) 原型算法：均提供 `disposed` getter、`use` / `adopt` / `defer` / `move`；同步栈仅有 `dispose` 及其 `Symbol.dispose` 别名，异步栈仅有 `disposeAsync` 及其 `Symbol.asyncDispose` 别名。释放先标记 disposed 并取走记录，重入不重放；`move` 转移记录并将旧栈标记为 disposed。异步入口每次返回新的原生 Promise。登记记录和等待游标是堆对象强边，参与 GC 和快照。共享迭代器原型分别提供对应的释放符号方法，动态调用 `return`。宿主类通过 `WellKnownSymbol::{Dispose, AsyncDispose}` 声明符号成员，保持内部类校验，异步收尾用 `cx.promise(op)`，不新增宿主协议。
 
 ### VM 内建与可观察语义
 
