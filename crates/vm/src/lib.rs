@@ -67,6 +67,7 @@ mod frame;
 mod gc;
 pub mod heap;
 pub mod host;
+mod init;
 mod intrinsic;
 mod ops;
 #[doc(hidden)]

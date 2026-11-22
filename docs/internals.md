@@ -75,7 +75,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
 | 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交，折叠已知原始值的严格比较和少量 Number 运算；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 生成跳转 PC 和挂起表，并从块内活性流式累积槽区间，不保留逐 PC 活性表 |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
-| 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
+| 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/init.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `SetMember` 预热与布局守卫 |
 | 函数 ID 索引 / 调用分派 | `vm/src/vm.rs` 的 `FunctionTable` / `FunctionIndices`；连续 ID 用密集表，稀疏 ID 用排序向量二分。`vm/src/builtin/call.rs` 的 `Dispatch::Script` 携带 `callee` / `home` / `class`，避免 `invoke` 重复查堆 |
@@ -123,6 +123,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
 - `crates/vm/src/bytecode.rs` — `Instr`、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`、`Build::to_bytes` / `Build::from_bytes`
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
+- `crates/vm/src/init.rs` — VM 构造与模块初始化：`Vm::new*`、`prepare`、导入链接（`resolve_imports` / `install_imports` / `restore_imports`）与模块图实例化、求值
 - `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec
 - `crates/vm/src/gc.rs` — tracing GC 的根与可达性遍历；堆边统一由 `Heap::write_edges` 提供
 - `crates/harness/src/case.rs` — `// @` 指令运行器
