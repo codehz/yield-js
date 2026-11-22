@@ -2407,3 +2407,88 @@ fn typeof_probe_does_not_leak_between_modules() {
         "{error}"
     );
 }
+
+#[test]
+fn folds_primitive_tests_and_number_operations() {
+    let build = compile(
+        r#"
+export function run() {
+  const nan = 0 / 0;
+  const zero = -0;
+  if (nan === nan || zero !== 0 || 1n !== 0x1n || 1n === 1) return 99;
+  return (2 + 3) * 4 - 1;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let run = build.functions.iter().find(|f| f.name == "run").unwrap();
+    let [Instr::Const { constant, .. }, Instr::Return { .. }] = run.code.as_slice() else {
+        panic!("expected a literal return, got {:?}", run.code);
+    };
+    assert_eq!(
+        build.constants[*constant as usize],
+        yield_vm::bytecode::Constant::Number(19.0)
+    );
+}
+
+#[test]
+fn selects_constant_rhs_after_a_join() {
+    use yield_vm::bytecode::BinaryOp;
+
+    let run = compile_run(
+        r#"
+export function run(value, flag) {
+  let rhs;
+  if (flag) rhs = 1 + 2;
+  else rhs = 3;
+  if (value < rhs) return value + rhs;
+  return value;
+}
+"#,
+    );
+    assert!(run.code.iter().any(|op| matches!(
+        op,
+        Instr::BranchCompareConstFalse {
+            op: BinaryOp::Lt,
+            ..
+        }
+    )));
+    assert!(run.code.iter().any(|op| matches!(
+        op,
+        Instr::BinaryConst {
+            op: BinaryOp::Add,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn signed_zero_facts_do_not_merge_at_a_join() {
+    use yield_vm::bytecode::{BinaryOp, Constant};
+
+    let build = compile(
+        r#"
+export function run(flag) {
+  let rhs;
+  if (flag) rhs = 0;
+  else rhs = -0;
+  return 1 / rhs;
+}
+"#,
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    let run = build.functions.iter().find(|f| f.name == "run").unwrap();
+    for bits in [0.0_f64.to_bits(), (-0.0_f64).to_bits()] {
+        assert!(run.code.iter().any(|op| matches!(op, Instr::Const { constant, .. }
+            if matches!(build.constants[*constant as usize], Constant::Number(n) if n.to_bits() == bits))));
+    }
+    assert!(run.code.iter().any(|op| matches!(
+        op,
+        Instr::Binary {
+            op: BinaryOp::Div,
+            ..
+        }
+    )));
+}

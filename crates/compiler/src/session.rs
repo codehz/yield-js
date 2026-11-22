@@ -19,6 +19,8 @@ use crate::error::CompileError;
 pub(crate) struct Session {
     constants: Vec<Constant>,
     string_constants: BTreeMap<yield_vm::JsString, u32>,
+    number_constants: BTreeMap<u64, u32>,
+    bool_constants: [Option<u32>; 2],
     templates: Vec<TemplateSite>,
     functions: Vec<BytecodeFunction>,
     next_func_id: u32,
@@ -30,6 +32,8 @@ impl Session {
         Self {
             constants: Vec::new(),
             string_constants: BTreeMap::new(),
+            number_constants: BTreeMap::new(),
+            bool_constants: [None; 2],
             templates: Vec::new(),
             functions: Vec::new(),
             next_func_id: 1,
@@ -47,16 +51,31 @@ impl Session {
     }
 
     pub(crate) fn intern(&mut self, constant: Constant) -> u32 {
-        if let Constant::String(value) = constant {
-            if let Some(&index) = self.string_constants.get(&value) {
-                return index;
-            }
-            let index = self.constants.len() as u32;
-            self.string_constants.insert(value.clone(), index);
-            self.constants.push(Constant::String(value));
-            return index;
-        }
         let index = self.constants.len() as u32;
+        match &constant {
+            Constant::String(value) => {
+                let entry = self.string_constants.entry(value.clone()).or_insert(index);
+                if *entry != index {
+                    return *entry;
+                }
+            }
+            Constant::Number(value) => {
+                let entry = self
+                    .number_constants
+                    .entry(value.to_bits())
+                    .or_insert(index);
+                if *entry != index {
+                    return *entry;
+                }
+            }
+            Constant::Bool(value) => {
+                let entry = self.bool_constants[usize::from(*value)].get_or_insert(index);
+                if *entry != index {
+                    return *entry;
+                }
+            }
+            _ => {}
+        }
         self.constants.push(constant);
         index
     }
