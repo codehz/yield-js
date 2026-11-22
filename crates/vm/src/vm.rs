@@ -325,8 +325,7 @@ impl Vm {
             Some(crate::perf::Startup {
                 prepare: initializing.duration_since(started),
                 build_identity: digest_checked.duration_since(started),
-                build_digest_json: digest_timing.json,
-                build_digest_hash: digest_timing.hash,
+                build_digest: digest_timing,
                 build_structure: validated.duration_since(digest_checked),
                 link_and_setup: initializing.duration_since(validated),
                 initialize: finished.duration_since(initializing),

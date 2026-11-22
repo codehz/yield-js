@@ -12,8 +12,8 @@ YIELD_VM_BENCH_DIAGNOSTICS=1 cargo bench --locked -p yield-harness --bench basel
 
 - 默认 Cargo bench profile（继承 release）。计时用两个独立进程，每组负载每进程预跑 2 次后保留 9 个样本。计数单独编译运行，同样的字节码及输入，每阶段一个样本；普通构建不启用计数。不要对诊断构建计时。
 - 每个计时样本都先测离线编译和 JSON 编码，再从已生成的内存字节解码。不计文件 I/O，不刷新进程外缓存。`startup_prepare` 包含校验、宿主链接、派生元数据及 VM 初始化准备；`startup_initialize` 包含模块实例化、求值和初始化微任务。`entry_first` 使用新 VM；`entry_steady_5` 是同一 VM 连续再运行 5 次的总时长，包含出参校验及固定输入下的宿主驱动。React 使用测试宿主的虚拟时钟，不等待墙钟。它测量整次提交路径，不是纯解释器循环。
-- 最新基准还输出 `startup_build_identity`（版本检查及 JSON 序列化 / 稳定摘要；历史基线为 SHA-256，当前为 xxh3-128）、`startup_build_structure`（字节码结构校验）和 `startup_link_and_setup`（校验后的宿主链接、派生元数据及 VM 准备）；三项之和是 `startup_prepare`。这些子项不在本页的历史 CSV 中；首轮分项见[加载实验](bytecode-loading.md)。
-- `startup_build_digest_json` 和 `startup_build_digest_hash`（历史 CSV 中为 `startup_build_digest_sha256`）是 `startup_build_identity` 内的两个区间：前者把摘要输入序列化到内存，后者只对这些字节计算稳定摘要（当前 xxh3-128，历史基线 SHA-256）。两者不含版本检查、缓冲区释放、摘要字符串格式化或 ID 比较，也不等同于产物的编码和解码。
+- 最新基准还输出 `startup_build_identity`（版本检查及摘要输入编码；当前为 xxh3-128 + bincode 固定整数小端编码，历史基线为 JSON + SHA-256/xxh3-128）、`startup_build_structure`（字节码结构校验）和 `startup_link_and_setup`（校验后的宿主链接、派生元数据及 VM 准备）；三项之和是 `startup_prepare`。这些子项不在本页的历史 CSV 中；首轮分项见[加载实验](bytecode-loading.md)。
+- `startup_build_digest` 是 `startup_build_identity` 内的摘要耗时：二进制编码与 xxh3-128 哈希合计，不含版本检查或 ID 比较。历史 CSV 中该区间分为 `startup_build_digest_json` 和 `startup_build_digest_hash`（JSON 序列化与哈希）；更早的 SHA-256 基线使用 `startup_build_digest_sha256`。它不等同于产物的编码和解码。
 - 挂起负载另用新 VM 构造可恢复状态。单独计初次挂起、捕获、JSON 编解码、恢复、宿主 operation 重挂，以及恢复后的续跑校验；不把外部等待计入任何阶段。`restore` 包括重新校验构建，但不包含恢复输入的克隆或解码。
 - `frame_allocations` 是帧构造次数（零槽帧不分配槽缓冲区）；`frame_slots` 是这些帧的总槽数。环境计数是查找 owner 时访问的环境数；属性计数是自有属性探测次数，`property_slow_paths` 是进入通用属性原型链读取的次数，不是缓存失效率。`saved_values / suspensions` 是捕获平均值，分母包含 `await`、`yield` 和生成器初始捕获。
 - 峰值 RSS 用未插桩的独立进程采集：先用 `cargo bench --locked -p yield-harness --bench baseline --no-run` 获取可执行文件路径，再对每个工作负载执行 `/usr/bin/time -l <可执行文件> --compile-only <负载名>`（macOS）。RSS 包括进程启动、编译、打印构建 ID，不包含 VM 执行和独立的产物编码。Linux 可用 `/usr/bin/time -v`，注意其 RSS 单位不同。

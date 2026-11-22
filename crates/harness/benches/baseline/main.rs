@@ -83,10 +83,7 @@ fn run(workload: &Workload, samples: usize) {
                 .push(("startup_build_identity", stages.build_identity));
             sample
                 .times
-                .push(("startup_build_digest_json", stages.build_digest_json));
-            sample
-                .times
-                .push(("startup_build_digest_hash", stages.build_digest_hash));
+                .push(("startup_build_digest", stages.build_digest));
             sample
                 .times
                 .push(("startup_build_structure", stages.build_structure));

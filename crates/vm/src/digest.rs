@@ -23,3 +23,14 @@ impl Digest {
         format!("xxh3-128:{:032x}", self.0.digest128())
     }
 }
+
+impl std::io::Write for Digest {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

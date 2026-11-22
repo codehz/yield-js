@@ -5,14 +5,15 @@
 //! persisted across an `Await` or a `Yield`.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::io::Write;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use bincode::Options;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::digest::Digest;
-use crate::perf::BuildDigestTiming;
 use crate::value::{BindingId, JsBigInt, JsString};
 
 pub const BYTECODE_VERSION: u32 = 47;
@@ -798,6 +799,9 @@ where
     deserializer.deserialize_map(UniqueMap(std::marker::PhantomData))
 }
 
+/// Digest inputs use bincode's fixed-int little-endian encoding. The crate
+/// version and options are part of the build identity contract: changing either
+/// changes every `build_id`.
 #[derive(Serialize)]
 struct DigestInput<'a> {
     bytecode_version: u32,
@@ -843,7 +847,7 @@ impl Build {
         self.compute_id_profiled::<false>().0
     }
 
-    fn compute_id_profiled<const PROFILE: bool>(&self) -> (String, Option<BuildDigestTiming>) {
+    fn compute_id_profiled<const PROFILE: bool>(&self) -> (String, Option<Duration>) {
         let input = DigestInput {
             bytecode_version: self.bytecode_version,
             // Reject artifacts from older builtin semantics even when their
@@ -857,21 +861,19 @@ impl Build {
             entry: self.entry,
             preload: self.preload,
         };
-        let json_started = PROFILE.then(Instant::now);
-        let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
-        let hash_started = PROFILE.then(Instant::now);
-        let mut digest = Digest::new();
-        digest.update(bytes.as_slice());
-        let hash = hash_started.map(|started| started.elapsed());
-        let timing = match (json_started, hash_started, hash) {
-            (Some(json_started), Some(hash_started), Some(hash)) => Some(BuildDigestTiming {
-                json: hash_started.duration_since(json_started),
-                hash,
-            }),
-            _ => None,
-        };
-        drop(bytes);
-        (digest.finish(), timing)
+        let digest_started = PROFILE.then(Instant::now);
+        let mut sink = std::io::BufWriter::with_capacity(64 * 1024, Digest::new());
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .serialize_into(&mut sink, &input)
+            .expect("bytecode digest serialization cannot fail");
+        sink.flush().expect("bytecode digest flush cannot fail");
+        let digest = sink
+            .into_inner()
+            .unwrap_or_else(|_| panic!("bytecode digest flush cannot fail"));
+        let elapsed = digest_started.map(|started| started.elapsed());
+        (digest.finish(), elapsed)
     }
 
     pub fn function(&self, id: u32) -> Option<&Function> {
@@ -891,7 +893,7 @@ impl Build {
 
     pub(crate) fn validate_with_digest_checkpoint<const PROFILE: bool>(
         &self,
-        after_digest: impl FnOnce(Option<BuildDigestTiming>),
+        after_digest: impl FnOnce(Option<Duration>),
     ) -> Result<(), String> {
         if self.bytecode_version != BYTECODE_VERSION {
             return Err(format!(
