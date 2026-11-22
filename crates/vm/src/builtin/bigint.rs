@@ -64,8 +64,8 @@ pub(crate) mod members {
 
     prototype_calls! {
         toString: 1 => |vm, host, roots, args, receiver| vm.bigint_to_string(host, roots, receiver, &args);
-        toLocaleString: 0 => |vm, _, _, _, receiver| vm.bigint_to_locale_string(receiver);
-        valueOf: 0 => |vm, _, _, _, receiver| vm.bigint_value_of(receiver);
+        toLocaleString: 0 => |vm, _, roots, _, receiver| vm.bigint_to_locale_string(roots, receiver);
+        valueOf: 0 => |vm, _, roots, _, receiver| vm.bigint_value_of(roots, receiver);
     }
 }
 
@@ -100,12 +100,15 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             };
         let result = match primitive.as_ref().view() {
-            ValueRef::Undefined => Err(self.type_error("Cannot convert undefined to a BigInt")?),
-            ValueRef::Null => Err(self.type_error("Cannot convert null to a BigInt")?),
+            ValueRef::Undefined => {
+                Err(self.type_error(roots, "Cannot convert undefined to a BigInt")?)
+            }
+            ValueRef::Null => Err(self.type_error(roots, "Cannot convert null to a BigInt")?),
             ValueRef::Bool(value) => Ok(JsBigInt::from_i64(i64::from(value))),
             ValueRef::Number(value) => match JsBigInt::from_f64(value) {
                 Some(value) => Ok(value),
                 None => Err(self.make_range_error(
+                    roots,
                     "The number cannot be converted to a BigInt because it is not an integer",
                 )?),
             },
@@ -118,6 +121,7 @@ impl Vm {
                 match parsed {
                     Some(value) => Ok(value),
                     None => Err(self.alloc_error(
+                        roots,
                         self.builtins.get("syntaxerror.prototype"),
                         "SyntaxError",
                         Some("Cannot convert string to a BigInt".into()),
@@ -125,7 +129,7 @@ impl Vm {
                 }
             }
             ValueRef::Symbol(_) => {
-                Err(self.type_error("Cannot convert a Symbol value to a BigInt")?)
+                Err(self.type_error(roots, "Cannot convert a Symbol value to a BigInt")?)
             }
             ValueRef::Object(_) => unreachable!("ToPrimitive returned an object"),
         };
@@ -146,7 +150,7 @@ impl Vm {
             Ok(bits) => bits,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let bits = match self.bigint_index(bits)? {
+        let bits = match self.bigint_index(roots, bits)? {
             Ok(bits) => bits,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -161,19 +165,27 @@ impl Vm {
         ))))
     }
 
-    fn bigint_index(&mut self, number: f64) -> Result<Result<u64, Value>, VmError> {
+    fn bigint_index(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        number: f64,
+    ) -> Result<Result<u64, Value>, VmError> {
         if number.is_nan() || number == 0.0 {
             return Ok(Ok(0));
         }
         let integer = number.trunc();
         if integer < 0.0 {
-            return Ok(Err(self.make_range_error("Invalid BigInt length")?));
+            return Ok(Err(self.make_range_error(roots, "Invalid BigInt length")?));
         }
         let clamped = integer.min(9_007_199_254_740_991.0);
         Ok(Ok(clamped as u64))
     }
 
-    fn bigint_receiver(&mut self, receiver: &Value) -> Result<Result<JsBigInt, Value>, VmError> {
+    fn bigint_receiver(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Result<JsBigInt, Value>, VmError> {
         Ok(match receiver.view() {
             ValueRef::BigInt(value) => Ok(value.clone()),
             ValueRef::Object(id) => match self.heap.get(id)? {
@@ -181,9 +193,9 @@ impl Vm {
                     primitive: BoxedPrimitive::BigInt(value),
                     ..
                 } => Ok(value.clone()),
-                _ => Err(self.type_error("BigInt method called on incompatible receiver")?),
+                _ => Err(self.type_error(roots, "BigInt method called on incompatible receiver")?),
             },
-            _ => Err(self.type_error("BigInt method called on incompatible receiver")?),
+            _ => Err(self.type_error(roots, "BigInt method called on incompatible receiver")?),
         })
     }
 
@@ -194,7 +206,7 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let value = match self.bigint_receiver(receiver)? {
+        let value = match self.bigint_receiver(roots, receiver)? {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -208,23 +220,31 @@ impl Vm {
             },
         };
         if !(2.0..=36.0).contains(&radix) {
-            return self.throw_range_error("BigInt radix must be between 2 and 36");
+            return self.throw_range_error(roots, "BigInt radix must be between 2 and 36");
         }
         Ok(Invocation::Value(Value::string(
             value.to_radix(radix as u32).into(),
         )))
     }
 
-    fn bigint_to_locale_string(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let value = match self.bigint_receiver(receiver)? {
+    fn bigint_to_locale_string(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let value = match self.bigint_receiver(roots, receiver)? {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         Ok(Invocation::Value(Value::string(value.to_decimal().into())))
     }
 
-    fn bigint_value_of(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let value = match self.bigint_receiver(receiver)? {
+    fn bigint_value_of(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let value = match self.bigint_receiver(roots, receiver)? {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };

@@ -91,15 +91,19 @@ pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         FUNCTION_CTOR,
         1,
-        |vm, _, _, _, _| vm.throw_type_error("Dynamic function construction is disabled"),
-        |vm, _, _, _, _| vm.throw_type_error("Dynamic function construction is disabled"),
+        |vm, _, roots, _, _| {
+            vm.throw_type_error(roots, "Dynamic function construction is disabled")
+        },
+        |vm, _, roots, _, _| {
+            vm.throw_type_error(roots, "Dynamic function construction is disabled")
+        },
     )
     .without_new_target_prototype(),
     IntrinsicDef::call(FUNCTION_PROTO, 0, |_, _, _, _, _| {
         Ok(Invocation::Value(Value::UNDEFINED))
     }),
-    IntrinsicDef::call(THROW_TYPE_ERROR, 0, |vm, _, _, _, _| {
-        vm.throw_type_error("Restricted function property")
+    IntrinsicDef::call(THROW_TYPE_ERROR, 0, |vm, _, roots, _, _| {
+        vm.throw_type_error(roots, "Restricted function property")
     }),
     FUNCTION_CALL,
     FUNCTION_APPLY,
@@ -142,7 +146,7 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         if !self.is_callable(receiver) {
-            return self.throw_type_error("incompatible Function receiver");
+            return self.throw_type_error(roots, "incompatible Function receiver");
         }
         let this_arg = args.first().cloned().unwrap_or(Value::UNDEFINED);
         let rest = args.get(1..).unwrap_or_default();
@@ -157,7 +161,7 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         if !self.is_callable(receiver) {
-            return self.throw_type_error("incompatible Function receiver");
+            return self.throw_type_error(roots, "incompatible Function receiver");
         }
         let this_arg = args.first().cloned().unwrap_or(Value::UNDEFINED);
         let args = match args.get(1) {
@@ -183,7 +187,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let target = match receiver.view() {
             ValueRef::Object(id) if self.heap.get(id).is_ok_and(is_callable_object) => id,
-            _ => return self.throw_type_error("incompatible Function receiver"),
+            _ => return self.throw_type_error(roots, "incompatible Function receiver"),
         };
         let object = self.heap.get(target)?;
         let prototype = object.prototype();
@@ -228,15 +232,17 @@ impl Vm {
     fn function_to_string(
         &mut self,
         _: &mut dyn Host,
-        _: &ActiveRoots<'_>,
+        roots: &ActiveRoots<'_>,
         _: Vec<Value>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("incompatible Function.prototype.toString receiver");
+            return self
+                .throw_type_error(roots, "incompatible Function.prototype.toString receiver");
         };
         if !is_callable_object(self.heap.get(id)?) {
-            return self.throw_type_error("incompatible Function.prototype.toString receiver");
+            return self
+                .throw_type_error(roots, "incompatible Function.prototype.toString receiver");
         }
         let name = self.initial_function_name(id)?;
         let mut text = JsString::from("function ");
@@ -498,12 +504,14 @@ impl Vm {
             }
         }
         if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Symbol(_)) {
-            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+            return Ok(Err(self.type_error(roots, ops::SYMBOL_TO_NUMBER)?));
         }
         match self.unary(op, value) {
             Ok(value) => Ok(Ok(value)),
-            Err(BinaryError::TypeError(message)) => Ok(Err(self.type_error(message)?)),
-            Err(BinaryError::RangeError(message)) => Ok(Err(self.make_range_error(message)?)),
+            Err(BinaryError::TypeError(message)) => Ok(Err(self.type_error(roots, message)?)),
+            Err(BinaryError::RangeError(message)) => {
+                Ok(Err(self.make_range_error(roots, message)?))
+            }
             Err(BinaryError::Vm(error)) => Err(error),
         }
     }
@@ -607,14 +615,14 @@ impl Vm {
                     }
                 }
                 if numeric && matches!(value.view(), ValueRef::Symbol(_)) {
-                    return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+                    return Ok(Err(self.type_error(roots, ops::SYMBOL_TO_NUMBER)?));
                 }
             }
         }
         Ok(match ops::binary_op(op, lhs, rhs) {
             Ok(value) => Ok(value),
-            Err(BinaryError::TypeError(message)) => Err(self.type_error(message)?),
-            Err(BinaryError::RangeError(message)) => Err(self.make_range_error(message)?),
+            Err(BinaryError::TypeError(message)) => Err(self.type_error(roots, message)?),
+            Err(BinaryError::RangeError(message)) => Err(self.make_range_error(roots, message)?),
             Err(BinaryError::Vm(error)) => return Err(error),
         })
     }
@@ -690,7 +698,7 @@ impl Vm {
                     && !matches!(frame.read_ref(object)?.view(), ValueRef::Object(_))
                 {
                     return Ok(Step::Throw(
-                        self.type_error("property access on a non-object")?,
+                        self.type_error(frame_roots, "property access on a non-object")?,
                     ));
                 }
                 let value =
@@ -714,9 +722,10 @@ impl Vm {
             } => {
                 let env = self.module_environment(module)?;
                 let Some(value) = self.heap.get_module_binding(env, binding)? else {
-                    return Ok(Step::Throw(self.reference_error(&format!(
-                        "module binding {binding} is not initialized"
-                    ))?));
+                    return Ok(Step::Throw(self.reference_error(
+                        frame_roots,
+                        &format!("module binding {binding} is not initialized"),
+                    )?));
                 };
                 frame.write(dst, value)?;
                 Ok(Step::Next)
@@ -818,7 +827,9 @@ impl Vm {
                 receiver,
             } => {
                 let ValueRef::Object(base) = frame.read_ref(base)?.view() else {
-                    return Ok(Step::Throw(self.type_error("super base is null")?));
+                    return Ok(Step::Throw(
+                        self.type_error(frame_roots, "super base is null")?,
+                    ));
                 };
                 let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
                     Ok(key) => key,
@@ -841,7 +852,9 @@ impl Vm {
                 src,
             } => {
                 let ValueRef::Object(base) = frame.read_ref(base)?.view() else {
-                    return Ok(Step::Throw(self.type_error("super base is null")?));
+                    return Ok(Step::Throw(
+                        self.type_error(frame_roots, "super base is null")?,
+                    ));
                 };
                 let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
                     Ok(key) => key,
@@ -863,7 +876,7 @@ impl Vm {
             }
             Instr::GetDerivedThis { dst, context } => {
                 let context = object_id(frame.read_ref(context)?, "derived this context")?;
-                let invocation = self.derived_this(context)?;
+                let invocation = self.derived_this(frame_roots, context)?;
                 store_invocation(frame, dst, invocation)
             }
             Instr::GetSuperConstructor { dst, context } => {
@@ -916,7 +929,7 @@ impl Vm {
                 let scope = self.class_scope(frame, scope)?;
                 let Some(value) = self.heap.find_binding(scope, binding)? else {
                     return Ok(Step::Throw(
-                        self.reference_error("class name is not initialized")?,
+                        self.reference_error(frame_roots, "class name is not initialized")?,
                     ));
                 };
                 frame.write(dst, value)?;
@@ -960,9 +973,10 @@ impl Vm {
                         }
                         Some(parent) => {
                             if !self.is_constructor(&parent)? {
-                                return Ok(Step::Throw(
-                                    self.type_error("class heritage is not a constructor")?,
-                                ));
+                                return Ok(Step::Throw(self.type_error(
+                                    frame_roots,
+                                    "class heritage is not a constructor",
+                                )?));
                             }
                             let parent_id = object_id(&parent, "class heritage")?;
                             match self.read_property(
@@ -977,6 +991,7 @@ impl Vm {
                                         ValueRef::Object(id) => (parent_id, Some(id)),
                                         ValueRef::Null => (parent_id, None),
                                         _ => return Ok(Step::Throw(self.type_error(
+                                            frame_roots,
                                             "class heritage prototype must be an object or null",
                                         )?)),
                                     }
@@ -1049,9 +1064,10 @@ impl Vm {
                 let key = converted_property_key(&key)?.to_owned();
                 let src = object_id(&frame.read(src)?, "class method closure")?;
                 if is_static && key.borrowed().is_str("prototype") {
-                    return Ok(Step::Throw(
-                        self.type_error("static class element cannot be named prototype")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "static class element cannot be named prototype",
+                    )?));
                 }
                 self.define_class_method(class, key, src, is_static, kind)?;
                 Ok(Step::Next)
@@ -1065,9 +1081,10 @@ impl Vm {
                 let class = object_id(&frame.read(class)?, "class field target")?;
                 let key = converted_property_key(frame.read_ref(key)?)?.to_owned();
                 if is_static && key.borrowed().is_str("prototype") {
-                    return Ok(Step::Throw(
-                        self.type_error("static class element cannot be named prototype")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "static class element cannot be named prototype",
+                    )?));
                 }
                 let initializer = initializer
                     .map(|slot| object_id(frame.read_ref(slot)?, "field initializer"))
@@ -1155,9 +1172,10 @@ impl Vm {
                 let brand = object_id(frame.read_ref(brand)?, "private brand")?;
                 self.check_private_lexical(brand, lexical, index)?;
                 let ValueRef::Object(object) = frame.read_ref(object)?.view() else {
-                    return Ok(Step::Throw(
-                        self.type_error("private brand check requires an object")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "private brand check requires an object",
+                    )?));
                 };
                 let present = self
                     .heap
@@ -1265,9 +1283,10 @@ impl Vm {
                 if matches!(&invocation, Invocation::Value(value)
                     if matches!(value.view(), ValueRef::Bool(false)))
                 {
-                    return Ok(Step::Throw(
-                        self.type_error("cannot delete a non-configurable property")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "cannot delete a non-configurable property",
+                    )?));
                 }
                 store_invocation(frame, dst, invocation)
             }
@@ -1327,9 +1346,11 @@ impl Vm {
                     }
                     None => self.invoke(host, frame_roots, &method, Arguments::EMPTY, &iterator)?,
                 };
-                let result = match self
-                    .require_iterator_object(invocation, "iterator method must return an object")?
-                {
+                let result = match self.require_iterator_object(
+                    frame_roots,
+                    invocation,
+                    "iterator method must return an object",
+                )? {
                     Invocation::Value(value) => value,
                     Invocation::Thrown(error) => return Ok(Step::Throw(error)),
                 };
@@ -1437,9 +1458,10 @@ impl Vm {
                     frame.read_ref(src)?.view(),
                     ValueRef::Null | ValueRef::Undefined
                 ) {
-                    return Ok(Step::Throw(
-                        self.type_error("Cannot destructure null or undefined")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "Cannot destructure null or undefined",
+                    )?));
                 }
                 Ok(Step::Next)
             }
@@ -1447,9 +1469,10 @@ impl Vm {
                 if matches!(frame.read_ref(src)?.view(), ValueRef::Object(_)) {
                     Ok(Step::Next)
                 } else {
-                    Ok(Step::Throw(
-                        self.type_error("async iterator must be an object")?,
-                    ))
+                    Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "async iterator must be an object",
+                    )?))
                 }
             }
             Instr::ObjectRest {
@@ -1459,9 +1482,10 @@ impl Vm {
             } => {
                 let source = frame.read_ref(src)?;
                 if matches!(source.view(), ValueRef::Null | ValueRef::Undefined) {
-                    return Ok(Step::Throw(
-                        self.type_error("Cannot destructure null or undefined")?,
-                    ));
+                    return Ok(Step::Throw(self.type_error(
+                        frame_roots,
+                        "Cannot destructure null or undefined",
+                    )?));
                 }
                 let excluded = excluded
                     .iter()
@@ -1735,10 +1759,10 @@ impl Vm {
             Instr::Return { src } => Ok(Step::Return(frame.read(src)?)),
             Instr::Throw { src } => Ok(Step::Throw(frame.read(src)?)),
             Instr::ThrowDeleteSuper => Ok(Step::Throw(
-                self.reference_error("cannot delete a super property")?,
+                self.reference_error(frame_roots, "cannot delete a super property")?,
             )),
             Instr::ThrowAssignmentToConst => Ok(Step::Throw(
-                self.type_error("Assignment to constant variable.")?,
+                self.type_error(frame_roots, "Assignment to constant variable.")?,
             )),
         }
     }
@@ -1811,7 +1835,7 @@ impl Vm {
                 Invocation::Thrown(error) => return Ok(Err(error)),
             }
         } else {
-            return Ok(Err(self.type_error("value is not iterable")?));
+            return Ok(Err(self.type_error(roots, "value is not iterable")?));
         };
         self.get_iterator_from_method(host, roots, iterable, &method)
     }
@@ -1825,7 +1849,7 @@ impl Vm {
     ) -> Result<Result<(Value, Value), Value>, VmError> {
         let result = self.invoke(host, roots, method, Arguments::EMPTY, iterable)?;
         let iterator =
-            self.require_iterator_object(result, "Symbol.iterator must return an object")?;
+            self.require_iterator_object(roots, result, "Symbol.iterator must return an object")?;
         let iterator = match iterator {
             Invocation::Value(iterator) => iterator,
             Invocation::Thrown(error) => return Ok(Err(error)),
@@ -1864,11 +1888,14 @@ impl Vm {
         next: &Value,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
         let result = self.invoke(host, roots, next, Arguments::EMPTY, iterator)?;
-        let result =
-            match self.require_iterator_object(result, "iterator next must return an object")? {
-                Invocation::Value(value) => value,
-                Invocation::Thrown(error) => return Ok(Err(error)),
-            };
+        let result = match self.require_iterator_object(
+            roots,
+            result,
+            "iterator next must return an object",
+        )? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
         let roots = &roots.with(&result);
         match self.read_property(host, roots, &result, PropertyKeyRef::String("done"))? {
             Invocation::Value(done) if done.truthy() => Ok(Ok(None)),
@@ -1895,7 +1922,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         // Valid bytecode produced by the compiler only supplies a GetIterator result.
         if !matches!(iterator.view(), ValueRef::Object(_)) {
-            return self.throw_type_error("iterator must be an object");
+            return self.throw_type_error(roots, "iterator must be an object");
         }
         let roots = &roots.with(iterator);
         let method =
@@ -1909,7 +1936,7 @@ impl Vm {
                 thrown => return Ok(thrown),
             };
         let invocation = self.invoke(host, roots, &method, Arguments::EMPTY, iterator)?;
-        self.require_iterator_object(invocation, "iterator return must return an object")
+        self.require_iterator_object(roots, invocation, "iterator return must return an object")
     }
 
     pub(crate) fn string_value(
@@ -1935,7 +1962,7 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if matches!(value.as_ref().view(), ValueRef::Symbol(_)) {
-            return Ok(Err(self.type_error(ops::SYMBOL_TO_STRING)?));
+            return Ok(Err(self.type_error(roots, ops::SYMBOL_TO_STRING)?));
         }
         Ok(Ok(ops::to_js_string(&value)))
     }
@@ -1956,7 +1983,7 @@ impl Vm {
             return Ok(Ok(value.to_f64()));
         }
         if matches!(value.as_ref().view(), ValueRef::Symbol(_)) {
-            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+            return Ok(Err(self.type_error(roots, ops::SYMBOL_TO_NUMBER)?));
         }
         Ok(Ok(ops::to_number(&value)?))
     }
@@ -1972,10 +1999,10 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if matches!(value.as_ref().view(), ValueRef::Symbol(_)) {
-            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+            return Ok(Err(self.type_error(roots, ops::SYMBOL_TO_NUMBER)?));
         }
         if matches!(value.as_ref().view(), ValueRef::BigInt(_)) {
-            return Ok(Err(self.type_error(ops::BIGINT_TO_NUMBER)?));
+            return Ok(Err(self.type_error(roots, ops::BIGINT_TO_NUMBER)?));
         }
         Ok(Ok(ops::to_number(&value)?))
     }
@@ -2040,7 +2067,7 @@ impl Vm {
                 )?;
                 return match result {
                     Invocation::Value(value) if matches!(value.view(), ValueRef::Object(_)) => {
-                        self.throw_type_error("Cannot convert object to primitive value")
+                        self.throw_type_error(roots, "Cannot convert object to primitive value")
                     }
                     result => Ok(result),
                 };
@@ -2077,11 +2104,12 @@ impl Vm {
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             }
         }
-        self.throw_type_error("Cannot convert object to primitive value")
+        self.throw_type_error(roots, "Cannot convert object to primitive value")
     }
 
     fn require_iterator_object(
         &mut self,
+        roots: &ActiveRoots<'_>,
         invocation: Invocation,
         message: &str,
     ) -> Result<Invocation, VmError> {
@@ -2090,7 +2118,7 @@ impl Vm {
                 Ok(invocation)
             }
             Invocation::Thrown(_) => Ok(invocation),
-            Invocation::Value(_) => self.throw_type_error(message),
+            Invocation::Value(_) => self.throw_type_error(roots, message),
         }
     }
 
@@ -2102,7 +2130,7 @@ impl Vm {
         key: &Value,
     ) -> Result<Invocation, VmError> {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("property access on a non-object");
+            return self.throw_type_error(roots, "property access on a non-object");
         }
         if let ValueRef::Object(id) = object.view()
             && let Some(index) = array_index_number(key)
@@ -2140,7 +2168,7 @@ impl Vm {
         key: PropertyKeyRef<'_>,
     ) -> Result<Invocation, VmError> {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("Cannot destructure null or undefined");
+            return self.throw_type_error(roots, "Cannot destructure null or undefined");
         }
         self.read_property(host, roots, object, key)
     }
@@ -2162,7 +2190,7 @@ impl Vm {
             return self.read_property_with_receiver(host, roots, prototype, object, key);
         }
         let ValueRef::Object(id) = object.view() else {
-            return self.throw_type_error("property access on a non-object");
+            return self.throw_type_error(roots, "property access on a non-object");
         };
         self.read_property_with_receiver(host, roots, id, object, key)
     }
@@ -2389,7 +2417,7 @@ impl Vm {
             return if ordinary {
                 Ok(Invocation::Value(Value::boolean(false)))
             } else {
-                self.throw_type_error("right-hand side of 'instanceof' is not an object")
+                self.throw_type_error(roots, "right-hand side of 'instanceof' is not an object")
             };
         };
         let live = (value, constructor);
@@ -2409,7 +2437,7 @@ impl Vm {
                 };
                 if !matches!(hook.view(), ValueRef::Undefined | ValueRef::Null) {
                     if !self.is_callable(&hook) {
-                        return self.throw_type_error("Symbol.hasInstance is not callable");
+                        return self.throw_type_error(roots, "Symbol.hasInstance is not callable");
                     }
                     // Inline the default intrinsic after lookup so a chain of
                     // bound functions does not recurse through native calls.
@@ -2444,7 +2472,7 @@ impl Vm {
                 return if ordinary {
                     Ok(Invocation::Value(Value::boolean(false)))
                 } else {
-                    self.throw_type_error(not_callable)
+                    self.throw_type_error(roots, not_callable)
                 };
             }
             let Object::Bound(bound) = object else {
@@ -2472,8 +2500,10 @@ impl Vm {
         )? {
             Invocation::Value(value) => {
                 let ValueRef::Object(id) = value.view() else {
-                    return self
-                        .throw_type_error("'instanceof' constructor prototype is not an object");
+                    return self.throw_type_error(
+                        roots,
+                        "'instanceof' constructor prototype is not an object",
+                    );
                 };
                 id
             }
@@ -2497,7 +2527,7 @@ impl Vm {
         key: &Value,
     ) -> Result<Invocation, VmError> {
         let ValueRef::Object(id) = object.view() else {
-            return self.throw_type_error("right-hand side of 'in' is not an object");
+            return self.throw_type_error(roots, "right-hand side of 'in' is not an object");
         };
         let roots = &roots.with(object);
         let key = match self.coerce_property_key(host, roots, key)? {
@@ -2544,7 +2574,7 @@ impl Vm {
         key: &Value,
     ) -> Result<Invocation, VmError> {
         if matches!(target.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("cannot delete a property of null or undefined");
+            return self.throw_type_error(roots, "cannot delete a property of null or undefined");
         }
         let roots = &roots.with(target);
         let coerced;
@@ -2588,7 +2618,7 @@ impl Vm {
         site: Option<PropertySite>,
     ) -> Result<Invocation, VmError> {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("property write on a non-object");
+            return self.throw_type_error(roots, "property write on a non-object");
         }
         if let ValueRef::Object(id) = object.view()
             && let Some(index) = array_index_number(key)
@@ -2615,7 +2645,8 @@ impl Vm {
                         || ops::canonical_index_key(key)
                             .is_some_and(|index| index < text.unit_len()))
                 {
-                    return self.throw_type_error("Cannot assign to a read only string property");
+                    return self
+                        .throw_type_error(roots, "Cannot assign to a read only string property");
                 }
                 self.primitive_prototype(object)
                     .expect("non-nullish primitive")
@@ -2716,7 +2747,7 @@ impl Vm {
         let success = Invocation::Value(Value::boolean(true));
         let reject = |vm: &mut Self, message: &str| {
             if strict {
-                vm.throw_type_error(message)
+                vm.throw_type_error(roots, message)
             } else {
                 Ok(Invocation::Value(Value::boolean(false)))
             }
@@ -2789,8 +2820,10 @@ impl Vm {
             Some(None) => return reject(self, "Cannot set property without a setter"),
             None if property.is_some_and(|property| !property.attributes().writable) => {
                 if strict && let PropertyKey::String(key) = &key {
-                    return self
-                        .throw_type_error(&format!("Cannot assign to read only property '{key}'"));
+                    return self.throw_type_error(
+                        roots,
+                        &format!("Cannot assign to read only property '{key}'"),
+                    );
                 }
                 return reject(self, "Cannot assign to read only symbol property");
             }
@@ -3047,7 +3080,7 @@ impl Vm {
             .install_private_methods(class, receiver, is_static)
         {
             return Ok(Some(
-                self.type_error("private member is already installed")?,
+                self.type_error(roots, "private member is already installed")?,
             ));
         }
         for index in 0..element_count {
@@ -3104,7 +3137,9 @@ impl Vm {
             };
             if let Some(index) = private {
                 if !self.stamp_private(receiver, class, index, PrivateElement::Field(value)) {
-                    return Ok(Some(self.type_error("private field is already installed")?));
+                    return Ok(Some(
+                        self.type_error(roots, "private field is already installed")?,
+                    ));
                 }
                 continue;
             }
@@ -3465,21 +3500,25 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let id = match receiver.view() {
             ValueRef::Object(id) => id,
-            _ => return self.reject_type_error("receiver is not an async generator"),
+            _ => return self.reject_type_error(roots, "receiver is not an async generator"),
         };
         let Some(record) = self.heap.generator(id) else {
-            return self.reject_type_error("receiver is not an async generator");
+            return self.reject_type_error(roots, "receiver is not an async generator");
         };
         let func_id = record.func_id;
         if !self.is_async_generator(func_id)? {
-            return self.reject_type_error("receiver is not an async generator");
+            return self.reject_type_error(roots, "receiver is not an async generator");
         }
         self.enqueue_async_request(host, roots, id, completion, argument)
     }
 
     /// A fresh Promise already rejected with a script `TypeError`.
-    fn reject_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
-        let error = self.type_error(message)?;
+    fn reject_type_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Invocation, VmError> {
+        let error = self.type_error(roots, message)?;
         let promise = self.heap.alloc_promise();
         self.settle(promise, Settlement::Rejected(error))?;
         Ok(Invocation::Value(Value::object(promise)))
@@ -3505,10 +3544,10 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let id = match receiver.view() {
             ValueRef::Object(id) => id,
-            _ => return self.throw_type_error("generator method called on a non-object"),
+            _ => return self.throw_type_error(roots, "generator method called on a non-object"),
         };
         let Some(record) = self.heap.generator(id).cloned() else {
-            return self.throw_type_error("receiver is not a generator");
+            return self.throw_type_error(roots, "receiver is not a generator");
         };
         if self.is_async_generator(record.func_id)? {
             return self.enqueue_async_request(host, roots, id, completion, argument);
@@ -3522,7 +3561,7 @@ impl Vm {
             )));
         }
         if matches!(record.status, GeneratorStatus::Executing) {
-            return self.throw_type_error("generator is already executing");
+            return self.throw_type_error(roots, "generator is already executing");
         }
         if matches!(record.status, GeneratorStatus::Completed) {
             return match completion {

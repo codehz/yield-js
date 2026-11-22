@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::error::VmError;
+use crate::frame::Frame;
 use crate::heap::{
     ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_SYMBOL, DISPOSE_SYMBOL, HAS_INSTANCE_SYMBOL, Heap,
     IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
@@ -45,6 +46,11 @@ impl ActiveRoots<'_> {
         ActiveRoots(Some((self, view)))
     }
 
+    pub(crate) fn frames(&self) -> impl Iterator<Item = &Frame> {
+        std::iter::successors(Some(self), |roots| roots.0.map(|(parent, _)| parent))
+            .filter_map(|roots| roots.0.and_then(|(_, view)| view.frame()))
+    }
+
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         let mut current = self;
         while let Some((parent, view)) = current.0 {
@@ -56,6 +62,10 @@ impl ActiveRoots<'_> {
 }
 
 pub(crate) trait TraceRoots {
+    fn frame(&self) -> Option<&Frame> {
+        None
+    }
+
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError>;
 }
 
@@ -87,6 +97,10 @@ impl TraceRoots for PropertyKeyRef<'_> {
 }
 
 impl<T: TraceRoots + ?Sized> TraceRoots for &T {
+    fn frame(&self) -> Option<&Frame> {
+        (**self).frame()
+    }
+
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         (**self).trace(tracer)
     }

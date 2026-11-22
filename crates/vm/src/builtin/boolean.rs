@@ -4,6 +4,7 @@ pub(crate) mod members {
     use crate::builtin::roots::{RootKind, RootSpec};
     use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, link_constructor};
     use crate::error::VmError;
+    use crate::gc::ActiveRoots;
     use crate::heap::{BoxedPrimitive, Object};
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
@@ -27,11 +28,11 @@ pub(crate) mod members {
                         args.first().is_some_and(Value::truthy),
                     )))
                 },
-                |vm, _, _, args, prototype| {
+                |vm, _, roots, args, prototype| {
                     let result = vm.construct_object(&[Value::boolean(
                         args.first().is_some_and(Value::truthy),
                     )])?;
-                    vm.with_result_prototype(result, prototype)
+                    vm.with_result_prototype(roots, result, prototype)
                 },
             )],
             INTRINSICS,
@@ -48,6 +49,7 @@ pub(crate) mod members {
 
     fn boolean_value(
         vm: &mut Vm,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         stringify: bool,
     ) -> Result<Invocation, VmError> {
@@ -58,9 +60,9 @@ pub(crate) mod members {
                     primitive: BoxedPrimitive::Bool(value),
                     ..
                 } => *value,
-                _ => return vm.throw_type_error("incompatible Boolean receiver"),
+                _ => return vm.throw_type_error(roots, "incompatible Boolean receiver"),
             },
-            _ => return vm.throw_type_error("incompatible Boolean receiver"),
+            _ => return vm.throw_type_error(roots, "incompatible Boolean receiver"),
         };
         Ok(Invocation::Value(if stringify {
             Value::string(value.to_string().into())
@@ -70,7 +72,7 @@ pub(crate) mod members {
     }
 
     prototype_calls! {
-        valueOf: 0 => |vm, _, _, _, receiver| boolean_value(vm, receiver, false);
-        toString: 0 => |vm, _, _, _, receiver| boolean_value(vm, receiver, true);
+        valueOf: 0 => |vm, _, roots, _, receiver| boolean_value(vm, roots, receiver, false);
+        toString: 0 => |vm, _, roots, _, receiver| boolean_value(vm, roots, receiver, true);
     }
 }

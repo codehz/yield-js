@@ -31,7 +31,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 公共入口：
 
-- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。
+- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
 - `Vm::new(build, &mut host)` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
 - `Vm::start(host, "run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量，随后宿主自行调用 `Vm::run_until_idle(host)`。
@@ -92,6 +92,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
 - VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。
+- Error 位置随指令穿过 CFG，最终按 PC 保存位置变化；`(0, 0)` 终止有来源区段，空表隐藏函数。位置表及定义模块索引参与构建摘要和校验，只在分配 Error 时沿 `ActiveRoots` 读取活动帧，使用预增 PC 减一查询。栈文本保留为普通字符串属性，不改变快照记录。
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。`VerifiedBuild` 在校验后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。

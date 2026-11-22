@@ -141,7 +141,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let class = self.private_class(brand, index)?;
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("private member requires an object");
+            return self.throw_type_error(roots, "private member requires an object");
         };
         let Some(element) = self
             .heap
@@ -149,7 +149,7 @@ impl Vm {
             .get(&id)
             .and_then(|elements| elements.get(&(brand, index)))
         else {
-            return self.throw_type_error("private member is not installed");
+            return self.throw_type_error(roots, "private member is not installed");
         };
         if let PrivateElement::Field(value) = element {
             return Ok(Invocation::Value(value.clone()));
@@ -159,7 +159,7 @@ impl Vm {
             PrivateMemberKind::Accessor { get: Some(get), .. } => {
                 self.invoke(host, roots, &Value::object(get), Arguments::EMPTY, receiver)
             }
-            _ => self.throw_type_error("private member has no getter"),
+            _ => self.throw_type_error(roots, "private member has no getter"),
         }
     }
 
@@ -179,7 +179,7 @@ impl Vm {
             .get(&index)
             .map(|member| member.kind);
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("private member requires an object");
+            return self.throw_type_error(roots, "private member requires an object");
         };
         let Some(element) = self
             .heap
@@ -187,7 +187,7 @@ impl Vm {
             .get_mut(&id)
             .and_then(|elements| elements.get_mut(&(brand, index)))
         else {
-            return self.throw_type_error("private member is not installed");
+            return self.throw_type_error(roots, "private member is not installed");
         };
         if let PrivateElement::Field(slot) = element {
             *slot = value;
@@ -201,7 +201,7 @@ impl Vm {
                 Arguments::Values(&[value]),
                 receiver,
             ),
-            _ => self.throw_type_error("private member is not writable"),
+            _ => self.throw_type_error(roots, "private member is not writable"),
         }
     }
 }

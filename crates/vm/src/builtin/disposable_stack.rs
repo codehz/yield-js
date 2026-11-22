@@ -66,7 +66,9 @@ macro_rules! stack_family {
                 IntrinsicDef::constructor(
                     CONSTRUCTOR,
                     0,
-                    |vm, _, _, _, _| vm.throw_type_error(concat!($name, " requires new")),
+                    |vm, _, roots, _, _| {
+                        vm.throw_type_error(roots, concat!($name, " requires new"))
+                    },
                     |vm, _, _, _, prototype| {
                         let prototype = prototype.unwrap_or_else(|| vm.builtins.get($prototype));
                         Ok(Invocation::Value(Value::object(vm.alloc_disposable_stack(
@@ -182,7 +184,7 @@ impl Vm {
             _ => None,
         };
         let Some((id, disposed)) = brand else {
-            let error = self.type_error("incompatible disposable stack receiver")?;
+            let error = self.type_error(roots, "incompatible disposable stack receiver")?;
             return if let Some(result) = result {
                 self.settle(result, Settlement::Rejected(error))?;
                 Ok(Invocation::Value(Value::object(result)))
@@ -206,7 +208,7 @@ impl Vm {
             }
             _ if disposed => {
                 return Ok(Invocation::Thrown(
-                    self.reference_error("stack is disposed")?,
+                    self.reference_error(roots, "stack is disposed")?,
                 ));
             }
             StackMethod::Move => {
@@ -248,7 +250,7 @@ impl Vm {
             StackMethod::Adopt => {
                 let callback = args.get(1).unwrap_or(&undefined);
                 if !self.is_callable(callback) {
-                    return self.throw_type_error("adopt callback must be callable");
+                    return self.throw_type_error(roots, "adopt callback must be callable");
                 }
                 (
                     DisposableResource::Adopt {
@@ -261,7 +263,7 @@ impl Vm {
             }
             StackMethod::Defer => {
                 if !self.is_callable(value) {
-                    return self.throw_type_error("defer callback must be callable");
+                    return self.throw_type_error(roots, "defer callback must be callable");
                 }
                 (
                     DisposableResource::Defer {

@@ -420,6 +420,7 @@ fn fuse_branch_tests(function: &mut FunctionCfg) {
         };
         let end = Terminator::Branch { test, taken, next };
         if end.may_throw() == may_throw(&last.instr) {
+            block.end_origin = last.origin;
             block.statements.pop();
             block.end = end;
         }

@@ -29,17 +29,17 @@ macro_rules! data_view_members {
             IntrinsicDef::constructor_with_target(
                 DATA_VIEW,
                 1,
-                |vm, _, _, _, _| vm.throw_type_error("Constructor DataView requires new"),
+                |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor DataView requires new"),
                 construct,
             ),
-            IntrinsicDef::call(BUFFER, 0, |vm, _, _, _, receiver| {
-                brand(vm, receiver, |view| Value::object(view.buffer))
+            IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
+                brand(vm, roots, receiver, |view| Value::object(view.buffer))
             }),
-            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, _, _, receiver| {
-                vm.data_view_length(receiver)
+            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+                vm.data_view_length(roots, receiver)
             }),
-            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, _, _, receiver| {
-                vm.data_view_offset(receiver)
+            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
+                vm.data_view_offset(roots, receiver)
             }),
             $(
                 IntrinsicDef::call(
@@ -104,10 +104,11 @@ pub(super) fn install(vm: &mut Vm) {
 /// A getter body: brand check, then read the view's own record.
 fn brand(
     vm: &mut Vm,
+    roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl Fn(&DataViewObject) -> Value,
 ) -> Result<Invocation, VmError> {
-    let id = match vm.require_data_view(receiver)? {
+    let id = match vm.require_data_view(roots, receiver)? {
         Ok(id) => id,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
@@ -123,10 +124,11 @@ fn construct(
     new_target: &Value,
 ) -> Result<Invocation, VmError> {
     let roots = &roots.with(&args);
-    let buffer = match vm.require_array_buffer(arg(&args, 0), "DataView requires an ArrayBuffer")? {
-        Ok(id) => id,
-        Err(error) => return Ok(Invocation::Thrown(error)),
-    };
+    let buffer =
+        match vm.require_array_buffer(roots, arg(&args, 0), "DataView requires an ArrayBuffer")? {
+            Ok(id) => id,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
     let roots = &roots.with(&buffer);
     let offset = match vm.coerce_index(host, roots, arg(&args, 1))? {
         Ok(offset) => offset,
@@ -136,11 +138,11 @@ fn construct(
         unreachable!("buffer was validated")
     };
     let Some(buffer_length) = record.byte_length() else {
-        return vm.throw_type_error("cannot view a detached ArrayBuffer");
+        return vm.throw_type_error(roots, "cannot view a detached ArrayBuffer");
     };
     let resizable = record.is_resizable();
     if offset > buffer_length {
-        return vm.throw_range_error("DataView byteOffset exceeds the buffer length");
+        return vm.throw_range_error(roots, "DataView byteOffset exceeds the buffer length");
     }
     let length = match arg(&args, 2).view() {
         // Only a resizable buffer lets a view track the buffer's length.
@@ -155,7 +157,8 @@ fn construct(
                 .checked_add(length)
                 .is_none_or(|end| end > buffer_length)
             {
-                return vm.throw_range_error("DataView byteLength exceeds the buffer length");
+                return vm
+                    .throw_range_error(roots, "DataView byteLength exceeds the buffer length");
             }
             Some(length)
         }
@@ -175,24 +178,32 @@ fn construct(
 
 impl Vm {
     /// `get DataView.prototype.byteLength`: out of bounds is a TypeError.
-    fn data_view_length(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let id = match self.require_data_view(receiver)? {
+    fn data_view_length(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let id = match self.require_data_view(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        match self.data_view_size(id)? {
+        match self.data_view_size(roots, id)? {
             Ok(size) => Ok(Invocation::Value(Value::number(size as f64))),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
 
     /// `get DataView.prototype.byteOffset`: out of bounds is a TypeError too.
-    fn data_view_offset(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let id = match self.require_data_view(receiver)? {
+    fn data_view_offset(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let id = match self.require_data_view(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        if let Err(error) = self.data_view_size(id)? {
+        if let Err(error) = self.data_view_size(roots, id)? {
             return Ok(Invocation::Thrown(error));
         }
         let view = self
@@ -204,18 +215,23 @@ impl Vm {
 
     /// IsViewOutOfBounds plus GetViewByteLength: the current extent, or a
     /// TypeError when the view no longer fits its buffer.
-    pub(crate) fn data_view_size(&mut self, id: ObjectId) -> Completion<usize> {
+    pub(crate) fn data_view_size(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Completion<usize> {
         let Some(view) = self.heap.data_view(id)? else {
             return Ok(Err(self.type_error(
+                roots,
                 "DataView method called on an incompatible receiver",
             )?));
         };
         match self.heap.data_view_range(view)? {
             ViewRange::Detached => Ok(Err(
-                self.type_error("DataView is backed by a detached ArrayBuffer")?
+                self.type_error(roots, "DataView is backed by a detached ArrayBuffer")?
             )),
             ViewRange::OutOfBounds => Ok(Err(
-                self.type_error("DataView is out of bounds of its ArrayBuffer")?
+                self.type_error(roots, "DataView is out of bounds of its ArrayBuffer")?
             )),
             ViewRange::Bytes { len, .. } => Ok(Ok(len)),
         }
@@ -229,7 +245,7 @@ impl Vm {
         args: &[Value],
         kind: ElementKind,
     ) -> Result<Invocation, VmError> {
-        let id = match self.require_data_view(receiver)? {
+        let id = match self.require_data_view(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -240,12 +256,12 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let little = arg(args, 1).truthy();
-        let size = match self.data_view_size(id)? {
+        let size = match self.data_view_size(roots, id)? {
             Ok(size) => size,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if index.checked_add(kind.bytes()).is_none_or(|end| end > size) {
-            return self.throw_range_error("DataView offset is outside the view");
+            return self.throw_range_error(roots, "DataView offset is outside the view");
         }
         let Some(view) = self.heap.data_view(id)? else {
             unreachable!("receiver was validated")
@@ -266,7 +282,7 @@ impl Vm {
         args: &[Value],
         kind: ElementKind,
     ) -> Result<Invocation, VmError> {
-        let id = match self.require_data_view(receiver)? {
+        let id = match self.require_data_view(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -281,12 +297,12 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let little = arg(args, 2).truthy();
-        let size = match self.data_view_size(id)? {
+        let size = match self.data_view_size(roots, id)? {
             Ok(size) => size,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if index.checked_add(kind.bytes()).is_none_or(|end| end > size) {
-            return self.throw_range_error("DataView offset is outside the view");
+            return self.throw_range_error(roots, "DataView offset is outside the view");
         }
         let Some(view) = self.heap.data_view(id)? else {
             unreachable!("receiver was validated")

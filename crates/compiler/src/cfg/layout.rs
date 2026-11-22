@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, GeneratorStart, Instr, ResumeEntry};
+use yield_vm::bytecode::{
+    ExceptionHandler, GeneratorEntry, GeneratorStart, Instr, ResumeEntry, StackSite,
+};
 
 use super::{BlockId, Condition, FunctionCfg, Terminator, invalid};
 use crate::analyze::Liveness;
@@ -10,6 +12,7 @@ use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::may_throw;
 use crate::ir::{FunctionAttrs, logical};
+use crate::source_lines::SourceLines;
 
 /// Concrete layout, still using logical registers in code and table entries.
 /// The recovery tables' `saved_slots` carry logical registers until allocation.
@@ -45,7 +48,11 @@ fn index(value: usize) -> Result<u32, CompileError> {
 }
 
 impl FunctionCfg {
-    pub(crate) fn into_lowered(self, live: &Liveness) -> Result<LaidOutFunction, CompileError> {
+    pub(crate) fn into_lowered(
+        self,
+        live: &Liveness,
+        mut lines: Option<&mut SourceLines>,
+    ) -> Result<(LaidOutFunction, Vec<StackSite>), CompileError> {
         let Self {
             attrs,
             blocks,
@@ -131,12 +138,29 @@ impl FunctionCfg {
             generator_start: None,
             handlers: Vec::new(),
         };
+        let mut stack_sites = Vec::new();
+        let mut previous = None;
+        let mut record = |pc: usize, origin: Option<u32>| {
+            if previous == origin {
+                return;
+            }
+            previous = origin;
+            if let Some(lines) = lines.as_deref_mut() {
+                let (line, column) = origin.map_or((0, 0), |offset| lines.position(offset));
+                stack_sites.push(StackSite {
+                    pc: pc as u32,
+                    line,
+                    column,
+                });
+            }
+        };
         let mut ranges = vec![None::<(u32, u32, bool)>; handlers.len()];
         for (id, block) in blocks.into_iter().enumerate() {
             let Some(block) = block else { continue };
             let pos = positions[id].as_ref().unwrap();
             let code = &mut lowered.code;
             if pos.separator {
+                record(code.len(), None);
                 code.push(Instr::Jump {
                     target: pos.start - 1,
                 });
@@ -151,6 +175,7 @@ impl FunctionCfg {
             let mut can_throw = block.end.may_throw();
             for statement in block.statements {
                 can_throw |= may_throw(&statement.instr);
+                record(code.len(), statement.origin);
                 code.push(statement.instr);
             }
             if pos.encode_end {
@@ -229,6 +254,7 @@ impl FunctionCfg {
                         Instr::GeneratorStart
                     }
                 };
+                record(code.len(), block.end_origin);
                 code.push(instr);
             }
             let end = index(code.len())?;
@@ -248,7 +274,7 @@ impl FunctionCfg {
                 });
             }
         }
-        Ok(lowered)
+        Ok((lowered, stack_sites))
     }
 }
 

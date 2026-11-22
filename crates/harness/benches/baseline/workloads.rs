@@ -208,6 +208,12 @@ fn numeric_branch(vm: &mut Vm, host: &mut TestHost) {
 }
 
 fn build_react() -> Build {
+    let options =
+        CompileOptions::from_dts(include_str!("../../test.d.ts")).expect("test declarations parse");
+    build_react_with_options(&options)
+}
+
+pub(super) fn build_react_with_options(options: &CompileOptions) -> Build {
     let preload = concat!(
         include_str!("react-preload.mjs"),
         "\nexport const window = undefined; export const process = undefined;\n",
@@ -229,9 +235,7 @@ fn build_react() -> Build {
         ),
     ])
     .expect("valid React fixture paths");
-    let options =
-        CompileOptions::from_dts(include_str!("../../test.d.ts")).expect("test declarations parse");
-    compile("main.js", Some("preload.js"), &resolver, &options).expect("React fixture compiles")
+    compile("main.js", Some("preload.js"), &resolver, options).expect("React fixture compiles")
 }
 
 fn react_commit(vm: &mut Vm, host: &mut TestHost) {

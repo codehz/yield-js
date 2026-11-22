@@ -33,6 +33,7 @@ use crate::ir::{GeneratorStartSite, IterationEnvGroup, LoweredFunction};
 use crate::names::Tables;
 use crate::promote;
 use crate::session::Session;
+use crate::source_lines::SourceLines;
 use control::Control;
 
 pub(crate) fn lower_graph<'ast>(
@@ -82,6 +83,8 @@ pub(crate) fn lower_graph<'ast>(
             let scope = ModuleScope {
                 index,
                 source,
+                stack_traces: options.stack_traces
+                    && !options.framework_modules.contains(&module.id),
                 entry: index == graph.entry,
                 slots: &reservations[index as usize],
                 module_bindings: reservations[index as usize].values().copied().collect(),
@@ -146,6 +149,7 @@ pub(crate) fn lower_graph<'ast>(
 struct ModuleScope<'src> {
     index: u32,
     source: &'src str,
+    stack_traces: bool,
     entry: bool,
     slots: &'src BTreeMap<&'src str, BindingId>,
     module_bindings: BTreeSet<BindingId>,
@@ -243,6 +247,7 @@ fn lower_module<'ast>(
         .filter(|function| !has_iteration_environment(function))
         .map(|function| function.attrs.func_id)
         .collect();
+    let mut lines = scope.stack_traces.then(|| SourceLines::new(scope.source));
     for mut function in lowered {
         direct_bindings(
             &mut function,
@@ -255,7 +260,7 @@ fn lower_module<'ast>(
         crate::propagate::optimize(&mut function, session);
         function.simplify_jumps();
         function.validate()?;
-        let allocated = allocate::allocate(scope.source, function)?;
+        let allocated = allocate::allocate(scope.source, scope.index, function, lines.as_mut())?;
         session.push_function(allocated);
     }
     Ok(())
@@ -641,6 +646,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Self {
         let span = task.source.span();
         let is_async = task.source.is_async();
+        let stack_traces = module.stack_traces && matches!(mode, LoweringMode::Emit(_));
         Self {
             session,
             tasks,
@@ -667,7 +673,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             class_bindings: task.class_bindings,
             private_scopes: task.private_scopes,
             class_scope: None,
-            emit: Emitter::new(module.source, span),
+            emit: Emitter::new(module.source, span, stack_traces),
             control: Control::new(),
             dispose_scope: None,
             param_bindings: Vec::new(),
@@ -821,6 +827,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 span: self.span,
             },
             code: self.emit.take_code(),
+            origins: self.emit.take_origins(),
             awaits: self.control.take_awaits(),
             generator_start,
             yields: self.control.take_yields(),
@@ -973,16 +980,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     dst: self.slot(value),
                     binding,
                 });
-                let value = if let Some(initializer) = &parameter.initializer {
-                    let name = match &parameter.pattern {
-                        BindingPattern::BindingIdentifier(id) => id.name.as_str(),
-                        _ => "",
+                self.with_origin(parameter.span, |this| {
+                    let value = if let Some(initializer) = &parameter.initializer {
+                        let name = match &parameter.pattern {
+                            BindingPattern::BindingIdentifier(id) => id.name.as_str(),
+                            _ => "",
+                        };
+                        this.compile_pattern_default(value, initializer, name)?
+                    } else {
+                        value
                     };
-                    self.compile_pattern_default(value, initializer, name)?
-                } else {
-                    value
-                };
-                self.compile_binding_pattern(&parameter.pattern, value)?;
+                    this.compile_binding_pattern(&parameter.pattern, value)
+                })?;
             }
             if let Some(rest) = &params.rest {
                 let binding = self.alloc_binding();
@@ -992,7 +1001,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     dst: self.slot(value),
                     binding,
                 });
-                self.compile_binding_pattern(&rest.rest.argument, value)?;
+                self.with_origin(rest.span, |this| {
+                    this.compile_binding_pattern(&rest.rest.argument, value)
+                })?;
             }
         }
         Ok(length)
@@ -1030,6 +1041,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     pub(super) fn emit(&mut self, instruction: Instr) -> usize {
         self.emit.emit(instruction)
+    }
+
+    fn with_origin<T>(&mut self, span: Span, lower: impl FnOnce(&mut Self) -> T) -> T {
+        if !self.emit.records_origins() {
+            return lower(self);
+        }
+        let previous = self.emit.replace_origin(Some(span.start));
+        let result = lower(self);
+        self.emit.replace_origin(previous);
+        result
     }
 
     pub(super) fn pc(&self) -> usize {

@@ -43,5 +43,5 @@ export async function run() {
 function describeError(e) {
   if (typeof e !== "object") return "not an error object";
   const description = e.name + ": " + e.message;
-  return e.stack === description ? description : "wrong stack";
+  return e.stack.split("\n")[0] === description ? description : "wrong stack";
 }

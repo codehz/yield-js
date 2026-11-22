@@ -84,6 +84,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         while let Expression::ParenthesizedExpression(paren) = expression {
             expression = &paren.expression;
         }
+        self.with_origin(expression.span(), |this| {
+            this.compile_named_expression_at_site(expression, name, key)
+        })
+    }
+
+    fn compile_named_expression_at_site(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+        name: &str,
+        key: Option<Reg>,
+    ) -> Result<Reg, CompileError> {
         let function = match expression {
             Expression::ClassExpression(class) if class.id.is_none() => {
                 return self.compile_class(class, name, key);
@@ -212,6 +223,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     where
         'node: 'ast,
     {
+        self.with_origin(expression.span(), |this| {
+            this.compile_expression_inner(expression)
+        })
+    }
+
+    fn compile_expression_inner(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+    ) -> Result<Reg, CompileError> {
         match expression {
             Expression::BooleanLiteral(literal) => {
                 self.emit_constant(Constant::Bool(literal.value))
@@ -766,6 +786,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         expression: &'ast Expression<'ast>,
     ) -> Result<Vec<usize>, CompileError> {
         let expression = expression.without_parentheses();
+        self.with_origin(expression.span(), |this| {
+            this.compile_condition_inner(expression)
+        })
+    }
+
+    fn compile_condition_inner(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+    ) -> Result<Vec<usize>, CompileError> {
         match expression {
             Expression::BinaryExpression(binary)
                 if let Some(op) = comparison_operator(binary.operator) =>
@@ -799,6 +828,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         expression: &'ast Expression<'ast>,
     ) -> Result<Vec<usize>, CompileError> {
         let expression = expression.without_parentheses();
+        self.with_origin(expression.span(), |this| {
+            this.compile_condition_true_inner(expression)
+        })
+    }
+
+    fn compile_condition_true_inner(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+    ) -> Result<Vec<usize>, CompileError> {
         if let Expression::BinaryExpression(binary) = expression
             && let Some(op) = comparison_operator(binary.operator)
         {
@@ -1234,6 +1272,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_call_inner(
+        &mut self,
+        expression: &'ast CallExpression<'ast>,
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<Reg, CompileError> {
+        self.with_origin(expression.span, |this| {
+            this.compile_call_at_site(expression, exits)
+        })
+    }
+
+    fn compile_call_at_site(
         &mut self,
         expression: &'ast CallExpression<'ast>,
         mut exits: Option<&mut Vec<usize>>,
@@ -1677,6 +1725,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn compile_member_read(
+        &mut self,
+        member: &'ast MemberExpression<'ast>,
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<(Reg, Reg), CompileError> {
+        self.with_origin(member.span(), |this| {
+            this.compile_member_read_at_site(member, exits)
+        })
+    }
+
+    fn compile_member_read_at_site(
         &mut self,
         member: &'ast MemberExpression<'ast>,
         exits: Option<&mut Vec<usize>>,

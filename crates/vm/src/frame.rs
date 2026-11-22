@@ -106,6 +106,10 @@ impl Frame {
 }
 
 impl TraceRoots for Frame {
+    fn frame(&self) -> Option<&Frame> {
+        Some(self)
+    }
+
     fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
         self.env.trace(tracer)?;
         self.target.map(ContinuationTarget::object).trace(tracer)?;

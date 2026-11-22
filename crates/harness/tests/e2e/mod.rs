@@ -13,6 +13,7 @@ mod preload;
 mod promises;
 mod react_compat;
 mod resume;
+mod stack_traces;
 mod support;
 mod sync;
 mod timer_faults;

@@ -281,11 +281,15 @@ fn encode(units: &[u8], alphabet: Alphabet, omit_padding: bool) -> String {
 
 impl Vm {
     /// The `options` argument of the codec methods, or `None` when absent.
-    fn options_object(&mut self, value: &Value) -> Completion<Option<ObjectId>> {
+    fn options_object(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Completion<Option<ObjectId>> {
         match value.view() {
             ValueRef::Undefined => Ok(Ok(None)),
             ValueRef::Object(id) => Ok(Ok(Some(id))),
-            _ => Ok(Err(self.type_error("options must be an object")?)),
+            _ => Ok(Err(self.type_error(roots, "options must be an object")?)),
         }
     }
 
@@ -312,13 +316,13 @@ impl Vm {
         }
         let ValueRef::String(text) = value.view() else {
             return Ok(Err(
-                self.type_error("string option requires a string value")?
+                self.type_error(roots, "string option requires a string value")?
             ));
         };
         let text = text.to_utf8().unwrap_or_default();
         match allowed.iter().find(|allowed| **allowed == text) {
             Some(allowed) => Ok(Ok(allowed)),
-            None => Ok(Err(self.type_error("unsupported option value")?)),
+            None => Ok(Err(self.type_error(roots, "unsupported option value")?)),
         }
     }
 
@@ -341,23 +345,28 @@ impl Vm {
     }
 
     /// RequireInternalSlot plus the Uint8Array name check.
-    pub(super) fn validate_uint8(&mut self, value: &Value) -> Completion<ObjectId> {
-        let (id, kind) = match self.require_typed(value)? {
+    pub(super) fn validate_uint8(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Completion<ObjectId> {
+        let (id, kind) = match self.require_typed(roots, value)? {
             Ok(value) => value,
             Err(error) => return Ok(Err(error)),
         };
         if kind != ElementKind::Uint8 {
             return Ok(Err(self.type_error(
+                roots,
                 "Uint8Array method called on a different TypedArray",
             )?));
         }
         Ok(Ok(id))
     }
 
-    fn codec_string(&mut self, value: &Value) -> Completion<JsString> {
+    fn codec_string(&mut self, roots: &ActiveRoots<'_>, value: &Value) -> Completion<JsString> {
         match value.view() {
             ValueRef::String(text) => Ok(Ok(text.clone())),
-            _ => Ok(Err(self.type_error("codec input must be a string")?)),
+            _ => Ok(Err(self.type_error(roots, "codec input must be a string")?)),
         }
     }
 
@@ -382,12 +391,14 @@ impl Vm {
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
         let ValueRef::Object(target) = created.view() else {
-            return Ok(Err(
-                self.type_error("Uint8Array construction did not return an object")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "Uint8Array construction did not return an object",
+            )?));
         };
         if self.heap.typed_array(target)?.is_none() {
             return Ok(Err(self.type_error(
+                roots,
                 "Uint8Array construction did not return a TypedArray",
             )?));
         }
@@ -424,8 +435,8 @@ impl Vm {
     }
 
     /// Bytes of a validated Uint8Array, in order.
-    fn uint8_bytes(&mut self, id: ObjectId) -> Completion<Vec<u8>> {
-        let length = match self.validate_typed_bounds(id)? {
+    fn uint8_bytes(&mut self, roots: &ActiveRoots<'_>, id: ObjectId) -> Completion<Vec<u8>> {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
@@ -446,11 +457,11 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let text = match self.codec_string(arg(args, 0))? {
+        let text = match self.codec_string(roots, arg(args, 0))? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let options = match self.options_object(arg(args, 1))? {
+        let options = match self.options_object(roots, arg(args, 1))? {
             Ok(options) => options,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -489,6 +500,7 @@ impl Vm {
         );
         if let Some(message) = decoded.error {
             let error = self.alloc_error(
+                roots,
                 self.builtins.get("syntaxerror.prototype"),
                 "SyntaxError",
                 Some(message.into()),
@@ -509,13 +521,14 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let _ = host;
         let roots = &roots.with(&args);
-        let text = match self.codec_string(arg(args, 0))? {
+        let text = match self.codec_string(roots, arg(args, 0))? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let decoded = from_hex(&text.to_utf16(), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
             let error = self.alloc_error(
+                roots,
                 self.builtins.get("syntaxerror.prototype"),
                 "SyntaxError",
                 Some(message.into()),
@@ -537,15 +550,15 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let view = (receiver, args);
         let roots = &roots.with(&view);
-        let id = match self.validate_uint8(receiver)? {
+        let id = match self.validate_uint8(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let text = match self.codec_string(arg(args, 0))? {
+        let text = match self.codec_string(roots, arg(args, 0))? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let options = match self.options_object(arg(args, 1))? {
+        let options = match self.options_object(roots, arg(args, 1))? {
             Ok(options) => options,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -571,7 +584,7 @@ impl Vm {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let length = match self.validate_typed_bounds(id)? {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -582,40 +595,43 @@ impl Vm {
         };
         let decoded = from_base64(&text.to_utf16(), alphabet, last_chunk(last), length);
         self.write_uint8_bytes(id, &decoded.bytes)?;
-        self.codec_result(decoded.read, decoded.bytes.len(), decoded.error)
+        self.codec_result(roots, decoded.read, decoded.bytes.len(), decoded.error)
     }
 
     pub(super) fn uint8_set_from_hex(
         &mut self,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let id = match self.validate_uint8(receiver)? {
+        let id = match self.validate_uint8(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let text = match self.codec_string(arg(args, 0))? {
+        let text = match self.codec_string(roots, arg(args, 0))? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let length = match self.validate_typed_bounds(id)? {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let decoded = from_hex(&text.to_utf16(), length);
         self.write_uint8_bytes(id, &decoded.bytes)?;
-        self.codec_result(decoded.read, decoded.bytes.len(), decoded.error)
+        self.codec_result(roots, decoded.read, decoded.bytes.len(), decoded.error)
     }
 
     /// The `{ read, written }` result, or the SyntaxError after any partial write.
     pub(super) fn codec_result(
         &mut self,
+        roots: &ActiveRoots<'_>,
         read: usize,
         written: usize,
         error: Option<&'static str>,
     ) -> Result<Invocation, VmError> {
         if let Some(message) = error {
             let error = self.alloc_error(
+                roots,
                 self.builtins.get("syntaxerror.prototype"),
                 "SyntaxError",
                 Some(message.into()),
@@ -639,12 +655,12 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let view = (receiver, args);
         let roots = &roots.with(&view);
-        let id = match self.validate_uint8(receiver)? {
+        let id = match self.validate_uint8(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let roots = &roots.with(&id);
-        let options = match self.options_object(arg(args, 0))? {
+        let options = match self.options_object(roots, arg(args, 0))? {
             Ok(options) => options,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -663,7 +679,7 @@ impl Vm {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let bytes = match self.uint8_bytes(id)? {
+        let bytes = match self.uint8_bytes(roots, id)? {
             Ok(bytes) => bytes,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -677,12 +693,16 @@ impl Vm {
         )))
     }
 
-    pub(super) fn uint8_to_hex(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let id = match self.validate_uint8(receiver)? {
+    pub(super) fn uint8_to_hex(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let id = match self.validate_uint8(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let bytes = match self.uint8_bytes(id)? {
+        let bytes = match self.uint8_bytes(roots, id)? {
             Ok(bytes) => bytes,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };

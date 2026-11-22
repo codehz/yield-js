@@ -225,6 +225,7 @@ fn compile_run(source: &str) -> yield_vm::bytecode::Function {
         &source,
         &CompileOptions {
             imports: manifest(&[("test", &["inspect", "seed", "wait"])]),
+            ..CompileOptions::default()
         },
     )
     .expect("source compiles");
@@ -1071,6 +1072,7 @@ fn rejects_static_use_before_lexical_initialization() {
             case.source,
             &CompileOptions {
                 imports: manifest(case.imports),
+                ..CompileOptions::default()
             },
         )
         .expect_err(case.source);
@@ -1108,7 +1110,14 @@ fn allows_lexical_use_after_initialization_and_cross_closure_read() {
         } else {
             BTreeMap::new()
         };
-        compile(source, &CompileOptions { imports }).expect(source);
+        compile(
+            source,
+            &CompileOptions {
+                imports,
+                ..CompileOptions::default()
+            },
+        )
+        .expect(source);
     }
 }
 
@@ -1186,6 +1195,7 @@ fn host_import_export_aliases_share_one_binding() {
         "import { inspect } from 'test';\nexport { inspect, inspect as check };",
         &CompileOptions {
             imports: manifest(&[("test", &["inspect"])]),
+            ..CompileOptions::default()
         },
     )
     .unwrap();
@@ -1670,7 +1680,10 @@ import * as host from "host";
 import "host";
 function run() { return call(item, fallback, empty, host.value); }
 "#,
-        &CompileOptions { imports },
+        &CompileOptions {
+            imports,
+            ..CompileOptions::default()
+        },
     )
     .expect("static host imports compile");
     let run = build.functions.iter().find(|f| f.name == "run").unwrap();
@@ -1692,6 +1705,7 @@ fn delegates_unknown_host_specifiers_and_rejects_missing_host_exports() {
             source,
             &CompileOptions {
                 imports: imports.clone(),
+                ..CompileOptions::default()
             },
         )
         .unwrap_err();
@@ -1846,6 +1860,7 @@ fn imported_bindings_are_readonly_and_shadow_normally() {
         "import { value } from 'host'; value = 1;",
         &CompileOptions {
             imports: imports.clone(),
+            ..CompileOptions::default()
         },
     )
     .expect("imports are const; the assignment throws at runtime");
@@ -1858,7 +1873,10 @@ fn imported_bindings_are_readonly_and_shadow_normally() {
     );
     compile(
         "import { value } from 'host'; function run() { let value = 1; return value; }",
-        &CompileOptions { imports },
+        &CompileOptions {
+            imports,
+            ..CompileOptions::default()
+        },
     )
     .expect("local shadowing allowed");
 }
@@ -1869,6 +1887,7 @@ fn imported_values_in_closures_are_direct_operands_not_environment_cells() {
         "import { value } from 'host'; function run() { return value; }",
         &CompileOptions {
             imports: manifest(&[("host", &["value"])]),
+            ..CompileOptions::default()
         },
     )
     .expect("imported closure reference compiles");
@@ -1895,6 +1914,7 @@ fn imported_assignments_use_const_throws_without_binding_cells() {
         "import { value } from 'host'; value += 1;",
         &CompileOptions {
             imports: manifest(&[("host", &["value"])]),
+            ..CompileOptions::default()
         },
     )
     .expect("readonly import assignment lowers");
@@ -2568,4 +2588,23 @@ export function run(flag) {
             ..
         }
     )));
+}
+
+#[test]
+fn stack_sites_follow_ecmascript_lines_and_parameter_initializers() {
+    let source = "/*a*/\r\n/*b*/\r/*c*/\n/*d*/\u{2028}/*e*/\u{2029}export function run(x = /*😀é*/ Error('x')) { return x; }";
+    let build = compile(source, &CompileOptions::default()).unwrap();
+    let run = build.functions.iter().find(|f| f.name == "run").unwrap();
+    let pc = run
+        .code
+        .iter()
+        .position(|op| matches!(op, Instr::CallValue { .. }))
+        .unwrap() as u32;
+    let site = run
+        .stack_sites
+        .iter()
+        .rev()
+        .find(|site| site.pc <= pc)
+        .unwrap();
+    assert_eq!((site.line, site.column), (6, 33));
 }

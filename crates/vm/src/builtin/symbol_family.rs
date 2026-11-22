@@ -15,19 +15,17 @@ const PROTOTYPE: &str = "symbol.prototype";
 
 #[yield_binding_macros::builtin_global(name = "Symbol", root = "symbol", kind = "constructor")]
 mod members {
-    use crate::vm::Vm;
-
     prototype_calls! {
-        valueOf: 0 | toString: 0 as name => |vm, _, _, _, receiver| vm.symbol_method(receiver, name);
+        valueOf: 0 | toString: 0 as name => |vm, _, roots, _, receiver| vm.symbol_method(roots, receiver, name);
     }
 
     static_calls! {
         r#for: 1 => |vm, host, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_for(host, roots, args), args);
-        keyFor: 1 => |vm, _, _, args, receiver| vm.symbol_static(receiver, Vm::symbol_key_for, args);
+        keyFor: 1 => |vm, _, roots, args, receiver| vm.symbol_static(receiver, |vm, args| vm.symbol_key_for(roots, args), args);
     }
 
     prototype_calls! {
-        get description: 0 => |vm, _, _, _, receiver| vm.symbol_method(receiver, "get description");
+        get description: 0 => |vm, _, roots, _, receiver| vm.symbol_method(roots, receiver, "get description");
     }
 }
 

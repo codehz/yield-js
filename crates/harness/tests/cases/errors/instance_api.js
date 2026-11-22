@@ -6,10 +6,10 @@ export async function run() {
   if (empty.name !== "TypeError" || empty.message !== "" || empty.hasOwnProperty("message")) {
     return "wrong default message";
   }
-  if (Error("bare").stack !== "Error: bare") return "wrong bare call";
+  if (Error("bare").stack.split("\n")[0] !== "Error: bare") return "wrong bare call";
   try {
     throw new TypeError("boom");
   } catch (e) {
-    return e.name + ": " + e.message + " | " + e.stack;
+    return e.name + ": " + e.message + " | " + e.stack.split("\n")[0];
   }
 }

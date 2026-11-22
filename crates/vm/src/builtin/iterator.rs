@@ -100,7 +100,7 @@ fn return_method(
         Invocation::Value(value) => match value.view() {
             ValueRef::Undefined | ValueRef::Null => Ok(Invocation::Value(Value::UNDEFINED)),
             _ if vm.is_callable(&value) => Ok(Invocation::Value(value)),
-            _ => vm.throw_type_error("Iterator return is not callable"),
+            _ => vm.throw_type_error(roots, "Iterator return is not callable"),
         },
         thrown => Ok(thrown),
     }

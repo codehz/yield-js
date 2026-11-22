@@ -25,11 +25,13 @@ pub(crate) struct InstrId(usize);
 pub(crate) struct Statement {
     pub(crate) id: InstrId,
     pub(crate) instr: Instr,
+    pub(crate) origin: Option<u32>,
 }
 
 pub(crate) struct Block {
     pub(crate) statements: Vec<Statement>,
     pub(crate) end: Terminator,
+    pub(crate) end_origin: Option<u32>,
     /// Indices into `FunctionCfg::handlers`, in VM priority order.
     pub(crate) protected_by: Vec<usize>,
 }
@@ -274,6 +276,7 @@ impl FunctionCfg {
         let LoweredFunction {
             attrs,
             code,
+            origins,
             awaits,
             yields,
             handlers,
@@ -394,15 +397,18 @@ impl FunctionCfg {
             .collect::<Result<_, CompileError>>()?;
         let mut blocks = Vec::with_capacity(starts.len() - 1);
         let mut code = code.into_iter();
+        let origin = |pc: usize| origins.as_ref().and_then(|origins| origins[pc]);
         for pair in starts.windows(2) {
             let [start, end] = [pair[0], pair[1]];
             let pc = end - 1;
             let statements = (start..pc).map(|pc| Statement {
                 id: InstrId(pc),
                 instr: code.next().unwrap(),
+                origin: origin(pc),
             });
             let mut statements: Vec<_> = statements.collect();
             let last = code.next().unwrap();
+            let mut end_origin = origin(pc);
             let end = if let Some((test, target)) = decode_condition(&last) {
                 Terminator::Branch {
                     test,
@@ -474,6 +480,7 @@ impl FunctionCfg {
                         statements.push(Statement {
                             id: InstrId(pc),
                             instr,
+                            origin: end_origin.take(),
                         });
                         Terminator::Next(block_at(end)?)
                     }
@@ -489,6 +496,7 @@ impl FunctionCfg {
             blocks.push(Some(Block {
                 statements,
                 end,
+                end_origin,
                 protected_by,
             }));
         }

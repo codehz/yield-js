@@ -26,10 +26,10 @@ pub(super) fn method(
         return to_json(vm, host, roots, receiver);
     }
     let ValueRef::Object(id) = receiver.view() else {
-        return vm.throw_type_error("Date method requires a Date receiver");
+        return vm.throw_type_error(roots, "Date method requires a Date receiver");
     };
     let Object::Date { time, .. } = vm.heap.get(id)? else {
-        return vm.throw_type_error("Date method requires a Date receiver");
+        return vm.throw_type_error(roots, "Date method requires a Date receiver");
     };
     let time = *time;
     if let Some(setter) = Setter::from_key(key) {
@@ -65,7 +65,7 @@ pub(super) fn method(
         "toISOString" => {
             return match time {
                 Some(time) => Ok(string(text::format_iso(time))),
-                None => vm.throw_range_error("Invalid time value"),
+                None => vm.throw_range_error(roots, "Invalid time value"),
             };
         }
         "toUTCString" => {
@@ -117,7 +117,10 @@ fn to_json(
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
     if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
-        return vm.throw_type_error("Date.prototype.toJSON requires an object-coercible receiver");
+        return vm.throw_type_error(
+            roots,
+            "Date.prototype.toJSON requires an object-coercible receiver",
+        );
     }
     let object = Value::object(vm.coercible_object(receiver));
     let roots = &roots.with(&object);
@@ -143,13 +146,18 @@ pub(super) fn to_primitive(
     hint: &Value,
 ) -> Result<Invocation, VmError> {
     if !matches!(receiver.view(), ValueRef::Object(_)) {
-        return vm
-            .throw_type_error("Date.prototype[Symbol.toPrimitive] requires an object receiver");
+        return vm.throw_type_error(
+            roots,
+            "Date.prototype[Symbol.toPrimitive] requires an object receiver",
+        );
     }
     let hint = match hint.view() {
         ValueRef::String(hint) if hint == "string" || hint == "default" => Hint::String,
         ValueRef::String(hint) if hint == "number" => Hint::Number,
-        _ => return vm.throw_type_error("Invalid hint for Date.prototype[Symbol.toPrimitive]"),
+        _ => {
+            return vm
+                .throw_type_error(roots, "Invalid hint for Date.prototype[Symbol.toPrimitive]");
+        }
     };
     vm.ordinary_to_primitive(host, roots, receiver, hint)
 }

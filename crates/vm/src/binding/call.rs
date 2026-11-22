@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, Property};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
@@ -233,6 +234,7 @@ impl<T: HostClass> This<T> {
 
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut Vm,
+    pub(crate) roots: &'a ActiveRoots<'a>,
     pub(crate) bindings: &'a Bindings,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
@@ -413,7 +415,7 @@ impl<'a> CallCx<'a> {
 
     pub fn type_error(&mut self, message: impl Into<String>) -> JsError {
         let message = format!("TypeError: {}", message.into());
-        match self.vm.type_error(&message) {
+        match self.vm.type_error(self.roots, &message) {
             Ok(value) => JsError::Throw(self.js_value(value)),
             Err(error) => JsError::Fault(HostFault::new(error.to_string())),
         }

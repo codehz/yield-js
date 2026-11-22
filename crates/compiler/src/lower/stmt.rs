@@ -20,6 +20,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     where
         'node: 'ast,
     {
+        self.with_origin(statement.span(), |this| {
+            this.compile_statement_inner(statement)
+        })
+    }
+
+    fn compile_statement_inner(
+        &mut self,
+        statement: &'ast Statement<'ast>,
+    ) -> Result<(), CompileError> {
         if let Some(declaration) = local_declaration(statement) {
             return self.compile_declaration(declaration);
         }

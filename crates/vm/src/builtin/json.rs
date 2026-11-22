@@ -387,9 +387,12 @@ impl Vm {
         });
         let value = match parsed {
             Ok(value) => self.materialize_json(value)?,
-            Err(message) if message.contains("depth") => return self.throw_range_error(&message),
+            Err(message) if message.contains("depth") => {
+                return self.throw_range_error(roots, &message);
+            }
             Err(message) => {
                 let error = self.alloc_error(
+                    roots,
                     self.builtins.get("syntaxerror.prototype"),
                     "SyntaxError",
                     Some(message.into()),
@@ -546,7 +549,9 @@ impl Vm {
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
         let roots = &roots.with(&holder);
         if state.stack.len() > MAX_DEPTH {
-            return self.type_error("Maximum JSON nesting exceeded").map(Err);
+            return self
+                .type_error(roots, "Maximum JSON nesting exceeded")
+                .map(Err);
         }
         let mut value = match self.read_property(
             host,
@@ -612,7 +617,7 @@ impl Vm {
             ValueRef::String(_) => JsonValue::String(value.into_string().expect("string value")),
             ValueRef::BigInt(_) => {
                 return Ok(Err(
-                    self.type_error("Do not know how to serialize a BigInt")?
+                    self.type_error(roots, "Do not know how to serialize a BigInt")?
                 ));
             }
             ValueRef::Object(_) if self.is_callable(&value) => return Ok(Ok(None)),
@@ -644,7 +649,7 @@ impl Vm {
         id: ObjectId,
     ) -> Result<Result<JsonValue, Value>, VmError> {
         let roots = &roots.with(&id);
-        if let Some(error) = self.cycle(state, id)? {
+        if let Some(error) = self.cycle(roots, state, id)? {
             return Ok(Err(error));
         }
         state.stack.push(id);
@@ -696,7 +701,7 @@ impl Vm {
         id: ObjectId,
     ) -> Result<Result<JsonValue, Value>, VmError> {
         let roots = &roots.with(&id);
-        if let Some(error) = self.cycle(state, id)? {
+        if let Some(error) = self.cycle(roots, state, id)? {
             return Ok(Err(error));
         }
         state.stack.push(id);
@@ -726,12 +731,17 @@ impl Vm {
         Ok(Ok(JsonValue::Object(values)))
     }
 
-    fn cycle(&mut self, state: &Serialize<'_>, id: ObjectId) -> Result<Option<Value>, VmError> {
+    fn cycle(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        state: &Serialize<'_>,
+        id: ObjectId,
+    ) -> Result<Option<Value>, VmError> {
         if state.stack.contains(&id) {
-            self.type_error(&format!(
-                "Converting circular structure to JSON at {}",
-                state.path
-            ))
+            self.type_error(
+                roots,
+                &format!("Converting circular structure to JSON at {}", state.path),
+            )
             .map(Some)
         } else {
             Ok(None)
@@ -769,7 +779,9 @@ impl Vm {
                     .collect::<Vec<_>>(),
             };
             if nested.len() > MAX_DEPTH {
-                return self.type_error("Maximum JSON nesting exceeded").map(Err);
+                return self
+                    .type_error(roots, "Maximum JSON nesting exceeded")
+                    .map(Err);
             }
             for name in nested {
                 if let Err(error) = self.revive(host, roots, reviver, id, &name)? {

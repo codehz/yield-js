@@ -61,11 +61,11 @@ const ENCODER_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         ENCODER,
         0,
-        |vm, _, _, _, _| vm.throw_type_error("TextEncoder constructor requires new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "TextEncoder constructor requires new"),
         construct_encoder,
     ),
-    IntrinsicDef::call(ENCODING, 0, |vm, _, _, _, receiver| {
-        match vm.require_encoder(receiver)? {
+    IntrinsicDef::call(ENCODING, 0, |vm, _, roots, _, receiver| {
+        match vm.require_encoder(roots, receiver)? {
             Ok(_) => Ok(Invocation::Value(Value::string("utf-8".into()))),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
@@ -82,25 +82,34 @@ const DECODER_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         DECODER,
         0,
-        |vm, _, _, _, _| vm.throw_type_error("TextDecoder constructor requires new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "TextDecoder constructor requires new"),
         construct_decoder,
     ),
-    IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, roots, _, receiver| {
         match vm.text_decoder_state(receiver)? {
             Some(_) => Ok(Invocation::Value(Value::string("utf-8".into()))),
-            None => vm.throw_type_error("TextDecoder method called on an incompatible receiver"),
+            None => vm.throw_type_error(
+                roots,
+                "TextDecoder method called on an incompatible receiver",
+            ),
         }
     }),
-    IntrinsicDef::call(FATAL, 0, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(FATAL, 0, |vm, _, roots, _, receiver| {
         match vm.text_decoder_state(receiver)? {
             Some(state) => Ok(Invocation::Value(Value::boolean(state.fatal))),
-            None => vm.throw_type_error("TextDecoder method called on an incompatible receiver"),
+            None => vm.throw_type_error(
+                roots,
+                "TextDecoder method called on an incompatible receiver",
+            ),
         }
     }),
-    IntrinsicDef::call(IGNORE_BOM, 0, |vm, _, _, _, receiver| {
+    IntrinsicDef::call(IGNORE_BOM, 0, |vm, _, roots, _, receiver| {
         match vm.text_decoder_state(receiver)? {
             Some(state) => Ok(Invocation::Value(Value::boolean(state.ignore_bom))),
-            None => vm.throw_type_error("TextDecoder method called on an incompatible receiver"),
+            None => vm.throw_type_error(
+                roots,
+                "TextDecoder method called on an incompatible receiver",
+            ),
         }
     }),
     IntrinsicDef::call(DECODE, 0, |vm, host, roots, args, receiver| {
@@ -234,9 +243,10 @@ fn construct_decoder(
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
     if canonical_label(&label).is_none() {
-        return Ok(Invocation::Thrown(
-            vm.make_range_error("unsupported TextDecoder encoding label")?,
-        ));
+        return Ok(Invocation::Thrown(vm.make_range_error(
+            roots,
+            "unsupported TextDecoder encoding label",
+        )?));
     }
     let prototype = prototype.unwrap_or_else(|| vm.builtins.get(DECODER_PROTOTYPE));
     let object = vm.heap.alloc(Object::TextDecoder(TextDecoderObject {
@@ -267,7 +277,7 @@ fn decoder_options(
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<(bool, bool)> {
-    let id = match options_dictionary(vm, options)? {
+    let id = match options_dictionary(vm, roots, options)? {
         Ok(Some(id)) => id,
         Ok(None) => return Ok(Ok((false, false))),
         Err(error) => return Ok(Err(error)),
@@ -290,18 +300,24 @@ fn stream_option(
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<bool> {
-    let id = match options_dictionary(vm, options)? {
+    let id = match options_dictionary(vm, roots, options)? {
         Ok(id) => id,
         Err(error) => return Ok(Err(error)),
     };
     vm.boolean_option(host, roots, id, "stream")
 }
 
-fn options_dictionary(vm: &mut Vm, options: &Value) -> Completion<Option<ObjectId>> {
+fn options_dictionary(
+    vm: &mut Vm,
+    roots: &ActiveRoots<'_>,
+    options: &Value,
+) -> Completion<Option<ObjectId>> {
     match options.view() {
         ValueRef::Undefined | ValueRef::Null => Ok(Ok(None)),
         ValueRef::Object(id) => Ok(Ok(Some(id))),
-        _ => Ok(Err(vm.type_error("TextDecoder options must be an object")?)),
+        _ => Ok(Err(
+            vm.type_error(roots, "TextDecoder options must be an object")?
+        )),
     }
 }
 
@@ -314,13 +330,14 @@ enum Source {
     View(ObjectId),
 }
 
-fn buffer_source(vm: &mut Vm, value: &Value) -> Completion<Source> {
+fn buffer_source(vm: &mut Vm, roots: &ActiveRoots<'_>, value: &Value) -> Completion<Source> {
     let ValueRef::Object(id) = value.view() else {
         return match value.view() {
             ValueRef::Undefined => Ok(Ok(Source::Empty)),
-            _ => Ok(Err(
-                vm.type_error("TextDecoder input must be a buffer source")?
-            )),
+            _ => Ok(Err(vm.type_error(
+                roots,
+                "TextDecoder input must be a buffer source",
+            )?)),
         };
     };
     if vm.heap.buffer(id)?.is_some() {
@@ -329,9 +346,10 @@ fn buffer_source(vm: &mut Vm, value: &Value) -> Completion<Source> {
     if vm.heap.data_view(id)?.is_some() || vm.heap.typed_array(id)?.is_some() {
         return Ok(Ok(Source::View(id)));
     }
-    Ok(Err(
-        vm.type_error("TextDecoder input must be a buffer source")?
-    ))
+    Ok(Err(vm.type_error(
+        roots,
+        "TextDecoder input must be a buffer source",
+    )?))
 }
 
 /// The raw byte window of a validated buffer source. A detached or
@@ -372,28 +390,40 @@ impl Vm {
         })
     }
 
-    fn require_encoder(&mut self, receiver: &Value) -> Completion<ObjectId> {
+    fn require_encoder(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Completion<ObjectId> {
         let ValueRef::Object(id) = receiver.view() else {
             return Ok(Err(self.type_error(
+                roots,
                 "TextEncoder method called on an incompatible receiver",
             )?));
         };
         if !matches!(self.heap.get(id)?, Object::TextEncoder { .. }) {
             return Ok(Err(self.type_error(
+                roots,
                 "TextEncoder method called on an incompatible receiver",
             )?));
         }
         Ok(Ok(id))
     }
 
-    fn require_decoder(&mut self, receiver: &Value) -> Completion<ObjectId> {
+    fn require_decoder(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Completion<ObjectId> {
         let ValueRef::Object(id) = receiver.view() else {
             return Ok(Err(self.type_error(
+                roots,
                 "TextDecoder method called on an incompatible receiver",
             )?));
         };
         if !matches!(self.heap.get(id)?, Object::TextDecoder(_)) {
             return Ok(Err(self.type_error(
+                roots,
                 "TextDecoder method called on an incompatible receiver",
             )?));
         }
@@ -409,7 +439,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let view = (receiver, args);
         let roots = &roots.with(&view);
-        match self.require_encoder(receiver)? {
+        match self.require_encoder(roots, receiver)? {
             Ok(_) => {}
             Err(error) => return Ok(Invocation::Thrown(error)),
         }
@@ -436,18 +466,18 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let view = (receiver, args);
         let roots = &roots.with(&view);
-        match self.require_encoder(receiver)? {
+        match self.require_encoder(roots, receiver)? {
             Ok(_) => {}
             Err(error) => return Ok(Invocation::Thrown(error)),
         }
         if args.len() < 2 {
-            return self.throw_type_error("encodeInto requires a source and a destination");
+            return self.throw_type_error(roots, "encodeInto requires a source and a destination");
         }
         let source = match self.coerce_string(host, roots, arg(args, 0))? {
             Ok(text) => text,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let destination = match self.validate_uint8(arg(args, 1))? {
+        let destination = match self.validate_uint8(roots, arg(args, 1))? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -483,7 +513,7 @@ impl Vm {
                 index += consumed;
             }
         }
-        self.codec_result(read, written, None)
+        self.codec_result(roots, read, written, None)
     }
 
     pub(super) fn text_decode(
@@ -495,13 +525,13 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let view = (receiver, args);
         let roots = &roots.with(&view);
-        let id = match self.require_decoder(receiver)? {
+        let id = match self.require_decoder(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         // Validate the shape first, then run the `stream` getter, and only
         // then resolve the bytes: the getter can resize or detach the source.
-        let source = match buffer_source(self, arg(args, 0))? {
+        let source = match buffer_source(self, roots, arg(args, 0))? {
             Ok(source) => source,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -559,7 +589,7 @@ impl Vm {
             record.prefix = [0; 3];
             record.prefix_len = 0;
             record.pending = if stream { decoder.retained } else { Vec::new() };
-            self.throw_type_error("TextDecoder fatal error")
+            self.throw_type_error(roots, "TextDecoder fatal error")
         }
     }
 }

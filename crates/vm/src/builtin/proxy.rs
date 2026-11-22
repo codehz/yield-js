@@ -18,8 +18,8 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
 pub(crate) const PROXY_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     CONSTRUCTOR,
     2,
-    |vm, _, _, _, _| vm.throw_type_error("Proxy requires new"),
-    |vm, _, _, args, _| vm.construct_proxy(&args),
+    |vm, _, roots, _, _| vm.throw_type_error(roots, "Proxy requires new"),
+    |vm, _, roots, args, _| vm.construct_proxy(roots, &args),
 )
 .without_new_target_prototype()];
 
@@ -41,12 +41,16 @@ macro_rules! unwrap_script {
 }
 
 impl Vm {
-    fn construct_proxy(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
+    fn construct_proxy(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return self.throw_type_error("Proxy requires an object target");
+            return self.throw_type_error(roots, "Proxy requires an object target");
         };
         let Some(ValueRef::Object(handler)) = args.get(1).map(Value::view) else {
-            return self.throw_type_error("Proxy requires an object handler");
+            return self.throw_type_error(roots, "Proxy requires an object handler");
         };
         let base = self.heap.proxy_target(target)?;
         if !matches!(
@@ -60,6 +64,7 @@ impl Vm {
                 | Object::DataView(_)
         ) {
             return self.throw_type_error(
+                roots,
                 "Proxy supports only plain object, array, primitive wrapper, Date, and binary targets",
             );
         }
@@ -138,7 +143,8 @@ impl Vm {
                     _ => true,
                 };
                 if !valid {
-                    return self.throw_type_error("Proxy get trap contradicts a fixed property");
+                    return self
+                        .throw_type_error(roots, "Proxy get trap contradicts a fixed property");
                 }
             }
             _ => {}
@@ -183,7 +189,7 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
             Ok(Some(result)) if !result.truthy() => {
                 return if strict {
-                    self.throw_type_error("Proxy set trap rejected the write")
+                    self.throw_type_error(roots, "Proxy set trap rejected the write")
                 } else {
                     Ok(Invocation::Value(Value::boolean(false)))
                 };
@@ -199,7 +205,8 @@ impl Vm {
                     _ => true,
                 };
                 if !valid {
-                    return self.throw_type_error("Proxy set trap contradicts a fixed property");
+                    return self
+                        .throw_type_error(roots, "Proxy set trap contradicts a fixed property");
                 }
             }
             _ => {}
@@ -240,8 +247,8 @@ impl Vm {
                 .is_extensible();
             match self.own_descriptor(host, roots, target, key)? {
                 Err(error) => return Ok(Invocation::Thrown(error)),
-                Ok(Some((_, attrs))) if !attrs.configurable || !extensible => return self.throw_type_error("Proxy trap contradicts a protected own property"),
-                Ok(None) if delete && !extensible => return self.throw_type_error("Proxy deleteProperty trap cannot report success for a missing property on a non-extensible target"),
+                Ok(Some((_, attrs))) if !attrs.configurable || !extensible => return self.throw_type_error(roots, "Proxy trap contradicts a protected own property"),
+                Ok(None) if delete && !extensible => return self.throw_type_error(roots, "Proxy deleteProperty trap cannot report success for a missing property on a non-extensible target"),
                 _ => {}
             }
         }
@@ -276,7 +283,7 @@ impl Vm {
         };
         if !matches!(result.view(), ValueRef::Object(_)) {
             return Ok(Err(
-                self.type_error("Proxy ownKeys trap must return an object")?
+                self.type_error(roots, "Proxy ownKeys trap must return an object")?
             ));
         }
         let root_view = (target, &result);
@@ -342,7 +349,8 @@ impl Vm {
             } else if let ValueRef::Symbol(key) = entry.view() {
                 PropertyKey::Symbol(key)
             } else {
-                let error = self.type_error("Proxy ownKeys entries must be strings or symbols")?;
+                let error =
+                    self.type_error(roots, "Proxy ownKeys entries must be strings or symbols")?;
                 if let Some((iterator, _)) = &iterable {
                     self.close_iterator(host, &roots.with(&error), iterator)?;
                 }
@@ -352,9 +360,10 @@ impl Vm {
                 if let Some((iterator, _)) = &iterable {
                     self.close_iterator(host, roots, iterator)?;
                 }
-                return Ok(Err(
-                    self.type_error("Proxy ownKeys trap returned a duplicate key")?
-                ));
+                return Ok(Err(self.type_error(
+                    roots,
+                    "Proxy ownKeys trap returned a duplicate key",
+                )?));
             }
             keys.push(key);
         }
@@ -366,6 +375,7 @@ impl Vm {
         let target_keys = unwrap_script!(self.own_keys(host, roots, target, false));
         if !extensible && target_keys.len() != keys.len() {
             return Ok(Err(self.type_error(
+                roots,
                 "Proxy ownKeys trap changed keys of a non-extensible target",
             )?));
         }
@@ -376,9 +386,10 @@ impl Vm {
             if (!extensible || descriptor.is_some_and(|(_, attrs)| !attrs.configurable))
                 && !seen.contains(key)
             {
-                return Ok(Err(
-                    self.type_error("Proxy ownKeys trap omitted a protected key")?
-                ));
+                return Ok(Err(self.type_error(
+                    roots,
+                    "Proxy ownKeys trap omitted a protected key",
+                )?));
             }
         }
         Ok(Ok(keys))
@@ -442,6 +453,7 @@ impl Vm {
         };
         if !matches!(result.view(), ValueRef::Undefined | ValueRef::Object(_)) {
             return Ok(Err(self.type_error(
+                roots,
                 "Proxy descriptor trap must return an object or undefined",
             )?));
         }
@@ -453,6 +465,7 @@ impl Vm {
             .is_extensible();
         let invalid = |vm: &mut Self| {
             Ok(Err(vm.type_error(
+                roots,
                 "Proxy descriptor trap reported an incompatible descriptor",
             )?))
         };

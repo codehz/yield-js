@@ -233,6 +233,7 @@ impl Vm {
 
     pub(crate) fn with_result_prototype(
         &mut self,
+        roots: &ActiveRoots<'_>,
         result: Invocation,
         prototype: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
@@ -240,7 +241,7 @@ impl Vm {
             && let ValueRef::Object(id) = value.view()
             && !self.heap.set_prototype(id, Some(prototype))?
         {
-            return self.throw_type_error("cannot set constructor result prototype");
+            return self.throw_type_error(roots, "cannot set constructor result prototype");
         }
         Ok(result)
     }

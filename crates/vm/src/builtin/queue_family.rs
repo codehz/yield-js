@@ -8,8 +8,8 @@ const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
 pub(crate) const OWNER: Owner = Owner::new(
     NAME,
     &[RootSpec::new(NAME, RootKind::Native(KEY), FUNCTION_PARENT)],
-    &[&[IntrinsicDef::call(KEY, 1, |vm, _, _, args, _| {
-        vm.queue_microtask(args)
+    &[&[IntrinsicDef::call(KEY, 1, |vm, _, roots, args, _| {
+        vm.queue_microtask(roots, args)
     })]],
     None,
 );

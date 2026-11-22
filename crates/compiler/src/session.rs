@@ -142,6 +142,8 @@ impl Session {
             generator_start: None,
             generator_resumes: Vec::new(),
             handlers: Vec::new(),
+            module: None,
+            stack_sites: Vec::new(),
         });
         Ok(func_id)
     }

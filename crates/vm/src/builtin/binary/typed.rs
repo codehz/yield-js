@@ -48,9 +48,9 @@ macro_rules! members {
             IntrinsicDef::constructor(
                 TYPED_ARRAY,
                 0,
-                |vm, _, _, _, _| vm.throw_type_error("%TypedArray% is not directly callable"),
-                |vm, _, _, _, _| {
-                    vm.throw_type_error("%TypedArray% is not directly constructable")
+                |vm, _, roots, _, _| vm.throw_type_error(roots, "%TypedArray% is not directly callable"),
+                |vm, _, roots, _, _| {
+                    vm.throw_type_error(roots, "%TypedArray% is not directly constructable")
                 },
             ),
             IntrinsicDef::call(FROM, 1, |vm, host, roots, args, receiver| {
@@ -62,16 +62,16 @@ macro_rules! members {
             IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
                 Ok(Invocation::Value(receiver.clone()))
             }),
-            IntrinsicDef::call(BUFFER, 0, |vm, _, _, _, receiver| {
-                vm.typed_record(receiver, |view| Value::object(view.buffer))
+            IntrinsicDef::call(BUFFER, 0, |vm, _, roots, _, receiver| {
+                vm.typed_record(roots, receiver, |view| Value::object(view.buffer))
             }),
-            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, _, _, receiver| {
-                vm.typed_byte_length(receiver)
+            IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+                vm.typed_byte_length(roots, receiver)
             }),
-            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, _, _, receiver| {
-                vm.typed_byte_offset(receiver)
+            IntrinsicDef::call(BYTE_OFFSET, 0, |vm, _, roots, _, receiver| {
+                vm.typed_byte_offset(roots, receiver)
             }),
-            IntrinsicDef::call(LENGTH, 0, |vm, _, _, _, receiver| vm.typed_length(receiver)),
+            IntrinsicDef::call(LENGTH, 0, |vm, _, roots, _, receiver| vm.typed_length(roots, receiver)),
             IntrinsicDef::call(TO_STRING_TAG, 0, |vm, _, _, _, receiver| {
                 Ok(Invocation::Value(match receiver.view() {
                     ValueRef::Object(id) => match vm.heap.typed_array(id)? {
@@ -81,14 +81,14 @@ macro_rules! members {
                     _ => Value::UNDEFINED,
                 }))
             }),
-            IntrinsicDef::call(VALUES, 0, |vm, _, _, _, receiver| {
-                vm.typed_iterator(receiver, ArrayIterationKind::Values)
+            IntrinsicDef::call(VALUES, 0, |vm, _, roots, _, receiver| {
+                vm.typed_iterator(roots, receiver, ArrayIterationKind::Values)
             }),
-            IntrinsicDef::call(ENTRIES, 0, |vm, _, _, _, receiver| {
-                vm.typed_iterator(receiver, ArrayIterationKind::Entries)
+            IntrinsicDef::call(ENTRIES, 0, |vm, _, roots, _, receiver| {
+                vm.typed_iterator(roots, receiver, ArrayIterationKind::Entries)
             }),
-            IntrinsicDef::call(KEYS, 0, |vm, _, _, _, receiver| {
-                vm.typed_iterator(receiver, ArrayIterationKind::Keys)
+            IntrinsicDef::call(KEYS, 0, |vm, _, roots, _, receiver| {
+                vm.typed_iterator(roots, receiver, ArrayIterationKind::Keys)
             }),
             $(
                 IntrinsicDef::call(
@@ -119,7 +119,7 @@ macro_rules! members {
             IntrinsicDef::call(
                 IntrinsicKey::new("Uint8Array", Slot::Prototype, "setFromHex"),
                 1,
-                |vm, _, _, args, receiver| vm.uint8_set_from_hex(receiver, &args),
+                |vm, _, roots, args, receiver| vm.uint8_set_from_hex(roots, receiver, &args),
             ),
             IntrinsicDef::call(
                 IntrinsicKey::new("Uint8Array", Slot::Prototype, "toBase64"),
@@ -129,7 +129,7 @@ macro_rules! members {
             IntrinsicDef::call(
                 IntrinsicKey::new("Uint8Array", Slot::Prototype, "toHex"),
                 0,
-                |vm, _, _, _, receiver| vm.uint8_to_hex(receiver),
+                |vm, _, roots, _, receiver| vm.uint8_to_hex(roots, receiver),
             ),
         ];
 
@@ -237,11 +237,11 @@ pub(super) fn install(vm: &mut Vm) {
 pub(super) fn call_requires_new(
     vm: &mut Vm,
     _: &mut dyn Host,
-    _: &ActiveRoots<'_>,
+    roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     _: &Value,
 ) -> Result<Invocation, VmError> {
-    vm.throw_type_error("Constructor TypedArray requires new")
+    vm.throw_type_error(roots, "Constructor TypedArray requires new")
 }
 
 /// `%TypedArray%.from`'s optional mapper and its receiver, already validated.
@@ -342,10 +342,10 @@ impl Vm {
             };
         let Some(byte_length) = length.checked_mul(kind.bytes()) else {
             return Ok(Err(
-                self.make_range_error("TypedArray byte length is too large")?
+                self.make_range_error(roots, "TypedArray byte length is too large")?
             ));
         };
-        let buffer = match self.allocate_array_buffer(byte_length, None)? {
+        let buffer = match self.allocate_array_buffer(roots, byte_length, None)? {
             Ok(buffer) => buffer,
             Err(error) => return Ok(Err(error)),
         };
@@ -362,16 +362,17 @@ impl Vm {
     /// object, which is how every non-buffer constructor overload finishes.
     fn attach_buffer(
         &mut self,
+        roots: &ActiveRoots<'_>,
         object: ObjectId,
         kind: ElementKind,
         length: usize,
     ) -> Completion<()> {
         let Some(byte_length) = length.checked_mul(kind.bytes()) else {
             return Ok(Err(
-                self.make_range_error("TypedArray byte length is too large")?
+                self.make_range_error(roots, "TypedArray byte length is too large")?
             ));
         };
-        let buffer = match self.allocate_array_buffer(byte_length, None)? {
+        let buffer = match self.allocate_array_buffer(roots, byte_length, None)? {
             Ok(buffer) => buffer,
             Err(error) => return Ok(Err(error)),
         };
@@ -405,24 +406,25 @@ impl Vm {
         let source_kind = source_view.kind;
         if source_kind.is_bigint() != kind.is_bigint() {
             return Ok(Err(self.type_error(
+                roots,
                 "cannot initialize a BigInt TypedArray from a Number TypedArray",
             )?));
         }
-        let source_length = match self.validate_typed_bounds(source_id)? {
+        let source_length = match self.validate_typed_bounds(roots, source_id)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
         let Some(byte_length) = source_length.checked_mul(kind.bytes()) else {
             return Ok(Err(
-                self.make_range_error("TypedArray byte length is too large")?
+                self.make_range_error(roots, "TypedArray byte length is too large")?
             ));
         };
         if byte_length > super::MAX_BYTE_LENGTH {
             return Ok(Err(
-                self.make_range_error("TypedArray byte length is too large")?
+                self.make_range_error(roots, "TypedArray byte length is too large")?
             ));
         }
-        let buffer = match self.allocate_array_buffer(byte_length, None)? {
+        let buffer = match self.allocate_array_buffer(roots, byte_length, None)? {
             Ok(buffer) => buffer,
             Err(error) => return Ok(Err(error)),
         };
@@ -479,6 +481,7 @@ impl Vm {
         };
         if offset % element_size != 0 {
             return Ok(Err(self.make_range_error(
+                roots,
                 "TypedArray byte offset must be element aligned",
             )?));
         }
@@ -496,6 +499,7 @@ impl Vm {
         };
         let Some(buffer_length) = record.byte_length() else {
             return Ok(Err(self.type_error(
+                roots,
                 "cannot create a TypedArray over a detached ArrayBuffer",
             )?));
         };
@@ -503,28 +507,31 @@ impl Vm {
             None if !resizable => {
                 if buffer_length % element_size != 0 {
                     return Ok(Err(self.make_range_error(
+                        roots,
                         "ArrayBuffer byte length is not a multiple of the element size",
                     )?));
                 }
                 let Some(new_byte_length) = buffer_length.checked_sub(offset) else {
-                    return Ok(Err(
-                        self.make_range_error("TypedArray byte offset exceeds the buffer")?
-                    ));
+                    return Ok(Err(self.make_range_error(
+                        roots,
+                        "TypedArray byte offset exceeds the buffer",
+                    )?));
                 };
                 (Some(new_byte_length), Some(new_byte_length / element_size))
             }
             None => {
                 if offset > buffer_length {
-                    return Ok(Err(
-                        self.make_range_error("TypedArray byte offset exceeds the buffer")?
-                    ));
+                    return Ok(Err(self.make_range_error(
+                        roots,
+                        "TypedArray byte offset exceeds the buffer",
+                    )?));
                 }
                 (None, None)
             }
             Some(length) => {
                 let Some(new_byte_length) = length.checked_mul(element_size) else {
                     return Ok(Err(
-                        self.make_range_error("TypedArray byte length is too large")?
+                        self.make_range_error(roots, "TypedArray byte length is too large")?
                     ));
                 };
                 if offset
@@ -532,7 +539,7 @@ impl Vm {
                     .is_none_or(|end| end > buffer_length)
                 {
                     return Ok(Err(
-                        self.make_range_error("TypedArray exceeds the ArrayBuffer")?
+                        self.make_range_error(roots, "TypedArray exceeds the ArrayBuffer")?
                     ));
                 }
                 (Some(new_byte_length), Some(length))
@@ -574,7 +581,7 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             };
             let roots = &roots.with(&list);
-            match self.attach_buffer(object, kind, list.len())? {
+            match self.attach_buffer(roots, object, kind, list.len())? {
                 Ok(()) => {}
                 Err(error) => return Ok(Err(error)),
             }
@@ -593,9 +600,11 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if length > super::MAX_BYTE_LENGTH as u64 {
-            return Ok(Err(self.make_range_error("TypedArray length is too large")?));
+            return Ok(Err(
+                self.make_range_error(roots, "TypedArray length is too large")?
+            ));
         }
-        match self.attach_buffer(object, kind, length as usize)? {
+        match self.attach_buffer(roots, object, kind, length as usize)? {
             Ok(()) => {}
             Err(error) => return Ok(Err(error)),
         }
@@ -810,35 +819,40 @@ impl Vm {
             }
         };
         let ValueRef::Object(id) = created.view() else {
-            return Ok(Err(
-                self.type_error("TypedArray constructor did not return an object")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "TypedArray constructor did not return an object",
+            )?));
         };
         if self.heap.typed_array(id)?.is_none() {
             return Ok(Err(self.type_error(
+                roots,
                 "TypedArray constructor did not return a TypedArray",
             )?));
         }
         if let Some(requested) = requested {
             if self.typed_out_of_bounds(id)? {
                 return Ok(Err(self.type_error(
+                    roots,
                     "TypedArray constructor returned an out-of-bounds view",
                 )?));
             }
-            let length = match self.validate_typed_bounds(id)? {
+            let length = match self.validate_typed_bounds(roots, id)? {
                 Ok(length) => length,
                 Err(error) => return Ok(Err(error)),
             };
             if length < requested as usize {
-                return Ok(Err(
-                    self.type_error("TypedArray constructor returned a shorter view")?
-                ));
+                return Ok(Err(self.type_error(
+                    roots,
+                    "TypedArray constructor returned a shorter view",
+                )?));
             }
         }
         if let Some(expected) = expected {
             let kind = self.heap.typed_array(id)?.map(|view| view.kind);
             if kind.map(ElementKind::is_bigint) != Some(expected.is_bigint()) {
                 return Ok(Err(self.type_error(
+                    roots,
                     "TypedArray species has an incompatible content type",
                 )?));
             }
@@ -849,10 +863,11 @@ impl Vm {
     /// A shared getter body: brand check, then read the view's record.
     fn typed_record(
         &mut self,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         read: impl Fn(&TypedArrayObject) -> Value,
     ) -> Result<Invocation, VmError> {
-        let (id, _) = match self.require_typed(receiver)? {
+        let (id, _) = match self.require_typed(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -860,24 +875,32 @@ impl Vm {
         Ok(Invocation::Value(read(view)))
     }
 
-    fn typed_length(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let (id, _) = match self.require_typed(receiver)? {
+    fn typed_length(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let (id, _) = match self.require_typed(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         // An out-of-bounds or detached view reports zero, not an error.
-        match self.validate_typed_bounds(id)? {
+        match self.validate_typed_bounds(roots, id)? {
             Ok(length) => Ok(Invocation::Value(Value::number(length as f64))),
             Err(_) => Ok(Invocation::Value(Value::number(0.0))),
         }
     }
 
-    fn typed_byte_length(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let (id, kind) = match self.require_typed(receiver)? {
+    fn typed_byte_length(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let (id, kind) = match self.require_typed(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let length = match self.validate_typed_bounds(id)? {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(_) => return Ok(Invocation::Value(Value::number(0.0))),
         };
@@ -886,8 +909,12 @@ impl Vm {
         )))
     }
 
-    fn typed_byte_offset(&mut self, receiver: &Value) -> Result<Invocation, VmError> {
-        let (id, _) = match self.require_typed(receiver)? {
+    fn typed_byte_offset(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        receiver: &Value,
+    ) -> Result<Invocation, VmError> {
+        let (id, _) = match self.require_typed(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -904,17 +931,18 @@ impl Vm {
     /// Shared iterator creation; the array iterator re-reads the target each step.
     fn typed_iterator(
         &mut self,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         kind: ArrayIterationKind,
     ) -> Result<Invocation, VmError> {
-        let (id, _) = match self.require_typed(receiver)? {
+        let (id, _) = match self.require_typed(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if self.typed_out_of_bounds(id)? {
-            return self.throw_type_error("TypedArray is detached or out of bounds");
+            return self.throw_type_error(roots, "TypedArray is detached or out of bounds");
         }
-        self.array_iterator(&Value::object(id), kind)
+        self.array_iterator(roots, &Value::object(id), kind)
     }
 }
 
@@ -932,13 +960,13 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let (id, kind) = match self.require_typed(receiver)? {
+        let (id, kind) = match self.require_typed(roots, receiver)? {
             Ok(value) => value,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         let view = (id, args);
         let roots = &roots.with(&view);
-        let length = match self.validate_typed_bounds(id)? {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -1049,7 +1077,7 @@ impl Vm {
         if count > 0 {
             // Side effects may have shrunk the view; keep the longest
             // still-applicable prefix.
-            let length = match self.validate_typed_bounds(id)? {
+            let length = match self.validate_typed_bounds(roots, id)? {
                 Ok(length) => length,
                 Err(error) => return Ok(Err(error)),
             };
@@ -1100,7 +1128,7 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             }
         };
-        let length = match self.validate_typed_bounds(id)? {
+        let length = match self.validate_typed_bounds(roots, id)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
@@ -1139,6 +1167,7 @@ impl Vm {
         let callback = arg(args, 0).clone();
         if !self.is_callable(&callback) {
             return Ok(Err(self.type_error(
+                roots,
                 "TypedArray predicate requires a callable callback",
             )?));
         }
@@ -1341,7 +1370,7 @@ impl Vm {
             };
             if !self.is_callable(&method) {
                 return Ok(Err(
-                    self.type_error("element toLocaleString is not callable")?
+                    self.type_error(roots, "element toLocaleString is not callable")?
                 ));
             }
             let roots = &roots.with(&method);
@@ -1368,9 +1397,10 @@ impl Vm {
     ) -> Completion<Value> {
         let callback = arg(args, 0).clone();
         if !self.is_callable(&callback) {
-            return Ok(Err(
-                self.type_error("TypedArray map requires a callable callback")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "TypedArray map requires a callable callback",
+            )?));
         }
         let this_arg = arg(args, 1).clone();
         let view = (&callback, &this_arg);
@@ -1417,9 +1447,10 @@ impl Vm {
     ) -> Completion<Value> {
         let callback = arg(args, 0).clone();
         if !self.is_callable(&callback) {
-            return Ok(Err(
-                self.type_error("TypedArray filter requires a callable callback")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "TypedArray filter requires a callable callback",
+            )?));
         }
         let this_arg = arg(args, 1).clone();
         let view = (&callback, &this_arg);
@@ -1473,13 +1504,15 @@ impl Vm {
     ) -> Completion<Value> {
         let callback = arg(args, 0).clone();
         if !self.is_callable(&callback) {
-            return Ok(Err(
-                self.type_error("TypedArray reduce requires a callable callback")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "TypedArray reduce requires a callable callback",
+            )?));
         }
         let present = args.len() > 1;
         if length == 0 && !present {
             return Ok(Err(self.type_error(
+                roots,
                 "reduce of an empty TypedArray with no initial value",
             )?));
         }
@@ -1564,7 +1597,7 @@ impl Vm {
         };
         if offset < 0.0 {
             return Ok(Err(
-                self.make_range_error("TypedArray set offset is negative")?
+                self.make_range_error(roots, "TypedArray set offset is negative")?
             ));
         }
         let source = arg(args, 0).clone();
@@ -1596,11 +1629,11 @@ impl Vm {
         let ValueRef::Object(source_id) = source.view() else {
             unreachable!("caller checked the source is an object")
         };
-        let target_length = match self.validate_typed_bounds(target)? {
+        let target_length = match self.validate_typed_bounds(roots, target)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
-        let source_length = match self.validate_typed_bounds(source_id)? {
+        let source_length = match self.validate_typed_bounds(roots, source_id)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
@@ -1610,13 +1643,15 @@ impl Vm {
         };
         if kind.is_bigint() != source_kind.is_bigint() {
             return Ok(Err(self.type_error(
+                roots,
                 "cannot set BigInt elements from a Number TypedArray",
             )?));
         }
         if offset.is_infinite() || offset + source_length as f64 > target_length as f64 {
-            return Ok(Err(
-                self.make_range_error("TypedArray set exceeds the target length")?
-            ));
+            return Ok(Err(self.make_range_error(
+                roots,
+                "TypedArray set exceeds the target length",
+            )?));
         }
         let offset = offset as usize;
         if source_length == 0 {
@@ -1690,12 +1725,13 @@ impl Vm {
         offset: f64,
         source: &Value,
     ) -> Completion<()> {
-        let target_length = match self.validate_typed_bounds(target)? {
+        let target_length = match self.validate_typed_bounds(roots, target)? {
             Ok(length) => length,
             Err(error) => return Ok(Err(error)),
         };
         if matches!(source.view(), ValueRef::Null | ValueRef::Undefined) {
             return Ok(Err(self.type_error(
+                roots,
                 "TypedArray set source cannot be null or undefined",
             )?));
         }
@@ -1706,9 +1742,10 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if offset.is_infinite() || offset + source_length as f64 > target_length as f64 {
-            return Ok(Err(
-                self.make_range_error("TypedArray set exceeds the target length")?
-            ));
+            return Ok(Err(self.make_range_error(
+                roots,
+                "TypedArray set exceeds the target length",
+            )?));
         }
         let offset = offset as usize;
         for index in 0..source_length {
@@ -1766,7 +1803,7 @@ impl Vm {
             };
         if count > 0 {
             let roots = &roots.with(&result);
-            let length = match self.validate_typed_bounds(id)? {
+            let length = match self.validate_typed_bounds(roots, id)? {
                 Ok(length) => length,
                 Err(error) => return Ok(Err(error)),
             };
@@ -1913,9 +1950,10 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if index < 0.0 || index >= length as f64 {
-            return Ok(Err(
-                self.make_range_error("TypedArray with index is out of range")?
-            ));
+            return Ok(Err(self.make_range_error(
+                roots,
+                "TypedArray with index is out of range",
+            )?));
         }
         let index = index as usize;
         let result = match self.same_type_create(host, roots, id, length)? {
@@ -1956,9 +1994,10 @@ impl Vm {
     ) -> Completion<Value> {
         let comparator = arg(args, 0).clone();
         if !matches!(comparator.view(), ValueRef::Undefined) && !self.is_callable(&comparator) {
-            return Ok(Err(
-                self.type_error("TypedArray sort comparator is not callable")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "TypedArray sort comparator is not callable",
+            )?));
         }
         let roots = &roots.with(&comparator);
         let result = if copying {
@@ -2135,12 +2174,12 @@ impl Vm {
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         if !self.is_constructor(receiver)? {
-            return self.throw_type_error("%TypedArray%.from requires a constructor");
+            return self.throw_type_error(roots, "%TypedArray%.from requires a constructor");
         }
         let mapper = arg(args, 1).clone();
         let mapping = !matches!(mapper.view(), ValueRef::Undefined);
         if mapping && !self.is_callable(&mapper) {
-            return self.throw_type_error("%TypedArray%.from mapper is not callable");
+            return self.throw_type_error(roots, "%TypedArray%.from mapper is not callable");
         }
         let this_arg = arg(args, 2).clone();
         let source = arg(args, 0).clone();
@@ -2280,7 +2319,7 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         if !self.is_constructor(receiver)? {
-            return self.throw_type_error("%TypedArray%.of requires a constructor");
+            return self.throw_type_error(roots, "%TypedArray%.of requires a constructor");
         }
         let roots = &roots.with(&args);
         let result = self.typed_of_impl(host, roots, receiver, &args);

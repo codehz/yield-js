@@ -16,15 +16,19 @@ pub(crate) struct Emitter<'src> {
     source: &'src str,
     span: Span,
     code: Vec<Instr>,
+    origins: Option<Vec<Option<u32>>>,
+    origin: Option<u32>,
     next_reg: Reg,
 }
 
 impl<'src> Emitter<'src> {
-    pub(crate) fn new(source: &'src str, span: Span) -> Self {
+    pub(crate) fn new(source: &'src str, span: Span, stack_traces: bool) -> Self {
         Self {
             source,
             span,
             code: Vec::new(),
+            origins: stack_traces.then(Vec::new),
+            origin: None,
             next_reg: 0,
         }
     }
@@ -50,6 +54,18 @@ impl<'src> Emitter<'src> {
         std::mem::take(&mut self.code)
     }
 
+    pub(crate) fn take_origins(&mut self) -> Option<Vec<Option<u32>>> {
+        self.origins.take()
+    }
+
+    pub(crate) fn records_origins(&self) -> bool {
+        self.origins.is_some()
+    }
+
+    pub(crate) fn replace_origin(&mut self, origin: Option<u32>) -> Option<u32> {
+        std::mem::replace(&mut self.origin, origin)
+    }
+
     pub(crate) fn alloc(&mut self) -> Result<Reg, CompileError> {
         let reg = self.next_reg;
         self.next_reg = self
@@ -70,6 +86,9 @@ impl<'src> Emitter<'src> {
     pub(crate) fn emit(&mut self, instruction: Instr) -> usize {
         let index = self.code.len();
         self.code.push(instruction);
+        if let Some(origins) = &mut self.origins {
+            origins.push(self.origin);
+        }
         index
     }
 

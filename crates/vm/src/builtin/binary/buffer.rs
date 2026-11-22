@@ -34,7 +34,7 @@ pub(super) const INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor_with_target(
         ARRAY_BUFFER,
         1,
-        |vm, _, _, _, _| vm.throw_type_error("Constructor ArrayBuffer requires new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "Constructor ArrayBuffer requires new"),
         construct,
     ),
     IntrinsicDef::call(SPECIES, 0, |_, _, _, _, receiver| {
@@ -46,13 +46,13 @@ pub(super) const INTRINSICS: &[IntrinsicDef] = &[
             arg(&args, 0),
         ))))
     }),
-    IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, _, _, receiver| {
-        property(vm, receiver, |buffer| {
+    IntrinsicDef::call(BYTE_LENGTH, 0, |vm, _, roots, _, receiver| {
+        property(vm, roots, receiver, |buffer| {
             Value::number(buffer.byte_length().unwrap_or(0) as f64)
         })
     }),
-    IntrinsicDef::call(MAX_LENGTH, 0, |vm, _, _, _, receiver| {
-        property(vm, receiver, |buffer| {
+    IntrinsicDef::call(MAX_LENGTH, 0, |vm, _, roots, _, receiver| {
+        property(vm, roots, receiver, |buffer| {
             let length = match (buffer.byte_length(), buffer.max_byte_length) {
                 (None, _) | (Some(_), None) => buffer.byte_length().unwrap_or(0),
                 (Some(_), Some(max)) => max,
@@ -60,11 +60,15 @@ pub(super) const INTRINSICS: &[IntrinsicDef] = &[
             Value::number(length as f64)
         })
     }),
-    IntrinsicDef::call(RESIZABLE, 0, |vm, _, _, _, receiver| {
-        property(vm, receiver, |buffer| Value::boolean(buffer.is_resizable()))
+    IntrinsicDef::call(RESIZABLE, 0, |vm, _, roots, _, receiver| {
+        property(vm, roots, receiver, |buffer| {
+            Value::boolean(buffer.is_resizable())
+        })
     }),
-    IntrinsicDef::call(DETACHED, 0, |vm, _, _, _, receiver| {
-        property(vm, receiver, |buffer| Value::boolean(buffer.is_detached()))
+    IntrinsicDef::call(DETACHED, 0, |vm, _, roots, _, receiver| {
+        property(vm, roots, receiver, |buffer| {
+            Value::boolean(buffer.is_detached())
+        })
     }),
     IntrinsicDef::call(SLICE, 2, |vm, host, roots, args, receiver| {
         vm.array_buffer_slice(host, roots, receiver, &args)
@@ -103,14 +107,18 @@ pub(super) fn install(vm: &mut Vm) {
 /// A getter body: branding first, then read the buffer's current state.
 fn property(
     vm: &mut Vm,
+    roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl Fn(&crate::heap::ArrayBufferObject) -> Value,
 ) -> Result<Invocation, VmError> {
-    let id =
-        match vm.require_array_buffer(receiver, "ArrayBuffer method requires an ArrayBuffer")? {
-            Ok(id) => id,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
+    let id = match vm.require_array_buffer(
+        roots,
+        receiver,
+        "ArrayBuffer method requires an ArrayBuffer",
+    )? {
+        Ok(id) => id,
+        Err(error) => return Ok(Invocation::Thrown(error)),
+    };
     let buffer = vm.heap.buffer(id)?.expect("validated ArrayBuffer receiver");
     Ok(Invocation::Value(read(buffer)))
 }
@@ -136,10 +144,10 @@ fn construct(
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
     if max.is_some_and(|max| byte_length > max) {
-        return vm.throw_range_error("ArrayBuffer byte length exceeds maxByteLength");
+        return vm.throw_range_error(roots, "ArrayBuffer byte length exceeds maxByteLength");
     }
     let roots = &roots.with(&prototype);
-    match vm.allocate_array_buffer_with(byte_length, max, ARRAY_BUFFER_PROTOTYPE)? {
+    match vm.allocate_array_buffer_with(roots, byte_length, max, ARRAY_BUFFER_PROTOTYPE)? {
         Ok(id) => {
             // AllocateArrayBuffer honours newTarget's prototype, so restore the
             // one read before the allocation.
@@ -186,9 +194,11 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let id = match self
-            .require_array_buffer(receiver, "ArrayBuffer method requires an ArrayBuffer")?
-        {
+        let id = match self.require_array_buffer(
+            roots,
+            receiver,
+            "ArrayBuffer method requires an ArrayBuffer",
+        )? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -199,7 +209,7 @@ impl Vm {
             .buffer(id)?
             .is_some_and(|buffer| buffer.is_detached())
         {
-            return self.throw_type_error("cannot slice a detached ArrayBuffer");
+            return self.throw_type_error(roots, "cannot slice a detached ArrayBuffer");
         }
         let length = self
             .heap
@@ -240,27 +250,37 @@ impl Vm {
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
         let ValueRef::Object(new) = created.view() else {
-            return self.throw_type_error("ArrayBuffer slice species did not return an object");
+            return self
+                .throw_type_error(roots, "ArrayBuffer slice species did not return an object");
         };
         let Some(target) = self.heap.buffer(new)? else {
-            return self
-                .throw_type_error("ArrayBuffer slice species did not return an ArrayBuffer");
+            return self.throw_type_error(
+                roots,
+                "ArrayBuffer slice species did not return an ArrayBuffer",
+            );
         };
         if target.is_detached() {
-            return self.throw_type_error("ArrayBuffer slice species returned a detached buffer");
+            return self.throw_type_error(
+                roots,
+                "ArrayBuffer slice species returned a detached buffer",
+            );
         }
         if new == id {
-            return self.throw_type_error("ArrayBuffer slice species returned the source buffer");
+            return self.throw_type_error(
+                roots,
+                "ArrayBuffer slice species returned the source buffer",
+            );
         }
         if target.byte_length().unwrap_or(0) < new_length {
-            return self.throw_type_error("ArrayBuffer slice species returned a short buffer");
+            return self
+                .throw_type_error(roots, "ArrayBuffer slice species returned a short buffer");
         }
         // Re-read the source: a species constructor may have detached it.
         let Some(source) = self.heap.buffer(id)? else {
             unreachable!("receiver was validated")
         };
         let Some(source_bytes) = source.bytes.as_deref() else {
-            return self.throw_type_error("cannot slice a detached ArrayBuffer");
+            return self.throw_type_error(roots, "cannot slice a detached ArrayBuffer");
         };
         let count = new_length.min(length - first);
         let tail = source_bytes[first..first + count].to_vec();
@@ -279,9 +299,11 @@ impl Vm {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let id = match self
-            .require_array_buffer(receiver, "ArrayBuffer method requires an ArrayBuffer")?
-        {
+        let id = match self.require_array_buffer(
+            roots,
+            receiver,
+            "ArrayBuffer method requires an ArrayBuffer",
+        )? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -292,7 +314,7 @@ impl Vm {
             .buffer(id)?
             .and_then(|buffer| buffer.max_byte_length)
         else {
-            return self.throw_type_error("cannot resize a fixed-length ArrayBuffer");
+            return self.throw_type_error(roots, "cannot resize a fixed-length ArrayBuffer");
         };
         let new_length = match self.coerce_index(host, roots, arg(args, 0))? {
             Ok(length) => length,
@@ -303,22 +325,29 @@ impl Vm {
             .buffer(id)?
             .is_some_and(|buffer| buffer.is_detached())
         {
-            return self.throw_type_error("cannot resize a detached ArrayBuffer");
+            return self.throw_type_error(roots, "cannot resize a detached ArrayBuffer");
         }
         if new_length > max {
-            return self.throw_range_error("ArrayBuffer resize exceeds maxByteLength");
+            return self.throw_range_error(roots, "ArrayBuffer resize exceeds maxByteLength");
         }
-        match self.resize_block(id, new_length)? {
+        match self.resize_block(roots, id, new_length)? {
             Ok(()) => Ok(Invocation::Value(Value::UNDEFINED)),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
 
     /// Replace the byte block, zero-filling a grown tail.
-    pub(crate) fn resize_block(&mut self, id: ObjectId, new_length: usize) -> Completion<()> {
+    pub(crate) fn resize_block(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        new_length: usize,
+    ) -> Completion<()> {
         let mut block: Vec<u8> = Vec::new();
         if block.try_reserve_exact(new_length).is_err() {
-            return Ok(Err(self.make_range_error("ArrayBuffer resize failed")?));
+            return Ok(Err(
+                self.make_range_error(roots, "ArrayBuffer resize failed")?
+            ));
         }
         let Some(Object::ArrayBuffer(buffer)) = Some(self.heap.get_mut(id)?) else {
             unreachable!("caller validated an ArrayBuffer")
@@ -339,9 +368,11 @@ impl Vm {
         args: &[Value],
         preserve_resizability: bool,
     ) -> Result<Invocation, VmError> {
-        let id = match self
-            .require_array_buffer(receiver, "ArrayBuffer method requires an ArrayBuffer")?
-        {
+        let id = match self.require_array_buffer(
+            roots,
+            receiver,
+            "ArrayBuffer method requires an ArrayBuffer",
+        )? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -358,7 +389,7 @@ impl Vm {
             }
         };
         let Some(new_length) = new_length else {
-            return self.throw_type_error("cannot transfer a detached ArrayBuffer");
+            return self.throw_type_error(roots, "cannot transfer a detached ArrayBuffer");
         };
         let Some(buffer) = self.heap.buffer(id)? else {
             unreachable!("receiver was validated")
@@ -369,13 +400,13 @@ impl Vm {
             None
         };
         if buffer.is_detached() {
-            return self.throw_type_error("cannot transfer a detached ArrayBuffer");
+            return self.throw_type_error(roots, "cannot transfer a detached ArrayBuffer");
         }
         let bytes = buffer.bytes.clone().expect("attached buffer has bytes");
         if max.is_some_and(|max| new_length > max) {
-            return self.throw_range_error("ArrayBuffer transfer exceeds maxByteLength");
+            return self.throw_range_error(roots, "ArrayBuffer transfer exceeds maxByteLength");
         }
-        let result = match self.allocate_array_buffer(new_length, max)? {
+        let result = match self.allocate_array_buffer(roots, new_length, max)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -403,7 +434,7 @@ impl Vm {
     ) -> Completion<Value> {
         let roots = &roots.with(value);
         let fallback = Value::object(self.builtins.get(default));
-        let mut constructor =
+        let constructor =
             match self.read_property(host, roots, value, PropertyKeyRef::String("constructor"))? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
@@ -413,13 +444,12 @@ impl Vm {
         }
         if !matches!(constructor.view(), ValueRef::Object(_)) {
             return Ok(Err(
-                self.type_error("constructor property must be an object")?
+                self.type_error(roots, "constructor property must be an object")?
             ));
         }
-        let roots = &roots.with(&constructor);
-        constructor = match self.read_property(
+        let constructor = match self.read_property(
             host,
-            roots,
+            &roots.with(&constructor),
             &constructor,
             PropertyKeyRef::Symbol(crate::heap::SPECIES_SYMBOL),
         )? {
@@ -430,7 +460,9 @@ impl Vm {
             return Ok(Ok(fallback));
         }
         if !self.is_constructor(&constructor)? {
-            return Ok(Err(self.type_error("species value is not a constructor")?));
+            return Ok(Err(
+                self.type_error(roots, "species value is not a constructor")?
+            ));
         }
         Ok(Ok(constructor))
     }

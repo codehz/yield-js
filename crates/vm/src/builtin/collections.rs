@@ -232,13 +232,13 @@ const MAP_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         MAP,
         1,
-        |vm, _, _, _, _| vm.throw_type_error("Map and Set require new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
         |vm, host, roots, args, prototype| {
             vm.construct_collection(host, roots, CollectionKind::Map, &args, prototype)
         },
     ),
-    IntrinsicDef::call(MAP_ITERATOR_NEXT, 0, |vm, _, _, _, receiver| {
-        vm.collection_next(CollectionKind::Map, receiver)
+    IntrinsicDef::call(MAP_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
+        vm.collection_next(roots, CollectionKind::Map, receiver)
     }),
 ];
 
@@ -246,13 +246,13 @@ const SET_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         SET,
         1,
-        |vm, _, _, _, _| vm.throw_type_error("Map and Set require new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "Map and Set require new"),
         |vm, host, roots, args, prototype| {
             vm.construct_collection(host, roots, CollectionKind::Set, &args, prototype)
         },
     ),
-    IntrinsicDef::call(SET_ITERATOR_NEXT, 0, |vm, _, _, _, receiver| {
-        vm.collection_next(CollectionKind::Set, receiver)
+    IntrinsicDef::call(SET_ITERATOR_NEXT, 0, |vm, _, roots, _, receiver| {
+        vm.collection_next(roots, CollectionKind::Set, receiver)
     }),
 ];
 
@@ -261,17 +261,17 @@ mod weak_map_members {
     use super::WeakMapMethod::*;
 
     prototype_calls! {
-        get: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Get, receiver, &args);
-        set: 2 => |vm, _, _, args, receiver| vm.weakmap_method(Set, receiver, &args);
-        has: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Has, receiver, &args);
-        delete: 1 => |vm, _, _, args, receiver| vm.weakmap_method(Delete, receiver, &args);
+        get: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Get, receiver, &args);
+        set: 2 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Set, receiver, &args);
+        has: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Has, receiver, &args);
+        delete: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Delete, receiver, &args);
     }
 }
 
 const WEAK_MAP_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     WEAK_MAP,
     1,
-    |vm, _, _, _, _| vm.throw_type_error("WeakMap requires new"),
+    |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakMap requires new"),
     |vm, host, roots, args, prototype| vm.construct_weakmap(host, roots, &args, prototype),
 )];
 
@@ -280,16 +280,16 @@ mod weak_set_members {
     use super::WeakSetMethod::*;
 
     prototype_calls! {
-        add: 1 => |vm, _, _, args, receiver| vm.weakset_method(Add, receiver, &args);
-        has: 1 => |vm, _, _, args, receiver| vm.weakset_method(Has, receiver, &args);
-        delete: 1 => |vm, _, _, args, receiver| vm.weakset_method(Delete, receiver, &args);
+        add: 1 => |vm, _, roots, args, receiver| vm.weakset_method(roots, Add, receiver, &args);
+        has: 1 => |vm, _, roots, args, receiver| vm.weakset_method(roots, Has, receiver, &args);
+        delete: 1 => |vm, _, roots, args, receiver| vm.weakset_method(roots, Delete, receiver, &args);
     }
 }
 
 const WEAK_SET_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
     WEAK_SET,
     1,
-    |vm, _, _, _, _| vm.throw_type_error("WeakSet requires new"),
+    |vm, _, roots, _, _| vm.throw_type_error(roots, "WeakSet requires new"),
     |vm, host, roots, args, prototype| vm.construct_weakset(host, roots, &args, prototype),
 )];
 
@@ -390,19 +390,20 @@ impl Vm {
 
     fn weakmap_method(
         &mut self,
+        roots: &ActiveRoots<'_>,
         method: WeakMapMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("incompatible WeakMap receiver");
+            return self.throw_type_error(roots, "incompatible WeakMap receiver");
         };
         if !matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
-            return self.throw_type_error("incompatible WeakMap receiver");
+            return self.throw_type_error(roots, "incompatible WeakMap receiver");
         }
         let Some(key) = args.first().and_then(|value| self.heap.weak_key(value)) else {
             return match method {
-                WeakMapMethod::Set => self.throw_type_error(INVALID_WEAK_KEY),
+                WeakMapMethod::Set => self.throw_type_error(roots, INVALID_WEAK_KEY),
                 WeakMapMethod::Get => Ok(Invocation::Value(Value::UNDEFINED)),
                 WeakMapMethod::Has | WeakMapMethod::Delete => {
                     Ok(Invocation::Value(Value::boolean(false)))
@@ -440,19 +441,20 @@ impl Vm {
 
     fn weakset_method(
         &mut self,
+        roots: &ActiveRoots<'_>,
         method: WeakSetMethod,
         receiver: &Value,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("incompatible WeakSet receiver");
+            return self.throw_type_error(roots, "incompatible WeakSet receiver");
         };
         if !matches!(self.heap.get(id)?, Object::WeakSet { .. }) {
-            return self.throw_type_error("incompatible WeakSet receiver");
+            return self.throw_type_error(roots, "incompatible WeakSet receiver");
         }
         let Some(key) = args.first().and_then(|value| self.heap.weak_key(value)) else {
             return match method {
-                WeakSetMethod::Add => self.throw_type_error(INVALID_WEAK_KEY),
+                WeakSetMethod::Add => self.throw_type_error(roots, INVALID_WEAK_KEY),
                 WeakSetMethod::Has | WeakSetMethod::Delete => {
                     Ok(Invocation::Value(Value::boolean(false)))
                 }
@@ -521,7 +523,7 @@ impl Vm {
         )? {
             Invocation::Value(value) if self.is_callable(&value) => value,
             Invocation::Value(_) => {
-                return self.throw_type_error("collection adder is not callable");
+                return self.throw_type_error(roots, "collection adder is not callable");
             }
             thrown => return Ok(thrown),
         };
@@ -565,7 +567,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let args = if entry_pairs {
             if !matches!(item.view(), ValueRef::Object(_)) {
-                return self.throw_type_error("collection entry must be an object");
+                return self.throw_type_error(roots, "collection entry must be an object");
             }
             let mut pair = Vec::with_capacity(2);
             for name in ["0", "1"] {
@@ -597,14 +599,14 @@ impl Vm {
         use CollectionMethod::*;
         let invalid = "incompatible collection receiver";
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         };
         let object = self.heap.get_mut(id)?;
         if !matches!(
             (kind, &*object),
             (CollectionKind::Map, Object::Map { .. }) | (CollectionKind::Set, Object::Set { .. })
         ) {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         }
         let undefined = Value::UNDEFINED;
         let key = args.first().unwrap_or(&undefined);
@@ -625,7 +627,8 @@ impl Vm {
             }
             ForEach => {
                 if !self.is_callable(key) {
-                    return self.throw_type_error("collection forEach callback is not callable");
+                    return self
+                        .throw_type_error(roots, "collection forEach callback is not callable");
                 }
                 let mut index = 0;
                 while let Some((k, v)) = self.collection_pair(id, &mut index)? {
@@ -683,12 +686,13 @@ impl Vm {
 
     fn collection_next(
         &mut self,
+        roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let invalid = "incompatible collection iterator receiver";
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         };
         let Object::CollectionIterator {
             kind: actual,
@@ -698,10 +702,10 @@ impl Vm {
             ..
         } = self.heap.get(id)?
         else {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         };
         if *actual != kind {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         }
         let (iteration, mut index) = (*iteration, *next_index);
         let pair = match *target {

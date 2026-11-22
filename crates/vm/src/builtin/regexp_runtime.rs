@@ -241,6 +241,7 @@ impl Vm {
             Err(message) => {
                 return self
                     .alloc_error(
+                        roots,
                         self.builtins.get("syntaxerror.prototype"),
                         "SyntaxError",
                         Some(message.into()),
@@ -265,12 +266,12 @@ impl Vm {
         let roots = &roots.with(&root_view);
         if matches!(method, RegExpMethod::Escape) {
             let Some(ValueRef::String(input)) = args.first().map(Value::view) else {
-                return self.throw_type_error("RegExp.escape requires a string argument");
+                return self.throw_type_error(roots, "RegExp.escape requires a string argument");
             };
             return Ok(Invocation::Value(Value::string(regexp_escape(input))));
         }
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error("RegExp method requires an object receiver");
+            return self.throw_type_error(roots, "RegExp method requires an object receiver");
         };
         match method {
             RegExpMethod::ToString => {
@@ -337,7 +338,7 @@ impl Vm {
                     _ => return Ok(Invocation::Value(Value::UNDEFINED)),
                 }
             }
-            return self.throw_type_error("RegExp method requires a RegExp receiver");
+            return self.throw_type_error(roots, "RegExp method requires a RegExp receiver");
         };
         let value = match method {
             RegExpMethod::Exec => {
@@ -409,7 +410,8 @@ impl Vm {
                 Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => break,
                 Invocation::Value(result) => {
                     let ValueRef::Object(array) = result.view() else {
-                        return self.throw_type_error("RegExp exec must return an object or null");
+                        return self
+                            .throw_type_error(roots, "RegExp exec must return an object or null");
                     };
                     let matched = match self.regexp_capture(host, roots, array, 0)? {
                         Ok(value) => match self.coerce_string(host, roots, &value)? {
@@ -458,7 +460,8 @@ impl Vm {
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if !flags_contains(&flags, b'g') {
-            return self.throw_type_error("String.prototype.matchAll requires a global RegExp");
+            return self
+                .throw_type_error(roots, "String.prototype.matchAll requires a global RegExp");
         }
         let created = self.construct_regexp(
             host,
@@ -514,7 +517,7 @@ impl Vm {
         let roots = &roots.with(&receiver);
         let invalid = "RegExpStringIterator.next requires a RegExp string iterator";
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         };
         let Object::RegExpStringIterator {
             regexp,
@@ -525,7 +528,7 @@ impl Vm {
             ..
         } = self.heap.get(id)?
         else {
-            return self.throw_type_error(invalid);
+            return self.throw_type_error(roots, invalid);
         };
         let (regexp, string, global, full_unicode, done) =
             (*regexp, string.clone(), *global, *full_unicode, *done);
@@ -544,7 +547,8 @@ impl Vm {
             }
             Invocation::Value(result) => {
                 let ValueRef::Object(array) = result.view() else {
-                    return self.throw_type_error("RegExp exec must return an object or null");
+                    return self
+                        .throw_type_error(roots, "RegExp exec must return an object or null");
                 };
                 let roots = &roots.with(&array);
                 if global {
@@ -620,8 +624,10 @@ impl Vm {
                     Invocation::Value(result) if matches!(result.view(), ValueRef::Null) => break,
                     Invocation::Value(result) => {
                         if !matches!(result.view(), ValueRef::Object(_)) {
-                            return self
-                                .throw_type_error("RegExp exec must return an object or null");
+                            return self.throw_type_error(
+                                roots,
+                                "RegExp exec must return an object or null",
+                            );
                         }
                         results.push(result);
                         let roots = &roots.with(&results);
@@ -657,7 +663,8 @@ impl Vm {
                 }
                 Invocation::Value(result) => {
                     if !matches!(result.view(), ValueRef::Object(_)) {
-                        return self.throw_type_error("RegExp exec must return an object or null");
+                        return self
+                            .throw_type_error(roots, "RegExp exec must return an object or null");
                     }
                     results.push(result);
                 }
@@ -721,7 +728,8 @@ impl Vm {
             }
             Invocation::Value(result) => {
                 let ValueRef::Object(array) = result.view() else {
-                    return self.throw_type_error("RegExp exec must return an object or null");
+                    return self
+                        .throw_type_error(roots, "RegExp exec must return an object or null");
                 };
                 match self.regexp_element(host, roots, array, "index")? {
                     Ok(value) => match self.coerce_number(host, roots, &value)? {
@@ -1276,12 +1284,15 @@ impl Vm {
                 }
                 thrown @ Invocation::Thrown(_) => Ok(thrown),
                 Invocation::Value(_) => {
-                    self.throw_type_error("RegExp exec must return an object or null")
+                    self.throw_type_error(roots, "RegExp exec must return an object or null")
                 }
             };
         }
         if !matches!(self.heap.get(id)?, Object::RegExp { .. }) {
-            return self.throw_type_error("RegExpExec requires a RegExp receiver or callable exec");
+            return self.throw_type_error(
+                roots,
+                "RegExpExec requires a RegExp receiver or callable exec",
+            );
         }
         self.regexp_match_with_encoded(host, roots, id, input, encoded)
     }

@@ -22,6 +22,7 @@ fn main() {
     let mut capture_profile = false;
     let mut restore_profile = false;
     let mut rematerialization = false;
+    let mut stack_traces = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => {}
@@ -46,6 +47,8 @@ fn main() {
             }
             "--gc" => panic!("GC timings require a non-diagnostic build"),
             "--rematerialization" => rematerialization = true,
+            "--stack-traces" if !perf::ENABLED => stack_traces = true,
+            "--stack-traces" => panic!("stack trace timings require a non-diagnostic build"),
             _ => panic!("unknown baseline option: {arg}"),
         }
     }
@@ -59,6 +62,10 @@ fn main() {
     }
 
     println!("workload,metric,sample,value,unit");
+    if stack_traces {
+        run_stack_traces(samples);
+        return;
+    }
     if capture_profile {
         for workload in [&REACT_REUSE, &SNAPSHOT_BUFFER]
             .into_iter()
@@ -432,6 +439,75 @@ fn run(workload: &Workload, samples: usize) {
         }
         if i >= warmups {
             sample.print(workload.name, i - warmups + 1);
+        }
+    }
+}
+
+fn run_stack_traces(samples: usize) {
+    use yield_compiler::{CompileOptions, MemoryResolver, compile};
+    use yield_vm::{ValueRef, VerifiedBuild};
+
+    const ERRORS: usize = 4096;
+    let entry = format!(
+        "import {{ relay }} from './vendor.js';
+         function make() {{ return new Error('benchmark'); }}
+         export function run() {{
+             let last;
+             for (let n = 0; n < {ERRORS}; n++) last = relay(make);
+             return last;
+         }}"
+    );
+    let resolver = MemoryResolver::new([
+        ("main.js", entry.as_str()),
+        (
+            "vendor.js",
+            "export function relay(callback) { return callback(); }",
+        ),
+    ])
+    .unwrap();
+    let mut builds = Vec::new();
+    for (name, stack_traces, hide_vendor) in [
+        ("stacks-off", false, false),
+        ("stacks-on", true, false),
+        ("stacks-hide-vendor", true, true),
+    ] {
+        let mut options = CompileOptions::from_dts(include_str!("../../test.d.ts")).unwrap();
+        options.stack_traces = stack_traces;
+        let mut error_options = options.clone();
+        if hide_vendor {
+            options.framework_modules.extend([
+                "react.mjs".into(),
+                "react-reconciler-0.31.0.mjs".into(),
+                "renderer.mjs".into(),
+            ]);
+            error_options.framework_modules.insert("vendor.js".into());
+        }
+        let bytes = workloads::build_react_with_options(&options)
+            .to_bytes()
+            .len();
+        println!("{name},react_artifact_size,0,{bytes},bytes");
+        let build = compile("main.js", None, &resolver, &error_options).unwrap();
+        builds.push((name, VerifiedBuild::new(build).unwrap()));
+    }
+    for i in 0..WARMUP_SAMPLES + samples {
+        // Rotate order and use fresh heaps to avoid systematic warmup/sweep bias.
+        for (name, build) in builds
+            .iter()
+            .cycle()
+            .skip(i % builds.len())
+            .take(builds.len())
+        {
+            let mut host = TestHost::default();
+            let mut vm = Vm::new_verified(build.clone(), &mut host).unwrap();
+            let start = Instant::now();
+            let result = black_box(vm.start(&mut host, "run", vec![]).unwrap());
+            let elapsed = start.elapsed();
+            assert!(matches!(result.view(), ValueRef::Object(_)));
+            if i >= WARMUP_SAMPLES {
+                let sample = i - WARMUP_SAMPLES + 1;
+                let per_error = elapsed.as_nanos() as f64 / ERRORS as f64;
+                println!("{name},error_loop_per_error,{sample},{per_error:.2},ns");
+            }
         }
     }
 }

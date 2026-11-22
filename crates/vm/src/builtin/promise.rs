@@ -19,7 +19,7 @@ pub(crate) mod members {
     const GLOBAL: &[IntrinsicDef] = &[IntrinsicDef::constructor(
         CONSTRUCTOR,
         1,
-        |vm, _, _, _, _| vm.throw_type_error("Promise constructor requires new"),
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "Promise constructor requires new"),
         |vm, host, roots, args, prototype| vm.construct_promise(host, roots, args, prototype),
     )];
     pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));

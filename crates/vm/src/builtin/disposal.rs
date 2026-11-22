@@ -176,7 +176,7 @@ impl Vm {
         }
         if !matches!(value.view(), ValueRef::Object(_)) {
             return Ok(Err(
-                self.type_error("A disposable resource must be an object")?
+                self.type_error(roots, "A disposable resource must be an object")?
             ));
         }
         let roots = &roots.with(value);
@@ -203,7 +203,7 @@ impl Vm {
         };
         if !self.is_callable(&method) {
             return Ok(Err(
-                self.type_error("Resource disposal method is not callable")?
+                self.type_error(roots, "Resource disposal method is not callable")?
             ));
         }
         Ok(Ok(Some(DisposableResource::Method {

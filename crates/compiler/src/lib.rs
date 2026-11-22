@@ -36,6 +36,7 @@ mod promote;
 mod propagate;
 mod resolver;
 mod session;
+mod source_lines;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,11 +47,25 @@ use yield_vm::bytecode::Build;
 pub use error::CompileError;
 pub use resolver::{FileResolver, MemoryResolver, ModuleResolver};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CompileOptions {
     /// Static host module specifiers and available exports. The build retains
     /// this manifest; the VM resolves it before executing the script.
     pub imports: BTreeMap<String, BTreeSet<String>>,
+    /// Emit source sites for synchronous Error stacks (enabled by default).
+    pub stack_traces: bool,
+    /// Canonical source module IDs whose frames should never be shown.
+    pub framework_modules: BTreeSet<String>,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            imports: BTreeMap::new(),
+            stack_traces: true,
+            framework_modules: BTreeSet::new(),
+        }
+    }
 }
 
 impl CompileOptions {
@@ -62,7 +77,10 @@ impl CompileOptions {
         let imports = yield_host_dts::parse(source).map_err(|error| {
             CompileError::new(source, Span::new(error.start, error.end), error.message)
         })?;
-        Ok(Self { imports })
+        Ok(Self {
+            imports,
+            ..Self::default()
+        })
     }
 }
 

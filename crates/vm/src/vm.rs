@@ -759,6 +759,7 @@ impl Vm {
             let wrap = |value| JsValue::handle(value, epoch, call_id);
             let mut cx = CallCx {
                 vm: self,
+                roots,
                 bindings,
                 epoch,
                 call: call_id,

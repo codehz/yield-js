@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 54;
+pub const BYTECODE_VERSION: u32 = 55;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -757,6 +757,15 @@ pub enum ParamTarget {
     Slot(Slot),
 }
 
+/// A change of source position at an instruction boundary. Zero line and
+/// column mark the start of an unmapped range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackSite {
+    pub pc: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     pub func_id: u32,
@@ -793,6 +802,10 @@ pub struct Function {
     /// One entry per `Yield`, indexed by `Instr::Yield::generator`.
     pub generator_resumes: Vec<GeneratorEntry>,
     pub handlers: Vec<ExceptionHandler>,
+    /// Defining source module, absent on source-less bytecode.
+    pub module: Option<u32>,
+    /// Sparse PC-to-source map, ordered by PC. Empty hides the frame.
+    pub stack_sites: Vec<StackSite>,
 }
 
 impl Function {
@@ -967,8 +980,8 @@ impl Build {
         }
     }
 
-    /// Sets `build_id` to a digest of every execution-relevant field. Debug
-    /// metadata is deliberately absent from the contract.
+    /// Sets `build_id` to a digest of every execution-relevant field,
+    /// including source positions observable through Error stacks.
     pub fn finalize(&mut self) {
         self.build_id = self.compute_id();
     }
@@ -1379,6 +1392,30 @@ impl Build {
         let location = format!("function {} ({})", function.func_id, function.name);
         if function.code.is_empty() {
             return Err(format!("{location}: empty code"));
+        }
+        match function.module {
+            Some(module) if module as usize >= self.modules.len() => {
+                return Err(format!(
+                    "{location}: invalid defining module index {module}"
+                ));
+            }
+            None if !function.stack_sites.is_empty() => {
+                return Err(format!("{location}: stack sites without a defining module"));
+            }
+            _ => {}
+        }
+        let mut previous = None;
+        for site in &function.stack_sites {
+            if site.pc as usize >= function.code.len() || previous.is_some_and(|pc| pc >= site.pc) {
+                return Err(format!("{location}: invalid stack site PC {}", site.pc));
+            }
+            if (site.line == 0) != (site.column == 0) {
+                return Err(format!(
+                    "{location}: invalid stack site coordinates at PC {}",
+                    site.pc
+                ));
+            }
+            previous = Some(site.pc);
         }
         if function.resumes.len() > u32::MAX as usize {
             return Err(format!("{location}: too many resume entries"));

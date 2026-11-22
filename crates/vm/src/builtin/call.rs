@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 static UNDEFINED_VALUE: Value = Value::UNDEFINED;
 use crate::builtin::promise::members::THEN;
 use crate::builtin::string::{utf16_len, utf16_unit_string};
@@ -135,7 +137,7 @@ impl Vm {
                 class,
             }) => {
                 if class {
-                    return self.throw_type_error("class constructor requires new");
+                    return self.throw_type_error(roots, "class constructor requires new");
                 }
                 self.call_function(
                     host,
@@ -178,7 +180,7 @@ impl Vm {
                     (id.definition().call)(self, host, roots, values, receiver)
                 }
             },
-            None => self.throw_type_error("value is not a function"),
+            None => self.throw_type_error(roots, "value is not a function"),
         }
     }
 
@@ -241,11 +243,14 @@ impl Vm {
         let symbol = matches!(&dispatch, Some(Dispatch::Native { target: CallableTarget::Intrinsic(id), .. })
             if *id == symbol_family::CONSTRUCTOR.link());
         let Some(constructor) = self.constructor(dispatch)? else {
-            return self.throw_type_error(if symbol {
-                "Symbol is not a constructor"
-            } else {
-                "value is not a constructor"
-            });
+            return self.throw_type_error(
+                roots,
+                if symbol {
+                    "Symbol is not a constructor"
+                } else {
+                    "value is not a constructor"
+                },
+            );
         };
         if let ValueRef::Object(class) = callee.view()
             && let Some(record) = self.heap.function(class).and_then(|f| f.class.as_ref())
@@ -285,10 +290,11 @@ impl Vm {
                 Some(class),
             )? {
                 Invocation::Value(value) if matches!(value.view(), ValueRef::Undefined) => {
-                    self.derived_this(context)
+                    self.derived_this(roots, context)
                 }
                 Invocation::Value(value) if !matches!(value.view(), ValueRef::Object(_)) => self
                     .throw_type_error(
+                        roots,
                         "derived constructor returned a primitive other than undefined",
                     ),
                 result => Ok(result),
@@ -375,7 +381,11 @@ impl Vm {
         }
     }
 
-    pub(crate) fn derived_this(&mut self, context: ObjectId) -> Result<Invocation, VmError> {
+    pub(crate) fn derived_this(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        context: ObjectId,
+    ) -> Result<Invocation, VmError> {
         let record = self.heap.environment(context)?;
         if !record.bindings.contains_key(&DERIVED_CLASS) {
             return Err(VmError::InvalidState(
@@ -385,7 +395,7 @@ impl Vm {
         match record.bindings.get(&DERIVED_THIS) {
             Some(receiver) => Ok(Invocation::Value(receiver.clone())),
             None => Ok(Invocation::Thrown(
-                self.reference_error("this is not initialized")?,
+                self.reference_error(roots, "this is not initialized")?,
             )),
         }
     }
@@ -450,7 +460,7 @@ impl Vm {
         let receiver = match self.construct_with(host, roots, callee, args, new_target)? {
             Invocation::Value(value) => {
                 let ValueRef::Object(id) = value.view() else {
-                    return self.throw_type_error("super constructor must return an object");
+                    return self.throw_type_error(roots, "super constructor must return an object");
                 };
                 id
             }
@@ -461,7 +471,7 @@ impl Vm {
             let std::collections::btree_map::Entry::Vacant(entry) = bindings.entry(DERIVED_THIS)
             else {
                 return Ok(Invocation::Thrown(
-                    self.reference_error("this is already initialized")?,
+                    self.reference_error(roots, "this is already initialized")?,
                 ));
             };
             entry.insert(Value::object(receiver));
@@ -486,15 +496,15 @@ impl Vm {
         let new_target = args.get(2).unwrap_or(target);
         let list = if construct {
             if !self.is_constructor(target)? {
-                return self.throw_type_error("value is not a constructor");
+                return self.throw_type_error(roots, "value is not a constructor");
             }
             if args.get(2).is_some() && !self.is_constructor(new_target)? {
-                return self.throw_type_error("newTarget is not a constructor");
+                return self.throw_type_error(roots, "newTarget is not a constructor");
             }
             args.get(1)
         } else {
             if !self.is_callable(target) {
-                return self.throw_type_error("value is not a function");
+                return self.throw_type_error(roots, "value is not a function");
             }
             args.get(2)
         };
@@ -524,7 +534,9 @@ impl Vm {
     ) -> Result<Result<Vec<Value>, Value>, VmError> {
         let roots = &roots.with(&list);
         if !matches!(list.view(), ValueRef::Object(_)) {
-            return Ok(Err(self.type_error("argumentsList must be an object")?));
+            return Ok(Err(
+                self.type_error(roots, "argumentsList must be an object")?
+            ));
         }
         let length =
             match self.read_property(host, roots, list, PropertyKeyRef::String("length"))? {
@@ -584,7 +596,10 @@ impl Vm {
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("Array.prototype.toString called on null or undefined");
+            return self.throw_type_error(
+                roots,
+                "Array.prototype.toString called on null or undefined",
+            );
         }
         let roots = &roots.with(receiver);
         let mut boxed = None;
@@ -617,7 +632,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let tag = match receiver.view() {
             ValueRef::Object(id) if self.heap.is_environment(id) == Some(true) => {
-                return self.throw_type_error("incompatible Object.prototype receiver");
+                return self.throw_type_error(roots, "incompatible Object.prototype receiver");
             }
             ValueRef::Object(id) => self.object_tag(id)?,
             ValueRef::Undefined => {
@@ -687,7 +702,8 @@ impl Vm {
         let root_view = (receiver, args);
         let roots = &roots.with(&root_view);
         if matches!(receiver.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("Array.prototype.join called on null or undefined");
+            return self
+                .throw_type_error(roots, "Array.prototype.join called on null or undefined");
         }
         let mut boxed = None;
         let length = match self.read_to_object_property(
@@ -807,10 +823,11 @@ impl Vm {
 
     pub(crate) fn array_iterator(
         &mut self,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         kind: crate::heap::ArrayIterationKind,
     ) -> Result<Invocation, VmError> {
-        let id = match self.array_receiver(receiver)? {
+        let id = match self.array_receiver(roots, receiver)? {
             Ok(id) => id,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -833,7 +850,7 @@ impl Vm {
 
         let invalid_receiver = "ArrayIterator.next requires an array iterator";
         let ValueRef::Object(id) = receiver.view() else {
-            return self.throw_type_error(invalid_receiver);
+            return self.throw_type_error(roots, invalid_receiver);
         };
         let Object::ArrayIterator {
             array,
@@ -842,7 +859,7 @@ impl Vm {
             ..
         } = self.heap.get(id)?
         else {
-            return self.throw_type_error(invalid_receiver);
+            return self.throw_type_error(roots, invalid_receiver);
         };
         let Some(source) = *array else {
             return self.iterator_result(Value::UNDEFINED, true);
@@ -906,34 +923,58 @@ impl Vm {
         }
     }
 
-    pub(crate) fn type_error(&mut self, message: &str) -> Result<Value, VmError> {
+    pub(crate) fn type_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Value, VmError> {
         self.alloc_error(
+            roots,
             self.builtins.get("typeerror.prototype"),
             "TypeError",
             Some(message.into()),
         )
     }
 
-    pub(crate) fn reference_error(&mut self, message: &str) -> Result<Value, VmError> {
+    pub(crate) fn reference_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Value, VmError> {
         self.alloc_error(
+            roots,
             self.builtins.get("referenceerror.prototype"),
             "ReferenceError",
             Some(message.into()),
         )
     }
-    pub(crate) fn throw_type_error(&mut self, message: &str) -> Result<Invocation, VmError> {
-        self.type_error(message).map(Invocation::Thrown)
+    pub(crate) fn throw_type_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Invocation, VmError> {
+        self.type_error(roots, message).map(Invocation::Thrown)
     }
-    pub(crate) fn make_range_error(&mut self, message: &str) -> Result<Value, VmError> {
+    pub(crate) fn make_range_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Value, VmError> {
         self.alloc_error(
+            roots,
             self.builtins.get("rangeerror.prototype"),
             "RangeError",
             Some(message.into()),
         )
     }
 
-    pub(crate) fn throw_range_error(&mut self, message: &str) -> Result<Invocation, VmError> {
-        self.make_range_error(message).map(Invocation::Thrown)
+    pub(crate) fn throw_range_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: &str,
+    ) -> Result<Invocation, VmError> {
+        self.make_range_error(roots, message)
+            .map(Invocation::Thrown)
     }
 
     pub(crate) fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
@@ -986,7 +1027,8 @@ impl Vm {
             Some(ValueRef::Null) => None,
             Some(ValueRef::Object(id)) => Some(id),
             _ => {
-                return self.throw_type_error("Object.create requires an object or null prototype");
+                return self
+                    .throw_type_error(roots, "Object.create requires an object or null prototype");
             }
         };
         let object = self.heap.alloc_plain_with(prototype);
@@ -1001,6 +1043,7 @@ impl Vm {
 
     pub(crate) fn prevent_extensions_builtin_impl(
         &mut self,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
@@ -1018,13 +1061,14 @@ impl Vm {
                     Ok(Invocation::Value(Value::boolean(false)))
                 } else {
                     self.throw_type_error(
+                        roots,
                         "cannot prevent extensions on a length-tracking TypedArray",
                     )
                 };
             }
             self.heap.get_mut(id)?.prevent_extensions();
         } else if reflect {
-            return self.throw_type_error("Reflect.preventExtensions requires an object");
+            return self.throw_type_error(roots, "Reflect.preventExtensions requires an object");
         }
         Ok(Invocation::Value(if reflect {
             Value::boolean(true)
@@ -1035,6 +1079,7 @@ impl Vm {
 
     pub(crate) fn is_extensible_builtin_impl(
         &mut self,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
@@ -1043,7 +1088,7 @@ impl Vm {
                 self.heap.get(self.heap.proxy_target(id)?)?.is_extensible()
             }
             _ if reflect => {
-                return self.throw_type_error("Reflect.isExtensible requires an object");
+                return self.throw_type_error(roots, "Reflect.isExtensible requires an object");
             }
             _ => false,
         };
@@ -1052,6 +1097,7 @@ impl Vm {
 
     pub(crate) fn get_prototype_of(
         &mut self,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
@@ -1063,11 +1109,14 @@ impl Vm {
             {
                 return Ok(Invocation::Value(Value::object(prototype)));
             }
-            return self.throw_type_error(if reflect {
-                "Reflect.getPrototypeOf requires an object"
-            } else {
-                "Object.getPrototypeOf cannot convert null or undefined to an object"
-            });
+            return self.throw_type_error(
+                roots,
+                if reflect {
+                    "Reflect.getPrototypeOf requires an object"
+                } else {
+                    "Object.getPrototypeOf cannot convert null or undefined to an object"
+                },
+            );
         };
         Ok(Invocation::Value(
             self.heap
@@ -1079,22 +1128,27 @@ impl Vm {
 
     pub(crate) fn set_prototype_of(
         &mut self,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
     ) -> Result<Invocation, VmError> {
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if reflect && !matches!(target.view(), ValueRef::Object(_)) {
-            return self.throw_type_error("Reflect.setPrototypeOf requires an object target");
+            return self
+                .throw_type_error(roots, "Reflect.setPrototypeOf requires an object target");
         }
         if matches!(target.view(), ValueRef::Undefined | ValueRef::Null) {
-            return self.throw_type_error("Object.setPrototypeOf requires a non-nullish target");
+            return self
+                .throw_type_error(roots, "Object.setPrototypeOf requires a non-nullish target");
         }
         let prototype = match args.get(1).map(Value::view) {
             Some(ValueRef::Null) => None,
             Some(ValueRef::Object(id)) => Some(id),
             _ => {
-                return self
-                    .throw_type_error("setPrototypeOf requires an object or null prototype");
+                return self.throw_type_error(
+                    roots,
+                    "setPrototypeOf requires an object or null prototype",
+                );
             }
         };
         let ValueRef::Object(target_id) = target.view() else {
@@ -1106,7 +1160,7 @@ impl Vm {
         } else if accepted {
             Ok(Invocation::Value(Value::object(target_id)))
         } else {
-            self.throw_type_error("Object.setPrototypeOf cannot set the prototype")
+            self.throw_type_error(roots, "Object.setPrototypeOf cannot set the prototype")
         }
     }
 
@@ -1210,7 +1264,7 @@ impl Vm {
         let roots = &roots.with(&args);
         let keys = match args.first().map(Value::view) {
             None | Some(ValueRef::Undefined | ValueRef::Null) => {
-                return self.throw_type_error("Object.keys requires a non-nullish value");
+                return self.throw_type_error(roots, "Object.keys requires a non-nullish value");
             }
             Some(ValueRef::Object(id)) => match self.enumerable_string_keys(host, roots, id)? {
                 Ok(keys) => keys.into_iter().map(Value::string).collect(),
@@ -1242,11 +1296,14 @@ impl Vm {
         let mut values = Vec::new();
         match args.first().map(Value::view) {
             None | Some(ValueRef::Undefined | ValueRef::Null) => {
-                return self.throw_type_error(if symbols {
-                    "Object.getOwnPropertySymbols requires a non-nullish value"
-                } else {
-                    "Object.getOwnPropertyNames requires a non-nullish value"
-                });
+                return self.throw_type_error(
+                    roots,
+                    if symbols {
+                        "Object.getOwnPropertySymbols requires a non-nullish value"
+                    } else {
+                        "Object.getOwnPropertyNames requires a non-nullish value"
+                    },
+                );
             }
             Some(ValueRef::Object(id)) => {
                 let keys = match self.own_keys(host, roots, id, false)? {
@@ -1287,7 +1344,8 @@ impl Vm {
         let mut result = Vec::new();
         match args.first().map(|value| (value, value.view())) {
             None | Some((_, ValueRef::Undefined | ValueRef::Null)) => {
-                return self.throw_type_error("Object.values/entries requires a non-nullish value");
+                return self
+                    .throw_type_error(roots, "Object.values/entries requires a non-nullish value");
             }
             Some((target, ValueRef::Object(id))) => {
                 let keys = match self.own_keys(host, roots, id, false)? {
@@ -1378,9 +1436,10 @@ impl Vm {
         item: &Value,
     ) -> Result<Result<(), Value>, VmError> {
         if !matches!(item.view(), ValueRef::Object(_)) {
-            return Ok(Err(
-                self.type_error("Object.fromEntries entry must be an object")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "Object.fromEntries entry must be an object",
+            )?));
         }
         let key = match self.read_property(host, roots, item, PropertyKeyRef::String("0"))? {
             Invocation::Value(key) => key,
@@ -1409,11 +1468,14 @@ impl Vm {
         let roots = &roots.with(&args);
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if reflect && !matches!(target.view(), ValueRef::Object(_)) {
-            return self.throw_type_error("Reflect.getOwnPropertyDescriptor requires an object");
+            return self
+                .throw_type_error(roots, "Reflect.getOwnPropertyDescriptor requires an object");
         }
         if matches!(target.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self
-                .throw_type_error("Object.getOwnPropertyDescriptor requires a non-nullish value");
+            return self.throw_type_error(
+                roots,
+                "Object.getOwnPropertyDescriptor requires a non-nullish value",
+            );
         }
         let key =
             match self.coerce_property_key(host, roots, args.get(1).unwrap_or(&UNDEFINED_VALUE))? {
@@ -1493,6 +1555,7 @@ impl Vm {
             ValueRef::Object(id) => id,
             ValueRef::Null | ValueRef::Undefined => {
                 return self.throw_type_error(
+                    roots,
                     "Object.getOwnPropertyDescriptors requires a non-nullish value",
                 );
             }
@@ -1550,11 +1613,14 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return self.throw_type_error(if reflect {
-                "Reflect.defineProperty requires an object target"
-            } else {
-                "Object.defineProperty requires an object target"
-            });
+            return self.throw_type_error(
+                roots,
+                if reflect {
+                    "Reflect.defineProperty requires an object target"
+                } else {
+                    "Object.defineProperty requires an object target"
+                },
+            );
         };
         let key = match self.coerce_property_key(
             host,
@@ -1591,7 +1657,7 @@ impl Vm {
         let roots = &roots.with(&args);
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if matches!(target.view(), ValueRef::Null | ValueRef::Undefined) {
-            return self.throw_type_error("Object.assign requires a non-nullish target");
+            return self.throw_type_error(roots, "Object.assign requires a non-nullish target");
         }
         let target_id = self.coercible_object(target);
         let target = Value::object(target_id);
@@ -1653,11 +1719,13 @@ impl Vm {
         let source = match properties.map(|value| (value, value.view())) {
             Some((_, ValueRef::Object(source))) => source,
             None | Some((_, ValueRef::Undefined | ValueRef::Null)) => {
-                return self
-                    .throw_type_error("Object.defineProperties requires non-nullish properties");
+                return self.throw_type_error(
+                    roots,
+                    "Object.defineProperties requires non-nullish properties",
+                );
             }
             Some((_, ValueRef::String(text))) if !text.is_empty() => {
-                return self.throw_type_error("property descriptor must be an object");
+                return self.throw_type_error(roots, "property descriptor must be an object");
             }
             _ => return Ok(Invocation::Value(Value::object(target))),
         };
@@ -1707,7 +1775,7 @@ impl Vm {
         let roots = &roots.with(&descriptor);
         let ValueRef::Object(id) = descriptor.view() else {
             return Ok(Err(
-                self.type_error("property descriptor must be an object")?
+                self.type_error(roots, "property descriptor must be an object")?
             ));
         };
         let mut update = DescriptorUpdate::default();
@@ -1743,6 +1811,7 @@ impl Vm {
                         ValueRef::Object(id) if self.is_callable(&value) => Some(id),
                         _ => {
                             return Ok(Err(self.type_error(
+                                roots,
                                 "descriptor accessor must be callable or undefined",
                             )?));
                         }
@@ -1757,9 +1826,10 @@ impl Vm {
             }
         }
         if update.is_data() && update.is_accessor() {
-            return Ok(Err(
-                self.type_error("descriptor cannot mix data and accessor fields")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "descriptor cannot mix data and accessor fields",
+            )?));
         }
         Ok(Ok(update))
     }
@@ -1774,7 +1844,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         match self.try_apply_property_update(host, &roots.with(&target), target, key, update)? {
             Ok(true) => Ok(Invocation::Value(Value::object(target))),
-            Ok(false) => self.throw_type_error("Cannot define property"),
+            Ok(false) => self.throw_type_error(roots, "Cannot define property"),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
     }
@@ -1825,7 +1895,7 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             };
             if f64::from(length) != number {
-                return Ok(Err(self.make_range_error("Invalid array length")?));
+                return Ok(Err(self.make_range_error(roots, "Invalid array length")?));
             }
             *value = Value::number(f64::from(length));
         }
@@ -1881,6 +1951,7 @@ impl Vm {
             let suppressed = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
             let value = if message.is_some() {
                 self.alloc_suppressed_error_with_message(
+                    roots,
                     self.builtins.get(prototype),
                     error,
                     suppressed,
@@ -1891,7 +1962,7 @@ impl Vm {
             };
             return Ok(Invocation::Value(value));
         }
-        let error = self.alloc_error(self.builtins.get(prototype), name, message)?;
+        let error = self.alloc_error(roots, self.builtins.get(prototype), name, message)?;
         if let (Some(errors), ValueRef::Object(id)) = (errors, error.view()) {
             let errors = self.heap.alloc_array(errors);
             self.heap
@@ -1902,6 +1973,7 @@ impl Vm {
 
     pub(crate) fn alloc_error(
         &mut self,
+        roots: &ActiveRoots<'_>,
         prototype: ObjectId,
         name: &str,
         message: Option<JsString>,
@@ -1914,6 +1986,55 @@ impl Vm {
             stack.push_str(&message);
             self.heap
                 .define_data(id, "message", Value::string(message), Attributes::METHOD)?;
+        }
+        // A frame can appear in more than one root view. Dedup by address,
+        // not function ID: recursive calls are separate frames.
+        let mut visible = [std::ptr::null(); 10];
+        let mut depth = 0;
+        let mut suffix = String::new();
+        for frame in roots.frames() {
+            let address = std::ptr::from_ref(frame);
+            if visible[..depth].contains(&address) {
+                continue;
+            }
+            let Some(pc) = frame.pc.checked_sub(1) else {
+                continue;
+            };
+            let function = &self.build.functions[frame.function];
+            let Some(module) = function.module else {
+                continue;
+            };
+            let sites = &function.stack_sites;
+            let Some(index) = sites
+                .partition_point(|site| site.pc as usize <= pc)
+                .checked_sub(1)
+            else {
+                continue;
+            };
+            let site = &sites[index];
+            if site.line == 0 {
+                continue;
+            }
+            let name = if function.initial_name.is_empty() {
+                "<anonymous>"
+            } else {
+                &function.initial_name
+            };
+            let module = &self.build.modules[module as usize].id;
+            write!(
+                suffix,
+                "\n    at {name} ({module}:{}:{})",
+                site.line, site.column
+            )
+            .expect("writing to String cannot fail");
+            visible[depth] = address;
+            depth += 1;
+            if depth == visible.len() {
+                break;
+            }
+        }
+        if !suffix.is_empty() {
+            stack.push_str(&JsString::from(suffix));
         }
         self.heap
             .define_data(id, "stack", Value::string(stack), Attributes::METHOD)?;
@@ -1934,12 +2055,13 @@ impl Vm {
 
     fn alloc_suppressed_error_with_message(
         &mut self,
+        roots: &ActiveRoots<'_>,
         prototype: ObjectId,
         error: Value,
         suppressed: Value,
         message: Option<JsString>,
     ) -> Result<Value, VmError> {
-        let value = self.alloc_error(prototype, "SuppressedError", message)?;
+        let value = self.alloc_error(roots, prototype, "SuppressedError", message)?;
         let ValueRef::Object(id) = value.view() else {
             unreachable!()
         };
@@ -1960,8 +2082,13 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
+    pub(crate) fn alloc_aggregate_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        errors: Vec<Value>,
+    ) -> Result<Value, VmError> {
         let error = self.alloc_error(
+            roots,
             self.builtins.get("aggregateerror.prototype"),
             "AggregateError",
             Some("All promises were rejected".into()),
@@ -1984,7 +2111,7 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let executor = args.first().cloned().unwrap_or(Value::UNDEFINED);
         if !self.is_callable(&executor) {
-            return self.throw_type_error("Promise executor is not a function");
+            return self.throw_type_error(roots, "Promise executor is not a function");
         }
         let promise = self.heap.alloc_promise();
         if let Some(prototype) = prototype {
@@ -2021,6 +2148,7 @@ impl Vm {
 
     pub(crate) fn symbol_method(
         &mut self,
+        roots: &ActiveRoots<'_>,
         receiver: &Value,
         method: &str,
     ) -> Result<Invocation, VmError> {
@@ -2031,9 +2159,9 @@ impl Vm {
                     primitive: BoxedPrimitive::Symbol(id),
                     ..
                 } => *id,
-                _ => return self.throw_type_error("incompatible Symbol receiver"),
+                _ => return self.throw_type_error(roots, "incompatible Symbol receiver"),
             },
-            _ => return self.throw_type_error("incompatible Symbol receiver"),
+            _ => return self.throw_type_error(roots, "incompatible Symbol receiver"),
         };
         let description = self.heap.symbols.get(&id).and_then(Option::as_ref);
         Ok(Invocation::Value(match method {
@@ -2084,9 +2212,13 @@ impl Vm {
         Ok(Invocation::Value(Value::symbol(id)))
     }
 
-    pub(crate) fn symbol_key_for(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn symbol_key_for(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let Some(ValueRef::Symbol(id)) = args.first().map(Value::view) else {
-            return self.throw_type_error("Symbol.keyFor requires a Symbol");
+            return self.throw_type_error(roots, "Symbol.keyFor requires a Symbol");
         };
         let key = self
             .heap
@@ -2099,10 +2231,14 @@ impl Vm {
         }))
     }
 
-    pub(crate) fn queue_microtask(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    pub(crate) fn queue_microtask(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let function = args.first().cloned().unwrap_or(Value::UNDEFINED);
         if !self.is_callable(&function) {
-            return self.throw_type_error("queueMicrotask argument is not a function");
+            return self.throw_type_error(roots, "queueMicrotask argument is not a function");
         }
         self.microtasks.push_back(Microtask::Call {
             function,
@@ -2130,7 +2266,7 @@ impl Vm {
         match name {
             "resolve" => {
                 if !matches!(receiver.view(), ValueRef::Object(_)) {
-                    return self.throw_type_error("incompatible Promise receiver");
+                    return self.throw_type_error(roots, "incompatible Promise receiver");
                 }
                 let value = args.into_iter().next().unwrap_or(Value::UNDEFINED);
                 self.promise_resolve_with(host, roots, receiver, value)
@@ -2149,7 +2285,7 @@ impl Vm {
             "allSettled" => self.combine(host, roots, receiver, CombineKind::AllSettled, args),
             "race" => self.combine(host, roots, receiver, CombineKind::Race, args),
             "any" => self.combine(host, roots, receiver, CombineKind::Any, args),
-            _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
+            _ => self.throw_type_error(roots, &format!("Promise.{name} is not a function")),
         }
     }
 
@@ -2174,10 +2310,10 @@ impl Vm {
             ),
             "then" | "finally" => {
                 let ValueRef::Object(id) = receiver.view() else {
-                    return self.throw_type_error("incompatible Promise receiver");
+                    return self.throw_type_error(roots, "incompatible Promise receiver");
                 };
                 if name == "then" && self.heap.get(id)?.as_promise().is_none() {
-                    return self.throw_type_error("incompatible Promise receiver");
+                    return self.throw_type_error(roots, "incompatible Promise receiver");
                 }
                 let species = match self.promise_species(host, &roots.with(&args), receiver)? {
                     Invocation::Value(value) => value,
@@ -2217,7 +2353,7 @@ impl Vm {
                 )?;
                 Ok(Invocation::Value(result))
             }
-            _ => self.throw_type_error(&format!("Promise.{name} is not a function")),
+            _ => self.throw_type_error(roots, &format!("Promise.{name} is not a function")),
         }
     }
 
@@ -2260,7 +2396,7 @@ impl Vm {
             }
             Invocation::Value(value) if matches!(value.view(), ValueRef::Object(_)) => value,
             Invocation::Value(_) => {
-                return self.throw_type_error("Promise constructor is not an object");
+                return self.throw_type_error(roots, "Promise constructor is not an object");
             }
             thrown => return Ok(thrown),
         };
@@ -2276,7 +2412,7 @@ impl Vm {
                 Ok(Invocation::Value(intrinsic))
             }
             Invocation::Value(value) if !self.is_constructor(&value)? => {
-                self.throw_type_error("Promise species is not a constructor")
+                self.throw_type_error(roots, "Promise species is not a constructor")
             }
             other => Ok(other),
         }
@@ -2322,7 +2458,9 @@ impl Vm {
         {
             return Ok(Ok((result, resolve.clone(), reject.clone())));
         }
-        Ok(Err(self.type_error("invalid Promise species capability")?))
+        Ok(Err(
+            self.type_error(roots, "invalid Promise species capability")?
+        ))
     }
 
     pub(crate) fn alloc_promise_callback(&mut self, callback: PromiseCallback) -> Value {
@@ -2354,8 +2492,10 @@ impl Vm {
                 if values.as_ref().is_some_and(|(resolve, reject)| {
                     *resolve != Value::UNDEFINED || *reject != Value::UNDEFINED
                 }) {
-                    return self
-                        .throw_type_error("Promise capability executor already initialized");
+                    return self.throw_type_error(
+                        roots,
+                        "Promise capability executor already initialized",
+                    );
                 }
                 *values = Some((argument, second));
                 Ok(Invocation::Value(Value::UNDEFINED))
@@ -2478,7 +2618,7 @@ impl Vm {
             match self.read_property(host, roots, receiver, PropertyKeyRef::String("resolve"))? {
                 Invocation::Value(resolve) if self.is_callable(&resolve) => resolve,
                 Invocation::Value(_) => {
-                    let error = self.type_error("Promise.resolve is not callable")?;
+                    let error = self.type_error(roots, "Promise.resolve is not callable")?;
                     return reject_result(self, host, roots, error);
                 }
                 Invocation::Thrown(error) => return reject_result(self, host, roots, error),
@@ -2805,7 +2945,7 @@ impl Vm {
             .map(|value| std::mem::replace(value, Value::UNDEFINED))
             .collect();
         let value = if kind == CombineKind::Any {
-            self.alloc_aggregate_error(values)?
+            self.alloc_aggregate_error(roots, values)?
         } else {
             Value::object(self.heap.alloc_array(values))
         };

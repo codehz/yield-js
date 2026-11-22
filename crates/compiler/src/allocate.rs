@@ -14,13 +14,16 @@ use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::map_slots;
 use crate::ir::FunctionAttrs;
+use crate::source_lines::SourceLines;
 
 pub(crate) fn allocate(
     source: &str,
+    module: u32,
     mut function: FunctionCfg,
+    lines: Option<&mut SourceLines>,
 ) -> Result<BytecodeFunction, CompileError> {
     let live = analyze::eliminate_dead_writes(&mut function);
-    let mut lowered = function.into_lowered(&live)?;
+    let (mut lowered, stack_sites) = function.into_lowered(&live, lines)?;
     let mut saved_regs = BTreeSet::new();
     for slots in lowered
         .resumes
@@ -97,6 +100,8 @@ pub(crate) fn allocate(
         generator_start: lowered.generator_start,
         generator_resumes: lowered.yields,
         handlers: lowered.handlers,
+        module: Some(module),
+        stack_sites,
     })
 }
 

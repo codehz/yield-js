@@ -70,6 +70,7 @@ pub(crate) struct FunctionAttrs {
 pub(crate) struct LoweredFunction {
     pub(crate) attrs: FunctionAttrs,
     pub(crate) code: Vec<Instr>,
+    pub(crate) origins: Option<Vec<Option<u32>>>,
     pub(crate) awaits: Vec<AwaitSite>,
     /// Where parameter initialization hands over to the generator body.
     pub(crate) generator_start: Option<GeneratorStartSite>,

@@ -78,7 +78,7 @@ pub(crate) const NUMBER_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructo
             Invocation::Value(value) => vm.construct_object(&[value])?,
             thrown => thrown,
         };
-        vm.with_result_prototype(result, prototype)
+        vm.with_result_prototype(roots, result, prototype)
     },
 )];
 
@@ -201,7 +201,7 @@ impl Vm {
             _ => None,
         };
         let Some(number) = number else {
-            return self.throw_type_error("Number method called on incompatible receiver");
+            return self.throw_type_error(roots, "Number method called on incompatible receiver");
         };
         if method == "valueOf" {
             return Ok(Invocation::Value(Value::number(number)));
@@ -233,11 +233,14 @@ impl Vm {
             _ => 0.0..=100.0,
         };
         if !range.contains(&digits) {
-            return self.throw_range_error(if method == "toString" {
-                "Number radix must be between 2 and 36"
-            } else {
-                "Number format digits out of range"
-            });
+            return self.throw_range_error(
+                roots,
+                if method == "toString" {
+                    "Number radix must be between 2 and 36"
+                } else {
+                    "Number format digits out of range"
+                },
+            );
         }
         if !number.is_finite() {
             return string(decimal());

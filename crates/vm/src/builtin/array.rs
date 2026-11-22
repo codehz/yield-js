@@ -39,8 +39,8 @@ mod members {
             | sort: 1 | toSorted: 1 | toReversed: 0 | with: 2 | toSpliced: 2 as name => |vm, host, roots, args, receiver| {
                 vm.array_operation(host, roots, name, receiver, args)
             };
-        keys: 0 => |vm, _, _, _, receiver| vm.array_iterator(receiver, ArrayIterationKind::Keys);
-        entries: 0 => |vm, _, _, _, receiver| vm.array_iterator(receiver, ArrayIterationKind::Entries);
+        keys: 0 => |vm, _, roots, _, receiver| vm.array_iterator(roots, receiver, ArrayIterationKind::Keys);
+        entries: 0 => |vm, _, roots, _, receiver| vm.array_iterator(roots, receiver, ArrayIterationKind::Entries);
         join: 1 => |vm, host, roots, args, receiver| vm.array_join(host, roots, receiver, &args);
         toString: 0 => |vm, host, roots, _, receiver| vm.array_to_string(host, roots, receiver);
     }
@@ -90,14 +90,14 @@ pub(crate) const ARRAY_INTRINSICS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor(
         ARRAY_CONSTRUCTOR,
         1,
-        |vm, _, _, args, _| vm.construct_array(args),
-        |vm, _, _, args, prototype| {
-            let result = vm.construct_array(args)?;
-            vm.with_result_prototype(result, prototype)
+        |vm, _, roots, args, _| vm.construct_array(roots, args),
+        |vm, _, roots, args, prototype| {
+            let result = vm.construct_array(roots, args)?;
+            vm.with_result_prototype(roots, result, prototype)
         },
     ),
-    IntrinsicDef::call(ARRAY_VALUES, 0, |vm, _, _, _, receiver| {
-        vm.array_iterator(receiver, ArrayIterationKind::Values)
+    IntrinsicDef::call(ARRAY_VALUES, 0, |vm, _, roots, _, receiver| {
+        vm.array_iterator(roots, receiver, ArrayIterationKind::Values)
     }),
     IntrinsicDef::call(ARRAY_ITERATOR_NEXT, 0, |vm, host, roots, _, receiver| {
         vm.array_iterator_next(host, roots, receiver)
@@ -186,7 +186,11 @@ impl Vm {
             .expect("Array iterator identity");
     }
 
-    fn construct_array(&mut self, args: Vec<Value>) -> Result<Invocation, VmError> {
+    fn construct_array(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: Vec<Value>,
+    ) -> Result<Invocation, VmError> {
         let length = match args.as_slice() {
             [arg] => match arg.view() {
                 ValueRef::Number(length) => Some(length),
@@ -197,7 +201,7 @@ impl Vm {
         let id = match length {
             Some(length) => {
                 if !(0.0..=MAX_LENGTH as f64).contains(&length) || length.fract() != 0.0 {
-                    return self.throw_range_error("invalid array length");
+                    return self.throw_range_error(roots, "invalid array length");
                 }
                 self.sparse_array(length as u64)?
             }
@@ -215,18 +219,23 @@ impl Vm {
         Ok(id)
     }
 
-    fn array_create(&mut self, length: u64) -> Completion<ObjectId> {
+    fn array_create(&mut self, roots: &ActiveRoots<'_>, length: u64) -> Completion<ObjectId> {
         if length > MAX_LENGTH {
-            return Ok(Err(self.make_range_error("invalid array length")?));
+            return Ok(Err(self.make_range_error(roots, "invalid array length")?));
         }
         Ok(Ok(self.sparse_array(length)?))
     }
 
-    pub(crate) fn array_receiver(&mut self, value: &Value) -> Completion<ObjectId> {
+    pub(crate) fn array_receiver(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Completion<ObjectId> {
         if matches!(value.view(), ValueRef::Null | ValueRef::Undefined) {
-            return Ok(Err(
-                self.type_error("Array method requires a non-nullish receiver")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "Array method requires a non-nullish receiver",
+            )?));
         }
         Ok(Ok(self.coercible_object(value)))
     }
@@ -334,9 +343,11 @@ impl Vm {
             && !matches!(arg(args, 0).view(), ValueRef::Undefined)
             && !self.is_callable(arg(args, 0))
         {
-            return Ok(Err(self.type_error("Array comparator is not callable")?));
+            return Ok(Err(
+                self.type_error(roots, "Array comparator is not callable")?
+            ));
         }
-        let id = script!(self.array_receiver(receiver));
+        let id = script!(self.array_receiver(roots, receiver));
         let view = (id, args);
         let roots = &roots.with(&view);
         let len = if name == "concat" {
@@ -407,10 +418,12 @@ impl Vm {
         let mapper = arg(args, 1);
         let mapping = !matches!(mapper.view(), ValueRef::Undefined);
         if mapping && !self.is_callable(mapper) {
-            return Ok(Err(self.type_error("Array.from mapper is not callable")?));
+            return Ok(Err(
+                self.type_error(roots, "Array.from mapper is not callable")?
+            ));
         }
         if matches!(items.view(), ValueRef::Null | ValueRef::Undefined) {
-            return Ok(Err(self.type_error("Array.from requires items")?));
+            return Ok(Err(self.type_error(roots, "Array.from requires items")?));
         }
         let method = script!(completion(self.read_property(
             host,
@@ -420,9 +433,10 @@ impl Vm {
         )));
         let iterable = !matches!(method.view(), ValueRef::Null | ValueRef::Undefined);
         if iterable && !self.is_callable(&method) {
-            return Ok(Err(
-                self.type_error("Array.from iterator method is not callable")?
-            ));
+            return Ok(Err(self.type_error(
+                roots,
+                "Array.from iterator method is not callable",
+            )?));
         }
         let roots = &roots.with(&method);
         let source = if iterable {
@@ -447,7 +461,7 @@ impl Vm {
             script!(self.construct_array_result(host, roots, constructor, args))
         } else {
             ArrayResult {
-                id: script!(self.array_create(length)),
+                id: script!(self.array_create(roots, length)),
                 fresh: true,
             }
         };
@@ -485,7 +499,7 @@ impl Vm {
                     let failure = if index == MAX_SAFE_LENGTH {
                         access
                             .vm
-                            .type_error("Array.from exceeds the safe integer limit")?
+                            .type_error(roots, "Array.from exceeds the safe integer limit")?
                     } else {
                         let Some(value) = script!(access.vm.iterator_step(
                             access.host,
@@ -624,7 +638,9 @@ impl ArrayAccess<'_> {
         if deleted.truthy() {
             Ok(Ok(()))
         } else {
-            Ok(Err(self.vm.type_error("cannot delete array element")?))
+            Ok(Err(self
+                .vm
+                .type_error(self.roots, "cannot delete array element")?))
         }
     }
 
@@ -649,7 +665,7 @@ impl ArrayAccess<'_> {
         )) {
             return Ok(Err(self
                 .vm
-                .type_error("cannot define array result element")?));
+                .type_error(self.roots, "cannot define array result element")?));
         }
         Ok(Ok(()))
     }
@@ -686,7 +702,7 @@ impl ArrayAccess<'_> {
             }
         }
         Ok(Ok(ArrayResult {
-            id: script!(self.vm.array_create(length)),
+            id: script!(self.vm.array_create(self.roots, length)),
             fresh: true,
         }))
     }
@@ -722,9 +738,10 @@ impl ArrayAccess<'_> {
         let insert_count = inserts.len() as u64;
         let new_len = len - count + insert_count;
         if new_len > MAX_SAFE_LENGTH {
-            return Ok(Err(self
-                .vm
-                .type_error("array-like length exceeds the safe integer limit")?));
+            return Ok(Err(self.vm.type_error(
+                self.roots,
+                "array-like length exceeds the safe integer limit",
+            )?));
         }
         let value = match name {
             "pop" | "shift" if count != 0 => script!(self.get(self.id, start)),
@@ -878,7 +895,7 @@ impl ArrayAccess<'_> {
                 if index < 0.0 || index >= len as f64 {
                     return Ok(Err(self
                         .vm
-                        .make_range_error("Array.with index out of range")?));
+                        .make_range_error(self.roots, "Array.with index out of range")?));
                 }
                 (index as u64, 1, std::slice::from_ref(arg(args, 1)))
             }
@@ -897,12 +914,13 @@ impl ArrayAccess<'_> {
         let insert_count = inserted.len() as u64;
         let new_len = len - deleted + insert_count;
         if new_len > MAX_SAFE_LENGTH {
-            return Ok(Err(self
-                .vm
-                .type_error("array-like length exceeds the safe integer limit")?));
+            return Ok(Err(self.vm.type_error(
+                self.roots,
+                "array-like length exceeds the safe integer limit",
+            )?));
         }
         let result = ArrayResult {
-            id: script!(self.vm.array_create(new_len)),
+            id: script!(self.vm.array_create(self.roots, new_len)),
             fresh: true,
         };
         self.with_roots(&result, |array| {
@@ -925,7 +943,7 @@ impl ArrayAccess<'_> {
     fn sort(&mut self, copying: bool, compare: &Value) -> Completion<Value> {
         let result = if copying {
             Some(ArrayResult {
-                id: script!(self.vm.array_create(self.len)),
+                id: script!(self.vm.array_create(self.roots, self.len)),
                 fresh: true,
             })
         } else {
@@ -1087,7 +1105,9 @@ impl ArrayAccess<'_> {
     fn callback(&mut self, name: &str, args: &[Value]) -> Completion<Value> {
         let mapper = arg(args, 0);
         if !self.vm.is_callable(mapper) {
-            return Ok(Err(self.vm.type_error("Array callback is not callable")?));
+            return Ok(Err(self
+                .vm
+                .type_error(self.roots, "Array callback is not callable")?));
         }
         let result = match name {
             "map" => Some(script!(self.species_create(self.len))),
@@ -1154,7 +1174,7 @@ impl ArrayAccess<'_> {
                 Some(value) => Ok(value),
                 None => Err(self
                     .vm
-                    .type_error("reduce of empty array without initial value")?),
+                    .type_error(self.roots, "reduce of empty array without initial value")?),
             },
             "some" => Ok(Value::boolean(false)),
             "every" => Ok(Value::boolean(true)),
@@ -1184,9 +1204,10 @@ impl ArrayAccess<'_> {
                         let len =
                             script!(array.vm.length_of_array_like(array.host, array.roots, id));
                         if len > MAX_SAFE_LENGTH - output {
-                            return Ok(Err(array
-                                .vm
-                                .type_error("concat exceeds the safe integer limit")?));
+                            return Ok(Err(array.vm.type_error(
+                                array.roots,
+                                "concat exceeds the safe integer limit",
+                            )?));
                         }
                         for index in 0..len {
                             if script!(array.present(id, index)) {
@@ -1249,16 +1270,18 @@ impl ArrayAccess<'_> {
                     ))
                 );
                 if depth - 1.0 == depth && stack.iter().any(|(ancestor, _, _)| *ancestor == id) {
-                    return Ok(Err(self
-                        .vm
-                        .type_error("cannot flatten a cyclic array at this depth")?));
+                    return Ok(Err(self.vm.type_error(
+                        self.roots,
+                        "cannot flatten a cyclic array at this depth",
+                    )?));
                 }
                 stack.push((id, 0..len, depth - 1.0));
             } else {
                 if *output == MAX_SAFE_LENGTH {
-                    return Ok(Err(self
-                        .vm
-                        .type_error("array output exceeds the safe integer limit")?));
+                    return Ok(Err(self.vm.type_error(
+                        self.roots,
+                        "array output exceeds the safe integer limit",
+                    )?));
                 }
                 script!(self.define(result, *output, value));
                 *output += 1;

@@ -235,13 +235,17 @@ pub(crate) fn getter(
 
 impl Vm {
     /// CreateByteDataBlock: zero-filled, with allocation failure as RangeError.
-    fn allocate_block(&mut self, length: usize) -> Completion<Vec<u8>> {
+    fn allocate_block(&mut self, roots: &ActiveRoots<'_>, length: usize) -> Completion<Vec<u8>> {
         if length > MAX_BYTE_LENGTH {
-            return Ok(Err(self.make_range_error("Invalid array buffer length")?));
+            return Ok(Err(
+                self.make_range_error(roots, "Invalid array buffer length")?
+            ));
         }
         let mut bytes = Vec::new();
         if bytes.try_reserve_exact(length).is_err() {
-            return Ok(Err(self.make_range_error("Array buffer allocation failed")?));
+            return Ok(Err(
+                self.make_range_error(roots, "Array buffer allocation failed")?
+            ));
         }
         bytes.extend(std::iter::repeat_n(0u8, length));
         Ok(Ok(bytes))
@@ -251,24 +255,27 @@ impl Vm {
     /// arrays and clones always use `%ArrayBuffer.prototype%`.
     pub(crate) fn allocate_array_buffer(
         &mut self,
+        roots: &ActiveRoots<'_>,
         byte_length: usize,
         max_byte_length: Option<usize>,
     ) -> Completion<ObjectId> {
-        self.allocate_array_buffer_with(byte_length, max_byte_length, ARRAY_BUFFER_PROTOTYPE)
+        self.allocate_array_buffer_with(roots, byte_length, max_byte_length, ARRAY_BUFFER_PROTOTYPE)
     }
 
     pub(crate) fn allocate_array_buffer_with(
         &mut self,
+        roots: &ActiveRoots<'_>,
         byte_length: usize,
         max_byte_length: Option<usize>,
         prototype: &'static str,
     ) -> Completion<ObjectId> {
         if max_byte_length.is_some_and(|max| byte_length > max) {
             return Ok(Err(self.make_range_error(
+                roots,
                 "ArrayBuffer byte length exceeds maxByteLength",
             )?));
         }
-        let bytes = match self.allocate_block(byte_length)? {
+        let bytes = match self.allocate_block(roots, byte_length)? {
             Ok(bytes) => bytes,
             Err(error) => return Ok(Err(error)),
         };
@@ -314,7 +321,7 @@ impl Vm {
             Err(error) => return Ok(Err(error)),
         };
         if number < 0.0 || number > MAX_BYTE_LENGTH as f64 {
-            return Ok(Err(self.make_range_error("Invalid index")?));
+            return Ok(Err(self.make_range_error(roots, "Invalid index")?));
         }
         Ok(Ok(number as usize))
     }
@@ -366,12 +373,14 @@ impl Vm {
                 Err(error) => return Ok(Err(error)),
             };
         Ok(match primitive.view() {
-            ValueRef::Undefined => Err(self.type_error("Cannot convert undefined to a BigInt")?),
-            ValueRef::Null => Err(self.type_error("Cannot convert null to a BigInt")?),
+            ValueRef::Undefined => {
+                Err(self.type_error(roots, "Cannot convert undefined to a BigInt")?)
+            }
+            ValueRef::Null => Err(self.type_error(roots, "Cannot convert null to a BigInt")?),
             ValueRef::Bool(value) => Ok(JsBigInt::from_i64(i64::from(value))),
             ValueRef::BigInt(value) => Ok(value.clone()),
             ValueRef::Number(_) => {
-                Err(self.type_error("Cannot convert a Number to a BigInt element")?)
+                Err(self.type_error(roots, "Cannot convert a Number to a BigInt element")?)
             }
             ValueRef::String(text) => {
                 match text
@@ -381,6 +390,7 @@ impl Vm {
                 {
                     Some(value) => Ok(value),
                     None => Err(self.alloc_error(
+                        roots,
                         self.builtins.get("syntaxerror.prototype"),
                         "SyntaxError",
                         Some("Cannot convert string to a BigInt".into()),
@@ -388,7 +398,7 @@ impl Vm {
                 }
             }
             ValueRef::Symbol(_) => {
-                Err(self.type_error("Cannot convert a Symbol value to a BigInt")?)
+                Err(self.type_error(roots, "Cannot convert a Symbol value to a BigInt")?)
             }
             ValueRef::Object(_) => unreachable!("ToPrimitive returned an object"),
         })
@@ -439,15 +449,20 @@ impl Vm {
     }
 
     /// RequireInternalSlot(obj, [[TypedArrayName]]).
-    pub(crate) fn require_typed(&mut self, value: &Value) -> Completion<(ObjectId, ElementKind)> {
+    pub(crate) fn require_typed(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Completion<(ObjectId, ElementKind)> {
         let ValueRef::Object(id) = value.view() else {
             return Ok(Err(
-                self.type_error("TypedArray method called on a non-object")?
+                self.type_error(roots, "TypedArray method called on a non-object")?
             ));
         };
         match self.heap.typed_array(id)? {
             Some(view) => Ok(Ok((id, view.kind))),
             None => Ok(Err(self.type_error(
+                roots,
                 "TypedArray method called on an incompatible receiver",
             )?)),
         }
@@ -455,16 +470,21 @@ impl Vm {
 
     /// ValidateTypedArrayBounds: a detached or out-of-range view throws, so
     /// every method that touches elements starts here.
-    pub(crate) fn validate_typed_bounds(&mut self, id: ObjectId) -> Completion<usize> {
+    pub(crate) fn validate_typed_bounds(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Completion<usize> {
         let Some(view) = self.heap.typed_array(id)? else {
             return Ok(Err(self.type_error(
+                roots,
                 "TypedArray method called on an incompatible receiver",
             )?));
         };
         let range = self.heap.typed_range(view)?;
         if matches!(range, ViewRange::Detached | ViewRange::OutOfBounds) {
             return Ok(Err(
-                self.type_error("TypedArray is detached or out of bounds")?
+                self.type_error(roots, "TypedArray is detached or out of bounds")?
             ));
         }
         Ok(Ok(range.len() / view.kind.bytes()))
@@ -483,26 +503,32 @@ impl Vm {
 
     pub(crate) fn require_array_buffer(
         &mut self,
+        roots: &ActiveRoots<'_>,
         value: &Value,
         what: &str,
     ) -> Completion<ObjectId> {
         let ValueRef::Object(id) = value.view() else {
-            return Ok(Err(self.type_error(what)?));
+            return Ok(Err(self.type_error(roots, what)?));
         };
         if self.heap.buffer(id)?.is_none() {
-            return Ok(Err(self.type_error(what)?));
+            return Ok(Err(self.type_error(roots, what)?));
         }
         Ok(Ok(id))
     }
 
-    pub(crate) fn require_data_view(&mut self, value: &Value) -> Completion<ObjectId> {
+    pub(crate) fn require_data_view(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+    ) -> Completion<ObjectId> {
         let ValueRef::Object(id) = value.view() else {
             return Ok(Err(
-                self.type_error("DataView method called on a non-object")?
+                self.type_error(roots, "DataView method called on a non-object")?
             ));
         };
         if self.heap.data_view(id)?.is_none() {
             return Ok(Err(self.type_error(
+                roots,
                 "DataView method called on an incompatible receiver",
             )?));
         }

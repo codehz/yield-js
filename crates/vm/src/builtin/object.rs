@@ -52,19 +52,19 @@ pub(crate) mod members {
         entries: 1 => |vm, host, roots, args, _| vm.object_values_or_entries(host, roots, &args, true);
         fromEntries: 1 => |vm, host, roots, args, _| vm.object_from_entries(host, roots, &args);
         create: 2 => |vm, host, roots, args, _| vm.object_create(host, roots, &args);
-        getPrototypeOf: 1 => |vm, _, _, args, _| vm.get_prototype_of(&args, false);
-        setPrototypeOf: 2 => |vm, _, _, args, _| vm.set_prototype_of(&args, false);
+        getPrototypeOf: 1 => |vm, _, roots, args, _| vm.get_prototype_of(roots, &args, false);
+        setPrototypeOf: 2 => |vm, _, roots, args, _| vm.set_prototype_of(roots, &args, false);
         getOwnPropertyDescriptor: 2 => |vm, host, roots, args, _| vm.get_own_property_descriptor(host, roots, &args, false);
         getOwnPropertyDescriptors: 1 => |vm, host, roots, args, _| vm.get_own_property_descriptors(host, roots, &args);
         defineProperty: 3 => |vm, host, roots, args, _| vm.define_property_builtin(host, roots, &args, false);
         defineProperties: 2 => |vm, host, roots, args, _| {
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-                return vm.throw_type_error("Object.defineProperties requires an object target");
+                return vm.throw_type_error(roots, "Object.defineProperties requires an object target");
             };
             vm.define_properties(host, roots, target, args.get(1))
         };
-        preventExtensions: 1 => |vm, _, _, args, _| vm.prevent_extensions_builtin_impl(&args, false);
-        isExtensible: 1 => |vm, _, _, args, _| vm.is_extensible_builtin_impl(&args, false);
+        preventExtensions: 1 => |vm, _, roots, args, _| vm.prevent_extensions_builtin_impl(roots, &args, false);
+        isExtensible: 1 => |vm, _, roots, args, _| vm.is_extensible_builtin_impl(roots, &args, false);
         seal: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Sealed);
         isSealed: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Sealed);
         freeze: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Frozen);
@@ -73,7 +73,7 @@ pub(crate) mod members {
 
     prototype_calls! {
         hasOwnProperty: 1 => |vm, host, roots, args, receiver| test_own_property(vm, host, roots, &args, receiver, false);
-        isPrototypeOf: 1 => |vm, _, _, args, receiver| {
+        isPrototypeOf: 1 => |vm, _, roots, args, receiver| {
             let result = |value| Ok(Invocation::Value(Value::boolean(value)));
             let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
                 return result(false);
@@ -81,7 +81,7 @@ pub(crate) mod members {
             let receiver = match receiver.view() {
                 ValueRef::Object(id) => id,
                 ValueRef::Null | ValueRef::Undefined => {
-                    return vm.throw_type_error("incompatible Object.prototype.isPrototypeOf receiver");
+                    return vm.throw_type_error(roots, "incompatible Object.prototype.isPrototypeOf receiver");
                 }
                 _ => return result(false),
             };
@@ -103,9 +103,9 @@ pub(crate) mod members {
             };
             vm.invoke(host, roots, &method, Arguments::EMPTY, receiver)
         };
-        valueOf: 0 => |vm, _, _, _, receiver| match receiver.view() {
-            ValueRef::Null | ValueRef::Undefined => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),
-            ValueRef::Object(id) if vm.heap.is_environment(id) != Some(false) => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),
+        valueOf: 0 => |vm, _, roots, _, receiver| match receiver.view() {
+            ValueRef::Null | ValueRef::Undefined => vm.throw_type_error(roots, "incompatible Object.prototype.valueOf receiver"),
+            ValueRef::Object(id) if vm.heap.is_environment(id) != Some(false) => vm.throw_type_error(roots, "incompatible Object.prototype.valueOf receiver"),
             _ => Ok(Invocation::Value(Value::object(vm.coercible_object(receiver)))),
         };
         toString: 0 => |vm, host, roots, _, receiver| vm.object_to_string(host, roots, receiver);
@@ -137,7 +137,7 @@ pub(crate) mod members {
                 string_own_property(text, key.borrowed()).map(|property| property.attributes())
             }
             ValueRef::Null | ValueRef::Undefined | ValueRef::Object(_) => {
-                return vm.throw_type_error("incompatible Object.prototype receiver");
+                return vm.throw_type_error(roots, "incompatible Object.prototype receiver");
             }
             _ => None,
         };

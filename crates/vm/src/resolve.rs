@@ -37,7 +37,7 @@ impl Vm {
             return Ok(());
         }
         if matches!(value.view(), ValueRef::Object(id) if id == result) {
-            let error = self.type_error("Cannot resolve a promise with itself")?;
+            let error = self.type_error(roots, "Cannot resolve a promise with itself")?;
             return self.settle(result, Settlement::Rejected(error));
         }
         let input = self.classify_resolution(host, &roots.with(&result), value)?;

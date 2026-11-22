@@ -16,7 +16,7 @@ pub(crate) mod namespace {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(ValueRef::Object(id)) = args.first().map(Value::view) else {
-            return vm.throw_type_error("Reflect.ownKeys requires an object");
+            return vm.throw_type_error(roots, "Reflect.ownKeys requires an object");
         };
         let keys = match vm.own_keys(host, roots, id, false)? {
             Ok(keys) => keys,
@@ -44,7 +44,7 @@ pub(crate) mod namespace {
             .first()
             .filter(|value| matches!(value.view(), ValueRef::Object(_)))
         else {
-            return vm.throw_type_error("Reflect.deleteProperty requires an object");
+            return vm.throw_type_error(roots, "Reflect.deleteProperty requires an object");
         };
         vm.delete_property(
             host,
@@ -69,40 +69,40 @@ pub(crate) mod namespace {
     fn prevent_extensions(
         vm: &mut Vm,
         _host: &mut dyn Host,
-        _roots: &ActiveRoots<'_>,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.prevent_extensions_builtin_impl(args, true)
+        vm.prevent_extensions_builtin_impl(roots, args, true)
     }
 
     #[function(name = "isExtensible", length = 1)]
     fn is_extensible(
         vm: &mut Vm,
         _host: &mut dyn Host,
-        _roots: &ActiveRoots<'_>,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.is_extensible_builtin_impl(args, true)
+        vm.is_extensible_builtin_impl(roots, args, true)
     }
 
     #[function(name = "getPrototypeOf", length = 1)]
     fn get_prototype_of(
         vm: &mut Vm,
         _host: &mut dyn Host,
-        _roots: &ActiveRoots<'_>,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.get_prototype_of(args, true)
+        vm.get_prototype_of(roots, args, true)
     }
 
     #[function(name = "setPrototypeOf", length = 2)]
     fn set_prototype_of(
         vm: &mut Vm,
         _host: &mut dyn Host,
-        _roots: &ActiveRoots<'_>,
+        roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        vm.set_prototype_of(args, true)
+        vm.set_prototype_of(roots, args, true)
     }
 
     #[function(name = "get", length = 2)]
@@ -114,7 +114,7 @@ pub(crate) mod namespace {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return vm.throw_type_error("Reflect.get requires an object");
+            return vm.throw_type_error(roots, "Reflect.get requires an object");
         };
         let key =
             match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {
@@ -139,7 +139,7 @@ pub(crate) mod namespace {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return vm.throw_type_error("Reflect.set requires an object");
+            return vm.throw_type_error(roots, "Reflect.set requires an object");
         };
         let key =
             match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {
@@ -160,7 +160,7 @@ pub(crate) mod namespace {
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return vm.throw_type_error("Reflect.has requires an object");
+            return vm.throw_type_error(roots, "Reflect.has requires an object");
         };
         let key =
             match vm.coerce_property_key(host, roots, args.get(1).unwrap_or(&Value::UNDEFINED))? {

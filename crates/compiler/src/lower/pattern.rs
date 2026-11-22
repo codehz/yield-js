@@ -216,6 +216,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         initializer: &'ast Expression<'ast>,
         name: &str,
     ) -> Result<Reg, CompileError> {
+        self.with_origin(initializer.span(), |this| {
+            this.compile_pattern_default_at_site(value, initializer, name)
+        })
+    }
+
+    fn compile_pattern_default_at_site(
+        &mut self,
+        value: Reg,
+        initializer: &'ast Expression<'ast>,
+        name: &str,
+    ) -> Result<Reg, CompileError> {
         let undefined = self.emit_undefined()?;
         let is_undefined = self.alloc_reg()?;
         self.emit(Instr::Binary {

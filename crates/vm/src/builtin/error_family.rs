@@ -38,7 +38,7 @@ macro_rules! error_class {
                     },
                     |vm, host, roots, args, prototype| {
                         let result = vm.construct_error(host, roots, $name, PROTOTYPE, args)?;
-                        vm.with_result_prototype(result, prototype)
+                        vm.with_result_prototype(roots, result, prototype)
                     },
                 )]],
                 Some(|vm, _| {
