@@ -210,6 +210,34 @@ fn binary_artifact_round_trips_binary_only_values() {
 }
 
 #[test]
+fn iterator_records_survive_validated_binary_restore() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Snapshot, Value, Vm};
+
+    let build = build(
+        r#"
+let index = 0;
+const source = { next() { return { value: ++index, done: index > 2 }; } };
+const wrapped = Iterator.from(source);
+const iterator = Iterator.concat(wrapped, [3]);
+iterator.next();
+source.next = () => { throw 'next was not cached'; };
+export function run() { return iterator.toArray().join(); }
+"#,
+    );
+    let mut host = TestHost::default();
+    let vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let snapshot = vm.snapshot(&[]).expect("capture suspended iterator");
+    let bytes = snapshot.to_bytes().expect("encode snapshot");
+    let decoded = Snapshot::from_bytes(&bytes).expect("decode snapshot");
+    let mut restored = Vm::restore_validated(decoded, build, &mut host).expect("restore snapshot");
+    let actual = restored
+        .start(&mut host, "run", vec![])
+        .expect("consume iterator");
+    assert_eq!(actual, Value::string("2,3".into()));
+}
+
+#[test]
 fn callable_initial_names_participate_in_build_identity() {
     let mut build = yield_harness::build("export function run() { return 0; }");
     let id = build.build_id.clone();

@@ -140,6 +140,7 @@ builtin_globals! {
     "encodeURIComponent" => Global::Function(global_functions::ENCODE_URI_COMPONENT),
     "decodeURIComponent" => Global::Function(global_functions::DECODE_URI_COMPONENT),
     "eval" => Global::Function(global_functions::EVAL),
+    "Iterator" => Global::Function(super::iterator::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

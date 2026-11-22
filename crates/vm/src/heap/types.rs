@@ -1505,6 +1505,10 @@ pub enum Object {
         object: PlainObject,
         state: crate::builtin::iterator::helpers::HelperState,
     },
+    IteratorWrapper {
+        object: PlainObject,
+        record: crate::builtin::iterator::helpers::Record,
+    },
     StringIterator {
         object: PlainObject,
         string: JsString,
@@ -1737,6 +1741,16 @@ impl PartialEq for Object {
                 IteratorHelper {
                     object: b,
                     state: y,
+                },
+            ) => a == b && x == y,
+            (
+                IteratorWrapper {
+                    object: a,
+                    record: x,
+                },
+                IteratorWrapper {
+                    object: b,
+                    record: y,
                 },
             ) => a == b && x == y,
             (

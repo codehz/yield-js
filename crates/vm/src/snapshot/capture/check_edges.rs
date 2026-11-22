@@ -240,6 +240,13 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                 "iterator helper {id} has invalid suspended state"
             )));
         }
+        if let Object::IteratorWrapper { record, .. } = heap.get(id)?
+            && !record.valid(heap)
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "wrapped iterator {id} has an invalid iterator record"
+            )));
+        }
         if let Object::StringIterator {
             string, position, ..
         } = heap.get(id)?

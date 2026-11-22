@@ -110,6 +110,7 @@ macro_rules! map_object_storage {
             | Object::CollectionIterator { object: $storage, .. }
             | Object::ArrayIterator { object: $storage, .. }
             | Object::IteratorHelper { object: $storage, .. }
+            | Object::IteratorWrapper { object: $storage, .. }
             | Object::StringIterator { object: $storage, .. }
             | Object::RegExpStringIterator { object: $storage, .. }
             | Object::Bound(BoundObject { object: $storage, .. })
@@ -478,6 +479,11 @@ impl Object {
             }
             Self::IteratorHelper { state, .. } => {
                 for value in state.values() {
+                    push_value(out, value);
+                }
+            }
+            Self::IteratorWrapper { record, .. } => {
+                for value in record.values() {
                     push_value(out, value);
                 }
             }

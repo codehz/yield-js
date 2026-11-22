@@ -1371,7 +1371,7 @@ impl Vm {
         self.has_instance(host, roots, value, constructor, false)
     }
 
-    fn ordinary_has_instance(
+    pub(crate) fn ordinary_has_instance(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,

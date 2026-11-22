@@ -4,7 +4,7 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::error::VmError;
-use crate::gc::ActiveRoots;
+use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Heap, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
@@ -13,17 +13,17 @@ use crate::vm::Vm;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Record {
-    iterator: Value,
-    next: Value,
+pub struct Record {
+    pub(super) iterator: Value,
+    pub(super) next: Value,
 }
 
 impl Record {
-    fn values(&self) -> [&Value; 2] {
+    pub(crate) fn values(&self) -> [&Value; 2] {
         [&self.iterator, &self.next]
     }
 
-    fn valid(&self, heap: &Heap) -> bool {
+    pub(crate) fn valid(&self, heap: &Heap) -> bool {
         matches!(self.iterator.view(), ValueRef::Object(id) if script_object(heap, id))
             && !matches!(self.next.view(), ValueRef::Object(id) if !script_object(heap, id))
     }
@@ -119,8 +119,56 @@ pub struct Cursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConcatInput {
+    iterable: Value,
+    open: Value,
+}
+
+impl TraceRoots for ConcatInput {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        [&self.iterable, &self.open].trace(tracer)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConcatCursor {
+    // Stored in reverse order so completing each open can release that entry.
+    pending: Vec<ConcatInput>,
+    current: Option<Record>,
+}
+
+impl ConcatCursor {
+    fn values(&self) -> impl Iterator<Item = &Value> {
+        self.pending
+            .iter()
+            .flat_map(|input| [&input.iterable, &input.open])
+            .chain(self.current.iter().flat_map(Record::values))
+    }
+
+    fn valid(&self, heap: &Heap) -> bool {
+        self.current.as_ref().is_none_or(|record| record.valid(heap))
+            && self.pending.iter().all(|input| {
+                matches!(input.iterable.view(), ValueRef::Object(id) if script_object(heap, id))
+                    && matches!(input.open.view(), ValueRef::Object(id) if heap.get(id).is_ok_and(crate::builtin::is_callable_object))
+            })
+    }
+}
+
+impl TraceRoots for ConcatCursor {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        for value in self.values() {
+            value.trace(tracer)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HelperState {
     Suspended(Cursor),
+    Concat(ConcatCursor),
     Running,
     Done,
 }
@@ -131,20 +179,28 @@ impl HelperState {
             Self::Suspended(cursor) => Some(cursor),
             _ => None,
         };
-        cursor.into_iter().flat_map(|cursor| {
-            cursor
-                .outer
-                .values()
-                .into_iter()
-                .chain(cursor.operation.callback())
-                .chain(cursor.inner.iter().flat_map(Record::values))
-        })
+        let concat = match self {
+            Self::Concat(cursor) => Some(cursor),
+            _ => None,
+        };
+        cursor
+            .into_iter()
+            .flat_map(|cursor| {
+                cursor
+                    .outer
+                    .values()
+                    .into_iter()
+                    .chain(cursor.operation.callback())
+                    .chain(cursor.inner.iter().flat_map(Record::values))
+            })
+            .chain(concat.into_iter().flat_map(ConcatCursor::values))
     }
 
     pub(crate) fn valid(&self, heap: &Heap) -> bool {
         match self {
             Self::Running => false,
             Self::Done => true,
+            Self::Concat(cursor) => cursor.valid(heap),
             Self::Suspended(cursor) => {
                 cursor.outer.valid(heap)
                     && (cursor.started || cursor.index == 0)
@@ -174,10 +230,10 @@ macro_rules! script {
     };
 }
 
-struct Protocol<'a, 'r> {
-    vm: &'a mut Vm,
-    host: &'a mut dyn Host,
-    roots: &'a ActiveRoots<'r>,
+pub(super) struct Protocol<'a, 'r> {
+    pub(super) vm: &'a mut Vm,
+    pub(super) host: &'a mut dyn Host,
+    pub(super) roots: &'a ActiveRoots<'r>,
 }
 
 impl Protocol<'_, '_> {
@@ -196,11 +252,19 @@ impl Protocol<'_, '_> {
         }
     }
 
-    fn flatten(&mut self, mapped: &Value) -> Result<Result<Record, Value>, VmError> {
-        if !matches!(mapped.view(), ValueRef::Object(_)) {
-            return Ok(Err(self
-                .vm
-                .type_error(self.roots, "flatMap mapper must return an object")?));
+    pub(super) fn flatten(
+        &mut self,
+        mapped: &Value,
+        allow_strings: bool,
+    ) -> Result<Result<Record, Value>, VmError> {
+        let is_object = matches!(mapped.view(), ValueRef::Object(_));
+        if !(is_object || allow_strings && matches!(mapped.view(), ValueRef::String(_))) {
+            let message = if allow_strings {
+                "Iterator.from input must be an object or a string"
+            } else {
+                "flatMap mapper must return an object"
+            };
+            return Ok(Err(self.vm.type_error(self.roots, message)?));
         }
         let roots = &self.roots.with(mapped);
         let method = match self.vm.read_property(
@@ -213,6 +277,11 @@ impl Protocol<'_, '_> {
             Invocation::Value(method) => method,
         };
         if matches!(method.view(), ValueRef::Undefined | ValueRef::Null) {
+            if !is_object {
+                return Ok(Err(self
+                    .vm
+                    .type_error(roots, "iterator must be an object")?));
+            }
             self.direct(mapped)
         } else {
             self.vm
@@ -248,6 +317,48 @@ impl Protocol<'_, '_> {
             &Value::UNDEFINED,
         )
     }
+}
+
+pub(super) fn concat(
+    vm: &mut Vm,
+    host: &mut dyn Host,
+    roots: &ActiveRoots<'_>,
+    args: Vec<Value>,
+) -> Result<Invocation, VmError> {
+    let mut pending = Vec::with_capacity(args.len());
+    let mut args = args.into_iter();
+    while let Some(iterable) = args.next() {
+        let edges = (&iterable, args.as_slice(), &pending);
+        let roots = &roots.with(&edges);
+        if !matches!(iterable.view(), ValueRef::Object(_)) {
+            return vm.throw_type_error(roots, "Iterator.concat inputs must be objects");
+        }
+        let open = match vm.read_property(
+            host,
+            roots,
+            &iterable,
+            PropertyKeyRef::Symbol(ITERATOR_SYMBOL),
+        )? {
+            Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+            Invocation::Value(open) => open,
+        };
+        if !vm.is_callable(&open) {
+            return vm.throw_type_error(
+                roots,
+                "Iterator.concat input must have a callable Symbol.iterator",
+            );
+        }
+        pending.push(ConcatInput { iterable, open });
+    }
+    pending.reverse();
+    let id = vm.heap.alloc(Object::IteratorHelper {
+        object: PlainObject::new(Some(vm.builtins.get(super::HELPER_ROOT))),
+        state: HelperState::Concat(ConcatCursor {
+            pending,
+            current: None,
+        }),
+    });
+    Ok(Invocation::Value(Value::object(id)))
 }
 
 pub(super) fn invoke(
@@ -412,37 +523,35 @@ pub(super) fn resume(
     let Object::IteratorHelper { state, .. } = vm.heap.get_mut(id)? else {
         return vm.throw_type_error(roots, invalid);
     };
-    let done = match state {
+    let mut suspended = match state {
         HelperState::Running => {
             return vm.throw_type_error(roots, "iterator helper is already running");
         }
         HelperState::Done => return vm.iterator_result(Value::UNDEFINED, true),
-        HelperState::Suspended(cursor) => returning && !cursor.started,
-    };
-    let HelperState::Suspended(mut cursor) = std::mem::replace(
-        state,
-        if done {
-            HelperState::Done
-        } else {
-            HelperState::Running
-        },
-    ) else {
-        unreachable!()
+        HelperState::Suspended(cursor) if returning && !cursor.started => {
+            std::mem::replace(state, HelperState::Done)
+        }
+        HelperState::Suspended(_) | HelperState::Concat(_) => {
+            std::mem::replace(state, HelperState::Running)
+        }
     };
     let roots = &roots.with(receiver);
     let mut protocol = Protocol { vm, host, roots };
-    let result = if returning {
-        close_cursor(&mut protocol, &cursor)
-    } else {
-        cursor.started = true;
-        advance(&mut protocol, &mut cursor)
+    let result = match &mut suspended {
+        HelperState::Suspended(cursor) if returning => close_cursor(&mut protocol, cursor),
+        HelperState::Suspended(cursor) => {
+            cursor.started = true;
+            advance(&mut protocol, cursor)
+        }
+        HelperState::Concat(cursor) if returning => close_concat(&mut protocol, cursor),
+        HelperState::Concat(cursor) => advance_concat(&mut protocol, cursor),
+        _ => unreachable!(),
     };
     let Object::IteratorHelper { state, .. } = protocol.vm.heap.get_mut(id)? else {
         unreachable!()
     };
-    let suspended = matches!(result, Ok(Outcome::Yield(_)));
-    *state = if suspended {
-        HelperState::Suspended(cursor)
+    *state = if matches!(result, Ok(Outcome::Yield(_))) {
+        suspended
     } else {
         HelperState::Done
     };
@@ -450,6 +559,59 @@ pub(super) fn resume(
         Outcome::Yield(value) => protocol.vm.iterator_result(value, false),
         Outcome::Done => protocol.vm.iterator_result(Value::UNDEFINED, true),
         Outcome::Thrown(error) => Ok(Invocation::Thrown(error)),
+    }
+}
+
+fn advance_concat(
+    protocol: &mut Protocol<'_, '_>,
+    cursor: &mut ConcatCursor,
+) -> Result<Outcome, VmError> {
+    loop {
+        let roots = &protocol.roots.with(cursor);
+        if let Some(record) = &cursor.current {
+            let mut step = Protocol {
+                vm: protocol.vm,
+                host: protocol.host,
+                roots,
+            };
+            match step.step(record)? {
+                Ok(Some(value)) => return Ok(Outcome::Yield(value)),
+                Ok(None) => cursor.current = None,
+                Err(error) => return Ok(Outcome::Thrown(error)),
+            }
+        } else if let Some(input) = cursor.pending.last() {
+            match protocol.vm.get_iterator_from_method(
+                protocol.host,
+                roots,
+                &input.iterable,
+                &input.open,
+            )? {
+                Ok((iterator, next)) => {
+                    cursor.pending.pop();
+                    cursor.current = Some(Record { iterator, next });
+                }
+                Err(error) => return Ok(Outcome::Thrown(error)),
+            }
+        } else {
+            return Ok(Outcome::Done);
+        }
+    }
+}
+
+fn close_concat(
+    protocol: &mut Protocol<'_, '_>,
+    cursor: &ConcatCursor,
+) -> Result<Outcome, VmError> {
+    let Some(record) = &cursor.current else {
+        return Ok(Outcome::Done);
+    };
+    let roots = &protocol.roots.with(cursor);
+    match protocol
+        .vm
+        .close_iterator(protocol.host, roots, &record.iterator)?
+    {
+        Invocation::Value(_) => Ok(Outcome::Done),
+        Invocation::Thrown(error) => Ok(Outcome::Thrown(error)),
     }
 }
 
@@ -567,7 +729,7 @@ fn advance(protocol: &mut Protocol<'_, '_>, cursor: &mut Cursor) -> Result<Outco
             Operation::Map(_) => return Ok(Outcome::Yield(result)),
             Operation::Filter(_) if result.truthy() => return Ok(Outcome::Yield(value)),
             Operation::Filter(_) => {}
-            Operation::FlatMap(_) => match protocol.flatten(&result)? {
+            Operation::FlatMap(_) => match protocol.flatten(&result, false)? {
                 Ok(inner) => cursor.inner = Some(inner),
                 Err(error) => return close_abrupt(&mut protocol, outer, error),
             },

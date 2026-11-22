@@ -7,7 +7,7 @@ import { expect, gc, wait } from 'test';
 
 export async function run() {
   const proto = Object.getPrototypeOf(Object.getPrototypeOf([].values()));
-  expect(typeof globalThis.Iterator).toBe('undefined');
+  expect(proto).toBe(Iterator.prototype);
   expect(proto.map.length).toBe(1);
   expect(proto.toArray.length).toBe(0);
 

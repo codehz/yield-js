@@ -774,6 +774,7 @@ impl Heap {
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
             | Object::IteratorHelper { object: plain, .. }
+            | Object::IteratorWrapper { object: plain, .. }
             | Object::StringIterator { object: plain, .. }
             | Object::RegExpStringIterator { object: plain, .. } => plain,
             _ => {
