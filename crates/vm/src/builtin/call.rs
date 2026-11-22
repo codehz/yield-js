@@ -5,7 +5,7 @@ use crate::builtin::symbol_family;
 use crate::error::VmError;
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{
-    Attributes, BoundObject, BoxedPrimitive, CombineKind, CombineState, DescriptorUpdate,
+    Attributes, BoundObject, BoxedPrimitive, CombineKind, CombineState, DescriptorUpdate, Heap,
     ITERATOR_SYMBOL, IntegrityLevel, Object, OwnProperty, PlainObject, PromiseCallback,
     PromiseState, Property, ReactionJob, Resolution, SPECIES_SYMBOL, TO_STRING_TAG_SYMBOL,
     string_own_property,
@@ -54,13 +54,13 @@ impl Vm {
         func_id: u32,
         env: ObjectId,
     ) -> Result<ObjectId, VmError> {
-        if self.build.is_initializer(func_id) {
+        let index = self.function_index(func_id)?;
+        if self.is_initializer(index) {
             return Err(VmError::InvalidState(
                 "script function cannot be materialized".to_owned(),
             ));
         }
         let id = self.heap.alloc_function(func_id, env);
-        let index = self.function_index(func_id)?;
         let function = &self.build.functions[index];
         let constructable = function.is_constructable();
         let generator = function.is_generator;
@@ -128,11 +128,6 @@ impl Vm {
                 {
                     return self.throw_type_error("class constructor requires new");
                 }
-                if self.build.is_initializer(func_id) {
-                    return Err(VmError::InvalidState(
-                        "script function is not callable".to_owned(),
-                    ));
-                }
                 let (callee_id, home) = match callee.view() {
                     ValueRef::Object(id) => (Some(id), self.heap.function(id).and_then(|f| f.home)),
                     _ => (None, None),
@@ -183,11 +178,10 @@ impl Vm {
         dispatch: Option<Dispatch<'_>>,
     ) -> Result<Option<Constructor>, VmError> {
         Ok(match dispatch {
-            Some(Dispatch::Script { func_id, env })
-                if !self.build.is_initializer(func_id)
-                    && self.build.functions[self.function_index(func_id)?].is_constructable() =>
-            {
-                Some(Constructor::Script { func_id, env })
+            Some(Dispatch::Script { func_id, env }) => {
+                let index = self.function_index(func_id)?;
+                (!self.is_initializer(index) && self.build.functions[index].is_constructable())
+                    .then_some(Constructor::Script { func_id, env })
             }
             Some(Dispatch::Native {
                 target,
@@ -761,26 +755,30 @@ impl Vm {
         result
     }
 
-    pub(crate) fn create_arguments_object(&mut self, args: &[Value]) -> Result<Value, VmError> {
-        let id = self.heap.alloc_plain();
+    pub(crate) fn create_arguments_object(
+        heap: &mut Heap,
+        iterator: ObjectId,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        let id = heap.alloc_plain();
         for (index, value) in args.iter().enumerate() {
-            self.heap.define_data(
+            heap.define_data(
                 id,
                 PropertyKey::String(index.to_string().into()),
                 value.clone(),
                 Attributes::ORDINARY,
             )?;
         }
-        self.heap.define_data(
+        heap.define_data(
             id,
             "length",
             Value::number(args.len() as f64),
             Attributes::METHOD,
         )?;
-        self.heap.define_data(
+        heap.define_data(
             id,
             PropertyKey::Symbol(ITERATOR_SYMBOL),
-            Value::object(self.builtins.get("array.values")),
+            Value::object(iterator),
             Attributes::METHOD,
         )?;
         Ok(Value::object(id))

@@ -157,9 +157,59 @@ pub(crate) struct RestoredState {
     pub(crate) module_namespaces: Vec<ObjectId>,
 }
 
+/// Runtime-only metadata indexed by the original, validated function table.
+#[derive(Debug)]
+struct FunctionTable {
+    indices: BTreeMap<u32, usize>,
+    calls: Vec<CallMetadata>,
+    module_environments: Vec<bool>,
+}
+
+#[derive(Debug)]
+struct CallMetadata {
+    needs_environment: bool,
+    is_initializer: bool,
+}
+
+impl FunctionTable {
+    fn from_validated(build: &Build) -> Self {
+        let indices: BTreeMap<_, _> = build
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| (function.func_id, index))
+            .collect();
+        let mut calls: Vec<_> = build
+            .functions
+            .iter()
+            .map(|function| CallMetadata {
+                needs_environment: function.needs_environment(),
+                is_initializer: false,
+            })
+            .collect();
+        let module_environments = build
+            .modules
+            .iter()
+            .map(|module| {
+                let declaration = indices[&module.declaration];
+                let evaluation = indices[&module.evaluation];
+                calls[declaration].is_initializer = true;
+                calls[evaluation].is_initializer = true;
+                calls[declaration].needs_environment || calls[evaluation].needs_environment
+            })
+            .collect();
+        Self {
+            indices,
+            calls,
+            module_environments,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Vm {
     pub(crate) build: Build,
+    functions: FunctionTable,
     pub(crate) bindings: Arc<Bindings>,
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
@@ -233,6 +283,7 @@ impl Vm {
     fn empty(build: Build, bindings: Arc<Bindings>) -> Self {
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
         Self {
+            functions: FunctionTable::from_validated(&build),
             build,
             bindings,
             heap: Heap::new(),
@@ -1052,7 +1103,7 @@ impl Vm {
         self.module_namespaces.reserve(count);
         for index in 0..count {
             let module = index as u32;
-            let env = if self.build.module_needs_environment(module) {
+            let env = if self.module_needs_environment(index) {
                 let bindings = self.build.module_bindings(module);
                 let env = self
                     .heap
@@ -1194,11 +1245,12 @@ impl Vm {
         module: usize,
         func_id: u32,
     ) -> Result<(), VmError> {
+        let function_index = self.function_index(func_id)?;
         let prepared = self.module_envs[module];
         self.activate(
             host,
             &ActiveRoots::EMPTY,
-            func_id,
+            function_index,
             None,
             prepared,
             Vec::new(),
@@ -1453,11 +1505,19 @@ impl Vm {
     }
 
     pub(crate) fn function_index(&self, func_id: u32) -> Result<usize, VmError> {
-        self.build
-            .functions
-            .iter()
-            .position(|function| function.func_id == func_id)
+        self.functions
+            .indices
+            .get(&func_id)
+            .copied()
             .ok_or_else(|| VmError::InvalidState(format!("function {func_id} does not exist")))
+    }
+
+    pub(crate) fn is_initializer(&self, function_index: usize) -> bool {
+        self.functions.calls[function_index].is_initializer
+    }
+
+    pub(crate) fn module_needs_environment(&self, module_index: usize) -> bool {
+        self.functions.module_environments[module_index]
     }
 
     pub(crate) fn alloc_continuation(&mut self) -> ContinuationId {
@@ -1604,10 +1664,16 @@ impl Vm {
         (new_target, home): (&Value, Option<ObjectId>),
         callee: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
+        let function_index = self.function_index(func_id)?;
+        if self.is_initializer(function_index) {
+            return Err(VmError::InvalidState(
+                "script function is not callable".to_owned(),
+            ));
+        }
         self.activate(
             host,
             roots,
-            func_id,
+            function_index,
             parent_env,
             None,
             args,
@@ -1624,80 +1690,73 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
-        func_id: u32,
+        function_index: usize,
         parent_env: Option<ObjectId>,
         prepared_env: Option<ObjectId>,
         args: Vec<Value>,
         (receiver, new_target, home): (&Value, &Value, Option<ObjectId>),
         callee: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
-        let function_index = self.function_index(func_id)?;
-        let is_async = self.build.functions[function_index].is_async;
-        let params = self.build.functions[function_index].params.clone();
-        let rest_param = self.build.functions[function_index].rest_param.clone();
-        let this_param = self.build.functions[function_index].this_param.clone();
-        let new_target_param = self.build.functions[function_index]
-            .new_target_param
-            .clone();
-        let arguments_param = self.build.functions[function_index].arguments_param.clone();
+        let function = &self.build.functions[function_index];
         // An async generator's call returns the generator object, so it has no
         // activation result Promise; each request owns its own instead.
-        let is_generator = self.build.functions[function_index].is_generator;
-        let result_promise = (is_async && !is_generator).then(|| self.heap.alloc_promise());
+        let result_promise =
+            (function.is_async && !function.is_generator).then(|| self.heap.alloc_promise());
 
+        let mut frame = Frame::new(
+            function_index,
+            function,
+            None,
+            result_promise.map(ContinuationTarget::Promise),
+        );
+        frame.callee = callee;
+
+        // Entry initialization only mutates the frame and heap; it cannot run
+        // guest code or collect before execute_frame takes over rooting.
         let mut bindings = BTreeMap::new();
-        let mut slot_args = Vec::new();
-        let mut bind = |param, value| match param {
+        let mut bind = |param: &ParamTarget, value| match *param {
             ParamTarget::Binding(binding) => {
                 bindings.insert(binding, value);
+                Ok(())
             }
-            ParamTarget::Slot(slot) => slot_args.push((slot, value)),
+            ParamTarget::Slot(slot) => frame.write(slot, value),
         };
-        if let Some(param) = this_param {
-            bind(param, receiver.clone());
+        if let Some(param) = &function.this_param {
+            bind(param, receiver.clone())?;
         }
-        if let Some(param) = new_target_param {
-            bind(param, new_target.clone());
+        if let Some(param) = &function.new_target_param {
+            bind(param, new_target.clone())?;
         }
-        if let Some(param) = self.build.functions[function_index].home_param.clone() {
+        if let Some(param) = &function.home_param {
             let home =
                 home.ok_or_else(|| VmError::InvalidState("function has no home object".into()))?;
-            bind(param, Value::object(home));
+            bind(param, Value::object(home))?;
         }
-        if let Some(param) = arguments_param {
-            bind(param, self.create_arguments_object(&args)?);
+        if let Some(param) = &function.arguments_param {
+            let iterator = self.builtins.get("array.values");
+            bind(
+                param,
+                Self::create_arguments_object(&mut self.heap, iterator, &args)?,
+            )?;
         }
         let mut args = args.into_iter();
-        for param in params {
-            bind(param, args.next().unwrap_or(Value::UNDEFINED));
+        for param in &function.params {
+            bind(param, args.next().unwrap_or(Value::UNDEFINED))?;
         }
-        if let Some(param) = rest_param {
+        if let Some(param) = &function.rest_param {
             let rest = self.heap.alloc_array(args.collect());
-            bind(param, Value::object(rest));
+            bind(param, Value::object(rest))?;
         }
-        let needs_env = self.build.functions[function_index].needs_environment();
-        let env = if needs_env || prepared_env.is_some() {
-            let env = match prepared_env {
-                Some(env) => env,
-                None => self.heap.alloc_environment(parent_env, BTreeMap::new()),
-            };
+        frame.env = if let Some(env) = prepared_env {
             if !bindings.is_empty() {
                 self.heap.environment_mut(env)?.bindings.extend(bindings);
             }
             Some(env)
+        } else if self.functions.calls[function_index].needs_environment {
+            Some(self.heap.alloc_environment(parent_env, bindings))
         } else {
             None
         };
-        let mut frame = Frame::new(
-            function_index,
-            &self.build.functions[function_index],
-            env,
-            result_promise.map(ContinuationTarget::Promise),
-        );
-        frame.callee = callee;
-        for (slot, value) in slot_args {
-            frame.write(slot, value)?;
-        }
         let outcome = self.execute_frame(host, roots, frame)?;
         match result_promise {
             Some(promise) => {
@@ -1753,6 +1812,7 @@ impl Vm {
             .map(|(id, _)| *id)
             .collect();
         Self {
+            functions: FunctionTable::from_validated(&build),
             build,
             bindings,
             heap,

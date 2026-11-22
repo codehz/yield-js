@@ -8,6 +8,63 @@ use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
 
 #[test]
+fn sparse_function_ids_work_after_restore() {
+    let mut build = build(
+        r#"
+import { wait } from "test";
+function add_one(value) { return value + 1; }
+export async function run() {
+    const before = add_one(20);
+    return before + add_one(await wait("sparse"));
+}
+"#,
+    );
+    let sparse = |id: u32| u32::MAX - id;
+    for function in &mut build.functions {
+        function.func_id = sparse(function.func_id);
+        for instruction in &mut function.code {
+            if let Instr::Closure { function, .. } = instruction {
+                *function = sparse(*function);
+            }
+        }
+    }
+    for module in &mut build.modules {
+        module.declaration = sparse(module.declaration);
+        module.evaluation = sparse(module.evaluation);
+        for export in module.exports.values_mut() {
+            export.getter = sparse(export.getter);
+        }
+    }
+    build
+        .functions
+        .sort_by_key(|function| std::cmp::Reverse(function.func_id));
+    build.functions.rotate_left(1);
+    build.finalize();
+
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).expect("load sparse function IDs");
+    let result = vm.start(&mut host, "run", vec![]).expect("start");
+    vm.run_until_idle(&mut host).expect("suspend");
+    let snapshot = json_round_trip(
+        &vm.snapshot(std::slice::from_ref(&result))
+            .expect("snapshot"),
+    );
+    let mut vm = Vm::restore(snapshot, build, &mut host).expect("restore sparse function IDs");
+    vm.start_recovered_operations().expect("restart operation");
+    host.complete(
+        &mut vm,
+        "wait:sparse",
+        Completion::Fulfilled(JsValue::number(20.0)),
+    )
+    .expect("complete operation");
+    vm.run_until_idle(&mut host).expect("resume");
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::number(42.0))
+    );
+}
+
+#[test]
 fn loader_rejects_private_index_outside_its_lexical_class() {
     let mut corrupt = build("class A { #x; read(){ return this.#x; } } class B { #x; #y; }");
     let index = corrupt

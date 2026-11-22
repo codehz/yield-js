@@ -245,7 +245,7 @@ impl Vm {
             ));
         }
         for (module, env) in self.module_envs.iter().enumerate() {
-            if env.is_some() != self.build.module_needs_environment(module as u32) {
+            if env.is_some() != self.module_needs_environment(module) {
                 return Err(VmError::InvalidState(format!(
                     "wrong environment presence for source module {module}"
                 )));
