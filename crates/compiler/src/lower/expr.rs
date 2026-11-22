@@ -736,6 +736,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
         };
         let lhs = self.compile_expression(&expression.left)?;
+        if let Some(constant) = self.binary_constant(&expression.right)? {
+            let constant = self.session.intern(constant);
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::BinaryConst {
+                dst: self.slot(dst),
+                op: operator,
+                lhs: self.slot(lhs),
+                constant,
+            });
+            return Ok(dst);
+        }
         let rhs = self.compile_expression(&expression.right)?;
         let dst = self.alloc_reg()?;
         self.emit(Instr::Binary {
@@ -745,6 +756,30 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             rhs: self.slot(rhs),
         });
         Ok(dst)
+    }
+
+    /// A literal right operand has no evaluation side effects and can be
+    /// carried by the instruction instead of a separate `Const`.
+    fn binary_constant(
+        &self,
+        expression: &Expression<'ast>,
+    ) -> Result<Option<Constant>, CompileError> {
+        Ok(Some(match expression.without_parentheses() {
+            Expression::BooleanLiteral(literal) => Constant::Bool(literal.value),
+            Expression::NullLiteral(_) => Constant::Null,
+            Expression::NumericLiteral(literal) => Constant::Number(literal.value),
+            Expression::BigIntLiteral(literal) => {
+                let value =
+                    yield_vm::JsBigInt::from_decimal(literal.value.as_str()).ok_or_else(|| {
+                        unsupported(self.source_text(), literal.span, "BigInt literal")
+                    })?;
+                Constant::BigInt(value)
+            }
+            Expression::StringLiteral(literal) => {
+                Constant::String(self.string_literal_text(literal)?)
+            }
+            _ => return Ok(None),
+        }))
     }
 
     fn compile_logical(

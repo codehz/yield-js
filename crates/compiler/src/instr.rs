@@ -53,7 +53,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::SetMember { .. } => true,
-        Instr::Binary { op, .. } => !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe),
+        Instr::Binary { op, .. } | Instr::BinaryConst { op, .. } => {
+            !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
+        }
         Instr::Unary { op, .. } => {
             matches!(
                 *op,
@@ -127,6 +129,10 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Binary { dst, lhs, rhs, .. } => {
             uses.insert(lhs.index);
             uses.insert(rhs.index);
+            defs.insert(dst.index);
+        }
+        Instr::BinaryConst { dst, lhs, .. } => {
+            uses.insert(lhs.index);
             defs.insert(dst.index);
         }
         Instr::InstanceOf {
@@ -439,6 +445,17 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             op,
             lhs: remap(lhs),
             rhs: remap(rhs),
+        },
+        Instr::BinaryConst {
+            dst,
+            op,
+            lhs,
+            constant,
+        } => Instr::BinaryConst {
+            dst: remap(dst),
+            op,
+            lhs: remap(lhs),
+            constant,
         },
         Instr::InstanceOf {
             dst,

@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 48;
+pub const BYTECODE_VERSION: u32 = 49;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -186,6 +186,13 @@ pub enum Instr {
         op: BinaryOp,
         lhs: Slot,
         rhs: Slot,
+    },
+    /// Binary operation whose right operand is a build constant.
+    BinaryConst {
+        dst: Slot,
+        op: BinaryOp,
+        lhs: Slot,
+        constant: u32,
     },
     InstanceOf {
         dst: Slot,
@@ -1421,6 +1428,17 @@ impl Build {
                     check_slot(*dst, "Binary.dst")?;
                     check_slot(*lhs, "Binary.lhs")?;
                     check_slot(*rhs, "Binary.rhs")?;
+                }
+                Instr::BinaryConst {
+                    dst, lhs, constant, ..
+                } => {
+                    check_slot(*dst, "BinaryConst.dst")?;
+                    check_slot(*lhs, "BinaryConst.lhs")?;
+                    if *constant as usize >= self.constants.len() {
+                        return Err(format!(
+                            "{location}: BinaryConst at pc {pc} references constant {constant}"
+                        ));
+                    }
                 }
                 Instr::InstanceOf {
                     dst,

@@ -415,6 +415,117 @@ impl Vm {
         }
     }
 
+    fn binary_value(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        op: BinaryOp,
+        mut lhs: Value,
+        mut rhs: Value,
+    ) -> Result<Result<Value, Value>, VmError> {
+        if let (ValueRef::Number(left), ValueRef::Number(right)) = (lhs.view(), rhs.view()) {
+            return Ok(Ok(match op {
+                BinaryOp::Add => Value::number(left + right),
+                BinaryOp::Sub => Value::number(left - right),
+                BinaryOp::Mul => Value::number(left * right),
+                BinaryOp::Div => Value::number(left / right),
+                BinaryOp::Rem => Value::number(left % right),
+                BinaryOp::Exp => Value::number(left.powf(right)),
+                BinaryOp::Lt => Value::boolean(left < right),
+                BinaryOp::Le => Value::boolean(left <= right),
+                BinaryOp::Gt => Value::boolean(left > right),
+                BinaryOp::Ge => Value::boolean(left >= right),
+                BinaryOp::Eq | BinaryOp::StrictEq => Value::boolean(left == right),
+                BinaryOp::Ne | BinaryOp::StrictNe => Value::boolean(left != right),
+                BinaryOp::BitAnd => {
+                    let left = ops::number_to_uint32(left) as i32;
+                    let right = ops::number_to_uint32(right);
+                    Value::number((left & right as i32) as f64)
+                }
+                BinaryOp::BitOr => {
+                    let left = ops::number_to_uint32(left) as i32;
+                    let right = ops::number_to_uint32(right);
+                    Value::number((left | right as i32) as f64)
+                }
+                BinaryOp::BitXor => {
+                    let left = ops::number_to_uint32(left) as i32;
+                    let right = ops::number_to_uint32(right);
+                    Value::number((left ^ right as i32) as f64)
+                }
+                BinaryOp::Shl => {
+                    let left = ops::number_to_uint32(left) as i32;
+                    let right = ops::number_to_uint32(right);
+                    Value::number(left.wrapping_shl(right & 0x1f) as f64)
+                }
+                BinaryOp::Shr => {
+                    let left = ops::number_to_uint32(left) as i32;
+                    let right = ops::number_to_uint32(right);
+                    Value::number(left.wrapping_shr(right & 0x1f) as f64)
+                }
+                BinaryOp::UShr => {
+                    let left = ops::number_to_uint32(left);
+                    let right = ops::number_to_uint32(right);
+                    Value::number(left.wrapping_shr(right & 0x1f) as f64)
+                }
+            }));
+        }
+        let hint = match op {
+            BinaryOp::StrictEq | BinaryOp::StrictNe => None,
+            BinaryOp::Eq | BinaryOp::Ne => match (lhs.view(), rhs.view()) {
+                (
+                    ValueRef::Object(_),
+                    ValueRef::String(_)
+                    | ValueRef::Number(_)
+                    | ValueRef::BigInt(_)
+                    | ValueRef::Bool(_)
+                    | ValueRef::Symbol(_),
+                )
+                | (
+                    ValueRef::String(_)
+                    | ValueRef::Number(_)
+                    | ValueRef::BigInt(_)
+                    | ValueRef::Bool(_)
+                    | ValueRef::Symbol(_),
+                    ValueRef::Object(_),
+                ) => Some(Hint::Default),
+                _ => None,
+            },
+            BinaryOp::Add => Some(Hint::Default),
+            _ => Some(Hint::Number),
+        };
+        if let Some(hint) = hint {
+            // Arithmetic applies ToNumber to the left operand before the right.
+            let numeric = matches!(hint, Hint::Number)
+                && !matches!(
+                    op,
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+                );
+            for left in [true, false] {
+                let (value, other) = if left {
+                    (&mut lhs, &rhs)
+                } else {
+                    (&mut rhs, &lhs)
+                };
+                if matches!(value.view(), ValueRef::Object(_)) {
+                    // The first coercion may produce a fresh symbol.
+                    match self.primitive_from_object(host, &roots.with(other), value, hint)? {
+                        Invocation::Value(primitive) => *value = primitive,
+                        Invocation::Thrown(error) => return Ok(Err(error)),
+                    }
+                }
+                if numeric && matches!(value.view(), ValueRef::Symbol(_)) {
+                    return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+                }
+            }
+        }
+        Ok(match ops::binary_op(op, lhs, rhs) {
+            Ok(value) => Ok(value),
+            Err(BinaryError::TypeError(message)) => Err(self.type_error(message)?),
+            Err(BinaryError::RangeError(message)) => Err(self.make_range_error(message)?),
+            Err(BinaryError::Vm(error)) => return Err(error),
+        })
+    }
+
     fn step(
         &mut self,
         host: &mut dyn Host,
@@ -441,123 +552,31 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::Binary { dst, op, lhs, rhs } => {
-                let mut lhs = frame.read(lhs)?;
-                let mut rhs = frame.read(rhs)?;
-                if let (ValueRef::Number(left), ValueRef::Number(right)) = (lhs.view(), rhs.view())
-                {
-                    let value = match op {
-                        BinaryOp::Add => Value::number(left + right),
-                        BinaryOp::Sub => Value::number(left - right),
-                        BinaryOp::Mul => Value::number(left * right),
-                        BinaryOp::Div => Value::number(left / right),
-                        BinaryOp::Rem => Value::number(left % right),
-                        BinaryOp::Exp => Value::number(left.powf(right)),
-                        BinaryOp::Lt => Value::boolean(left < right),
-                        BinaryOp::Le => Value::boolean(left <= right),
-                        BinaryOp::Gt => Value::boolean(left > right),
-                        BinaryOp::Ge => Value::boolean(left >= right),
-                        BinaryOp::Eq | BinaryOp::StrictEq => Value::boolean(left == right),
-                        BinaryOp::Ne | BinaryOp::StrictNe => Value::boolean(left != right),
-                        BinaryOp::BitAnd => {
-                            let left = ops::number_to_uint32(left) as i32;
-                            let right = ops::number_to_uint32(right);
-                            Value::number((left & right as i32) as f64)
-                        }
-                        BinaryOp::BitOr => {
-                            let left = ops::number_to_uint32(left) as i32;
-                            let right = ops::number_to_uint32(right);
-                            Value::number((left | right as i32) as f64)
-                        }
-                        BinaryOp::BitXor => {
-                            let left = ops::number_to_uint32(left) as i32;
-                            let right = ops::number_to_uint32(right);
-                            Value::number((left ^ right as i32) as f64)
-                        }
-                        BinaryOp::Shl => {
-                            let left = ops::number_to_uint32(left) as i32;
-                            let right = ops::number_to_uint32(right);
-                            Value::number(left.wrapping_shl(right & 0x1f) as f64)
-                        }
-                        BinaryOp::Shr => {
-                            let left = ops::number_to_uint32(left) as i32;
-                            let right = ops::number_to_uint32(right);
-                            Value::number(left.wrapping_shr(right & 0x1f) as f64)
-                        }
-                        BinaryOp::UShr => {
-                            let left = ops::number_to_uint32(left);
-                            let right = ops::number_to_uint32(right);
-                            Value::number(left.wrapping_shr(right & 0x1f) as f64)
-                        }
-                    };
-                    frame.write(dst, value)?;
-                    return Ok(Step::Next);
+                let lhs = frame.read(lhs)?;
+                let rhs = frame.read(rhs)?;
+                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
+                    Ok(value) => {
+                        frame.write(dst, value)?;
+                        Ok(Step::Next)
+                    }
+                    Err(error) => Ok(Step::Throw(error)),
                 }
-                let hint = match op {
-                    BinaryOp::StrictEq | BinaryOp::StrictNe => None,
-                    BinaryOp::Eq | BinaryOp::Ne => match (lhs.view(), rhs.view()) {
-                        (
-                            ValueRef::Object(_),
-                            ValueRef::String(_)
-                            | ValueRef::Number(_)
-                            | ValueRef::BigInt(_)
-                            | ValueRef::Bool(_)
-                            | ValueRef::Symbol(_),
-                        )
-                        | (
-                            ValueRef::String(_)
-                            | ValueRef::Number(_)
-                            | ValueRef::BigInt(_)
-                            | ValueRef::Bool(_)
-                            | ValueRef::Symbol(_),
-                            ValueRef::Object(_),
-                        ) => Some(Hint::Default),
-                        _ => None,
-                    },
-                    BinaryOp::Add => Some(Hint::Default),
-                    _ => Some(Hint::Number),
-                };
-                if let Some(hint) = hint {
-                    // Arithmetic applies ToNumber to the left operand before the right.
-                    let numeric = matches!(hint, Hint::Number)
-                        && !matches!(
-                            op,
-                            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-                        );
-                    for left in [true, false] {
-                        let (value, other) = if left {
-                            (&mut lhs, &rhs)
-                        } else {
-                            (&mut rhs, &lhs)
-                        };
-                        if matches!(value.view(), ValueRef::Object(_)) {
-                            // The first coercion may produce a fresh symbol.
-                            match self.primitive_from_object(
-                                host,
-                                &frame_roots.with(other),
-                                value,
-                                hint,
-                            )? {
-                                Invocation::Value(primitive) => *value = primitive,
-                                Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                            }
-                        }
-                        if numeric && matches!(value.view(), ValueRef::Symbol(_)) {
-                            return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
-                        }
+            }
+            Instr::BinaryConst {
+                dst,
+                op,
+                lhs,
+                constant,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = Self::constant(constants, constant)?;
+                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
+                    Ok(value) => {
+                        frame.write(dst, value)?;
+                        Ok(Step::Next)
                     }
+                    Err(error) => Ok(Step::Throw(error)),
                 }
-                let value = match ops::binary_op(op, lhs, rhs) {
-                    Ok(value) => value,
-                    Err(BinaryError::TypeError(message)) => {
-                        return Ok(Step::Throw(self.type_error(message)?));
-                    }
-                    Err(BinaryError::RangeError(message)) => {
-                        return Ok(Step::Throw(self.make_range_error(message)?));
-                    }
-                    Err(BinaryError::Vm(error)) => return Err(error),
-                };
-                frame.write(dst, value)?;
-                Ok(Step::Next)
             }
             Instr::Unary { dst, op, src } => {
                 let mut value = frame.read(src)?;
