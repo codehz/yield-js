@@ -75,11 +75,11 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
 | 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交，折叠已知原始值的严格比较和少量 Number 运算；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 生成跳转 PC 和挂起表，并从块内活性流式累积槽区间，不保留逐 PC 活性表 |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（step 按语义族分派；分支体在 `vm/src/exec/{value,branch,env,call,class,object,iterator}.rs`，值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
-| 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/init.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
-| 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
+| 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/init.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture/` |
+| 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture/` |
 | 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `write_member` 预热与布局守卫（`SetMember` 指令分支在 `vm/src/exec/object.rs`） |
 | 函数 ID 索引 / 调用分派 | `vm/src/vm.rs` 的 `FunctionTable` / `FunctionIndices`；连续 ID 用密集表，稀疏 ID 用排序向量二分。`vm/src/builtin/call.rs` 的 `Dispatch::Script` 携带 `callee` / `home` / `class`，避免 `invoke` 重复查堆 |
-| 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
+| 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 入口与 `capture/` 下按校验、堆边、装载、续体、微任务分文件的恢复逻辑）；在 `harness/tests/e2e/` 补拒绝用例 |
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
 | 可观察的 JS 行为 | 一个 `.js` 用例，不是新的 Rust harness |
