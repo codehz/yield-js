@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use yield_vm::bytecode::Instr;
 
-use crate::cfg::{Block, Edge, FunctionCfg, Handler};
+use crate::cfg::{Block, Edge, FunctionCfg, Handler, Terminator};
 use crate::emit::Reg;
 use crate::instr::{may_throw, uses_defs};
 
@@ -19,7 +19,8 @@ pub(crate) struct Liveness {
 }
 
 pub(crate) fn eliminate_dead_writes(function: &mut FunctionCfg) -> Liveness {
-    let mut live = Liveness::solve(function, true);
+    let predecessors = predecessors(function);
+    let mut live = Liveness::solve(function, &predecessors, true);
     let mut changed = false;
     for block in function.blocks.iter_mut().flatten() {
         let mut after = live.before_end(block, &function.handlers);
@@ -45,35 +46,58 @@ pub(crate) fn eliminate_dead_writes(function: &mut FunctionCfg) -> Liveness {
         }
     }
     if changed {
-        live = Liveness::solve(function, false);
+        live = Liveness::solve(function, &predecessors, false);
     }
     live
 }
 
+fn predecessors(function: &FunctionCfg) -> Vec<Vec<usize>> {
+    let mut predecessors = vec![Vec::new(); function.blocks.len()];
+    for (id, block) in function.blocks.iter().enumerate() {
+        let Some(block) = block else { continue };
+        let can_throw = block.end.may_throw()
+            || (!block.protected_by.is_empty()
+                && block.statements.iter().any(|stmt| may_throw(&stmt.instr)));
+        for edge in block
+            .end
+            .successors()
+            .chain(block.exception_edges(&function.handlers, can_throw))
+        {
+            let incoming = &mut predecessors[edge.target.0];
+            if incoming.last() != Some(&id) {
+                incoming.push(id);
+            }
+        }
+    }
+    predecessors
+}
+
 impl Liveness {
-    fn solve(function: &FunctionCfg, skip_dead: bool) -> Self {
+    fn solve(function: &FunctionCfg, predecessors: &[Vec<usize>], skip_dead: bool) -> Self {
         let mut live = Self {
             live_in: vec![LiveSet::new(); function.blocks.len()],
         };
-        loop {
-            let mut changed = false;
-            for (id, block) in function.blocks.iter().enumerate().rev() {
-                let Some(block) = block else { continue };
-                let mut before = live.before_end(block, &function.handlers);
-                for stmt in block.statements.iter().rev() {
-                    if !skip_dead || !removable_write(&stmt.instr, &before) {
-                        live.before_statement(block, &function.handlers, &stmt.instr, &mut before);
-                    }
-                }
-                if before != live.live_in[id] {
-                    live.live_in[id] = before;
-                    changed = true;
+        // Prefer reverse layout order, but only revisit dependent blocks.
+        let mut pending: BTreeSet<_> = function
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(id, block)| block.as_ref().map(|_| id))
+            .collect();
+        while let Some(id) = pending.pop_last() {
+            let block = function.blocks[id].as_ref().unwrap();
+            let mut before = live.before_end(block, &function.handlers);
+            for stmt in block.statements.iter().rev() {
+                if !skip_dead || !removable_write(&stmt.instr, &before) {
+                    live.before_statement(block, &function.handlers, &stmt.instr, &mut before);
                 }
             }
-            if !changed {
-                return live;
+            if before != live.live_in[id] {
+                live.live_in[id] = before;
+                pending.extend(predecessors[id].iter().copied());
             }
         }
+        live
     }
 
     fn join_edge(&self, set: &mut LiveSet, edge: Edge) {
@@ -83,6 +107,15 @@ impl Liveness {
                 .copied()
                 .filter(|&reg| Some(reg) != edge.injected),
         );
+    }
+
+    /// Save the union after subtracting each edge's own injection.
+    pub(crate) fn saved_on_entry(&self, end: &Terminator) -> Vec<Reg> {
+        let mut saved = LiveSet::new();
+        for edge in end.successors() {
+            self.join_edge(&mut saved, edge);
+        }
+        saved.into_iter().collect()
     }
 
     fn before_end(&self, block: &Block, handlers: &[Handler]) -> LiveSet {
@@ -103,37 +136,46 @@ impl Liveness {
         handlers: &[Handler],
         instr: &Instr,
         set: &mut LiveSet,
-    ) {
+    ) -> LiveSet {
         let (uses, defs) = uses_defs(instr);
-        for def in defs {
-            set.remove(&def);
+        for def in &defs {
+            set.remove(def);
         }
         for edge in block.exception_edges(handlers, may_throw(instr)) {
             self.join_edge(set, edge);
         }
         set.extend(uses);
+        defs
     }
 
-    /// Append the live-in of each emitted instruction, in layout order. A
-    /// synthetic continuation jump uses its target live-in; `Next` has no
-    /// operands or writes, so its transfer already gives exactly that set.
-    pub(crate) fn append_points(
+    /// Visit live-ins and writes in an already positioned block, without
+    /// retaining a copy of each live set.
+    pub(crate) fn visit_points(
         &self,
         block: &Block,
         handlers: &[Handler],
+        start: usize,
         encode_end: bool,
-        out: &mut Vec<LiveSet>,
+        mut touch: impl FnMut(Reg, usize),
     ) {
-        let start = out.len();
         let mut before = self.before_end(block, handlers);
         if encode_end {
-            out.push(before.clone());
+            let pc = start + block.statements.len();
+            for &reg in &before {
+                touch(reg, pc);
+            }
+            // Await encodes a destination here; the other terminator writes
+            // occur only at their respective entry PCs.
+            if let Terminator::Await { fulfill, .. } = block.end {
+                touch(fulfill.dst, pc);
+            }
         }
-        for stmt in block.statements.iter().rev() {
-            self.before_statement(block, handlers, &stmt.instr, &mut before);
-            out.push(before.clone());
+        for (index, stmt) in block.statements.iter().enumerate().rev() {
+            let defs = self.before_statement(block, handlers, &stmt.instr, &mut before);
+            for reg in before.iter().copied().chain(defs) {
+                touch(reg, start + index);
+            }
         }
-        out[start..].reverse();
     }
 }
 

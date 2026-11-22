@@ -5,20 +5,33 @@ use std::collections::BTreeSet;
 use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, GeneratorStart, Instr, ResumeEntry};
 
 use super::{BlockId, Condition, FunctionCfg, Terminator, invalid};
-use crate::analyze::{LiveSet, Liveness};
+use crate::analyze::Liveness;
+use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::may_throw;
 use crate::ir::{FunctionAttrs, logical};
 
 /// Concrete layout, still using logical registers in code and table entries.
+/// The recovery tables' `saved_slots` carry logical registers until allocation.
 pub(crate) struct LaidOutFunction {
     pub(crate) attrs: FunctionAttrs,
     pub(crate) code: Vec<Instr>,
-    pub(crate) live_in: Vec<LiveSet>,
+    pub(crate) bounds: RegisterBounds,
     pub(crate) resumes: Vec<ResumeEntry>,
     pub(crate) yields: Vec<GeneratorEntry>,
     pub(crate) generator_start: Option<GeneratorStart>,
     pub(crate) handlers: Vec<ExceptionHandler>,
+}
+
+#[derive(Default)]
+pub(crate) struct RegisterBounds(pub(crate) Vec<Option<(usize, usize)>>);
+
+impl RegisterBounds {
+    pub(crate) fn touch(&mut self, reg: Reg, pc: usize) {
+        let bound = &mut self.0[usize::from(reg)];
+        let (first, last) = bound.unwrap_or((pc, pc));
+        *bound = Some((first.min(pc), last.max(pc)));
+    }
 }
 
 struct Position {
@@ -108,10 +121,11 @@ impl FunctionCfg {
                 .filter(|&pc| pc < len)
                 .ok_or_else(|| invalid("layout target missing"))
         };
+        let bounds = RegisterBounds(vec![None; usize::from(attrs.reg_count)]);
         let mut lowered = LaidOutFunction {
             attrs,
             code: Vec::with_capacity(len as usize),
-            live_in: Vec::with_capacity(len as usize),
+            bounds,
             resumes: Vec::new(),
             yields: Vec::new(),
             generator_start: None,
@@ -126,15 +140,26 @@ impl FunctionCfg {
                 code.push(Instr::Jump {
                     target: pos.start - 1,
                 });
-                lowered.live_in.push(LiveSet::new());
             }
-            live.append_points(&block, &handlers, pos.encode_end, &mut lowered.live_in);
+            live.visit_points(
+                &block,
+                &handlers,
+                pos.start as usize,
+                pos.encode_end,
+                |reg, pc| lowered.bounds.touch(reg, pc),
+            );
             let mut can_throw = block.end.may_throw();
             for statement in block.statements {
                 can_throw |= may_throw(&statement.instr);
                 code.push(statement.instr);
             }
             if pos.encode_end {
+                let saved = match block.end {
+                    Terminator::Await { .. }
+                    | Terminator::Yield { .. }
+                    | Terminator::GeneratorStart { .. } => live.saved_on_entry(&block.end),
+                    _ => Vec::new(),
+                };
                 let next_pc = index(code.len() + 1)?;
                 let adjacent = |target| {
                     let target = pc(target)?;
@@ -163,7 +188,7 @@ impl FunctionCfg {
                             reject_dst: logical(reject.dst),
                             fulfill_pc: pc(fulfill.target)?,
                             reject_pc: pc(reject.target)?,
-                            saved_slots: Vec::new(),
+                            saved_slots: saved,
                         });
                         Instr::Await {
                             input,
@@ -185,7 +210,7 @@ impl FunctionCfg {
                             next_pc: adjacent(next.target)?,
                             throw_pc: pc(thrown.target)?,
                             return_pc: pc(returned)?,
-                            saved_slots: Vec::new(),
+                            saved_slots: saved,
                         });
                         Instr::Yield {
                             input,
@@ -196,7 +221,7 @@ impl FunctionCfg {
                     Terminator::GeneratorStart { body } => {
                         let start = GeneratorStart {
                             body_pc: adjacent(body)?,
-                            saved_slots: Vec::new(),
+                            saved_slots: saved,
                         };
                         if lowered.generator_start.replace(start).is_some() {
                             return Err(invalid("multiple generator starts"));

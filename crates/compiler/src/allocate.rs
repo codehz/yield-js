@@ -6,15 +6,13 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
-use yield_vm::bytecode::{
-    Function as BytecodeFunction, GeneratorEntry, ParamTarget, ResumeEntry, Slot, SlotKind,
-};
+use yield_vm::bytecode::{Function as BytecodeFunction, ParamTarget, Slot, SlotKind};
 
 use crate::analyze;
 use crate::cfg::{FunctionCfg, LaidOutFunction};
 use crate::emit::Reg;
 use crate::error::CompileError;
-use crate::instr::{map_slots, uses_defs};
+use crate::instr::map_slots;
 use crate::ir::FunctionAttrs;
 
 pub(crate) fn allocate(
@@ -23,41 +21,39 @@ pub(crate) fn allocate(
 ) -> Result<BytecodeFunction, CompileError> {
     let live = analyze::eliminate_dead_writes(&mut function);
     let mut lowered = function.into_lowered(&live)?;
-    let live_in = &lowered.live_in;
-    let mut saved_sets = Vec::with_capacity(lowered.resumes.len());
-    for resume in &lowered.resumes {
-        saved_sets.push(saved_set(source, &lowered.attrs, live_in, resume)?);
-    }
-    let mut generator_saved = Vec::with_capacity(lowered.yields.len());
-    for entry in &lowered.yields {
-        generator_saved.push(generator_saved_set(source, &lowered.attrs, live_in, entry)?);
-    }
     let mut saved_regs = BTreeSet::new();
-    for saved in saved_sets.iter().chain(&generator_saved) {
-        saved_regs.extend(saved);
+    for slots in lowered
+        .resumes
+        .iter()
+        .map(|entry| &entry.saved_slots)
+        .chain(lowered.yields.iter().map(|entry| &entry.saved_slots))
+        .chain(
+            lowered
+                .generator_start
+                .iter()
+                .map(|entry| &entry.saved_slots),
+        )
+    {
+        saved_regs.extend(slots.iter().copied());
     }
-    // A generator body starts with every parameter-initialization value that is
-    // still live, so the whole live-in set must survive the call.
-    if let Some(start) = &lowered.generator_start {
-        saved_regs.extend(&live_in[start.body_pc as usize]);
-    }
+    check_saved(source, &lowered.attrs, &saved_regs)?;
 
-    let layout = FrameLayout::new(&lowered, &saved_regs);
+    let layout = FrameLayout::new(&mut lowered, &saved_regs);
     for instruction in &mut lowered.code {
         *instruction = map_slots(instruction, &|slot| layout.remap(slot));
     }
-    for (resume, saved) in lowered.resumes.iter_mut().zip(&saved_sets) {
-        resume.saved_slots = remapped_saved(&layout, saved);
+    for resume in &mut lowered.resumes {
+        remap_saved(&layout, &mut resume.saved_slots);
         resume.fulfill_dst = layout.remap(resume.fulfill_dst);
         resume.reject_dst = layout.remap(resume.reject_dst);
     }
-    for (entry, saved) in lowered.yields.iter_mut().zip(&generator_saved) {
-        entry.saved_slots = remapped_saved(&layout, saved);
+    for entry in &mut lowered.yields {
+        remap_saved(&layout, &mut entry.saved_slots);
         entry.next_dst = layout.remap(entry.next_dst);
         entry.throw_dst = layout.remap(entry.throw_dst);
     }
     if let Some(start) = &mut lowered.generator_start {
-        start.saved_slots = remapped_saved(&layout, &live_in[start.body_pc as usize]);
+        remap_saved(&layout, &mut start.saved_slots);
     }
     for handler in &mut lowered.handlers {
         handler.dst = layout.remap(handler.dst);
@@ -113,7 +109,7 @@ struct FrameLayout {
 }
 
 impl FrameLayout {
-    fn new(lowered: &LaidOutFunction, saved: &BTreeSet<Reg>) -> Self {
+    fn new(lowered: &mut LaidOutFunction, saved: &BTreeSet<Reg>) -> Self {
         let persistent = saved
             .iter()
             .copied()
@@ -148,24 +144,12 @@ impl FrameLayout {
 /// Keeping whole instruction PCs inclusive avoids aliasing operands or outputs
 /// of a single instruction, including definitions whose results are dead.
 fn allocate_transients(
-    lowered: &LaidOutFunction,
+    lowered: &mut LaidOutFunction,
     saved: &BTreeSet<Reg>,
 ) -> (BTreeMap<Reg, u16>, u16) {
     let attrs = &lowered.attrs;
-    let mut bounds = vec![None::<(usize, usize)>; attrs.reg_count as usize];
-    let mut touch = |reg: Reg, pc: usize| {
-        if !saved.contains(&reg) {
-            let bound = &mut bounds[reg as usize];
-            let (first, last) = bound.unwrap_or((pc, pc));
-            *bound = Some((first.min(pc), last.max(pc)));
-        }
-    };
-    for (pc, (instruction, live)) in lowered.code.iter().zip(&lowered.live_in).enumerate() {
-        let (_, defs) = uses_defs(instruction);
-        for reg in live.iter().copied().chain(defs) {
-            touch(reg, pc);
-        }
-    }
+    let mut bounds = std::mem::take(&mut lowered.bounds);
+    let mut touch = |reg: Reg, pc: usize| bounds.touch(reg, pc);
 
     // The VM writes parameters before the first instruction, and injects
     // exceptions and resume results before executing their target PCs.
@@ -195,9 +179,15 @@ fn allocate_transients(
     }
 
     let mut intervals = bounds
+        .0
         .into_iter()
         .enumerate()
-        .filter_map(|(reg, bound)| bound.map(|(first, last)| (first, last, reg as Reg)))
+        .filter_map(|(reg, bound)| {
+            let reg = reg as Reg;
+            bound
+                .filter(|_| !saved.contains(&reg))
+                .map(|(first, last)| (first, last, reg))
+        })
         .collect::<Vec<_>>();
     intervals.sort_unstable();
     let mut active = BinaryHeap::new();
@@ -223,46 +213,11 @@ fn allocate_transients(
     (slots, count)
 }
 
-fn remapped_saved(layout: &FrameLayout, saved: &BTreeSet<Reg>) -> Vec<u16> {
-    let mut slots = saved
-        .iter()
-        .map(|reg| layout.persistent[reg])
-        .collect::<Vec<_>>();
-    slots.sort_unstable();
-    slots
-}
-
-fn saved_set(
-    source: &str,
-    attrs: &FunctionAttrs,
-    live_in: &[BTreeSet<Reg>],
-    resume: &ResumeEntry,
-) -> Result<BTreeSet<Reg>, CompileError> {
-    let mut saved = live_in[resume.fulfill_pc as usize].clone();
-    saved.remove(&resume.fulfill_dst.index);
-    let mut reject = live_in[resume.reject_pc as usize].clone();
-    reject.remove(&resume.reject_dst.index);
-    saved.extend(reject);
-    check_saved(source, attrs, &saved)?;
-    Ok(saved)
-}
-
-/// Each entry subtracts only its own injected result before the three sets are
-/// joined. Subtracting after the union would drop a value live on another entry.
-fn generator_saved_set(
-    source: &str,
-    attrs: &FunctionAttrs,
-    live_in: &[BTreeSet<Reg>],
-    entry: &GeneratorEntry,
-) -> Result<BTreeSet<Reg>, CompileError> {
-    let mut saved = live_in[entry.next_pc as usize].clone();
-    saved.remove(&entry.next_dst.index);
-    let mut thrown = live_in[entry.throw_pc as usize].clone();
-    thrown.remove(&entry.throw_dst.index);
-    saved.extend(thrown);
-    saved.extend(&live_in[entry.return_pc as usize]);
-    check_saved(source, attrs, &saved)?;
-    Ok(saved)
+fn remap_saved(layout: &FrameLayout, saved: &mut [Reg]) {
+    // Persistent slots follow register order, so this stays sorted.
+    for reg in saved {
+        *reg = layout.persistent[reg];
+    }
 }
 
 fn check_saved(

@@ -21,10 +21,10 @@ yield-harness  →  yield-compiler  →  yield-vm
   → bindings     确定哪些 id 跨函数共享
   → cfg          消费线性发射结果，建立带恢复边和异常边的基本块
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
-  → propagate    CFG 跨块传播字面量和复制，折叠分支并移除不可达块
+  → propagate    CFG 跨块传播字面量和复制，折叠纯运算和分支，选择右侧常量指令
   → cfg cleanup  校验 CFG，清理普通跳转，不改变源块顺序与恢复入口
-  → analyze      CFG live-in（含恢复边与异常边），移除无副作用的死写入
-  → allocate     按原块序布局字节码，再分配持久槽与可复用的瞬时槽
+  → analyze      按前驱重查 CFG live-in（含恢复边与异常边），移除无副作用的死写入
+  → allocate     按原块序布局，流式记录瞬时槽区间并分配槽；保存集合取 CFG 块入口活性
   → Build        版本化字节码；build_id = 执行相关字段的摘要
   → Vm           校验、运行、宿主操作、快照 / 恢复
 ```
@@ -72,7 +72,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
-| 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 最终生成跳转 PC、挂起表和逐 PC 的 live-in |
+| 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交，折叠已知原始值的严格比较和少量 Number 运算；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 生成跳转 PC 和挂起表，并从块内活性流式累积槽区间，不保留逐 PC 活性表 |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
@@ -94,7 +94,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。`VerifiedBuild` 在校验后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。
-- `Instr::Binary` / `Instr::BinaryConst` 在两个操作数都是 `Number` 时直接执行 f64 算术、比较、相等和 ToInt32/ToUint32 位运算；任一操作数不是 `Number` 时回退 `ops::binary_op`，保持 BigInt、Symbol、字符串、对象和混合类型的转换与抛错顺序。编译器把右侧字面量放入 `BinaryConst` 的常量池索引，左侧仍先求值；快速路径不做对象转换，也不缓存结果。
+- `Instr::Binary` / `Instr::BinaryConst` 在两个操作数都是 `Number` 时直接执行 f64 算术、比较、相等和 ToInt32/ToUint32 位运算；任一操作数不是 `Number` 时回退 `ops::binary_op`，保持 BigInt、Symbol、字符串、对象和混合类型的转换与抛错顺序。编译器把右侧字面量（包括 CFG 证明的值）放入 `BinaryConst` 的常量池索引，不交换操作数；快速路径不做对象转换，也不缓存结果。
 - 条件分支的 `BranchCompareFalse` / `BranchCompareTrue` 及常量变体直接求值比较并按结果跳转，不创建布尔结果槽；双 Number 比较直接返回条件，其他类型复用 `binary_value`。`if` / `while` / `do…while` / `for` 条件、条件表达式和 `switch` 的 `===` 使用该形式；`&&` 连接假分支，`||` 用真分支跳过右侧，`!` 使用 `BranchTrue`。分支目标、槽和常量索引在加载时校验，异常转换仍由当前异常表覆盖。
 - `Instr::Unary` 对 `Number` 的 `Neg`、`Pos`、`BitNot`、`ToNumeric`、`Increment`、`Decrement` 直接计算，不进入 `ops::unary_op`；其余类型仍先执行对象转换和 Symbol 检查。`BranchBinary` / `BranchBinaryConst` / `BranchUnary` 是同一运算的无结果槽条件形式，供 CFG 优化后的单用途窥孔使用。
 - `Math` 和 `Number` 的内建入口在实参已是 `Number` 时跳过数值转换；`Number` 静态 `is*` 方法不构造 coercion roots，`Math` 的 `max` / `min` / `hypot` 仍逐个按源码顺序处理实参并保留 NaN/Infinity 规则。
