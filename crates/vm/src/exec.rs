@@ -443,6 +443,55 @@ impl Vm {
             Instr::Binary { dst, op, lhs, rhs } => {
                 let mut lhs = frame.read(lhs)?;
                 let mut rhs = frame.read(rhs)?;
+                if let (ValueRef::Number(left), ValueRef::Number(right)) = (lhs.view(), rhs.view())
+                {
+                    let value = match op {
+                        BinaryOp::Add => Value::number(left + right),
+                        BinaryOp::Sub => Value::number(left - right),
+                        BinaryOp::Mul => Value::number(left * right),
+                        BinaryOp::Div => Value::number(left / right),
+                        BinaryOp::Rem => Value::number(left % right),
+                        BinaryOp::Exp => Value::number(left.powf(right)),
+                        BinaryOp::Lt => Value::boolean(left < right),
+                        BinaryOp::Le => Value::boolean(left <= right),
+                        BinaryOp::Gt => Value::boolean(left > right),
+                        BinaryOp::Ge => Value::boolean(left >= right),
+                        BinaryOp::Eq | BinaryOp::StrictEq => Value::boolean(left == right),
+                        BinaryOp::Ne | BinaryOp::StrictNe => Value::boolean(left != right),
+                        BinaryOp::BitAnd => {
+                            let left = ops::number_to_uint32(left) as i32;
+                            let right = ops::number_to_uint32(right);
+                            Value::number((left & right as i32) as f64)
+                        }
+                        BinaryOp::BitOr => {
+                            let left = ops::number_to_uint32(left) as i32;
+                            let right = ops::number_to_uint32(right);
+                            Value::number((left | right as i32) as f64)
+                        }
+                        BinaryOp::BitXor => {
+                            let left = ops::number_to_uint32(left) as i32;
+                            let right = ops::number_to_uint32(right);
+                            Value::number((left ^ right as i32) as f64)
+                        }
+                        BinaryOp::Shl => {
+                            let left = ops::number_to_uint32(left) as i32;
+                            let right = ops::number_to_uint32(right);
+                            Value::number(left.wrapping_shl(right & 0x1f) as f64)
+                        }
+                        BinaryOp::Shr => {
+                            let left = ops::number_to_uint32(left) as i32;
+                            let right = ops::number_to_uint32(right);
+                            Value::number(left.wrapping_shr(right & 0x1f) as f64)
+                        }
+                        BinaryOp::UShr => {
+                            let left = ops::number_to_uint32(left);
+                            let right = ops::number_to_uint32(right);
+                            Value::number(left.wrapping_shr(right & 0x1f) as f64)
+                        }
+                    };
+                    frame.write(dst, value)?;
+                    return Ok(Step::Next);
+                }
                 let hint = match op {
                     BinaryOp::StrictEq | BinaryOp::StrictNe => None,
                     BinaryOp::Eq | BinaryOp::Ne => match (lhs.view(), rhs.view()) {
