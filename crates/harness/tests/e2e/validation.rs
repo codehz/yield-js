@@ -177,7 +177,7 @@ export async function run() {
     );
 
     let mut mismatched = snapshot.clone();
-    mismatched.build_id = "sha256:deadbeef".to_owned();
+    mismatched.build_id = "xxh3-128:deadbeef".to_owned();
     let error = s.restore(mismatched).expect_err("build mismatch");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("build id")));
 

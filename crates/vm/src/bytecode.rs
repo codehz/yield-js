@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 
+use crate::digest::Digest;
 use crate::perf::BuildDigestTiming;
 use crate::value::{BindingId, JsBigInt, JsString};
 
@@ -859,24 +859,19 @@ impl Build {
         };
         let json_started = PROFILE.then(Instant::now);
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
-        let sha256_started = PROFILE.then(Instant::now);
-        let digest = Sha256::digest(bytes.as_slice());
-        let sha256_elapsed = sha256_started.map(|started| started.elapsed());
-        let timing = match (json_started, sha256_started, sha256_elapsed) {
-            (Some(json_started), Some(sha256_started), Some(sha256)) => Some(BuildDigestTiming {
-                json: sha256_started.duration_since(json_started),
-                sha256,
+        let hash_started = PROFILE.then(Instant::now);
+        let mut digest = Digest::new();
+        digest.update(bytes.as_slice());
+        let hash = hash_started.map(|started| started.elapsed());
+        let timing = match (json_started, hash_started, hash) {
+            (Some(json_started), Some(hash_started), Some(hash)) => Some(BuildDigestTiming {
+                json: hash_started.duration_since(json_started),
+                hash,
             }),
             _ => None,
         };
         drop(bytes);
-        let mut out = String::with_capacity(7 + digest.len() * 2);
-        out.push_str("sha256:");
-        for byte in digest {
-            use std::fmt::Write;
-            write!(out, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        (out, timing)
+        (digest.finish(), timing)
     }
 
     pub fn function(&self, id: u32) -> Option<&Function> {

@@ -16,6 +16,6 @@ regress.workspace = true
 ryu-js.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+xxhash-rust.workspace = true
 thiserror.workspace = true
 yield-binding-macros = { path = "../binding-macros" }

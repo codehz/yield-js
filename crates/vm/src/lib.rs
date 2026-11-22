@@ -60,6 +60,7 @@ pub mod binding;
 mod builtin;
 use builtin as builtins;
 pub mod bytecode;
+mod digest;
 pub mod error;
 mod exec;
 mod frame;

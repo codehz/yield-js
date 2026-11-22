@@ -86,7 +86,7 @@ fn run(workload: &Workload, samples: usize) {
                 .push(("startup_build_digest_json", stages.build_digest_json));
             sample
                 .times
-                .push(("startup_build_digest_sha256", stages.build_digest_sha256));
+                .push(("startup_build_digest_hash", stages.build_digest_hash));
             sample
                 .times
                 .push(("startup_build_structure", stages.build_structure));

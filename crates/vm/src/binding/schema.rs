@@ -12,9 +12,9 @@ use std::fmt;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::call::{CallCx, JsValue};
+use crate::digest::Digest;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
@@ -1380,12 +1380,12 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
     Ok(())
 }
 
-fn hash_line(hasher: &mut Sha256, text: String) {
+fn hash_line(hasher: &mut Digest, text: String) {
     hasher.update(text.as_bytes());
     hasher.update(b"\n");
 }
 
-fn hash_signature(hasher: &mut Sha256, direction: u8, signature: CallSignature) {
+fn hash_signature(hasher: &mut Digest, direction: u8, signature: CallSignature) {
     hasher.update([direction]);
     hasher.update((signature.args.len() as u64).to_le_bytes());
     for arg in signature.args {
@@ -1406,7 +1406,7 @@ fn hash_signature(hasher: &mut Sha256, direction: u8, signature: CallSignature) 
     }
 }
 
-fn hash_cps(hasher: &mut Sha256, stages: Option<&[CpsStage]>) {
+fn hash_cps(hasher: &mut Digest, stages: Option<&[CpsStage]>) {
     let Some(stages) = stages else { return };
     hash_line(hasher, format!("cps stages={}", stages.len()));
     for stage in stages {
@@ -1432,7 +1432,7 @@ fn fingerprint(
     states: &BTreeMap<usize, StateDecl>,
     services: &BTreeSet<String>,
 ) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Digest::new();
     for module in modules {
         hash_line(&mut hasher, format!("module {}", module.name));
         for export in &module.exports {
@@ -1523,5 +1523,5 @@ fn fingerprint(
     for service in services {
         hash_line(&mut hasher, format!("service {service}"));
     }
-    format!("{:x}", hasher.finalize())
+    hasher.finish()
 }
