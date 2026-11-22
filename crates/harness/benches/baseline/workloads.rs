@@ -38,6 +38,15 @@ impl Workload {
     }
 }
 
+pub(super) const REACT_REUSE: Workload =
+    Workload::new("react-first-commit", build_react, react_first_commit).with_snapshot(
+        |vm, host| {
+            react_first_commit(vm, host);
+            Vec::new()
+        },
+        |vm, host, _| assert_number(vm, host, "checkFirst", vec![], 1.0),
+    );
+
 pub(super) const WORKLOADS: &[Workload] = &[
     Workload::new("react-first-commit", build_react, react_first_commit),
     Workload::new("react-updates", build_react, react_updates),

@@ -5,9 +5,9 @@ mod workloads;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use workloads::{WORKLOADS, Workload};
+use workloads::{REACT_REUSE, WORKLOADS, Workload};
 use yield_harness::TestHost;
-use yield_vm::{Build, Snapshot, Vm, perf};
+use yield_vm::{Build, Snapshot, VerifiedBuild, Vm, perf};
 
 const WARMUP_SAMPLES: usize = 2;
 const STEADY_ITERATIONS: usize = 5;
@@ -16,6 +16,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut samples = 9;
     let mut compile_only = None;
+    let mut reuse = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => {}
@@ -24,6 +25,8 @@ fn main() {
                 assert!(samples > 0, "sample count must be positive");
             }
             "--compile-only" => compile_only = Some(args.next().expect("workload name")),
+            "--verified-reuse" if !perf::ENABLED => reuse = true,
+            "--verified-reuse" => panic!("reuse timings require a non-diagnostic build"),
             _ => panic!("unknown baseline option: {arg}"),
         }
     }
@@ -37,8 +40,103 @@ fn main() {
     }
 
     println!("workload,metric,sample,value,unit");
+    if reuse {
+        let await_success = WORKLOADS
+            .iter()
+            .find(|w| w.name == "await-success")
+            .unwrap();
+        for workload in [&REACT_REUSE, await_success] {
+            run_reuse(workload, samples);
+        }
+        return;
+    }
     for workload in WORKLOADS {
         run(workload, if perf::ENABLED { 1 } else { samples });
+    }
+}
+
+fn run_reuse(workload: &Workload, samples: usize) {
+    const VMS: usize = 8;
+    let suspend = workload
+        .suspend
+        .expect("reuse workload captures a snapshot");
+    let resume = workload
+        .resume
+        .expect("reuse workload checks restored state");
+    let artifact = (workload.build)().to_bytes();
+    let decode = || Build::from_bytes(&artifact).expect("decode build artifact");
+    let mut source_host = TestHost::default();
+    let mut source = Vm::new(decode(), &mut source_host).expect("start snapshot source");
+    let roots = suspend(&mut source, &mut source_host);
+    let snapshot = source.snapshot(&roots).expect("capture source");
+    drop(source);
+    drop(source_host);
+
+    let name = workload.name;
+    println!("{name},build_id,0,{},text", snapshot.build_id);
+    println!("{name},artifact_size,0,{},bytes", artifact.len());
+    println!(
+        "{name},snapshot_size,0,{},bytes",
+        snapshot.to_json().unwrap().len()
+    );
+    for i in 0..WARMUP_SAMPLES + samples {
+        let mut sample = Sample::default();
+        let build = decode();
+        let verified = sample.time("verify_once", || VerifiedBuild::new(build).unwrap());
+        let mut totals = [Duration::ZERO; 4];
+        let mut measure = |slot: usize, start: Instant, vm: Vm| {
+            totals[slot] += start.elapsed();
+            black_box(vm)
+        };
+        for j in 0..VMS {
+            let shared_first = (i + j) % 2 == 0;
+            for shared in [shared_first, !shared_first] {
+                let mut host = TestHost::default();
+                let mut vm = if shared {
+                    let start = Instant::now();
+                    measure(
+                        1,
+                        start,
+                        Vm::new_verified(verified.clone(), &mut host).unwrap(),
+                    )
+                } else {
+                    let build = decode();
+                    let start = Instant::now();
+                    measure(0, start, Vm::new(build, &mut host).unwrap())
+                };
+                (workload.run)(&mut vm, &mut host);
+
+                let mut host = TestHost::default();
+                let image = snapshot.clone();
+                let mut vm = if shared {
+                    let start = Instant::now();
+                    measure(
+                        3,
+                        start,
+                        Vm::restore_verified(image, verified.clone(), &mut host).unwrap(),
+                    )
+                } else {
+                    let build = decode();
+                    let start = Instant::now();
+                    measure(2, start, Vm::restore(image, build, &mut host).unwrap())
+                };
+                vm.start_recovered_operations().unwrap();
+                resume(&mut vm, &mut host, &roots);
+            }
+        }
+        sample.times.extend(
+            [
+                "startup_8",
+                "startup_verified_8",
+                "restore_8",
+                "restore_verified_8",
+            ]
+            .into_iter()
+            .zip(totals),
+        );
+        if i >= WARMUP_SAMPLES {
+            sample.print(name, i - WARMUP_SAMPLES);
+        }
     }
 }
 

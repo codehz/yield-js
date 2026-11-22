@@ -36,6 +36,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Vm::snapshot(&[roots])` 仅在微任务队列为空时可用。
 - `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
 - `Vm::restore(snapshot, same_build, host)` 在执行前重绑声明与 operation。
+- `VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表。线程内可克隆句柄传给 `Vm::new_verified` / `Vm::restore_verified`；每个 VM 仍独立链接宿主、持有堆和缓存，恢复仍校验镜像、构建身份与绑定指纹。
 - `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
 
 ## 2. 挂起、恢复与快照不变量（不得弱化）
@@ -85,9 +86,9 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
 - `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器。指令压缩由 `ir.rs::compact_dead_instructions` 统一重映射跳转、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`；压缩后为空的保护区不再登记。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
-- VM 在 `new` / `restore` 校验后以 `Rc<Build>` 持有只读构建；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
+- VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。
-- `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。VM 在 `new` / `restore` 校验 `Build` 后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
+- `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。`VerifiedBuild` 在校验后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。
 - `Instr::Binary` / `Instr::BinaryConst` 在两个操作数都是 `Number` 时直接执行 f64 算术、比较、相等和 ToInt32/ToUint32 位运算；任一操作数不是 `Number` 时回退 `ops::binary_op`，保持 BigInt、Symbol、字符串、对象和混合类型的转换与抛错顺序。编译器把右侧字面量放入 `BinaryConst` 的常量池索引，左侧仍先求值；快速路径不做对象转换，也不缓存结果。

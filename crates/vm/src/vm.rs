@@ -287,10 +287,41 @@ impl FunctionTable {
     }
 }
 
+/// An immutable, validated program and its host-independent execution metadata.
+/// Clone this handle to create multiple VMs on the same thread.
+#[derive(Clone, Debug)]
+pub struct VerifiedBuild(Rc<VerifiedBuildInner>);
+
+#[derive(Debug)]
+struct VerifiedBuildInner {
+    build: Build,
+    functions: FunctionTable,
+}
+
+impl VerifiedBuild {
+    /// Check the bytecode version, identity, and structure before sharing it.
+    pub fn new(build: Build) -> Result<Self, VmError> {
+        build.validate().map_err(VmError::InvalidBuild)?;
+        Ok(Self::from_validated(build))
+    }
+
+    fn from_validated(build: Build) -> Self {
+        let functions = FunctionTable::from_validated(&build);
+        Self(Rc::new(VerifiedBuildInner { build, functions }))
+    }
+}
+
+impl std::ops::Deref for VerifiedBuild {
+    type Target = Build;
+
+    fn deref(&self) -> &Build {
+        &self.0.build
+    }
+}
+
 #[derive(Debug)]
 pub struct Vm {
-    pub(crate) build: Rc<Build>,
-    functions: FunctionTable,
+    pub(crate) build: VerifiedBuild,
     pub(crate) bindings: Arc<Bindings>,
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
@@ -336,7 +367,14 @@ enum ModuleEvaluation {
 
 impl Vm {
     pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
-        Self::startup::<false>(build, host).map(|(vm, _)| vm)
+        Self::new_verified(VerifiedBuild::new(build)?, host)
+    }
+
+    /// Start a fresh VM, linking this host and running module initialization.
+    pub fn new_verified(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
+        let mut vm = Self::prepare(build, host)?;
+        vm.initialize_modules(host)?;
+        Ok(vm)
     }
 
     /// Construct a VM using the regular startup pipeline and time its phases.
@@ -345,32 +383,32 @@ impl Vm {
         build: Build,
         host: &mut dyn Host,
     ) -> Result<(Self, crate::perf::Startup), VmError> {
-        let (vm, profile) = Self::startup::<true>(build, host)?;
-        Ok((vm, profile.expect("profiled startup records durations")))
-    }
-
-    fn startup<const PROFILE: bool>(
-        build: Build,
-        host: &mut dyn Host,
-    ) -> Result<(Self, Option<crate::perf::Startup>), VmError> {
-        let started = if PROFILE {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
+        let started = std::time::Instant::now();
         let mut digest_checked = None;
         build
-            .validate_with_digest_checkpoint::<PROFILE>(|timing| {
-                if let Some(timing) = timing {
-                    digest_checked = Some((std::time::Instant::now(), timing));
-                }
+            .validate_with_digest_checkpoint::<true>(|timing| {
+                digest_checked = timing.map(|timing| (std::time::Instant::now(), timing));
             })
             .map_err(VmError::InvalidBuild)?;
-        let validated = if PROFILE {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
+        let validated = std::time::Instant::now();
+        let mut vm = Self::prepare(VerifiedBuild::from_validated(build), host)?;
+        let initializing = std::time::Instant::now();
+        vm.initialize_modules(host)?;
+        let (digest_checked, digest_timing) = digest_checked.expect("recorded digest timing");
+        Ok((
+            vm,
+            crate::perf::Startup {
+                prepare: initializing.duration_since(started),
+                build_identity: digest_checked.duration_since(started),
+                build_digest: digest_timing,
+                build_structure: validated.duration_since(digest_checked),
+                link_and_setup: initializing.duration_since(validated),
+                initialize: initializing.elapsed(),
+            },
+        ))
+    }
+
+    fn prepare(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, &bindings)?;
         let mut vm = Self::empty(build, bindings.clone());
@@ -379,53 +417,33 @@ impl Vm {
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);
         vm.install_imports(&bindings, resolved)?;
-        let initializing = if PROFILE {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        vm.instantiate_modules(host)?;
-        let mut states = vec![ModuleEvaluation::Pending; vm.build.modules.len()];
-        if let Some(preload) = vm.build.preload {
-            vm.evaluate_module(host, preload, &mut states)?;
-            vm.install_preload_globals(preload)?;
+        Ok(vm)
+    }
+
+    fn initialize_modules(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        self.instantiate_modules(host)?;
+        let mut states = vec![ModuleEvaluation::Pending; self.build.modules.len()];
+        if let Some(preload) = self.build.preload {
+            self.evaluate_module(host, preload, &mut states)?;
+            self.install_preload_globals(preload)?;
         }
-        vm.evaluate_module(host, vm.build.entry, &mut states)?;
-        for env in vm.module_envs.iter().flatten() {
-            if !vm.heap.environment(*env)?.uninitialized.is_empty() {
+        self.evaluate_module(host, self.build.entry, &mut states)?;
+        for env in self.module_envs.iter().flatten() {
+            if !self.heap.environment(*env)?.uninitialized.is_empty() {
                 return Err(VmError::InvalidState(
                     "module evaluation left uninitialized bindings".into(),
                 ));
             }
         }
-        vm.run_until_idle(host)?;
-        let profile = if PROFILE {
-            let finished = std::time::Instant::now();
-            let started = started.expect("startup start time");
-            let (digest_checked, digest_timing) = digest_checked.expect("digest check timing");
-            let validated = validated.expect("validation end time");
-            let initializing = initializing.expect("initialization start time");
-            Some(crate::perf::Startup {
-                prepare: initializing.duration_since(started),
-                build_identity: digest_checked.duration_since(started),
-                build_digest: digest_timing,
-                build_structure: validated.duration_since(digest_checked),
-                link_and_setup: initializing.duration_since(validated),
-                initialize: finished.duration_since(initializing),
-            })
-        } else {
-            None
-        };
-        Ok((vm, profile))
+        self.run_until_idle(host)
     }
 
-    fn empty(build: Build, bindings: Arc<Bindings>) -> Self {
+    fn empty(build: VerifiedBuild, bindings: Arc<Bindings>) -> Self {
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
         let caches = property_caches(&build);
         Self {
-            functions: FunctionTable::from_validated(&build),
             property_caches: caches,
-            build: Rc::new(build),
+            build,
             bindings,
             heap: Heap::new(),
             host_tasks: BTreeMap::new(),
@@ -1658,18 +1676,20 @@ impl Vm {
     }
 
     pub(crate) fn function_index(&self, func_id: u32) -> Result<usize, VmError> {
-        self.functions
+        self.build
+            .0
+            .functions
             .indices
             .get(func_id)
             .ok_or_else(|| VmError::InvalidState(format!("function {func_id} does not exist")))
     }
 
     pub(crate) fn is_initializer(&self, function_index: usize) -> bool {
-        self.functions.calls[function_index].is_initializer
+        self.build.0.functions.calls[function_index].is_initializer
     }
 
     pub(crate) fn module_needs_environment(&self, module_index: usize) -> bool {
-        self.functions.module_environments[module_index]
+        self.build.0.functions.module_environments[module_index]
     }
 
     pub(crate) fn alloc_continuation(&mut self) -> ContinuationId {
@@ -1904,7 +1924,7 @@ impl Vm {
                 self.heap.environment_mut(env)?.bindings.extend(bindings);
             }
             Some(env)
-        } else if self.functions.calls[function_index].needs_environment {
+        } else if self.build.0.functions.calls[function_index].needs_environment {
             Some(self.heap.alloc_environment(parent_env, bindings))
         } else {
             None
@@ -1928,7 +1948,11 @@ impl Vm {
         }
     }
 
-    pub(crate) fn restored(build: Build, bindings: Arc<Bindings>, state: RestoredState) -> Self {
+    pub(crate) fn restored(
+        build: VerifiedBuild,
+        bindings: Arc<Bindings>,
+        state: RestoredState,
+    ) -> Self {
         let RestoredState {
             mut heap,
             continuations,
@@ -1965,9 +1989,8 @@ impl Vm {
             .collect();
         let caches = property_caches(&build);
         Self {
-            functions: FunctionTable::from_validated(&build),
             property_caches: caches,
-            build: Rc::new(build),
+            build,
             bindings,
             heap,
             continuations,

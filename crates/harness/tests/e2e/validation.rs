@@ -5,7 +5,9 @@ use yield_harness::{TestHost, build};
 use yield_vm::bytecode::{Instr, ModuleTarget, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
-use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
+use yield_vm::{
+    Completion, JsString, JsValue, Object, PromiseState, Value, VerifiedBuild, Vm, VmError,
+};
 
 #[test]
 fn sparse_function_ids_work_after_restore() {
@@ -62,6 +64,55 @@ export async function run() {
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(42.0))
     );
+}
+
+#[test]
+fn verified_build_shares_code_but_not_module_state() {
+    let source = "let n = 0; export function run() { return ++n; }";
+    let program = VerifiedBuild::new(build(source)).expect("verify build once");
+    let mut host_a = TestHost::default();
+    let mut host_b = TestHost::default();
+    let mut a = Vm::new_verified(program.clone(), &mut host_a).unwrap();
+    let mut b = Vm::new_verified(program.clone(), &mut host_b).unwrap();
+    assert_eq!(
+        a.start(&mut host_a, "run", vec![]).unwrap(),
+        Value::number(1.0)
+    );
+    assert_eq!(
+        a.start(&mut host_a, "run", vec![]).unwrap(),
+        Value::number(2.0)
+    );
+    assert_eq!(
+        b.start(&mut host_b, "run", vec![]).unwrap(),
+        Value::number(1.0)
+    );
+
+    let snapshot = json_round_trip(&a.snapshot(&[]).unwrap());
+    let different = VerifiedBuild::new(build("export function run() { return 0; }")).unwrap();
+    assert!(matches!(
+        Vm::restore_verified(snapshot.clone(), different, &mut host_b),
+        Err(VmError::InvalidSnapshot(detail)) if detail.contains("build id mismatch")
+    ));
+    let mut restored = Vm::restore_verified(snapshot, program, &mut host_b).unwrap();
+    assert_eq!(
+        restored.start(&mut host_b, "run", vec![]).unwrap(),
+        Value::number(3.0)
+    );
+}
+
+#[test]
+fn verified_build_checks_identity_and_structure() {
+    let mut corrupt = build("export function run() { return 0; }");
+    corrupt.entry = u32::MAX;
+    assert!(matches!(
+        VerifiedBuild::new(corrupt.clone()),
+        Err(VmError::InvalidBuild(_))
+    ));
+    corrupt.finalize();
+    assert!(matches!(
+        VerifiedBuild::new(corrupt),
+        Err(VmError::InvalidBuild(_))
+    ));
 }
 
 #[test]

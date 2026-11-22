@@ -25,7 +25,7 @@ use crate::runtime::{
     HostTaskState, ModuleState, PendingOperation, Settlement,
 };
 use crate::value::{ContinuationId, ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::{VerifiedBuild, Vm};
 
 use super::record::{valid_string_position, *};
 
@@ -339,18 +339,27 @@ impl Vm {
         Ok(snapshot)
     }
 
-    pub fn restore(
-        mut snapshot: Snapshot,
-        build: Build,
+    pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
+        check_snapshot_header(&snapshot)?;
+        Self::restore_checked(snapshot, VerifiedBuild::new(build)?, host)
+    }
+
+    /// Restore with an already validated program. The snapshot and current host
+    /// still undergo the same compatibility and state checks as in `restore`.
+    pub fn restore_verified(
+        snapshot: Snapshot,
+        build: VerifiedBuild,
         host: &mut dyn Host,
     ) -> Result<Self, VmError> {
-        check_versions(&snapshot)?;
-        if snapshot.random_state == 0 {
-            return Err(VmError::InvalidSnapshot(
-                "invalid Math.random state".to_owned(),
-            ));
-        }
-        build.validate().map_err(VmError::InvalidBuild)?;
+        check_snapshot_header(&snapshot)?;
+        Self::restore_checked(snapshot, build, host)
+    }
+
+    fn restore_checked(
+        mut snapshot: Snapshot,
+        build: VerifiedBuild,
+        host: &mut dyn Host,
+    ) -> Result<Self, VmError> {
         if snapshot.build_id != build.build_id {
             return Err(VmError::InvalidSnapshot(format!(
                 "build id mismatch: snapshot {}, build {}",
@@ -491,7 +500,7 @@ impl Vm {
     }
 }
 
-fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
+fn check_snapshot_header(snapshot: &Snapshot) -> Result<(), VmError> {
     if snapshot.format_version != SNAPSHOT_FORMAT_VERSION {
         return Err(VmError::InvalidSnapshot(format!(
             "unsupported snapshot format {}, expected {}",
@@ -503,6 +512,11 @@ fn check_versions(snapshot: &Snapshot) -> Result<(), VmError> {
             "unsupported bytecode version {}, expected {}",
             snapshot.bytecode_version, BYTECODE_VERSION
         )));
+    }
+    if snapshot.random_state == 0 {
+        return Err(VmError::InvalidSnapshot(
+            "invalid Math.random state".to_owned(),
+        ));
     }
     Ok(())
 }

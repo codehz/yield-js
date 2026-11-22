@@ -326,7 +326,7 @@ impl Vm {
     ) -> Result<ExecOutcome, VmError> {
         // Own a read-only build handle so dispatch can borrow the code across
         // mutable VM operations, including nested calls.
-        let build = std::rc::Rc::clone(&self.build);
+        let build = self.build.clone();
         let code = &build.functions[frame.function].code;
         loop {
             let pc = frame.pc;
