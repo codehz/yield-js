@@ -1,9 +1,9 @@
 use super::store::lookup_tables;
 use super::types::{
-    ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, EnvironmentObject,
-    FunctionObject, IntegrityLevel, NativeObject, Object, OwnProperty, PromiseCallback,
-    PromiseObject, PromiseState, Property, PropertyTables, PropertyTablesMut, Resolution,
-    TextDecoderObject, TypedArrayObject, array_index, collect_own_keys,
+    ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, DisposableResource,
+    EnvironmentObject, FunctionObject, IntegrityLevel, NativeObject, Object, OwnProperty,
+    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables, PropertyTablesMut,
+    Resolution, TextDecoderObject, TypedArrayObject, array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -74,6 +74,10 @@ pub enum ReactionJob {
         generator: ObjectId,
         request: ObjectId,
     },
+    DisposeNext {
+        state: ObjectId,
+        result: ObjectId,
+    },
 }
 
 /// Project a field of the ordinary-object record an object kind stores.
@@ -108,6 +112,7 @@ macro_rules! map_object_storage {
             | Object::Bound(BoundObject { object: $storage, .. })
             | Object::PromiseCallback { object: $storage, .. }
             | Object::Resolution(Resolution { object: $storage, .. })
+            | Object::DisposableStack { object: $storage, .. }
             | Object::Native(
                 NativeObject::Intrinsic { object: $storage, .. }
                 | NativeObject::Host { object: $storage, .. },
@@ -115,7 +120,7 @@ macro_rules! map_object_storage {
             Object::Array($storage) => Some($projection),
             Object::Function($storage) => Some($projection),
             Object::Promise($storage) => Some($projection),
-            Object::Environment(_) | Object::ForInIterator { .. } => None,
+            Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_) => None,
         }
     };
 }
@@ -373,8 +378,27 @@ impl Object {
                 if let Some(id) = promise.adopting {
                     out.push(OwnedEdge::Object(id));
                 }
+                if let Some(id) = promise.disposal {
+                    out.push(OwnedEdge::Object(id));
+                }
                 for job in &promise.reactions {
                     job.write_edges(out);
+                }
+            }
+            Self::DisposableStack { records, .. } => {
+                for record in records {
+                    record.write_edges(out);
+                }
+            }
+            Self::DisposeState(state) => {
+                for record in &state.records {
+                    record.write_edges(out);
+                }
+                if let Some(error) = &state.error {
+                    push_value(out, error);
+                }
+                for id in state.result.into_iter().chain(state.waiting) {
+                    out.push(OwnedEdge::Object(id));
                 }
             }
             Self::PromiseCallback { callback, .. } => match callback {
@@ -526,6 +550,19 @@ pub(crate) fn push_value(out: &mut Vec<OwnedEdge>, value: &Value) {
     }
 }
 
+impl DisposableResource {
+    fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
+        match self {
+            Self::Method { value, method, .. } | Self::Adopt { value, method, .. } => {
+                push_value(out, value);
+                push_value(out, method);
+            }
+            Self::Defer { method, .. } => push_value(out, method),
+            Self::AsyncEmpty => {}
+        }
+    }
+}
+
 impl ReactionJob {
     pub(crate) fn write_edges(&self, out: &mut Vec<OwnedEdge>) {
         match self {
@@ -551,6 +588,10 @@ impl ReactionJob {
             Self::GeneratorClose { generator, request } => {
                 out.push(OwnedEdge::Object(*generator));
                 out.push(OwnedEdge::Object(*request));
+            }
+            Self::DisposeNext { state, result } => {
+                out.push(OwnedEdge::Object(*state));
+                out.push(OwnedEdge::Object(*result));
             }
         }
     }

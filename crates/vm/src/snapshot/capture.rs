@@ -19,6 +19,7 @@ use crate::heap::{
     TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, WeakKey,
 };
 use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
+use crate::heap::{DisposableResource, DisposeHint};
 use crate::host::Host;
 use crate::regexp::compile_pattern;
 use crate::runtime::{
@@ -939,7 +940,10 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
         };
         if matches!(
             heap.get(record.receiver),
-            Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+            Err(_)
+                | Ok(Object::Environment(_)
+                    | Object::ForInIterator { .. }
+                    | Object::DisposeState(_))
         ) {
             return Err(invalid());
         }
@@ -961,7 +965,7 @@ fn load_private_elements(heap: &mut Heap, records: &[PrivateRecord]) -> Result<(
         }
         if let PrivateElement::Field(value) = &record.element {
             require_value_objects(heap, std::iter::once(value))?;
-            if matches!(value.view(), ValueRef::Object(id) if matches!(heap.get(id), Ok(Object::Environment(_) | Object::ForInIterator { .. })))
+            if matches!(value.view(), ValueRef::Object(id) if matches!(heap.get(id), Ok(Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_))))
             {
                 return Err(invalid());
             }
@@ -1094,7 +1098,10 @@ fn validate_weak_key(heap: &Heap, owner: &str, id: ObjectId, key: WeakKey) -> Re
     let valid = match key {
         WeakKey::Object(target) => !matches!(
             heap.get(target),
-            Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+            Err(_)
+                | Ok(Object::Environment(_)
+                    | Object::ForInIterator { .. }
+                    | Object::DisposeState(_))
         ),
         WeakKey::Symbol(target) => heap.weak_key(&Value::symbol(target)).is_some(),
     };
@@ -1154,7 +1161,10 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 None => true,
                 Some(ValueRef::Object(receiver)) => !matches!(
                     heap.get(receiver),
-                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                    Err(_)
+                        | Ok(Object::Environment(_)
+                            | Object::ForInIterator { .. }
+                            | Object::DisposeState(_))
                 ),
                 _ => false,
             };
@@ -1381,7 +1391,10 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             && (current.is_some_and(|source| {
                 matches!(
                     heap.get(source),
-                    Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                    Err(_)
+                        | Ok(Object::Environment(_)
+                            | Object::ForInIterator { .. }
+                            | Object::DisposeState(_))
                 )
             }) || (current.is_none() && pending.is_some())
                 || string_indices.start > string_indices.end
@@ -1442,6 +1455,11 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                             "object {id} prototype {target} is an environment"
                         )));
                     }
+                    Some(false) if matches!(heap.get(target), Ok(Object::DisposeState(_))) => {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "object {id} prototype {target} is an internal disposal state"
+                        )));
+                    }
                     Some(false) => {
                         prototypes.insert(id, target);
                     }
@@ -1480,7 +1498,10 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
             }
             if matches!(
                 heap.get(*handler),
-                Err(_) | Ok(Object::Environment(_) | Object::ForInIterator { .. })
+                Err(_)
+                    | Ok(Object::Environment(_)
+                        | Object::ForInIterator { .. }
+                        | Object::DisposeState(_))
             ) {
                 return Err(VmError::InvalidSnapshot(format!(
                     "proxy {id} has invalid handler {handler}"
@@ -2222,12 +2243,66 @@ fn validate_rejection_notifications(heap: &Heap, queue: &[ObjectId]) -> Result<(
     Ok(())
 }
 
+fn valid_disposal_record(heap: &Heap, record: &DisposableResource, async_: Option<bool>) -> bool {
+    let valid_object = |id| {
+        heap.get(id).is_ok_and(|object| {
+            !matches!(
+                object,
+                Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_)
+            )
+        })
+    };
+    let (method, hint) = match record {
+        DisposableResource::Method {
+            value,
+            method,
+            hint,
+        } => {
+            if !matches!(value.view(), ValueRef::Object(id) if valid_object(id)) {
+                return false;
+            }
+            (method, hint)
+        }
+        DisposableResource::Adopt {
+            value,
+            method,
+            hint,
+        } => {
+            if *hint == DisposeHint::AsyncFromSync
+                || matches!(value.view(), ValueRef::Object(id) if !valid_object(id))
+            {
+                return false;
+            }
+            (method, hint)
+        }
+        DisposableResource::Defer { method, hint } => {
+            if *hint == DisposeHint::AsyncFromSync {
+                return false;
+            }
+            (method, hint)
+        }
+        DisposableResource::AsyncEmpty => return async_ != Some(false),
+    };
+    async_.is_none_or(|async_| async_ == (*hint != DisposeHint::Sync))
+        && matches!(method.view(), ValueRef::Object(id) if heap.get(id).is_ok_and(is_callable_object))
+}
+
 fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
     let mut adopts: BTreeMap<ObjectId, usize> = BTreeMap::new();
     let mut closes: BTreeMap<ObjectId, Vec<(ObjectId, ObjectId)>> = BTreeMap::new();
+    let mut disposals = BTreeMap::new();
     for (id, object) in heap.iter() {
         match object {
             Object::Promise(promise) => {
+                if let Some(state) = promise.disposal
+                    && (!matches!(promise.state, PromiseState::Pending)
+                        || promise.adopting.is_some()
+                        || !matches!(heap.get(state), Ok(Object::DisposeState(state)) if state.result == Some(id)))
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "invalid disposal backlink on Promise {id}"
+                    )));
+                }
                 for job in &promise.reactions {
                     match job {
                         ReactionJob::Await(_) => {}
@@ -2250,6 +2325,15 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                             require_promise(heap, *request, &format!("Promise {id} reaction"))?;
                             closes.entry(*generator).or_default().push((id, *request));
                         }
+                        ReactionJob::DisposeNext { state, result } => {
+                            if !matches!(promise.state, PromiseState::Pending)
+                                || disposals.insert(*state, (id, *result)).is_some()
+                            {
+                                return Err(VmError::InvalidSnapshot(format!(
+                                    "invalid disposal reaction on Promise {id}"
+                                )));
+                            }
+                        }
                     }
                     if let ReactionJob::Adopt { result } = job {
                         *adopts.entry(*result).or_default() += 1;
@@ -2265,10 +2349,45 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                     )));
                 }
             }
+            Object::DisposableStack {
+                async_,
+                disposed,
+                records,
+                ..
+            } if (*disposed && !records.is_empty())
+                || !records
+                    .iter()
+                    .all(|record| valid_disposal_record(heap, record, Some(*async_))) =>
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "invalid disposable stack {id}"
+                )));
+            }
             _ => {}
         }
     }
     for (id, object) in heap.iter() {
+        if let Object::DisposeState(state) = object {
+            let reaction = disposals.remove(&id);
+            let valid_links = match (state.result, state.waiting) {
+                (None, None) => reaction.is_none(),
+                (Some(result), Some(source)) => {
+                    reaction == Some((source, result))
+                        && matches!(heap.get(result), Ok(Object::Promise(promise)) if promise.disposal == Some(id))
+                }
+                _ => false,
+            };
+            if !valid_links
+                || !state
+                    .records
+                    .iter()
+                    .all(|record| valid_disposal_record(heap, record, state.result.map(|_| true)))
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "invalid disposal state {id}"
+                )));
+            }
+        }
         let Object::Promise(promise) = object else {
             continue;
         };
@@ -2293,6 +2412,11 @@ fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                 )));
             }
         }
+    }
+    if !disposals.is_empty() {
+        return Err(VmError::InvalidSnapshot(
+            "disposal reaction has no disposal state".to_owned(),
+        ));
     }
     for (generator, waits) in &closes {
         let record = heap.generator(*generator).ok_or_else(|| {

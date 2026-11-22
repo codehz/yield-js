@@ -104,6 +104,49 @@ pub struct PromiseObject {
     /// Internal prototype. Promise instances share one identity.
     pub prototype: Option<ObjectId>,
     pub(super) extensible: bool,
+    /// Private disposal state driving this pending async stack result.
+    pub disposal: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisposeHint {
+    Sync,
+    Async,
+    AsyncFromSync,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisposableResource {
+    Method {
+        value: Value,
+        method: Value,
+        hint: DisposeHint,
+    },
+    Adopt {
+        value: Value,
+        method: Value,
+        hint: DisposeHint,
+    },
+    Defer {
+        method: Value,
+        hint: DisposeHint,
+    },
+    AsyncEmpty,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DisposeState {
+    pub records: Vec<DisposableResource>,
+    /// The pending throw completion; `Some(undefined)` is still a throw.
+    pub error: Option<Value>,
+    pub needs_await: bool,
+    pub has_awaited: bool,
+    /// The async stack result, or `None` for a compiler-owned scope.
+    pub result: Option<ObjectId>,
+    /// The pending source promise carrying the reciprocal `DisposeNext` reaction.
+    pub waiting: Option<ObjectId>,
 }
 
 /// Where a generator currently is.
@@ -1479,6 +1522,13 @@ pub enum Object {
         object: PlainObject,
         callback: PromiseCallback,
     },
+    DisposableStack {
+        object: PlainObject,
+        async_: bool,
+        disposed: bool,
+        records: Vec<DisposableResource>,
+    },
+    DisposeState(DisposeState),
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -1527,6 +1577,21 @@ impl PartialEq for Object {
         use Object::*;
         match (self, other) {
             (Promise(a), Promise(b)) => a == b,
+            (DisposeState(a), DisposeState(b)) => a == b,
+            (
+                DisposableStack {
+                    object: a,
+                    async_: x,
+                    disposed: p,
+                    records: r,
+                },
+                DisposableStack {
+                    object: b,
+                    async_: y,
+                    disposed: q,
+                    records: s,
+                },
+            ) => a == b && x == y && p == q && r == s,
             (Native(a), Native(b)) => a == b,
             (Plain(a), Plain(b)) => a == b,
             (Array(a), Array(b)) => a == b,

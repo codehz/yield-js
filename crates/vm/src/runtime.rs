@@ -295,6 +295,11 @@ pub(crate) enum Microtask {
         request: ObjectId,
         settlement: Settlement,
     },
+    DisposeNext {
+        state: ObjectId,
+        result: ObjectId,
+        settlement: Settlement,
+    },
     /// `queueMicrotask`. A throw is reported separately from Promise rejections.
     Call {
         function: Value,
@@ -339,6 +344,11 @@ impl TraceRoots for Microtask {
                 request,
                 settlement,
             } => (generator, request, settlement).trace(tracer),
+            Self::DisposeNext {
+                state,
+                result,
+                settlement,
+            } => (state, result, settlement).trace(tracer),
             Self::Call { function, args } => (function, args).trace(tracer),
         }
     }

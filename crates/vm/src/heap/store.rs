@@ -207,6 +207,7 @@ impl Heap {
             reactions: Vec::new(),
             locked: false,
             adopting: None,
+            disposal: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.promise_prototype,
@@ -731,6 +732,7 @@ impl Heap {
             Object::Plain(plain)
             | Object::Map { object: plain, .. }
             | Object::Date { object: plain, .. }
+            | Object::DisposableStack { object: plain, .. }
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }
             | Object::WeakSet { object: plain, .. }

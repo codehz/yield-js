@@ -1925,12 +1925,11 @@ impl Vm {
         error: Value,
         suppressed: Value,
     ) -> Result<Value, VmError> {
-        self.alloc_suppressed_error_with_message(
-            self.builtins.get("suppressederror.prototype"),
-            error,
-            suppressed,
-            None,
-        )
+        let id = self
+            .heap
+            .alloc_plain_with(Some(self.builtins.get("suppressederror.prototype")));
+        self.define_suppressed_values(id, error, suppressed)?;
+        Ok(Value::object(id))
     }
 
     fn alloc_suppressed_error_with_message(
@@ -1944,11 +1943,21 @@ impl Vm {
         let ValueRef::Object(id) = value.view() else {
             unreachable!()
         };
+        self.define_suppressed_values(id, error, suppressed)?;
+        Ok(value)
+    }
+
+    fn define_suppressed_values(
+        &mut self,
+        id: ObjectId,
+        error: Value,
+        suppressed: Value,
+    ) -> Result<(), VmError> {
         self.heap
             .define_data(id, "error", error, Attributes::METHOD)?;
         self.heap
             .define_data(id, "suppressed", suppressed, Attributes::METHOD)?;
-        Ok(value)
+        Ok(())
     }
 
     pub(crate) fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {

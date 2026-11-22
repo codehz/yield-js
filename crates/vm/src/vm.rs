@@ -332,6 +332,9 @@ pub struct Vm {
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) microtasks: VecDeque<Microtask>,
+    /// Destinations of stack `use` calls currently running a getter. A move
+    /// transfers the list; disposal detaches it. These calls never suspend.
+    pub(crate) stack_registrations: Vec<Option<ObjectId>>,
     /// FIFO of rejected promises with a pending host notification.
     pub(crate) pending_rejection_notifications: VecDeque<ObjectId>,
     pub(crate) globals: BTreeMap<JsString, Value>,
@@ -453,6 +456,7 @@ impl Vm {
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
             microtasks: VecDeque::new(),
+            stack_registrations: Vec::new(),
             pending_rejection_notifications: VecDeque::new(),
             globals: BTreeMap::new(),
             host_classes: Vec::new(),
@@ -1475,6 +1479,11 @@ impl Vm {
                     request,
                     ref settlement,
                 } => self.finish_closing_request(host, roots, generator, request, settlement)?,
+                Microtask::DisposeNext {
+                    state,
+                    result,
+                    ref settlement,
+                } => self.resume_disposal(host, roots, state, result, settlement)?,
                 Microtask::Call {
                     ref function,
                     ref args,
@@ -1800,6 +1809,13 @@ impl Vm {
                     settlement,
                 });
             }
+            ReactionJob::DisposeNext { state, result } => {
+                self.microtasks.push_back(Microtask::DisposeNext {
+                    state,
+                    result,
+                    settlement,
+                });
+            }
         }
         Ok(())
     }
@@ -1999,6 +2015,7 @@ impl Vm {
             next_host_task_id,
             recovered_operations,
             microtasks: VecDeque::new(),
+            stack_registrations: Vec::new(),
             pending_rejection_notifications: VecDeque::new(),
             globals,
             imports: Vec::new(),

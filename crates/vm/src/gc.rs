@@ -215,6 +215,7 @@ impl Vm {
         roots.trace(&mut tracer)?;
         if let Some(active) = active {
             active.trace(&mut tracer)?;
+            self.stack_registrations.trace(&mut tracer)?;
             for job in &self.microtasks {
                 job.trace(&mut tracer)?;
             }

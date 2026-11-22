@@ -4,6 +4,7 @@ use crate::builtin::binary;
 use crate::builtin::boolean::members as boolean_family;
 use crate::builtin::collections;
 use crate::builtin::date;
+use crate::builtin::disposable_stack;
 use crate::builtin::json::namespace as json;
 use crate::builtin::math::namespace as math;
 use crate::builtin::number;
@@ -126,6 +127,8 @@ builtin_globals! {
     "TextEncoder" => Global::Owner(binary::text::ENCODER_OWNER),
     "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
     "SuppressedError" => Global::Owner(error_family::SUPPRESSED_ERROR),
+    "DisposableStack" => Global::Owner(disposable_stack::SYNC_OWNER),
+    "AsyncDisposableStack" => Global::Owner(disposable_stack::ASYNC_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

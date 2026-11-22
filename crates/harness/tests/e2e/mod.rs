@@ -3,6 +3,7 @@
 mod bindings;
 mod date;
 mod defaults;
+mod disposal;
 mod generator;
 mod host_tasks;
 mod liveness;
