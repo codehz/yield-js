@@ -339,23 +339,39 @@ impl Vm {
         Ok(snapshot)
     }
 
+    /// Restore a trusted, unmodified snapshot produced by [`Vm::snapshot`].
+    ///
+    /// The caller must ensure provenance and integrity. This checks format,
+    /// build and host compatibility, but does not audit the snapshot graph.
+    /// Use [`Vm::restore_validated`] to diagnose invalid snapshot state.
     pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_checked(snapshot, VerifiedBuild::new(build)?, host, |_| {})
+        Self::restore_image::<false>(snapshot, VerifiedBuild::new(build)?, host, |_| {})
     }
 
-    /// Restore with an already validated program. The snapshot and current host
-    /// still undergo the same compatibility and state checks as in `restore`.
+    /// Restore a trusted snapshot with an already validated program.
+    /// The same snapshot requirements as [`Vm::restore`] apply.
     pub fn restore_verified(
         snapshot: Snapshot,
         build: VerifiedBuild,
         host: &mut dyn Host,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_checked(snapshot, build, host, |_| {})
+        Self::restore_image::<false>(snapshot, build, host, |_| {})
     }
 
-    /// Restore through the regular verified path and time its phases.
+    /// Restore with full snapshot validation for development and diagnostics.
+    /// This is not a sandbox or a resource limit for untrusted input.
+    pub fn restore_validated(
+        snapshot: Snapshot,
+        build: Build,
+        host: &mut dyn Host,
+    ) -> Result<Self, VmError> {
+        check_snapshot_header(&snapshot)?;
+        Self::restore_image::<true>(snapshot, VerifiedBuild::new(build)?, host, |_| {})
+    }
+
+    /// Restore with full snapshot validation and time its phases.
     #[doc(hidden)]
     pub fn restore_verified_profiled(
         snapshot: Snapshot,
@@ -368,7 +384,7 @@ impl Vm {
         let mut last = start;
         let mut profile = crate::perf::Restore::default();
         check_snapshot_header(&snapshot)?;
-        let vm = Self::restore_checked(snapshot, build, host, |field| {
+        let vm = Self::restore_image::<true>(snapshot, build, host, |field| {
             let now = Instant::now();
             *field(&mut profile) = now.duration_since(last);
             last = now;
@@ -379,7 +395,7 @@ impl Vm {
         Ok((vm, profile))
     }
 
-    fn restore_checked(
+    fn restore_image<const AUDIT: bool>(
         mut snapshot: Snapshot,
         build: VerifiedBuild,
         host: &mut dyn Host,
@@ -424,10 +440,14 @@ impl Vm {
             heap.insert_restore(id, object)?;
         }
         checkpoint(|profile| &mut profile.heap_insert);
-        validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
+        if AUDIT {
+            validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
+        }
         heap.combines = snapshot.combines.clone();
         heap.generators = load_generators(&build, &heap, snapshot.generators.clone())?;
-        validate_symbol_tables(&snapshot)?;
+        if AUDIT {
+            validate_symbol_tables(&snapshot)?;
+        }
         heap.restore_symbols(
             snapshot.symbols.clone(),
             snapshot.symbol_registry.clone(),
@@ -448,19 +468,23 @@ impl Vm {
         let host_instances = load_host_instances(&bindings, &heap, &snapshot.host_instances)?;
         let module_states = load_module_states(&bindings, &heap, &snapshot.module_states)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
-        for continuation in continuations.values() {
-            require_value_objects(&heap, continuation.values.iter())?;
+        if AUDIT {
+            for continuation in continuations.values() {
+                require_value_objects(&heap, continuation.values.iter())?;
+            }
         }
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
         let templates = load_templates(&build, &heap, std::mem::take(&mut snapshot.templates))?;
-        validate_source_modules(
-            &build,
-            &heap,
-            &builtins,
-            &snapshot.module_envs,
-            &snapshot.module_namespaces,
-            &snapshot.imports,
-        )?;
+        if AUDIT {
+            validate_source_modules(
+                &build,
+                &heap,
+                &builtins,
+                &snapshot.module_envs,
+                &snapshot.module_namespaces,
+                &snapshot.imports,
+            )?;
+        }
         let operations = load_operations(&bindings, &heap, snapshot.operations)?;
         let host_tasks = load_host_tasks(
             &bindings,
@@ -494,11 +518,13 @@ impl Vm {
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications.into();
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         checkpoint(|profile| &mut profile.vm_assembly);
-        validate_native_import_objects(&vm.heap, &vm.imports)?;
-        check_heap_edges(&vm.build, &vm.heap)?;
-        validate_jobs(&vm.heap)?;
-        validate_combines(&vm.heap)?;
-        checkpoint(|profile| &mut profile.graph_validation);
+        if AUDIT {
+            validate_native_import_objects(&vm.heap, &vm.imports)?;
+            check_heap_edges(&vm.build, &vm.heap)?;
+            validate_jobs(&vm.heap)?;
+            validate_combines(&vm.heap)?;
+            checkpoint(|profile| &mut profile.graph_validation);
+        }
         vm.settle_restored_operations()?;
         vm.random_state = snapshot.random_state;
         Ok(vm)

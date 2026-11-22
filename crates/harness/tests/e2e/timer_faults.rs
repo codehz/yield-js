@@ -51,8 +51,7 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     let mut target = TestHost::new();
     // The same image, unmodified, must get through validation without registering.
     drop(Vm::restore(snapshot.clone(), build.clone(), &mut target).unwrap());
-    let mut reject = |label: &str, message: &str, image: Snapshot| {
-        let error = Vm::restore(image, build.clone(), &mut target).expect_err(label);
+    let assert_rejected = |label: &str, message: &str, error: VmError, target: &TestHost| {
         assert!(
             matches!(&error, VmError::InvalidSnapshot(detail) if detail.contains(message)),
             "{label}: {error}"
@@ -65,12 +64,18 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     for length in [3, 5] {
         let mut image = snapshot.clone();
         image.operations[first_op].state.resize(length, 0);
-        reject(
+        let error = Vm::restore(image, build.clone(), &mut target).expect_err("timer codec length");
+        assert_rejected(
             "timer codec length",
             "timer state must be four bytes",
-            image,
+            error,
+            &target,
         );
     }
+    let mut reject = |label: &str, message: &str, image: Snapshot| {
+        let error = Vm::restore_validated(image, build.clone(), &mut target).expect_err(label);
+        assert_rejected(label, message, error, &target);
+    };
     let mut image = snapshot.clone();
     image.host_tasks[0].owner = sleep_owner;
     reject("owner has no CPS layout", "stage is not an external", image);

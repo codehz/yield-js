@@ -58,7 +58,7 @@ export async function run() {
         Some(Some("boxed-only".into()))
     );
     assert!(matches!(
-        Vm::restore(snapshot, build, &mut host),
+        Vm::restore_validated(snapshot, build, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("missing symbol")
     ));
 }
@@ -91,7 +91,7 @@ export async function run() {
         .expect("string cursor");
     visited.clear();
     assert!(matches!(
-        Vm::restore(snapshot, build, &mut host),
+        Vm::restore_validated(snapshot, build, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("invalid cursor state")
     ));
 }
@@ -289,7 +289,7 @@ fn restore_rejects_changed_has_instance_description() {
     assert_eq!(*description, Some("Symbol.hasInstance".into()));
     *description = Some("tampered".into());
     assert!(matches!(
-        Vm::restore(snapshot, build, &mut host),
+        Vm::restore_validated(snapshot, build, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("reserved symbol 8 has an invalid description")
     ));
 }
@@ -508,7 +508,7 @@ export const registered = Symbol.for('registered');
                 _ => panic!("expected weak collection"),
             }
             assert!(matches!(
-                Vm::restore(corrupt, build.clone(), &mut host),
+                Vm::restore_validated(corrupt, build.clone(), &mut host),
                 Err(VmError::InvalidSnapshot(message))
                     if message == format!("{owner} {id} has an invalid key {key}")
             ));
@@ -895,7 +895,7 @@ export function run() {
         view.byte_offset = 2;
     }
     assert!(matches!(
-        Vm::restore(misaligned, build.clone(), &mut host),
+        Vm::restore_validated(misaligned, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message))
             if message.contains("unaligned byte offset")
     ));
@@ -911,7 +911,7 @@ export function run() {
         view.byte_length = Some(3);
     }
     assert!(matches!(
-        Vm::restore(partial, build.clone(), &mut host),
+        Vm::restore_validated(partial, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message))
             if message.contains("partial element length")
     ));
@@ -927,7 +927,7 @@ export function run() {
         view.byte_offset = 8;
     }
     assert!(matches!(
-        Vm::restore(overflow, build.clone(), &mut host),
+        Vm::restore_validated(overflow, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("exceeds its buffer")
     ));
 
@@ -942,7 +942,7 @@ export function run() {
         buffer.max_byte_length = Some(2);
     }
     assert!(matches!(
-        Vm::restore(shrink, build.clone(), &mut host),
+        Vm::restore_validated(shrink, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message))
             if message.contains("exceeds its maximum byte length")
     ));
@@ -958,7 +958,7 @@ export function run() {
         view.byte_length = None;
     }
     assert!(matches!(
-        Vm::restore(tracking, build.clone(), &mut host),
+        Vm::restore_validated(tracking, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message))
             if message.contains("tracks the length of a fixed-length buffer")
     ));

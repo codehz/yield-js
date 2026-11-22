@@ -303,7 +303,7 @@ fn date_restore_rejects_out_of_range_serialized_time_slot() {
     *slot = serde_json::json!(OUT_OF_RANGE);
     let corrupt = Snapshot::from_json(&json.to_string()).unwrap();
     assert!(matches!(
-        Vm::restore(corrupt, program, &mut host),
+        Vm::restore_validated(corrupt, program, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("TimeClip")
     ));
 }

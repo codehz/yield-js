@@ -280,8 +280,8 @@ impl Snapshot {
         Ok(bytes)
     }
 
-    /// Decode the binary container. The result still requires normal VM
-    /// restore validation, including exact build and host matching.
+    /// Decode the binary container without authenticating or auditing its contents.
+    /// VM restore still checks exact build and host compatibility.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         let Some((header, payload)) = bytes.split_at_checked(SNAPSHOT_HEADER_LEN) else {
             return Err("binary snapshot is too short".to_owned());

@@ -35,8 +35,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Vm::start(host, "run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量，随后宿主自行调用 `Vm::run_until_idle(host)`。
 - `Vm::snapshot(&[roots])` 仅在微任务队列为空时可用。
 - `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
-- `Vm::restore(snapshot, same_build, host)` 在执行前重绑声明与 operation。
-- `VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表。线程内可克隆句柄传给 `Vm::new_verified` / `Vm::restore_verified`；每个 VM 仍独立链接宿主、持有堆和缓存，恢复仍校验镜像、构建身份与绑定指纹。
+- `Vm::restore(snapshot, same_build, host)` 恢复由 VM 捕获、未经篡改的有效镜像；来源和完整性由调用方保证。默认入口不重查堆图。开发、测试和诊断用 `Vm::restore_validated` 执行完整校验；它也不适用于不可信输入。
+- `VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表。线程内可克隆句柄传给 `Vm::new_verified` / `Vm::restore_verified`；每个 VM 仍独立链接宿主、持有堆和缓存，恢复仍要求精确匹配构建身份与绑定指纹。
 - `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
 
 ## 2. 挂起、恢复与快照不变量（不得弱化）
@@ -59,7 +59,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 标签模板对象在 VM 启动时按 `Build::templates` 的顺序全部创建，是 GC 与快照根；快照按位置保存对象 ID。恢复要求数量一致、ID 唯一，且每个对象是冻结数组、元素与构建记录一致、`raw` 属性为固定描述符并指向同样冻结的 raw 数组。`Instr::GetTemplate` 只读取该表，不分配。
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
 - 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
-- `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不替代恢复校验。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
+- `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
 
 宿主绑定函数是同步的，不得重入 VM。声明不可变且共享；VM 拥有原型、实例、槽、payload、模块状态与 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
 

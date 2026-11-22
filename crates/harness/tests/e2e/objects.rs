@@ -25,7 +25,7 @@ fn restore_rejects_private_stamp_with_non_class_brand() {
     stamp["brand"] = stamp["receiver"].clone();
     let corrupt = serde_json::from_value(corrupt).expect("deserialize snapshot");
     assert!(
-        matches!(suspended.restore(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("private brand"))
+        matches!(suspended.restore_validated(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("private brand"))
     );
     suspended.restore(snapshot).expect("valid snapshot");
     suspended.complete("wait:private", Completion::Fulfilled(number(0.0)));
@@ -68,7 +68,7 @@ export async function run() {
     record["home"] = serde_json::Value::Null;
     let corrupt = serde_json::from_value(corrupt).expect("deserialize snapshot");
     assert!(
-        matches!(suspended.restore(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("home object"))
+        matches!(suspended.restore_validated(corrupt), Err(VmError::InvalidSnapshot(detail)) if detail.contains("home object"))
     );
     suspended.restore(snapshot).expect("valid snapshot");
     suspended.complete("wait:home", Completion::Fulfilled(number(0.0)));
@@ -131,7 +131,7 @@ export async function run() {
         };
         *plain.props.get_mut(&JsString::from("x")).expect("accessor") =
             Property::Accessor { get, set };
-        let error = s.restore(corrupt).expect_err("bad descriptor");
+        let error = s.restore_validated(corrupt).expect_err("bad descriptor");
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
 
@@ -318,7 +318,7 @@ export async function run() {
                 }
             }
         }
-        let error = s.restore(invalid).expect_err(case);
+        let error = s.restore_validated(invalid).expect_err(case);
         assert!(
             matches!(&error, VmError::InvalidSnapshot(message) if *message == expected),
             "{case}: {error}"
@@ -359,7 +359,7 @@ export async function run() {
     // The array prototype has a null parent, so this edge does not create a cycle.
     plain.prototype = Some(array_prototype);
     let error = s
-        .restore(invalid)
+        .restore_validated(invalid)
         .expect_err("non-null Object.prototype parent");
     assert!(matches!(
         error,
@@ -401,7 +401,7 @@ function demo() {
 
     let mut missing = snapshot.clone();
     missing.roots.remove("array").expect("Array root");
-    let error = s.restore(missing).expect_err("missing root");
+    let error = s.restore_validated(missing).expect_err("missing root");
     assert!(matches!(error, VmError::InvalidSnapshot(_)));
 
     s.restore(snapshot).expect("restore");
@@ -439,7 +439,9 @@ export async function run() {
         unreachable!();
     };
     bound.target = invalid.roots["object.prototype"];
-    let error = s.restore(invalid).expect_err("invalid bound target");
+    let error = s
+        .restore_validated(invalid)
+        .expect_err("invalid bound target");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("bound target")));
 
     let bound_record = bound_record.clone();
@@ -479,7 +481,7 @@ export async function run() {
             .expect("property a");
         entry[1]["ordinal"] = serde_json::json!(invalid_ordinal);
         let error = s
-            .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
+            .restore_validated(serde_json::from_value(corrupt).expect("deserialize snapshot"))
             .expect_err("invalid property ordinal");
         assert!(
             matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
@@ -551,7 +553,7 @@ fn restore_rejects_writable_object_prototype() {
         .expect("prototype property");
     entry[1]["attributes"]["writable"] = serde_json::json!(true);
     let error = s
-        .restore(serde_json::from_value(corrupt).expect("deserialize snapshot"))
+        .restore_validated(serde_json::from_value(corrupt).expect("deserialize snapshot"))
         .expect_err("writable Object.prototype");
     assert!(
         matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("Object.prototype"))
@@ -574,7 +576,7 @@ fn restore_rejects_array_index_past_length() {
         .expect("sparse array in snapshot");
     array["length"] = serde_json::json!(9);
     let error = s
-        .restore(serde_json::from_value(snapshot).expect("deserialize snapshot"))
+        .restore_validated(serde_json::from_value(snapshot).expect("deserialize snapshot"))
         .expect_err("array element outside length");
     assert!(
         matches!(error, VmError::InvalidSnapshot(detail) if detail.contains("invalid property tables"))
@@ -644,7 +646,9 @@ fn restore_rejects_corrupt_collection_records() {
             true
         });
         assert!(changed);
-        let error = s.restore(corrupt).expect_err("corrupt collection record");
+        let error = s
+            .restore_validated(corrupt)
+            .expect_err("corrupt collection record");
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
 }
@@ -690,7 +694,9 @@ fn restore_rejects_malformed_proxy_records() {
         if let Some(id) = handler_override {
             *handler = id;
         }
-        let error = s.restore(corrupt).expect_err("malformed proxy record");
+        let error = s
+            .restore_validated(corrupt)
+            .expect_err("malformed proxy record");
         assert!(matches!(error, VmError::InvalidSnapshot(detail) if detail.contains(message)));
     }
 }
@@ -760,7 +766,9 @@ fn restore_rejects_dangling_weakmap_entries() {
             .expect("reachable WeakMap");
         let (original_key, _) = entries.pop_first().expect("live entry");
         entries.insert(key.unwrap_or(original_key), value);
-        let error = s.restore(corrupt).expect_err("dangling WeakMap entry");
+        let error = s
+            .restore_validated(corrupt)
+            .expect_err("dangling WeakMap entry");
         assert!(matches!(error, VmError::InvalidSnapshot(_)), "{error:?}");
     }
 }

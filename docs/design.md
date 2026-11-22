@@ -66,9 +66,9 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 - `call` / `apply` / `bind` 是可调用的 `Function.prototype` 上的自有方法。全局 `Function` 的调用与构造均抛出 `TypeError`，不编译字符串。
 - 函数转字符串按设计返回 `function <初始名>() { [native code] }`；共享的 `Function.prototype.toString` 不读取公开 `name`，也不保留或反编译源码。
 - 支持 `Array`/`String` 的常用访问、转换、搜索、切片与迭代，以及 `Array.isArray/from`、`push/pop/shift/unshift/splice`、`map/filter/reduce/forEach/some/every/flat`；提供 `Number`、`BigInt`、`Math`、`RegExp`、`JSON` 和标准 `Error` 类型。具体方法和正则用法以锁定构建和回归用例补齐，不以整个内建对象的存在宣称完整兼容。
-- 二进制数据由 VM 自带实现，不依赖宿主缓冲区：`ArrayBuffer` 持有唯一的字节块（固定或可调整长度，支持 `resize` / `transfer` / `transferToFixedLength` / `slice`），`DataView` 提供全部数值宽度与 BigInt 的带端序访问，`%TypedArray%` 与其 12 个具体构造器共享一套整数索引 exotic 语义——越界索引不创建属性、写入丢弃、`ownKeys` 先给索引。视图只记录缓冲区、偏移与可选长度，从不复制字节；元素读写、属性描述符、代理转发与快照重建共用同一份判定。快照保存缓冲区字节与视图元组，恢复拒绝越界、未对齐和不一致的记录；`SharedArrayBuffer`、`Atomics` 与分离后重新附加不在此基线。
+- 二进制数据由 VM 自带实现，不依赖宿主缓冲区：`ArrayBuffer` 持有唯一的字节块（固定或可调整长度，支持 `resize` / `transfer` / `transferToFixedLength` / `slice`），`DataView` 提供全部数值宽度与 BigInt 的带端序访问，`%TypedArray%` 与其 12 个具体构造器都是 VM 自有对象。视图只记录缓冲区、偏移与可选长度，从不复制字节；整数索引访问与诊断校验共用视图判定。快照保存缓冲区字节与视图元组，诊断入口拒绝越界、未对齐和不一致的记录；`SharedArrayBuffer`、`Atomics` 与分离后重新附加不在此基线。
 - `globalThis` 是字节码内建名单中的一个固定根对象（普通对象，原型为 `Object.prototype`），不是对任意宿主全局对象的代理。内建名单里的名字（`Math`、`JSON`、`Symbol` 等）以数据属性挂在该对象上；脚本可以通过 `globalThis` 显式访问它们，但裸名称不做属性查找，而是走静态解析。裸名称解析顺序为：局部绑定 → 显式宿主导入 → preload 导出 → 内建 → `undefined` 字面量；解析不到的名字在编译期报错（读取、赋值和除 `typeof` 外的引用都不可见），`typeof 未知名字` 折叠为 `"undefined"`。运行时动态添加到 `globalThis` 的属性不会反向进入编译期的裸名称解析。
-- preload 全局：`Vm::new` 执行 preload 初始化器后，把 preload 的显式导出安装为 `globalThis` 上的可枚举、不可配置、仅 getter 的活绑定——每个名字一个捕获 preload 模块环境的 getter 函数，读值时实时读取 preload 绑定槽，不是安装时复制的快照值。安装只发生在 VM 启动路径，快照恢复不重新安装，但恢复时会校验 `globalThis` 上这些 getter 的描述符与 preload 记录一致（名字、环境、函数身份），不一致拒绝整个 restore。preload 名字在静态解析中优先于内建；同名局部绑定仍遮蔽 preload 全局。
+- preload 全局：`Vm::new` 执行 preload 初始化器后，把 preload 的显式导出安装为 `globalThis` 上的可枚举、不可配置、仅 getter 的活绑定——每个名字一个捕获 preload 模块环境的 getter 函数，读值时实时读取 preload 绑定槽，不是安装时复制的快照值。安装只发生在 VM 启动路径；快照恢复不重新安装。诊断入口校验 `globalThis` 上这些 getter 的描述符与 preload 记录一致（名字、环境、函数身份）。preload 名字在静态解析中优先于内建；同名局部绑定仍遮蔽 preload 全局。
 - 支持 `Symbol`（含 `Symbol.for/keyFor`、`Symbol.iterator`、`Symbol.asyncIterator`）、同步与异步 iterator 协议、生成器与 async generator 的原型、`Map`、`Set`、`WeakMap`。快照保存 symbol 注册表和引用身份、集合条目与顺序；`WeakMap` 遵循弱键/ephemeron 可达性，只存活键所对应的条目，不能把键提升成强根。
 - Solid 响应式 props/store 需要真正的 VM `Proxy`：首版覆盖普通对象/数组（以及 Date、ArrayBuffer、DataView、TypedArray）目标的 `get`、`set`、`has`、`deleteProperty`、`ownKeys`、`getOwnPropertyDescriptor` 陷阱及相应 `Reflect` 操作；遵守属性描述符与不可扩展目标不变量。快照保存代理、目标、handler 及其捕获环境的身份和关系，不执行 trap 来枚举快照。可撤销代理、代理函数/构造器及其他 traps 不在此基线。
 - `for…in` 到达每一原型层时才取得该层的自有键列表；逐键检查时读取实时描述符，不提前读取属性值。快照保存已经记录的键及枚举进度，恢复时不重跑该层的 `ownKeys`。
@@ -277,7 +277,8 @@ GeneratorEntry {
 - `AWAIT` 将输入转为 VM 内可等待的 Promise，读取操作数后保存续体，按 JS 微任务顺序安排后续反应。即使 Promise 已结算，也不能在 `AWAIT` 原地同步执行续体。
 - `YIELD` 不创建等待关系，也不经过微任务：生成器对象自身保存函数 ID、生命周期状态和按 `GeneratorEntry` 选出的持久槽，调用者的 `next(value)` 在不新建脚本帧的前提下同步恢复。async generator 的请求队列是 VM 堆对象，每个请求记录种类、参数和结果 Promise；请求由普通 Promise 反应驱动，不借用原生任务。
 - 挂起帧的逻辑快照记录为 `(object_id, func_id, resume_id, result_promise_ref, slot_values[])`；最后一项按 `saved_slots` 顺序写值，无需逐槽写编号。被等待 Promise 的反应记录引用续体，等待关系不在帧中重复编码。VM 在当前微任务轮次排空后才允许快照，因此无需落盘已入队但尚未执行的恢复任务。
-- 恢复先核对版本与构建，再为堆、Promise 和续体分配身份并解析引用，校验槽值数量、ID、记录类型与等待关系；每个挂起续体必须恰好对应一个未结算 Promise 上的等待反应，挂起于 `yield` 的生成器则按同一构建的生成器恢复表校验状态、入口与槽，async generator 的每个排队请求必须恰好关联一个未结算的结果 Promise。根据函数布局重建挂起帧，只填充指定的 `P` 槽；其余槽初始不可读。原生绑定验证通过前不调度。未来 Promise 结算时，VM 重建瞬时槽，写入成功值或拒绝原因，从对应落点执行；不重跑 `AWAIT`、`YIELD` 或之前的副作用。
+- 恢复入口面向受信且未经篡改的 VM 存档，精确匹配构建与当前宿主声明；独立的结构审计用于开发和诊断，不要求可信恢复重复遍历堆图。
+- 恢复先核对版本与构建，再为堆、Promise 和续体重建身份，按恢复表重建挂起状态。每个挂起续体必须恰好对应一个未结算 Promise 上的等待反应，async generator 的每个排队请求必须恰好关联一个未结算的结果 Promise；诊断恢复检查这些镜像内部关系。原生绑定验证通过前不调度。未来 Promise 结算时，VM 重建帧，只填充指定的 `P` 槽，写入成功值或拒绝原因，从对应落点执行；不重跑 `AWAIT`、`YIELD` 或之前的副作用。
 快照从模块环境、全局环境、绑定模块状态、显式脚本根及 pending operation 等持久根遍历对象图。绑定实例的槽按普通强边遍历；挂起续体、生成器对象及 async generator 请求队列只访问恢复表中的槽值与必要的运行时引用。从续体省略某个引用，不代表经模块、绑定实例或闭包仍可达的对象也可以省略。
 
 ### 两个挂起点的示例

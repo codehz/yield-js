@@ -183,7 +183,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         mutate(&mut image);
         assert!(
             matches!(
-                Vm::restore(image, build.clone(), &mut host),
+                Vm::restore_validated(image, build.clone(), &mut host),
                 Err(VmError::InvalidSnapshot(_))
             ),
             "accepted {label}"

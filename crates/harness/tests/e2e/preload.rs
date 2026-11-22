@@ -68,7 +68,7 @@ export function run() {
     let n = global.props.get_mut(&JsString::from("n")).unwrap();
     assert!(matches!(n, Property::Accessor { .. }));
     *n = alias;
-    assert!(matches!(Vm::restore(corrupt, build, &mut host),
+    assert!(matches!(Vm::restore_validated(corrupt, build, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("wrong getter function")));
 }
 

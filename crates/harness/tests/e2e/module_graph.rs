@@ -298,7 +298,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     assert!(bad_env.module_envs[counter].is_some());
     bad_env.module_envs[counter] = Some(bad_env.module_namespaces[counter]);
     assert!(matches!(
-        Vm::restore(bad_env, build.clone(), &mut host),
+        Vm::restore_validated(bad_env, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
 
@@ -327,7 +327,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     assert_ne!(*get, Some(wrong_getter));
     *get = Some(wrong_getter);
     assert!(matches!(
-        Vm::restore(bad_getter, build.clone(), &mut host),
+        Vm::restore_validated(bad_getter, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
 

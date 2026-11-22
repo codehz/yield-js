@@ -79,6 +79,13 @@ impl Suspended {
     }
 
     #[track_caller]
+    pub(super) fn restore_validated(&mut self, snapshot: Snapshot) -> Result<(), VmError> {
+        self.vm = Vm::restore_validated(snapshot, self.vm.build().clone(), &mut self.host)?;
+        self.vm.start_recovered_operations()?;
+        Ok(())
+    }
+
+    #[track_caller]
     pub(super) fn complete(&mut self, id: &str, completion: Completion) {
         self.host
             .complete(&mut self.vm, id, completion)

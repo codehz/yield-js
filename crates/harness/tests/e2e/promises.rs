@@ -68,7 +68,9 @@ fn restore_rejects_a_locked_promise_without_an_adopt_job() {
         }
     }
     assert!(locked, "a pending Promise exists at the first await");
-    let error = s.restore(snapshot).expect_err("locked without adopt");
+    let error = s
+        .restore_validated(snapshot)
+        .expect_err("locked without adopt");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("exactly one Adopt"))
     );
@@ -95,7 +97,7 @@ export async function run() {
         })
         .expect("then handler");
     snapshot.objects.retain(|record| record.id != handler);
-    let error = s.restore(snapshot).expect_err("missing handler");
+    let error = s.restore_validated(snapshot).expect_err("missing handler");
     assert!(matches!(error, VmError::InvalidSnapshot(_)));
 }
 
@@ -146,7 +148,7 @@ fn restore_rejects_a_combine_element_index_out_of_bounds() {
         .expect("combine element callback");
     *index = 2;
     let error = s
-        .restore(snapshot)
+        .restore_validated(snapshot)
         .expect_err("out-of-bounds element index");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("index 2 is out of bounds"))
@@ -160,7 +162,7 @@ fn restore_rejects_a_non_callable_combine_capability() {
     let (id, state) = snapshot.combines.iter_mut().next().expect("combine state");
     state.capability = Value::object(*id);
     let error = s
-        .restore(snapshot)
+        .restore_validated(snapshot)
         .expect_err("non-callable combine capability");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("capability is not callable"))
@@ -373,7 +375,7 @@ fn restore_rejects_duplicate_omitted_and_dangling_pending_notification_ids() {
             "dangling ID" => snapshot.objects.retain(|record| record.id != id),
             _ => unreachable!(),
         }
-        let result = Vm::restore(snapshot, vm.build().clone(), &mut host);
+        let result = Vm::restore_validated(snapshot, vm.build().clone(), &mut host);
         assert!(
             matches!(result, Err(VmError::InvalidSnapshot(_))),
             "accepted {corruption}"

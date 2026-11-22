@@ -441,7 +441,9 @@ fn corrupted_snapshot_associations_are_rejected() {
     wrong_values.continuations[0]
         .values
         .push(Value::number(999.0));
-    let error = s.restore(wrong_values).expect_err("slot value count");
+    let error = s
+        .restore_validated(wrong_values)
+        .expect_err("slot value count");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("values")));
 
     let mut broken_reactions = snapshot.clone();
@@ -454,7 +456,7 @@ fn corrupted_snapshot_associations_are_rejected() {
         }
     }
     let error = s
-        .restore(broken_reactions)
+        .restore_validated(broken_reactions)
         .expect_err("continuation not associated with promise");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("exactly once")));
 }
@@ -505,7 +507,9 @@ export async function run() {
     });
     snapshot.continuations[0].env = Some(env_id);
     let calls = s.host.count("wait");
-    let error = s.restore(snapshot).expect_err("extra environment");
+    let error = s
+        .restore_validated(snapshot)
+        .expect_err("extra environment");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("does not use an invocation environment"))
     );
@@ -528,7 +532,9 @@ export async function run() {
     assert!(snapshot.continuations[0].env.is_some());
     snapshot.continuations[0].env = None;
     let calls = s.host.count("wait");
-    let error = s.restore(snapshot).expect_err("missing environment");
+    let error = s
+        .restore_validated(snapshot)
+        .expect_err("missing environment");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("no invocation environment"))
     );
@@ -569,7 +575,9 @@ fn symbol_snapshot_tampering_is_rejected() {
 
     let mut missing_key = snapshot.clone();
     assert!(missing_key.symbols.remove(&symbol_id).is_some());
-    let error = s.restore(missing_key).expect_err("deleted live symbol");
+    let error = s
+        .restore_validated(missing_key)
+        .expect_err("deleted live symbol");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("missing symbol"))
     );
@@ -586,7 +594,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .symbol_registry
         .insert("fake".into(), iterator);
     let error = s
-        .restore(iterator_registry)
+        .restore_validated(iterator_registry)
         .expect_err("registry points at iterator");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("iterator")));
 
@@ -600,7 +608,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .expect("well-known conversion symbol");
     missing_to_primitive.symbols.remove(&to_primitive);
     let error = s
-        .restore(missing_to_primitive)
+        .restore_validated(missing_to_primitive)
         .expect_err("deleted well-known symbol");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("Symbol.toPrimitive"))
@@ -616,7 +624,7 @@ fn symbol_snapshot_tampering_is_rejected() {
         .expect("well-known species symbol");
     missing_species.symbols.remove(&species);
     let error = s
-        .restore(missing_species)
+        .restore_validated(missing_species)
         .expect_err("deleted species symbol");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("Symbol.species"))
@@ -624,7 +632,9 @@ fn symbol_snapshot_tampering_is_rejected() {
 
     let mut lowered = snapshot.clone();
     lowered.next_symbol_id = symbol_id;
-    let error = s.restore(lowered).expect_err("lowered high-water mark");
+    let error = s
+        .restore_validated(lowered)
+        .expect_err("lowered high-water mark");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("next symbol id"))
     );
@@ -639,7 +649,7 @@ fn restore_rejects_missing_or_mismatched_global_this_root() {
     let mut missing = snapshot.clone();
     assert!(missing.roots.remove("globalThis").is_some());
     let error = suspended
-        .restore(missing)
+        .restore_validated(missing)
         .expect_err("missing globalThis root");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("builtin roots"))
@@ -651,7 +661,7 @@ fn restore_rejects_missing_or_mismatched_global_this_root() {
             .roots
             .insert("globalThis".to_owned(), snapshot.roots[root]);
         let error = suspended
-            .restore(mismatched)
+            .restore_validated(mismatched)
             .expect_err("mismatched globalThis root");
         assert!(
             matches!(error, VmError::InvalidSnapshot(message) if message.contains("globalThis"))
@@ -676,7 +686,7 @@ fn array_iterator_snapshot_tampering_is_rejected() {
     };
     *array = Some(yield_vm::value::ObjectId::MAX);
     let error = s
-        .restore(invalid_source)
+        .restore_validated(invalid_source)
         .expect_err("missing iterator source");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("array iterator"))
@@ -688,7 +698,7 @@ fn array_iterator_snapshot_tampering_is_rejected() {
         snapshot.roots["object.prototype"],
     );
     let error = s
-        .restore(invalid_values)
+        .restore_validated(invalid_values)
         .expect_err("invalid array.values root");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("array.values")));
 
@@ -700,7 +710,7 @@ fn array_iterator_snapshot_tampering_is_rejected() {
             .is_some()
     );
     let error = s
-        .restore(missing_root)
+        .restore_validated(missing_root)
         .expect_err("missing iterator prototype root");
     assert!(matches!(error, VmError::InvalidSnapshot(message) if message.contains("builtin root")));
 
@@ -727,7 +737,9 @@ fn string_iterator_snapshot_rejects_invalid_offsets() {
             unreachable!();
         };
         *position = offset;
-        let error = s.restore(invalid).expect_err("invalid string cursor");
+        let error = s
+            .restore_validated(invalid)
+            .expect_err("invalid string cursor");
         assert!(
             matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid UTF-16 position"))
         );
@@ -758,7 +770,7 @@ export async function run() {
         unreachable!();
     };
     state.prefix_len = 4;
-    let error = s.restore(too_long).expect_err("prefix length 4");
+    let error = s.restore_validated(too_long).expect_err("prefix length 4");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
     );
@@ -769,7 +781,9 @@ export async function run() {
     };
     state.prefix_len = 1;
     state.prefix[0] = 0xff;
-    let error = s.restore(invalid_prefix).expect_err("invalid prefix bytes");
+    let error = s
+        .restore_validated(invalid_prefix)
+        .expect_err("invalid prefix bytes");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
     );
@@ -782,7 +796,7 @@ export async function run() {
     state.prefix_len = 0;
     state.pending = vec![0x41];
     let error = s
-        .restore(closed_with_pending)
+        .restore_validated(closed_with_pending)
         .expect_err("pending bytes on a closed stream");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
@@ -891,7 +905,7 @@ fn restore_rejects_duplicate_intrinsic_identity() {
         + 1;
     snapshot.objects.push(duplicate);
     let error = suspended
-        .restore(json_round_trip(&snapshot))
+        .restore_validated(json_round_trip(&snapshot))
         .expect_err("duplicate intrinsic object identity");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("duplicate native object identity"))
@@ -927,7 +941,9 @@ fn for_in_snapshot_rejects_invalid_cursor_state() {
             unreachable!();
         };
         *current = target;
-        let error = s.restore(invalid).expect_err("invalid enumeration cursor");
+        let error = s
+            .restore_validated(invalid)
+            .expect_err("invalid enumeration cursor");
         assert!(
             matches!(error, VmError::InvalidSnapshot(message) if message.contains("for-in iterator"))
         );
@@ -1051,7 +1067,7 @@ fn restore_rejects_a_pending_operation_with_a_different_import_binding() {
     assert_eq!(snapshot.operations[0].schema, 1);
     snapshot.operations[0].name = "inspect".to_owned();
     assert!(matches!(
-        s.restore(snapshot),
+        s.restore_validated(snapshot),
         Err(VmError::InvalidSnapshot(message)) if message.contains("is not declared")
     ));
 }
@@ -1113,13 +1129,13 @@ export function dropEntry() { entry = 0; }
     let mut missing = snapshot.clone();
     missing.module_envs[entry] = None;
     assert!(matches!(
-        Vm::restore(missing, build.clone(), &mut host),
+        Vm::restore_validated(missing, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut incorrect = snapshot.clone();
     incorrect.module_envs[entry] = Some(snapshot.module_namespaces[entry]);
     assert!(matches!(
-        Vm::restore(incorrect, build.clone(), &mut host),
+        Vm::restore_validated(incorrect, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut absent_export = snapshot.clone();
@@ -1139,7 +1155,7 @@ export function dropEntry() { entry = 0; }
     assert_eq!(module, build.entry);
     assert!(env.bindings.remove(&binding).is_some());
     assert!(matches!(
-        Vm::restore(absent_export, build.clone(), &mut host),
+        Vm::restore_validated(absent_export, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
 
@@ -1208,14 +1224,14 @@ export async function run() {
     let mut shortened = snapshot.clone();
     shortened.templates.clear();
     assert!(matches!(
-        Vm::restore(shortened, build.clone(), &mut host),
+        Vm::restore_validated(shortened, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("template count mismatch")
     ));
 
     let mut wrong = snapshot;
     wrong.templates[0] = wrong.roots["array.prototype"];
     assert!(matches!(
-        Vm::restore(wrong, build, &mut host),
+        Vm::restore_validated(wrong, build, &mut host),
         Err(VmError::InvalidSnapshot(message)) if message.contains("template 0")
     ));
 }

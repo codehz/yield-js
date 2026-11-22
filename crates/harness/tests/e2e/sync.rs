@@ -120,13 +120,13 @@ fn math_random_continues_after_snapshot_restore() {
     let mut missing_root = snapshot.clone();
     missing_root.roots.remove("math");
     assert!(matches!(
-        Vm::restore(missing_root, build.clone(), &mut host),
+        Vm::restore_validated(missing_root, build.clone(), &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut zero_state = snapshot;
     zero_state.random_state = 0;
     assert!(matches!(
-        Vm::restore(zero_state, build, &mut host),
+        Vm::restore_validated(zero_state, build, &mut host),
         Err(VmError::InvalidSnapshot(_))
     ));
 }
