@@ -306,14 +306,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         statement: &'ast ForInStatement<'ast>,
     ) -> Result<(), CompileError> {
-        if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
-            if declaration.kind.is_using() {
-                return Err(unsupported(
-                    self.source_text(),
-                    declaration.span,
-                    "resource declaration in a loop head",
-                ));
-            }
+        if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left
+            && declaration.kind.is_using()
+        {
+            return Err(unsupported(
+                self.source_text(),
+                declaration.span,
+                "resource declaration in a loop head",
+            ));
         }
         self.env.enter_block();
         let bindings = self.declare_iteration_bindings(&statement.left, "for-in")?;
