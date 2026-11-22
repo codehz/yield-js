@@ -11,7 +11,9 @@ use crate::error::CompileError;
 use crate::instr;
 use crate::ir::{FunctionAttrs, LoweredFunction};
 
+mod cleanup;
 mod layout;
+mod verify;
 pub(crate) use layout::LaidOutFunction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -335,27 +337,16 @@ impl FunctionCfg {
                 if target as usize >= len || pc + 1 == len {
                     return Err(invalid("invalid conditional successor"));
                 }
-                starts.extend([target as usize, pc + 1]);
-            } else {
-                match instr {
-                    Instr::Jump { target } => {
-                        if *target as usize >= len {
-                            return Err(invalid("jump target out of range"));
-                        }
-                        starts.extend([*target as usize, pc + 1]);
-                    }
-                    Instr::Return { .. }
-                    | Instr::Throw { .. }
-                    | Instr::ThrowAssignmentToConst
-                    | Instr::ThrowDeleteSuper
-                    | Instr::Await { .. }
-                    | Instr::Yield { .. }
-                    | Instr::GeneratorStart => {
-                        starts.insert(pc + 1);
-                    }
-                    _ => {}
+                starts.insert(target as usize);
+            } else if let Instr::Jump { target } = instr {
+                if *target as usize >= len {
+                    return Err(invalid("jump target out of range"));
                 }
+                starts.insert(*target as usize);
+            } else if !ends_block(instr) {
+                continue;
             }
+            starts.insert(pc + 1);
         }
         let iteration_envs = iteration_envs
             .into_iter()
@@ -501,7 +492,7 @@ impl FunctionCfg {
                 protected_by,
             }));
         }
-        Ok(Self {
+        let cfg = Self {
             attrs,
             blocks,
             handlers: entries,
@@ -509,8 +500,24 @@ impl FunctionCfg {
             generator_boundary: generator_start
                 .map(|s| block_at(s.body_pc - 1))
                 .transpose()?,
-        })
+        };
+        cfg.validate()?;
+        Ok(cfg)
     }
+}
+
+fn ends_block(instr: &Instr) -> bool {
+    matches!(
+        instr,
+        Instr::Jump { .. }
+            | Instr::Return { .. }
+            | Instr::Throw { .. }
+            | Instr::ThrowAssignmentToConst
+            | Instr::ThrowDeleteSuper
+            | Instr::Await { .. }
+            | Instr::Yield { .. }
+            | Instr::GeneratorStart
+    ) || decode_condition(instr).is_some()
 }
 
 fn decode_condition(instr: &Instr) -> Option<(Condition, u32)> {

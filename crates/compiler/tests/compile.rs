@@ -2112,6 +2112,21 @@ export function* run(a) {
 }
 
 #[test]
+fn empty_if_leaves_no_branch_or_jump() {
+    let build = compile(
+        "export function run(flag) { if (flag) {} else {} return 7; }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+    build.validate().unwrap();
+    let run = build.functions.iter().find(|f| f.name == "run").unwrap();
+    assert!(!run.code.iter().any(|instr| matches!(
+        instr,
+        Instr::BranchFalse { .. } | Instr::BranchTrue { .. } | Instr::Jump { .. }
+    )));
+}
+
+#[test]
 fn pruned_suspensions_do_not_leave_resume_entries() {
     let build = compile(
         r#"export async function* run(flag) {

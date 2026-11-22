@@ -71,7 +71,7 @@ impl FunctionCfg {
             // The verifier checks lexical predecessors, even when the preceding
             // opcode (e.g. Yield) cannot actually fall through to this stub.
             let separator = falls_through && stubs.contains(&id);
-            let encode_end = !matches!(block.end, Terminator::Next(target)
+            let encode_end = !matches!(block.end, Terminator::Next(target) | Terminator::Jump(target)
                 if Some(target) == adjacent && !(block.statements.is_empty() && distinct.contains(&id)));
             let start = len
                 .checked_add(u32::from(separator))
@@ -86,8 +86,8 @@ impl FunctionCfg {
                 .ok_or_else(|| invalid("too many instructions"))?;
             if width != 0 {
                 falls_through = match &block.end {
-                    Terminator::Next(_) => !encode_end,
-                    Terminator::Jump(_) | Terminator::GeneratorStart { .. } => false,
+                    Terminator::Next(_) | Terminator::Jump(_) => !encode_end,
+                    Terminator::GeneratorStart { .. } => false,
                     Terminator::Finish(instr) => {
                         !matches!(instr, Instr::Return { .. } | Instr::Throw { .. })
                     }

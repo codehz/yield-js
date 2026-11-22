@@ -22,6 +22,7 @@ yield-harness  →  yield-compiler  →  yield-vm
   → cfg          消费线性发射结果，建立带恢复边和异常边的基本块
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
   → propagate    CFG 跨块传播字面量和复制，折叠分支并移除不可达块
+  → cfg cleanup  校验 CFG，清理普通跳转，不改变源块顺序与恢复入口
   → analyze      CFG live-in（含恢复边与异常边），移除无副作用的死写入
   → allocate     按原块序布局字节码，再分配持久槽与可复用的瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
@@ -71,7 +72,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
-| 值传播 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 最终生成跳转 PC、挂起表和逐 PC 的 live-in |
+| 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 最终生成跳转 PC、挂起表和逐 PC 的 live-in |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |

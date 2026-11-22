@@ -253,6 +253,8 @@ fn lower_module<'ast>(
             &loop_free,
         );
         crate::propagate::optimize(&mut function, session.constants());
+        function.simplify_jumps();
+        function.validate()?;
         let allocated = allocate::allocate(scope.source, function)?;
         session.push_function(allocated);
     }
