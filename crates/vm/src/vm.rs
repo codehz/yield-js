@@ -160,9 +160,48 @@ pub(crate) struct RestoredState {
 /// Runtime-only metadata indexed by the original, validated function table.
 #[derive(Debug)]
 struct FunctionTable {
-    indices: BTreeMap<u32, usize>,
+    indices: FunctionIndices,
     calls: Vec<CallMetadata>,
     module_environments: Vec<bool>,
+}
+
+#[derive(Debug)]
+enum FunctionIndices {
+    /// `func_id` to function index; `usize::MAX` marks a missing ID.
+    Dense(Vec<usize>),
+    /// Sorted by `func_id`; used when IDs are too sparse for a dense table.
+    Sparse(Vec<(u32, usize)>),
+}
+
+impl FunctionIndices {
+    fn new(by_id: &BTreeMap<u32, usize>) -> Self {
+        let Some((&maximum, _)) = by_id.last_key_value() else {
+            return Self::Dense(Vec::new());
+        };
+        let limit = by_id.len().saturating_mul(4).max(64);
+        if usize::try_from(maximum).is_ok_and(|maximum| maximum < limit) {
+            let mut dense = vec![usize::MAX; usize::try_from(maximum).unwrap() + 1];
+            for (&func_id, &index) in by_id {
+                dense[func_id as usize] = index;
+            }
+            Self::Dense(dense)
+        } else {
+            Self::Sparse(by_id.iter().map(|(&id, &index)| (id, index)).collect())
+        }
+    }
+
+    fn get(&self, func_id: u32) -> Option<usize> {
+        match self {
+            Self::Dense(indices) => indices
+                .get(func_id as usize)
+                .copied()
+                .filter(|&index| index != usize::MAX),
+            Self::Sparse(indices) => indices
+                .binary_search_by_key(&func_id, |&(id, _)| id)
+                .ok()
+                .map(|index| indices[index].1),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -214,7 +253,7 @@ fn property_caches(build: &Build) -> Vec<Vec<PropertyCache>> {
 
 impl FunctionTable {
     fn from_validated(build: &Build) -> Self {
-        let indices: BTreeMap<_, _> = build
+        let by_id: BTreeMap<_, _> = build
             .functions
             .iter()
             .enumerate()
@@ -232,15 +271,15 @@ impl FunctionTable {
             .modules
             .iter()
             .map(|module| {
-                let declaration = indices[&module.declaration];
-                let evaluation = indices[&module.evaluation];
+                let declaration = by_id[&module.declaration];
+                let evaluation = by_id[&module.evaluation];
                 calls[declaration].is_initializer = true;
                 calls[evaluation].is_initializer = true;
                 calls[declaration].needs_environment || calls[evaluation].needs_environment
             })
             .collect();
         Self {
-            indices,
+            indices: FunctionIndices::new(&by_id),
             calls,
             module_environments,
         }
@@ -1620,8 +1659,7 @@ impl Vm {
     pub(crate) fn function_index(&self, func_id: u32) -> Result<usize, VmError> {
         self.functions
             .indices
-            .get(&func_id)
-            .copied()
+            .get(func_id)
             .ok_or_else(|| VmError::InvalidState(format!("function {func_id} does not exist")))
     }
 
