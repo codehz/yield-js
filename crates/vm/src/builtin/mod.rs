@@ -84,6 +84,7 @@ mod disposable_stack;
 mod disposal;
 pub(super) mod error_family;
 pub(crate) mod generator;
+mod global_functions;
 pub(crate) mod globals;
 pub(crate) mod iterator;
 pub(crate) mod json;

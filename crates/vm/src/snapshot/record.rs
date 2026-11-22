@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Raw JSON, revocable proxies, iterator helpers, and Array.fromAsync state.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 65;
+// Global numeric, URI, and eval function roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 66;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

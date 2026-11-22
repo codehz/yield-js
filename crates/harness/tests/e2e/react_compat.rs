@@ -15,20 +15,17 @@ use yield_vm::{Value, Vm};
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
 const REACT_RECONCILER: &str = include_str!("vendor/react-reconciler-0.31.0.mjs");
 const CUSTOM_RENDERER: &str = include_str!("vendor/react-renderer.mjs");
-// Host-provided environment globals and the small standards polyfills the
-// vendor sources call are supplied by the preload module. Framework-owned
-// gaps stay recorded in `docs/gaps.md` §8.
-//
+// The preload supplies environment globals; URI functions are VM builtins.
+
 // esm.sh inlines unenv's node:events polyfill, which reads Node's module-private
 // `kEvents` symbol without declaring it. Supplying it as an environment global
 // keeps the vendor bundle unchanged. `setTimeout` / `clearTimeout` are host
 // functions of the `test` module; re-exporting them makes the reconciler's
 // unenv fallback resolve without inventing a second timer implementation.
-// The URI family lives here because the VM has no standard URI globals yet.
-const PRELOAD_POLYFILLS: &str = include_str!("../../benches/baseline/react-preload.mjs");
+const PRELOAD: &str = include_str!("../../benches/baseline/react-preload.mjs");
 
 fn preload_source(environment_globals: bool) -> String {
-    let mut source = String::from(PRELOAD_POLYFILLS);
+    let mut source = String::from(PRELOAD);
     if environment_globals {
         source.push_str("export const window = undefined; export const process = undefined;");
     }
@@ -47,49 +44,6 @@ fn react_bundle_compiles_without_window_or_process_preload_exports() {
     let preload = preload_source(false);
     compile_preloaded(REACT_19_BUNDLE, &preload, &declared(TEST_DECLARATIONS)).unwrap_or_else(
         |error| panic!("React bundle depended on a removed environment export: {error}"),
-    );
-}
-
-#[test]
-fn preload_uri_polyfills_match_standard_encoding() {
-    let main = r#"
-        function throws(fn) {
-            try { fn(); return false; } catch (error) { return error instanceof URIError; }
-        }
-        export function run() {
-            return [
-                encodeURIComponent("a b&c/中文"),
-                encodeURIComponent("!'()*-._~"),
-                encodeURI("http://x/y?z=1#f"),
-                decodeURIComponent("%E4%B8%AD%20a"),
-                decodeURI("%3F%23%41"),
-                throws(() => encodeURIComponent("\uD800")),
-                throws(() => decodeURIComponent("%E4%B8")),
-                throws(() => decodeURIComponent("%ZZ")),
-            ].join("|");
-        }
-    "#;
-    let preload = preload_source(false);
-    let resolver = MemoryResolver::new([("main.js", main), ("preload.js", &preload)])
-        .expect("valid URI probe module paths");
-    let build = compile(
-        "main.js",
-        Some("preload.js"),
-        &resolver,
-        &declared(TEST_DECLARATIONS),
-    )
-    .expect("URI polyfill probe links");
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("URI polyfill VM initialization");
-    let result = vm
-        .start(&mut host, "run", Vec::new())
-        .expect("URI polyfill probe run");
-    assert_eq!(
-        result,
-        Value::string(
-            "a%20b%26c%2F%E4%B8%AD%E6%96%87|!'()*-._~|http://x/y?z=1#f|中 a|%3F%23A|true|true|true"
-                .into()
-        )
     );
 }
 

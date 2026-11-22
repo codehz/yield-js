@@ -40,7 +40,7 @@
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
 
-未提供的全局名包括 `Iterator`（因此 `Iterator.from` / `Iterator.concat` 不可用）、`WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics`、`Intl`、`eval`、`encodeURI` / `decodeURI`、`encodeURIComponent` / `decodeURIComponent`，以及全局 `parseInt` / `parseFloat` / `isNaN` / `isFinite`。`Temporal` 的规范出版目标为 ES2027，不属于 ES2026。
+未提供的全局名包括 `Iterator`（因此 `Iterator.from` / `Iterator.concat` 不可用）、`WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 的规范出版目标为 ES2027，不属于 ES2026。
 
 ## 5. 结构性缺口
 
@@ -57,7 +57,7 @@
 ## 6. 首版范围之外（不是首版缺口）
 
 - 完整 ECMAScript TDZ
-- 动态 `import()`、`eval`、`Function` 构造
+- 运行时加载或编译代码：动态 `import()` 在编译期拒绝；内建 `eval` 无论输入为何均抛 `EvalError`，调用或构造内建 `Function` 均抛 `TypeError`。
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
@@ -83,7 +83,6 @@
 preload 负责探针需要的环境全局：
 
 - `console` 宿主模块与空的 `reportError`、`kEvents`；`window`、`process` 仍为 `undefined`。
-- `encodeURI` / `encodeURIComponent` / `decodeURI` / `decodeURIComponent` 的严格 UTF-8 实现。VM 仍不提供标准 URI 全局，畸形百分号或 UTF-8 序列抛 `URIError`。
 - 从 `test` 宿主模块重导出的 `setTimeout` / `clearTimeout`，复用同一 timer driver。
 
 探针同时关闭了以下框架缺口：

@@ -121,6 +121,9 @@
 - `Promise.withResolvers()` 使用接收构造器创建 `{ promise, resolve, reject }`；`Promise.try(fn, ...args)` 同步调用回调，并用同一套决议能力处理结果或异常。原生决议函数可以跨快照保留。
 - Promise 决议（包括执行器的 `resolve` 和 async 返回值）不检查输入的 `constructor`，而是同步读取一次 `then`，包括真正 Promise 上覆写的 `then`；在微任务中以输入对象为接收者调用。`then` getter 或调用抛错进入拒绝路径，非可调用的 `then` 保留输入身份，直接自决议拒绝为 `TypeError`。
 - 内建包括 `Error`、`TypeError`、`RangeError`、`ReferenceError`、`SyntaxError`、`EvalError`、`URIError`、`AggregateError`、`queueMicrotask`、`BigInt`、`Promise`（构造、`resolve` / `reject` / `all` / `race` / `any` / `allSettled`，以及共享的 `Promise.prototype.then` / `catch` / `finally`）、`Symbol`（`Symbol()`、`Symbol.for` / `keyFor`，以及 `Symbol.iterator` / `Symbol.toPrimitive` / `Symbol.species`），以及原始数值全局 `NaN` 与 `Infinity`（作为运行期 `Value::Number` 提供，支持一元负号得到 `-Infinity`；不是编译期常量，也不进入快照根）。内建单例和共享原型进入快照根。`Promise` 反应、thenable 的 `resolve`/`reject` 能力和组合器状态可快照；快照时微任务队列必须为空，未根可达的 thenable 能力会拒绝快照。
+- 全局 `parseInt` / `parseFloat` 与 `Number` 上的同名属性初始指向同一函数对象；全局 `isNaN` / `isFinite` 先做 `ToNumber`，不同于 `Number` 上不做强制转换的同名方法。
+- `encodeURI` / `decodeURI` 和 `encodeURIComponent` / `decodeURIComponent` 先做 `ToString`，再按 UTF-8 编解码。`decodeURI` 保留 URI 保留字符的百分号转义及原始大小写；畸形转义、无效的百分号编码 UTF-8 或编码输入中的孤立代理码元抛 `URIError`。
+- 全局 `eval` 不可构造，并对所有调用抛 `EvalError`（不转换参数、不解析或执行输入）。动态 `import()` 仍在编译期拒绝，`Function` 仍不能动态编译源码。
 - `Symbol.for` / `Symbol.keyFor` 不读取 `this`，提取为普通函数后裸调用仍可用；`Symbol` 原型方法仍要求 Symbol 或 Symbol 包装对象接收者。
 - `Symbol.prototype[Symbol.toPrimitive]` 忽略提示参数并返回接收者的 Symbol 原始值；`Symbol.prototype[Symbol.toStringTag]` 的值为 `"Symbol"`。`Symbol.unscopables` 是固定静态属性，宿主成员可使用 `WellKnownSymbol::Unscopables`；`Array.prototype[Symbol.unscopables]` 暴露 ES2026 定义的空原型名单。
 - `Symbol.hasInstance` 是固定静态属性，宿主成员声明可使用 `WellKnownSymbol::HasInstance` 对应同一身份。
@@ -134,6 +137,7 @@
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。
 - 快照格式 **64** 增加编译器私有清理函数根；这些函数不出现在全局名表或 `globalThis`。字节码仍使用现有的 `GetBuiltin`、调用和 `Await` 指令。
 - 快照格式 **65** 保存 raw JSON 内部标记、`Array.fromAsync` 的等待状态、迭代器 helper 游标、代理撤销状态及 `Symbol.unscopables` 固定身份；不迁移旧格式，字节码版本不变。
+- 快照格式 **66** 增加 URI、数值与 `eval` 全局函数的内建根；字节码版本不变。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `Array.prototype.join` 或 `toString` 时，接收者可以是对象或非空值原始类型。`join` 先按数字 hint 转换 `length`、截断并限制在 `0..=2^53−1`，再转换分隔符；原始字符串直接按 UTF-16 码元连接，不创建包装。若继承的 getter 或代理可观察接收者，则使用同一个包装对象；`toString` 也以该包装调用查找到的 `join`。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。

@@ -23,7 +23,7 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 pub(crate) mod members {
     use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
 
-    #[functions(isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1, parseFloat: 1, parseInt: 2)]
+    #[functions(isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1)]
     fn call_static(
         vm: &mut Vm,
         host: &mut dyn Host,
@@ -109,6 +109,16 @@ fn install(vm: &mut Vm, _: &Value) {
     let prototype = vm.builtins.get(ROOT_NUMBER_PROTOTYPE);
     link_constructor(vm, constructor, prototype);
     members::install_members(vm, constructor, prototype);
+    // The Number properties start with the same function objects as the globals.
+    for name in ["parseFloat", "parseInt"] {
+        super::define_builtin_data(
+            vm,
+            constructor,
+            name,
+            Value::object(vm.builtins.get(name)),
+            crate::heap::Attributes::METHOD,
+        );
+    }
 }
 
 impl Vm {
@@ -131,7 +141,7 @@ impl Vm {
         })
     }
 
-    fn call_number_static(
+    pub(super) fn call_number_static(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,

@@ -1,3 +1,4 @@
+use super::global_functions;
 use crate::builtin::array;
 use crate::builtin::bigint;
 use crate::builtin::binary;
@@ -48,6 +49,7 @@ impl Owner {
 
 enum Global {
     Owner(Owner),
+    Function(Owner),
     Number(f64),
     /// A global whose object is an already allocated builtin root, used for a
     /// family of constructors that share one owner.
@@ -129,11 +131,20 @@ builtin_globals! {
     "SuppressedError" => Global::Owner(error_family::SUPPRESSED_ERROR),
     "DisposableStack" => Global::Owner(disposable_stack::SYNC_OWNER),
     "AsyncDisposableStack" => Global::Owner(disposable_stack::ASYNC_OWNER),
+    "parseInt" => Global::Function(global_functions::PARSE_INT),
+    "parseFloat" => Global::Function(global_functions::PARSE_FLOAT),
+    "isNaN" => Global::Function(global_functions::IS_NAN),
+    "isFinite" => Global::Function(global_functions::IS_FINITE),
+    "encodeURI" => Global::Function(global_functions::ENCODE_URI),
+    "decodeURI" => Global::Function(global_functions::DECODE_URI),
+    "encodeURIComponent" => Global::Function(global_functions::ENCODE_URI_COMPONENT),
+    "decodeURIComponent" => Global::Function(global_functions::DECODE_URI_COMPONENT),
+    "eval" => Global::Function(global_functions::EVAL),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
     GLOBALS.iter().filter_map(|global| match global {
-        Global::Owner(owner) => Some(owner),
+        Global::Owner(owner) | Global::Function(owner) => Some(owner),
         Global::Number(_) | Global::Root(_) => None,
     })
 }
@@ -180,7 +191,9 @@ impl Vm {
             return Ok(Value::object(self.builtins.get(key.member)));
         }
         match GLOBALS.get(index as usize) {
-            Some(Global::Owner(owner)) => Ok(Value::object(self.builtins.get(owner.root))),
+            Some(Global::Owner(owner) | Global::Function(owner)) => {
+                Ok(Value::object(self.builtins.get(owner.root)))
+            }
             Some(Global::Number(number)) => Ok(Value::number(*number)),
             Some(Global::Root(root)) => Ok(Value::object(self.builtins.get(root))),
             None => Err(VmError::InvalidState(format!(
@@ -265,8 +278,13 @@ impl Vm {
         for (index, name) in BUILTINS.iter().enumerate() {
             let name: &str = name;
             let value = self.builtin_value(index as u32).expect("global builtin");
+            let attributes = if matches!(GLOBALS[index], Global::Function(_)) {
+                Attributes::METHOD
+            } else {
+                Attributes::ORDINARY
+            };
             self.heap
-                .define_data(global_this, name, value, Attributes::ORDINARY)
+                .define_data(global_this, name, value, attributes)
                 .expect("global builtin property");
         }
         self.heap
