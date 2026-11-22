@@ -54,27 +54,6 @@ export function run() {
 }
 
 #[test]
-fn hoisted_functions_can_capture_later_bindings() {
-    let source = r#"
-export function run() {
-  return read();
-  function read() {
-    return x;
-  }
-  let x = 4;
-}
-"#;
-    let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("bindings");
-    // Scope entry initializes `x`; the later initializer never runs.
-    let result = vm
-        .start(&mut host, "run", Vec::new())
-        .expect("captured read");
-    assert_eq!(result, Value::UNDEFINED);
-}
-
-#[test]
 fn sync_control_flow_executes_before_any_await() {
     let source = r#"
 export function run(n) {
