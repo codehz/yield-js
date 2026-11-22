@@ -4,7 +4,6 @@ use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::Attributes;
-use crate::heap::Object;
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
@@ -19,9 +18,7 @@ const IS_ERROR: IntrinsicKey = IntrinsicKey::new("Error", Slot::Static, "isError
 const ERROR_STATIC_INTRINSICS: &[IntrinsicDef] =
     &[IntrinsicDef::call(IS_ERROR, 1, |vm, _, _, args, _| {
         let branded = match args.first().map(Value::view) {
-            Some(ValueRef::Object(id)) => {
-                matches!(vm.heap.get(id)?, Object::Plain(o) if o.is_error)
-            }
+            Some(ValueRef::Object(id)) => vm.heap.get(id)?.has_error_brand(),
             _ => false,
         };
         Ok(Invocation::Value(Value::boolean(branded)))

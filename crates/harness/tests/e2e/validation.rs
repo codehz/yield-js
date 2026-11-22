@@ -874,7 +874,7 @@ fn host_value_serde_preserves_utf16_units() {
 fn restore_rejects_previous_snapshot_format_version() {
     let mut s = Suspended::start(RUN, vec![]);
     let snapshot = s.snapshot();
-    for version in [7, 32, 37, 49] {
+    for version in [7, 32, 37, 49, 67] {
         let mut previous = snapshot.clone();
         previous.format_version = version;
         let error = s.restore(previous).expect_err("previous snapshot format");

@@ -153,15 +153,15 @@ impl Vm {
                 | Object::Array(_)
                 | Object::Boxed { .. }
                 | Object::Date { .. }
+                | Object::DomException { .. }
                 | Object::ArrayBuffer(_)
                 | Object::TypedArray(_)
                 | Object::DataView(_)
                 | Object::Proxy { .. }
         ) {
-            return Ok(Err(self.type_error(
-                roots,
-                "Proxy supports only plain object, array, primitive wrapper, Date, and binary targets",
-            )?));
+            return Ok(Err(
+                self.type_error(roots, "Unsupported Proxy target object")?
+            ));
         }
         Ok(Ok(self.heap.alloc(Object::Proxy {
             slots: Some((target, handler)),

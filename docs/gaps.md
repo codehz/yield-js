@@ -30,13 +30,14 @@
 | --- | --- |
 | `Array` | 不提供 `Array.prototype.toLocaleString`；`flat` 在无法减少深度的循环数组上抛 `TypeError`，而不是无限展开 |
 | 错误构造器 | `stack` 只包含创建时仍在执行的同步脚本帧，不包含 Rust 宿主帧，也不追踪 `await`、`yield` 或微任务之前的调用历史 |
+| `DOMException` | 提供 Web IDL 异常对象和历史常量，不因此提供浏览器 DOM API |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
 | `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥）。不实现 Annex B 的 `compile` 和旧式静态匹配属性，不保证覆盖全部 Annex B 兼容语法。 |
 | `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
-| `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
+| `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、DOMException、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
 

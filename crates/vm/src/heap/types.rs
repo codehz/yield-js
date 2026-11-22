@@ -1551,6 +1551,11 @@ pub enum Object {
         object: PlainObject,
         proxy: Option<ObjectId>,
     },
+    DomException {
+        object: PlainObject,
+        name: JsString,
+        message: JsString,
+    },
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -1616,6 +1621,18 @@ impl PartialEq for Object {
             ) => a == b && x == y && p == q && r == s,
             (Native(a), Native(b)) => a == b,
             (Plain(a), Plain(b)) => a == b,
+            (
+                DomException {
+                    object: a,
+                    name: x,
+                    message: m,
+                },
+                DomException {
+                    object: b,
+                    name: y,
+                    message: n,
+                },
+            ) => a == b && x == y && m == n,
             (Array(a), Array(b)) => a == b,
             (
                 Boxed {

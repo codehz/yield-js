@@ -99,6 +99,7 @@ impl Vm {
     fn object_tag(&self, id: ObjectId, target: ObjectId) -> Result<&'static str, VmError> {
         Ok(match self.heap.get(target)? {
             Object::Date { .. } if id == target => "Date",
+            Object::DomException { .. } if id == target => "Error",
             Object::Boxed { primitive, .. } => match primitive {
                 BoxedPrimitive::String(_) => "String",
                 BoxedPrimitive::Number(_) => "Number",

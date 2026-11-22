@@ -134,6 +134,7 @@
 - 标准 Error 构造器均可直接调用或用 `new` 构造，提供继承的 `name`、可选自有 `message` 和自有 `stack` 数据属性。`stack` 首行保留名称和消息；创建时按由内向外的顺序附加最多 10 个可见同步脚本帧，格式为 `    at <name> (<module>:<line>:<column>)`。行、列从 1 开始，列按 UTF-16 码元计算。抛出、重抛、拒绝和快照恢复都不重新捕获。各子类原型继承 `Error.prototype`，共享同一个 `toString`：可写、不可枚举、可配置。它动态读取接收者的 `name` 与 `message`（缺失时分别为 `"Error"` 和空串），先转换 `name` 再转换 `message`，消息为空串时返回 `name`，否则返回 `name: message`；`null` / `undefined` 接收者抛 `TypeError`，非字符串值按字符串 hint 转换，读取或转换中的异常原样保留。`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - Error 和原生错误构造器（包括 AggregateError）可从 `options` 读取继承或自有的 `cause`，作为不可枚举的自有属性安装；缺少该属性时不安装。原生错误构造器继承 `Error`，其原型各自拥有空的 `message` 数据属性。
 - `Error.isError(value)` 识别实际的 Error 内部标记（包括子类和 VM 自身创建的 Error），不依赖原型、`instanceof`、`Symbol.toStringTag` 或属性读取。
+- `DOMException` 必须用 `new` 构造；原型继承 `Error.prototype`。`name`、`message` 和旧式 `code` 由带品牌检查的只读 getter 提供，构造器和原型均定义历史常量。快照格式 **68** 保存内部名称和消息以及新增的内建根；字节码与二进制容器版本不变。
 - `SuppressedError(error, suppressed, message?)` 不读取 `cause` 选项，前两个值存为可写、可配置、不可枚举的自有属性。快照格式 **62** 保存新增的固有根并保留两个释放协议 Symbol。
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。
 - 快照格式 **64** 增加编译器私有清理函数根；这些函数不出现在全局名表或 `globalThis`。字节码仍使用现有的 `GetBuiltin`、调用和 `Await` 指令。

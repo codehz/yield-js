@@ -401,6 +401,7 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                     | Object::Array(_)
                     | Object::Boxed { .. }
                     | Object::Date { .. }
+                    | Object::DomException { .. }
                     | Object::ArrayBuffer(_)
                     | Object::TypedArray(_)
                     | Object::DataView(_)

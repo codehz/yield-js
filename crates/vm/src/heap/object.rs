@@ -99,6 +99,7 @@ macro_rules! map_object_storage {
             | Object::ProxyRevoker { object: $storage, .. }
             | Object::Map { object: $storage, .. }
             | Object::Date { object: $storage, .. }
+            | Object::DomException { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
             | Object::TypedArray(TypedArrayObject { object: $storage, .. })
             | Object::DataView(DataViewObject { object: $storage, .. })
@@ -130,6 +131,11 @@ macro_rules! map_object_storage {
 }
 
 impl Object {
+    pub(crate) fn has_error_brand(&self) -> bool {
+        matches!(self, Self::DomException { .. })
+            || matches!(self, Self::Plain(object) if object.is_error)
+    }
+
     pub fn as_promise(&self) -> Option<&PromiseObject> {
         match self {
             Self::Promise(promise) => Some(promise),
@@ -443,6 +449,7 @@ impl Object {
             | Self::ProxyRevoker { proxy: None, .. }
             | Self::RegExp { .. }
             | Self::Date { .. }
+            | Self::DomException { .. }
             | Self::TextEncoder { .. }
             | Self::TextDecoder(_)
             | Self::WeakMap { .. }

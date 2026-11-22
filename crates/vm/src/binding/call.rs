@@ -924,7 +924,7 @@ impl<'a> Inspect<'a> {
 
     /// Whether this object was created as an Error, independent of its prototype.
     pub fn is_error(&self) -> bool {
-        matches!(self.object(), Some(Object::Plain(object)) if object.is_error)
+        self.object().is_some_and(Object::has_error_brand)
     }
 
     /// Whether this value is a RegExp object, without following proxies.
