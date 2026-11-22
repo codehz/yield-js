@@ -54,6 +54,13 @@ pub(super) const WORKLOADS: &[Workload] = &[
         },
     ),
     Workload::new(
+        "array-write",
+        || build(include_str!("array-write.js")),
+        |vm, host| {
+            assert_number(vm, host, "run", vec![], 555_520.0);
+        },
+    ),
+    Workload::new(
         "builtin-math",
         || build(include_str!("builtin.js")),
         |vm, host| {

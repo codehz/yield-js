@@ -2606,6 +2606,17 @@ impl Vm {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
             return self.throw_type_error("property write on a non-object");
         }
+        if let ValueRef::Object(id) = object.view()
+            && let Some(index) = array_index_number(key)
+        {
+            let written = match self.heap.get_mut(id)? {
+                Object::Array(array) => array.set_existing_index(index, &value),
+                _ => false,
+            };
+            if written {
+                return Ok(Invocation::Value(Value::boolean(true)));
+            }
+        }
         let roots = &roots.with(object);
         let key = match self.coerce_property_key(host, &roots.with(&value), key)? {
             Ok(key) => key,

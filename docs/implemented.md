@@ -41,7 +41,7 @@
 - 二元运算的右侧为字面量时降为 `BinaryConst`，从构建常量取右操作数，跳过一条 `Const`；左侧仍先求值，非字面量右侧保持 `Binary`。加载时校验槽和常量池索引。
 - `if` / `while` / `do…while` / `for` 条件、条件表达式和 `switch` 的 `===` 比较直接降为 `BranchCompareFalse` / `BranchCompareTrue`；右侧字面量使用对应常量变体，不写布尔结果槽。`&&` 降为短路的假分支链，`||` 用真分支跳过右侧，`!` 直接使用 `BranchTrue`；双 Number 直接比较，其他类型复用通用比较和转换路径。数值一元运算（`-`、`+`、`~`、ToNumeric、`++`、`--`）在 `Number` 上直接执行，其他类型仍走对象转换和 BigInt 路径。
 - 结果只被条件使用的 `Binary` / `BinaryConst` / `Unary` 会在 CFG 优化后融合为 `BranchBinary` / `BranchBinaryConst` / `BranchUnary`，删除结果槽写入；分支本身是控制流目标时保持原样。`Math` 单参数/双参数方法、`max` / `min` / `hypot` 和 `Number` 构造/静态方法对已经为 `Number` 的实参跳过通用 `ToNumber` 转换；其余实参仍走完整转换和错误路径。
-- 数组元素读取对动态 Number 索引直接查 `ArrayObject::elements`；`.length` 降为 `GetMemberLength`，数组直接返回虚拟长度，其他接收者仍走普通属性读取。元素缺失、访问器、原型链、Proxy 和稀疏数组的语义不变。
+- 数组元素读取对动态 Number 索引直接查 `ArrayObject::elements`；`.length` 降为 `GetMemberLength`，数组直接返回虚拟长度，其他接收者仍走普通属性读取。元素缺失、访问器、原型链、Proxy 和稀疏数组的语义不变。已有可写数据元素的数字索引写入直接更新元素；缺失索引、空洞、访问器、只读属性和新元素创建仍走通用赋值路径。
 - 变量声明（含命名导出）、函数与箭头函数形参、`catch`、`for…in` / `for…of` 左侧和 `=` 赋值均支持嵌套的对象与数组解构。默认值仅在读到 `undefined` 时求值，形参从左到右初始化。对象 rest 复制未匹配的自有可枚举键（含 Symbol），与对象展开共用复制规则；计算键只求值和转换一次。解构 `null` / `undefined` 抛出可捕获的 `TypeError`。
 - `const` 声明正常初始化（含解构与 `for…of` 的每轮写入）。之后对该绑定写入时才抛出可捕获的 `TypeError`（`Assignment to constant variable.`）：包括普通、复合、逻辑赋值、自增减、解构赋值和闭包中的写入。逻辑赋值短路时不写入、不抛错；解构按赋值顺序在第一个实际写入的 `const` 目标处抛错，之前的副作用与写入保留。内层同名绑定按自身的声明规则处理；`const` 不冻结对象或数组。绑定的可变性在编译期解析，不需要写入快照。
 - 函数与箭头函数支持 rest 形参（含解构模式）。每次调用把超出位置形参的实参收集到一个新数组；没有剩余实参时得到空数组。普通绑定和槽位的快照机制保留跨 `await` 使用的 rest 数组。

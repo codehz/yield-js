@@ -1021,6 +1021,18 @@ impl ArrayObject {
             .map(|(property, attributes)| OwnProperty::Stored(property, *attributes))
     }
 
+    /// Writes an existing writable data element. Missing, accessor, and
+    /// non-writable elements are left for the ordinary assignment path.
+    pub(crate) fn set_existing_index(&mut self, index: usize, value: &Value) -> bool {
+        match self.elements.get_mut(&index) {
+            Some((Property::Data(slot), attributes)) if attributes.writable => {
+                *slot = value.clone();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn dense_values(&self) -> Result<Vec<Value>, VmError> {
         let invalid =
             || VmError::InvalidState("spread arguments require a dense data array".to_owned());

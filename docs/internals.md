@@ -94,7 +94,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 条件分支的 `BranchCompareFalse` / `BranchCompareTrue` 及常量变体直接求值比较并按结果跳转，不创建布尔结果槽；双 Number 比较直接返回条件，其他类型复用 `binary_value`。`if` / `while` / `do…while` / `for` 条件、条件表达式和 `switch` 的 `===` 使用该形式；`&&` 连接假分支，`||` 用真分支跳过右侧，`!` 使用 `BranchTrue`。分支目标、槽和常量索引在加载时校验，异常转换仍由当前异常表覆盖。
 - `Instr::Unary` 对 `Number` 的 `Neg`、`Pos`、`BitNot`、`ToNumeric`、`Increment`、`Decrement` 直接计算，不进入 `ops::unary_op`；其余类型仍先执行对象转换和 Symbol 检查。`BranchBinary` / `BranchBinaryConst` / `BranchUnary` 是同一运算的无结果槽条件形式，供 CFG 优化后的单用途窥孔使用。
 - `Math` 和 `Number` 的内建入口在实参已是 `Number` 时跳过数值转换；`Number` 静态 `is*` 方法不构造 coercion roots，`Math` 的 `max` / `min` / `hypot` 仍逐个按源码顺序处理实参并保留 NaN/Infinity 规则。
-- `GetMember` 的右侧为 Number 且对象是普通数组时，直接查 `ArrayObject::elements`；只命中自有元素，缺失时回退原型链。`.length` 由编译器降为 `GetMemberLength`，数组直接读取长度，其他接收者回退通用属性读取。
+- `GetMember` 的右侧为 Number 且对象是普通数组时，直接查 `ArrayObject::elements`；只命中自有元素，缺失时回退原型链。`.length` 由编译器降为 `GetMemberLength`，数组直接读取长度，其他接收者回退通用属性读取。`SetMember` 的动态 Number 索引只在普通数组已有可写数据元素时直接写 `ArrayObject::elements`；空洞、访问器、只读元素和越界写入仍走通用 `set_property`，以保留原型 setter、扩展性与错误语义。
 - 通用属性读取每层复用已取出的堆对象，只对 TypedArray 分类数值索引。普通自有属性缺失才继续查原型；TypedArray 的规范数值索引未命中直接返回 `undefined`。自有属性描述符查询则把两种未命中都视为无描述符。普通对象的属性表在 8 个键以内用按 key 排序的密集向量，超过后退回 `BTreeMap`；`SetMember` 站点预热 32 次后缓存接收者、键、布局和槽，只用于普通对象的可写数据属性，值仍实时读取，布局变化或写失败回退通用 `Set`。读路径与恢复后的缓存都为空；缓存不进快照，也不改变快照 JSON 形状。
 
 ## 5. 关键文件
