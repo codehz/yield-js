@@ -104,6 +104,29 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 - **运行验收**：用冻结版本的真实生产包和实际 JSX 构建产物。Solid 验证 signal/memo、响应式 props、嵌套 store、列表节点重排、事件更新和卸载清理；React 验证函数组件、`useState`、effect 及清理、带 key 的子节点重排、Promise 驱动的 Suspense 恢复和卸载。与参考 JS 引擎以 ESM 模式执行同一产物、遵循同一宿主适配器契约时的节点树和事件日志对照。
 - **恢复验收**：分别在已挂载、等待可恢复 operation 的边界保存快照。用新的宿主从快照重建节点后投递事件或结算原 operation。断言脚本可见的节点和闭包身份延续、挂载副作用不重跑、后续更新和清理正常；React 另验证挂起的 scheduler timer 恢复后只触发一次、已取消 timer 不执行。不能用重新挂载代替恢复。
 
+## Web API 互操作性设计：WinterTC
+
+以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为对照基线，不随[在线草案](https://min-common-api.proposal.wintertc.org/)滚动。这里记录后续设计范围，不扩大首版 Solid/React 验收要求，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。`globalThis`、`queueMicrotask`、`DOMException` 和 `TextEncoder` 已有 VM 内建；`TextDecoder` 和 `structuredClone` 有下表所列的覆盖限制。宿主模块、测试 preload 和 Rust 回调不等于默认脚本全局。
+
+| API 组 | 待补范围与边界 |
+| --- | --- |
+| 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`AbortController`、`AbortSignal`。监听器、取消原因及信号关系由 VM 持有；不引入 DOM 节点或事件树。 |
+| 全局错误与拒绝 | `reportError`、`ErrorEvent`、`PromiseRejectionEvent`，以及 `onerror`、`onunhandledrejection`、`onrejectionhandled` 对应的脚本可见通知。现有宿主错误／拒绝钩子不是全局事件，测试 preload 的空 `reportError` 也不是实现。全局采用 `EventTarget` 还是提供等价的脚本级通知出口，须与全局作用域模型一并确定；不能将宿主日志视为 §6 的替代机制。 |
+| 消息与克隆 | `MessageChannel`、`MessagePort`、`MessageEvent`。先定义 VM 内端口配对、任务投递、关闭和转移；`structuredClone` 目前仅转移 `ArrayBuffer`，随新增可序列化或可转移接口补齐对应类型（如 `Blob`、`File`、`MessagePort`）。消息队列、端口归属及转移后的状态须能恢复，不要求 Worker。 |
+| 定时器与时钟 | 全局 `setTimeout`／`clearTimeout` 目前只有测试宿主实现和 preload 接线；另缺 `setInterval`／`clearInterval`、`Performance` 与 `performance`（含 `now()`、`timeOrigin`）。须定义取消、重复触发和恢复时钟域；字符串 timer handler 与禁止运行时编译的设计冲突，不支持，并作为兼容偏差记录。 |
+| 全局别名与标识 | `self` 与 `navigator.userAgent`。若提供 `self`，其值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
+| 编码与 Base64 | `atob`／`btoa` 是独立的 HTML 字符串 API，现有 `Uint8Array` Base64 方法不能替代；`TextDecoder` 目前仅支持 UTF-8，待补 Encoding Standard 的其余支持标签和增量解码状态。`TextEncoderStream`／`TextDecoderStream` 依赖流。 |
+| URL | `URL`、`URLSearchParams`、`URLPattern`。覆盖 URL 解析与序列化、`URL.searchParams` 的双向联动及模式匹配，不依赖浏览器文档提供基准 URL。 |
+| 流与压缩 | `ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 与编解码进度必须有明确的快照表示。 |
+| Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；网络访问走宿主能力，明确基准 URL、origin、凭据及重定向策略。请求和响应体依赖流与取消协议；恢复不得盲目重发可能已产生外部副作用的请求。 |
+| Console | 从现有仅记录首个实参的宿主 `console` 模块补到规范的全局 `console`，涵盖方法集合、参数处理和分组／计时等状态；输出仍由宿主承接，恢复不重放日志。 |
+| Web Crypto | `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`。熵源和密码运算使用显式宿主能力，不复用 `Math.random`。密钥可导出性与快照可恢复性分别定义，不把不可导出密钥转成明文或落盘平台句柄。 |
+| WebAssembly（范围外） | 缺少整个命名空间，包括 `Global`、`Instance`、`Memory`、`Module`、`Table`、`Tag`、`Exception`、`CompileError`、`LinkError`、`RuntimeError`，以及 `compile`、`compileStreaming`、`instantiate`、`instantiateStreaming`、`JSTag`、`validate`。仅记为标准差异，不纳入当前引擎设计范围。 |
+
+- **全局暴露。** 不引入 `Window` 或 `WorkerGlobalScope`；Worker 本身不是 §5.3 的必选项。非 `[Exposed=*]` 接口的暴露须对照 §6 说明项目的作用域偏差。新增全局须同时审视 `globalThis` 属性和静态裸名解析，保留局部绑定遮蔽规则，不将任意宿主属性动态注入编译器名字表。
+- **快照与宿主边界。** JS 可见身份、监听器关系及待投递的任务数据由 VM 持有；不序列化 OS 句柄、原生调用栈或待执行的 VM 微任务。涉及外部 I/O 的接口先定义中断与恢复策略，再接入宿主 operation；无安全恢复策略的活动状态须明确拒绝捕获，不得静默丢状态、重放副作用或引入第二份存档。
+- **后续验收。** 对照上游 API 行为与适用的 Web Platform Tests，另验收快照前后身份、事件／微任务顺序、取消和恢复不重复交付。记录每项支持的接口和可观察偏差，不以同名全局存在作为验收。
+
 ## 总体架构
 
 ```mermaid
