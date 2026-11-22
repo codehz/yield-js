@@ -49,7 +49,7 @@ Package names are `yield-vm`, `yield-compiler`, `yield-harness`. There is no `sc
 
 ## Commit workflow
 
-Commit immediately after each completed phase of behavior change (new syntax support, VM/snapshot contract, host protocol, new cases); never accumulate one large commit. Before committing, in order: `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace` (plus the matching layer in `docs/testing.md` for contract changes), then the doc sync above. Commit messages are a single imperative English sentence describing the behavior change, e.g. `snapshot: reject restore when natives are missing`. Docs and tests land in the same commit.
+Commit immediately after each completed phase of behavior change (new syntax support, VM/snapshot contract, host protocol, new cases), and also after each completed refactor (file splits, renames, visibility changes that do not alter behavior); never accumulate one large commit. Before committing, in order: `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace` (plus the matching layer in `docs/testing.md` for contract changes), then the doc sync above. Commit messages are a single imperative English sentence describing the behavior change, e.g. `snapshot: reject restore when natives are missing`; refactors use `refactor: …` describing the move or split. Docs and tests land in the same commit.
 
 ## Before editing
 
