@@ -90,6 +90,13 @@ impl<'src> Emitter<'src> {
         })
     }
 
+    pub(crate) fn branch_true(&mut self, cond: Reg) -> usize {
+        self.emit(Instr::BranchTrue {
+            cond: self.slot(cond),
+            target: u32::MAX,
+        })
+    }
+
     pub(crate) fn branch_compare_false(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
         self.emit(Instr::BranchCompareFalse {
             lhs: self.slot(lhs),
@@ -113,13 +120,39 @@ impl<'src> Emitter<'src> {
         })
     }
 
+    pub(crate) fn branch_compare_true(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
+        self.emit(Instr::BranchCompareTrue {
+            lhs: self.slot(lhs),
+            op,
+            rhs: self.slot(rhs),
+            target: u32::MAX,
+        })
+    }
+
+    pub(crate) fn branch_compare_const_true(
+        &mut self,
+        lhs: Reg,
+        op: BinaryOp,
+        constant: u32,
+    ) -> usize {
+        self.emit(Instr::BranchCompareConstTrue {
+            lhs: self.slot(lhs),
+            op,
+            constant,
+            target: u32::MAX,
+        })
+    }
+
     pub(crate) fn patch(&mut self, index: usize, target: usize) -> Result<(), CompileError> {
         let target = target as u32;
         match self.code.get_mut(index) {
             Some(Instr::Jump { target: slot })
             | Some(Instr::BranchFalse { target: slot, .. })
+            | Some(Instr::BranchTrue { target: slot, .. })
             | Some(Instr::BranchCompareFalse { target: slot, .. })
-            | Some(Instr::BranchCompareConstFalse { target: slot, .. }) => {
+            | Some(Instr::BranchCompareConstFalse { target: slot, .. })
+            | Some(Instr::BranchCompareTrue { target: slot, .. })
+            | Some(Instr::BranchCompareConstTrue { target: slot, .. }) => {
                 *slot = target;
                 Ok(())
             }

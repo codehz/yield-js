@@ -417,7 +417,7 @@ impl Vm {
 
     /// Evaluates a comparison for a branch without materializing a boolean
     /// `Value` when both operands are numbers.
-    fn branch_compare_false(
+    fn branch_compare(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -609,6 +609,22 @@ impl Vm {
             }
             Instr::Unary { dst, op, src } => {
                 let mut value = frame.read(src)?;
+                if let ValueRef::Number(number) = value.view()
+                    && let Some(result) = match op {
+                        UnaryOp::Neg => Some(Value::number(-number)),
+                        UnaryOp::Pos => Some(Value::number(number)),
+                        UnaryOp::BitNot => Some(Value::number(
+                            (!(ops::number_to_uint32(number) as i32)) as f64,
+                        )),
+                        UnaryOp::ToNumeric => Some(Value::number(number)),
+                        UnaryOp::Increment => Some(Value::number(number + 1.0)),
+                        UnaryOp::Decrement => Some(Value::number(number - 1.0)),
+                        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void => None,
+                    }
+                {
+                    frame.write(dst, result)?;
+                    return Ok(Step::Next);
+                }
                 if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Object(_)) {
                     match self.primitive_from_object(host, frame_roots, &value, Hint::Number)? {
                         Invocation::Value(primitive) => value = primitive,
@@ -1552,6 +1568,12 @@ impl Vm {
                 }
                 Ok(Step::Next)
             }
+            Instr::BranchTrue { cond, target } => {
+                if frame.read(cond)?.truthy() {
+                    frame.pc = target as usize;
+                }
+                Ok(Step::Next)
+            }
             Instr::BranchCompareFalse {
                 lhs,
                 op,
@@ -1560,7 +1582,7 @@ impl Vm {
             } => {
                 let lhs = frame.read(lhs)?;
                 let rhs = frame.read(rhs)?;
-                match self.branch_compare_false(host, frame_roots, op, lhs, rhs)? {
+                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
                     Ok(true) => {}
                     Ok(false) => frame.pc = target as usize,
                     Err(error) => return Ok(Step::Throw(error)),
@@ -1575,9 +1597,39 @@ impl Vm {
             } => {
                 let lhs = frame.read(lhs)?;
                 let rhs = Self::constant(constants, constant)?;
-                match self.branch_compare_false(host, frame_roots, op, lhs, rhs)? {
+                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
                     Ok(true) => {}
                     Ok(false) => frame.pc = target as usize,
+                    Err(error) => return Ok(Step::Throw(error)),
+                }
+                Ok(Step::Next)
+            }
+            Instr::BranchCompareTrue {
+                lhs,
+                op,
+                rhs,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = frame.read(rhs)?;
+                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
+                    Ok(true) => frame.pc = target as usize,
+                    Ok(false) => {}
+                    Err(error) => return Ok(Step::Throw(error)),
+                }
+                Ok(Step::Next)
+            }
+            Instr::BranchCompareConstTrue {
+                lhs,
+                op,
+                constant,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = Self::constant(constants, constant)?;
+                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
+                    Ok(true) => frame.pc = target as usize,
+                    Ok(false) => {}
                     Err(error) => return Ok(Step::Throw(error)),
                 }
                 Ok(Step::Next)

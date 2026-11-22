@@ -174,6 +174,10 @@ pub(crate) fn compact_dead_instructions(
                 cond,
                 target: remap(target)?,
             },
+            Instr::BranchTrue { cond, target } => Instr::BranchTrue {
+                cond,
+                target: remap(target)?,
+            },
             Instr::BranchCompareFalse {
                 lhs,
                 op,
@@ -191,6 +195,28 @@ pub(crate) fn compact_dead_instructions(
                 constant,
                 target,
             } => Instr::BranchCompareConstFalse {
+                lhs,
+                op,
+                constant,
+                target: remap(target)?,
+            },
+            Instr::BranchCompareTrue {
+                lhs,
+                op,
+                rhs,
+                target,
+            } => Instr::BranchCompareTrue {
+                lhs,
+                op,
+                rhs,
+                target: remap(target)?,
+            },
+            Instr::BranchCompareConstTrue {
+                lhs,
+                op,
+                constant,
+                target,
+            } => Instr::BranchCompareConstTrue {
                 lhs,
                 op,
                 constant,

@@ -54,11 +54,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         Ok(())
                     };
                 }
-                let branch = self.compile_condition(&statement.test)?;
+                let branches = self.compile_condition(&statement.test)?;
                 self.compile_statement(&statement.consequent)?;
                 let end = self.jump();
                 let alternate = self.pc();
-                self.patch_jump(branch, alternate)?;
+                self.patch_condition(branches, alternate)?;
                 if let Some(alternate_statement) = &statement.alternate {
                     self.compile_statement(alternate_statement)?;
                 }
@@ -68,13 +68,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Statement::WhileStatement(statement) => {
                 let start = self.emit.loop_header();
-                let exit_branch = self.compile_condition(&statement.test)?;
+                let exit_branches = self.compile_condition(&statement.test)?;
                 self.control.push_loop(Some(start));
                 self.compile_statement(&statement.body)?;
                 let loop_context = self.control.pop_loop();
                 self.jump_to(start);
                 let end = self.pc();
-                self.patch_jump(exit_branch, end)?;
+                self.patch_condition(exit_branches, end)?;
                 self.patch_loop(loop_context, end)
             }
             Statement::DoWhileStatement(statement) => {
@@ -86,12 +86,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 for jump in loop_context.continue_jumps.drain(..) {
                     self.patch_jump(jump, test_pc)?;
                 }
-                self.compile_condition(&statement.test)?;
-                let back = self.pc();
+                let exit_branches = self.compile_condition(&statement.test)?;
                 self.jump_to(start);
                 let end = self.pc();
-                let exit_branch = back - 1;
-                self.patch_jump(exit_branch, end)?;
+                self.patch_condition(exit_branches, end)?;
                 loop_context.continue_target = Some(test_pc);
                 self.patch_loop(loop_context, end)
             }
@@ -124,7 +122,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     self.enter_iteration_env(saved);
                 }
                 let test_pc = self.emit.loop_header();
-                let exit_branch = if let Some(test) = &statement.test {
+                let exit_branches = if let Some(test) = &statement.test {
                     Some(self.compile_condition(test)?)
                 } else {
                     None
@@ -147,8 +145,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 self.jump_to(test_pc);
                 let end = self.pc();
-                if let Some(exit_branch) = exit_branch {
-                    self.patch_jump(exit_branch, end)?;
+                if let Some(exit_branches) = exit_branches {
+                    self.patch_condition(exit_branches, end)?;
                 }
                 loop_context.continue_target = Some(update_pc);
                 self.patch_loop(loop_context, end)?;

@@ -290,7 +290,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     });
                 }
                 let result = self.alloc_reg()?;
-                let alternate_branch = self.compile_condition(&expression.test)?;
+                let alternate_branches = self.compile_condition(&expression.test)?;
                 let consequent = self.compile_expression(&expression.consequent)?;
                 self.emit(Instr::Move {
                     dst: self.slot(result),
@@ -298,7 +298,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 });
                 let end = self.jump();
                 let alternate = self.pc();
-                self.patch_jump(alternate_branch, alternate)?;
+                self.patch_condition(alternate_branches, alternate)?;
                 let alternate_value = self.compile_expression(&expression.alternate)?;
                 self.emit(Instr::Move {
                     dst: self.slot(result),
@@ -757,13 +757,47 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(dst)
     }
 
-    /// Emits a conditional branch, fusing a direct comparison with its
-    /// branch. The comparison never writes a result slot, so conditions such
-    /// as `i < n` need neither a `Const` nor a boolean destination.
+    /// Emits branches that jump to the caller's false target. A comparison
+    /// writes no boolean slot; `&&` chains both operands and `||` skips its
+    /// right operand after a truthy left operand. The caller patches every
+    /// returned branch to the same destination.
     pub(super) fn compile_condition(
         &mut self,
         expression: &'ast Expression<'ast>,
-    ) -> Result<usize, CompileError> {
+    ) -> Result<Vec<usize>, CompileError> {
+        let expression = expression.without_parentheses();
+        match expression {
+            Expression::BinaryExpression(binary)
+                if let Some(op) = comparison_operator(binary.operator) =>
+            {
+                let lhs = self.compile_expression(&binary.left)?;
+                if let Some(constant) = self.binary_constant(&binary.right)? {
+                    let constant = self.session.intern(constant);
+                    return Ok(vec![self.branch_compare_const_false(lhs, op, constant)]);
+                }
+                let rhs = self.compile_expression(&binary.right)?;
+                Ok(vec![self.branch_compare_false(lhs, op, rhs)])
+            }
+            Expression::LogicalExpression(logical) => self.compile_logical_condition(logical),
+            Expression::UnaryExpression(unary)
+                if matches!(unary.operator, UnaryOperator::LogicalNot) =>
+            {
+                self.compile_condition_true(&unary.argument)
+            }
+            _ => {
+                let value = self.compile_expression(expression)?;
+                Ok(vec![self.branch_false(value)])
+            }
+        }
+    }
+
+    /// Emits branches for the condition being true. Comparisons use a
+    /// branch instruction directly; other expressions are tested with
+    /// `BranchTrue`.
+    fn compile_condition_true(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+    ) -> Result<Vec<usize>, CompileError> {
         let expression = expression.without_parentheses();
         if let Expression::BinaryExpression(binary) = expression
             && let Some(op) = comparison_operator(binary.operator)
@@ -771,13 +805,41 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             let lhs = self.compile_expression(&binary.left)?;
             if let Some(constant) = self.binary_constant(&binary.right)? {
                 let constant = self.session.intern(constant);
-                return Ok(self.branch_compare_const_false(lhs, op, constant));
+                return Ok(vec![self.branch_compare_const_true(lhs, op, constant)]);
             }
             let rhs = self.compile_expression(&binary.right)?;
-            return Ok(self.branch_compare_false(lhs, op, rhs));
+            return Ok(vec![self.branch_compare_true(lhs, op, rhs)]);
         }
         let value = self.compile_expression(expression)?;
-        Ok(self.branch_false(value))
+        Ok(vec![self.branch_true(value)])
+    }
+
+    fn compile_logical_condition(
+        &mut self,
+        logical: &'ast LogicalExpression<'ast>,
+    ) -> Result<Vec<usize>, CompileError> {
+        match logical.operator {
+            LogicalOperator::And => {
+                let mut branches = self.compile_condition(&logical.left)?;
+                branches.extend(self.compile_condition(&logical.right)?);
+                Ok(branches)
+            }
+            LogicalOperator::Or => {
+                // A truthy left operand skips the right operand. The false
+                // target is supplied later by the caller.
+                let skip = self.compile_condition_true(&logical.left)?;
+                let branches = self.compile_condition(&logical.right)?;
+                let after = self.pc();
+                for branch in skip {
+                    self.patch_jump(branch, after)?;
+                }
+                Ok(branches)
+            }
+            LogicalOperator::Coalesce => {
+                let value = self.compile_logical(logical)?;
+                Ok(vec![self.branch_false(value)])
+            }
+        }
     }
 
     /// A literal right operand has no evaluation side effects and can be

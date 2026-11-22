@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 50;
+pub const BYTECODE_VERSION: u32 = 51;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -528,6 +528,11 @@ pub enum Instr {
         cond: Slot,
         target: u32,
     },
+    /// Branches when the condition is truthy.
+    BranchTrue {
+        cond: Slot,
+        target: u32,
+    },
     /// Evaluates a comparison and branches when its boolean result is false.
     /// The result never occupies a frame slot.
     BranchCompareFalse {
@@ -538,6 +543,20 @@ pub enum Instr {
     },
     /// Comparison-with-constant variant of `BranchCompareFalse`.
     BranchCompareConstFalse {
+        lhs: Slot,
+        op: BinaryOp,
+        constant: u32,
+        target: u32,
+    },
+    /// Evaluates a comparison and branches when its boolean result is true.
+    BranchCompareTrue {
+        lhs: Slot,
+        op: BinaryOp,
+        rhs: Slot,
+        target: u32,
+    },
+    /// Comparison-with-constant variant of `BranchCompareTrue`.
+    BranchCompareConstTrue {
         lhs: Slot,
         op: BinaryOp,
         constant: u32,
@@ -2006,6 +2025,10 @@ impl Build {
                     check_slot(*cond, "BranchFalse.cond")?;
                     check_target(*target, "BranchFalse")?;
                 }
+                Instr::BranchTrue { cond, target } => {
+                    check_slot(*cond, "BranchTrue.cond")?;
+                    check_target(*target, "BranchTrue")?;
+                }
                 Instr::BranchCompareFalse {
                     lhs,
                     op,
@@ -2031,6 +2054,32 @@ impl Build {
                         ));
                     }
                     check_target(*target, "BranchCompareConstFalse")?;
+                }
+                Instr::BranchCompareTrue {
+                    lhs,
+                    op,
+                    rhs,
+                    target,
+                } => {
+                    check_slot(*lhs, "BranchCompareTrue.lhs")?;
+                    check_slot(*rhs, "BranchCompareTrue.rhs")?;
+                    check_comparison(*op)?;
+                    check_target(*target, "BranchCompareTrue")?;
+                }
+                Instr::BranchCompareConstTrue {
+                    lhs,
+                    op,
+                    constant,
+                    target,
+                } => {
+                    check_slot(*lhs, "BranchCompareConstTrue.lhs")?;
+                    check_comparison(*op)?;
+                    if *constant as usize >= self.constants.len() {
+                        return Err(format!(
+                            "{location}: BranchCompareConstTrue at pc {pc} references constant {constant}"
+                        ));
+                    }
+                    check_target(*target, "BranchCompareConstTrue")?;
                 }
                 Instr::Return { src } => check_slot(*src, "Return.src")?,
                 Instr::Throw { src } => check_slot(*src, "Throw.src")?,
@@ -2226,8 +2275,11 @@ fn has_control_flow_target(function: &Function, target: u32) -> bool {
     function.code.iter().any(|instruction| match instruction {
         Instr::Jump { target: slot }
         | Instr::BranchFalse { target: slot, .. }
+        | Instr::BranchTrue { target: slot, .. }
         | Instr::BranchCompareFalse { target: slot, .. }
-        | Instr::BranchCompareConstFalse { target: slot, .. } => *slot == target,
+        | Instr::BranchCompareConstFalse { target: slot, .. }
+        | Instr::BranchCompareTrue { target: slot, .. }
+        | Instr::BranchCompareConstTrue { target: slot, .. } => *slot == target,
         _ => false,
     }) || function
         .handlers

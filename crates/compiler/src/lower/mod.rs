@@ -1044,6 +1044,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit.branch_false(cond)
     }
 
+    pub(super) fn branch_true(&mut self, cond: Reg) -> usize {
+        self.emit.branch_true(cond)
+    }
+
     pub(super) fn branch_compare_false(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
         self.emit.branch_compare_false(lhs, op, rhs)
     }
@@ -1057,8 +1061,28 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit.branch_compare_const_false(lhs, op, constant)
     }
 
+    pub(super) fn branch_compare_true(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
+        self.emit.branch_compare_true(lhs, op, rhs)
+    }
+
+    pub(super) fn branch_compare_const_true(
+        &mut self,
+        lhs: Reg,
+        op: BinaryOp,
+        constant: u32,
+    ) -> usize {
+        self.emit.branch_compare_const_true(lhs, op, constant)
+    }
+
     pub(super) fn patch_jump(&mut self, index: usize, target: usize) -> Result<(), CompileError> {
         self.emit.patch(index, target)
+    }
+
+    fn patch_condition(&mut self, branches: Vec<usize>, target: usize) -> Result<(), CompileError> {
+        for branch in branches {
+            self.patch_jump(branch, target)?;
+        }
+        Ok(())
     }
 
     fn alloc_binding(&mut self) -> BindingId {
