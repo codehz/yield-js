@@ -39,6 +39,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Await { .. }
         | Instr::GetMember { .. }
         | Instr::GetMemberConstKey { .. }
+        | Instr::GetMemberLength { .. }
         | Instr::GetDestructuredMember { .. }
         | Instr::HasProperty { .. }
         | Instr::InstanceOf { .. }
@@ -348,6 +349,10 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             defs.insert(dst.index);
         }
         Instr::GetMemberConstKey { dst, object, .. } => {
+            uses.insert(object.index);
+            defs.insert(dst.index);
+        }
+        Instr::GetMemberLength { dst, object } => {
             uses.insert(object.index);
             defs.insert(dst.index);
         }
@@ -770,6 +775,10 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             dst: remap(dst),
             object: remap(object),
             key,
+        },
+        Instr::GetMemberLength { dst, object } => Instr::GetMemberLength {
+            dst: remap(dst),
+            object: remap(object),
         },
         Instr::AssertObjectCoercible { src } => Instr::AssertObjectCoercible { src: remap(src) },
         Instr::RequireObject { src } => Instr::RequireObject { src: remap(src) },

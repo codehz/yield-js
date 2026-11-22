@@ -47,6 +47,13 @@ pub(super) const WORKLOADS: &[Workload] = &[
         numeric_branch,
     ),
     Workload::new(
+        "array-access",
+        || build(include_str!("array-access.js")),
+        |vm, host| {
+            assert_number(vm, host, "run", vec![], 1_048_576.0);
+        },
+    ),
+    Workload::new(
         "builtin-math",
         || build(include_str!("builtin.js")),
         |vm, host| {

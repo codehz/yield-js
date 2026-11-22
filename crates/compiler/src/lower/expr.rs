@@ -1706,6 +1706,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         };
         if let Some(key) = key {
             let object = self.compile_member_object(member.object(), member.optional(), exits)?;
+            if key == "length" {
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::GetMemberLength {
+                    dst: self.slot(dst),
+                    object: self.slot(object),
+                });
+                return Ok((dst, object));
+            }
             let key = self.session.intern(Constant::String(key));
             let dst = self.alloc_reg()?;
             self.emit(Instr::GetMemberConstKey {

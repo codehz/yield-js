@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 52;
+pub const BYTECODE_VERSION: u32 = 53;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -403,6 +403,12 @@ pub enum Instr {
         dst: Slot,
         object: Slot,
         key: u32,
+    },
+    /// Reads an array's virtual `length`; other receivers use the ordinary
+    /// property lookup.
+    GetMemberLength {
+        dst: Slot,
+        object: Slot,
     },
     /// Tests property presence without reading the property value.
     HasProperty {
@@ -1816,6 +1822,10 @@ impl Build {
                     check_slot(*dst, "GetMember.dst")?;
                     check_slot(*object, "GetMember.object")?;
                     check_slot(*key, "GetMember.key")?;
+                }
+                Instr::GetMemberLength { dst, object } => {
+                    check_slot(*dst, "GetMemberLength.dst")?;
+                    check_slot(*object, "GetMemberLength.object")?;
                 }
                 Instr::GetMemberConstKey { dst, object, key } => {
                     check_slot(*dst, "GetMemberConstKey.dst")?;

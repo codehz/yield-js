@@ -31,6 +31,16 @@ use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, Value
 use crate::vm::Vm;
 
 type PropertySite = (usize, usize);
+/// A Number that can address an array element without building a property key.
+fn array_index_number(value: &Value) -> Option<usize> {
+    let ValueRef::Number(number) = value.view() else {
+        return None;
+    };
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number >= u32::MAX as f64 {
+        return None;
+    }
+    Some(number as usize)
+}
 
 #[derive(Clone, Copy)]
 enum CacheStatus {
@@ -1217,6 +1227,22 @@ impl Vm {
                 )?;
                 store_invocation(frame, dst, invocation)
             }
+            Instr::GetMemberLength { dst, object } => {
+                let object = frame.read_ref(object)?;
+                let direct = match object.view() {
+                    ValueRef::Object(id) => match self.heap.get(id)? {
+                        Object::Array(array) => Some(array.length),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let invocation = if let Some(length) = direct {
+                    Invocation::Value(Value::number(length as f64))
+                } else {
+                    self.read_property(host, frame_roots, object, PropertyKeyRef::String("length"))?
+                };
+                store_invocation(frame, dst, invocation)
+            }
             Instr::GetDestructuredMember { dst, object, key } => {
                 let key = converted_property_key(frame.read_ref(key)?)?;
                 let invocation =
@@ -2093,6 +2119,17 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
             return self.throw_type_error("property access on a non-object");
+        }
+        if let ValueRef::Object(id) = object.view()
+            && let Some(index) = array_index_number(key)
+        {
+            let property = match self.heap.get(id)? {
+                Object::Array(array) => array.own_index(index).map(OwnProperty::into_owned),
+                _ => None,
+            };
+            if let Some(property) = property {
+                return self.read_property_value(host, roots, object, property);
+            }
         }
         match key.view() {
             ValueRef::String(key) => {
