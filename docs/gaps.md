@@ -9,12 +9,14 @@
 `Value` 仍是 `Undefined / Null / Bool / Number(f64) / BigInt(Arc<BigInt>) / String / Symbol(SymbolId) / Object(ObjectId)`。`BigInt` 的任意精度内容由 Arc 持有，不是新的堆对象；`RegExp` 实例与显式包装对象通过堆对象表示，也不是新的 `Value` 变体。
 
 - `Symbol.asyncIterator` 作为保留 well-known Symbol 提供，由 async generator 与 `for await…of` 消费；`for await…of` 由编译器展开，同步回退不分配可反射的 `AsyncFromSyncIterator` 包装器（也没有其它内建异步迭代器），并且只对每轮的 `value` 做隐式 `await`。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
+- `Symbol.dispose` / `Symbol.asyncDispose` 尚未提供；显式资源管理的现状见第 5 节，目标设计见 [`design.md`](design.md) 的「显式资源管理」。
 
 ## 2. 合法输入的编译期限制
 
 - 正则字面量由 Oxc 解析并由 VM 的正则匹配器校验；匹配器不支持的模式会在编译期报告带行列的 `unsupported syntax: …`，而无效模式或标志也可能先被 Oxc 拒绝。匹配器范围见第 4 节。
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
 - `yield` / `yield*` 出现在非生成器函数中会被拒绝。
+- 模块顶层的 `await` 与 `await using` 随同步模块初始化帧一起在编译期拒绝；顶层同步 `using` 按目标设计支持，当前尚未实现（见第 5 节）。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整
@@ -50,13 +52,14 @@
 7. **静态属性键不缓存读取。** 专用读取指令只跳过字符串键的槽读写和转换；`SetMember` 对普通对象的自有可写数据属性有写侧单态缓存，但读取、计算键、复合赋值和 `super` 仍走通用属性路径。
 8. **CFG 常量传播不折叠通用 JS 运算。** 只传播已有字面量和槽复制、判断已知字面量的真假值；不做跨函数常量传播或运行时类型专用化。
 9. **快照不是不可信导入格式。** 默认恢复不重查受信镜像的堆图；应用负责来源、完整性和读入大小。`Vm::restore_validated` 用于诊断镜像不变量，不提供认证、隔离或资源预算。
+10. **显式资源管理未实现。** `using` / `await using`、`using void` for 头、`DisposableStack` / `AsyncDisposableStack`、`SuppressedError` 与 `Symbol.dispose` / `Symbol.asyncDispose` 均未实现；编译期目前把 `using` 语法按不支持拒绝。完整目标设计见 [`design.md`](design.md) 的「显式资源管理」。
 
 ## 6. 首版范围之外（不是首版缺口）
 
 - 完整 ECMAScript TDZ
 - 动态 `import()`、`eval`、`Function` 构造
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
-- `debugger`、`using` / `await using`：不在首版语法表
+- `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。

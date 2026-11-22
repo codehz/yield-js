@@ -96,7 +96,7 @@ impl Matcher {
 - **父类**：可选的父类标签。声明层把原型链接到父类原型，并把父类槽排在子类槽之前；基类方法与访问器接收派生实例，子类声明的槽索引按自身布局计数。
 - **槽布局**：有序、带名字、带种类。首版槽种类只有 `Js`（单个 `JsValue`）与 `JsList`（有序 `JsValue` 列表）。`JsList` 用于事件监听器集合这类「数量可变、元素是 JS 值」的状态，避免把引用塞进 payload。是否需要 `JsMap`、弱引用槽见[未决问题](#15-未决问题)。
 - **payload**：可选的 `T` 及其 schema 版本与 codec。`T` 不得包含 `JsValue`。payload 属于具体实例类，不沿继承链合并。
-- **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号由稳定的枚举（`WellKnownSymbol`）在声明期内静态给出，不接受运行期 Symbol。
+- **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号由稳定的枚举（`WellKnownSymbol`）在声明期内静态给出，不接受运行期 Symbol。`Symbol.dispose` / `Symbol.asyncDispose`（显式资源管理，见 `design.md`）同样按枚举声明；`asyncDispose` 需要异步收尾时以 `cx.promise(op)` 起始 operation，沿用现有挂起/恢复契约。
 - **可选构造器**：只有声明了 `Constructor` 的类才导出可 `new` 的函数。未声明时，类只作为返回类型和原型存在。
 
 实例是普通 JavaScript 对象，可以有普通自有属性；槽与 payload 不可枚举、不可由 `Object.getOwnPropertyNames`、`Object.getOwnPropertySymbols` 或 `Reflect` 观察到，也不能借 `Object.create(prototype)` 伪造。原型上的方法与访问器是普通属性，脚本可以读取、改写或删除；快照保存玩家修改后的原型，而不是每个 VM 重建静态模板。
@@ -132,6 +132,7 @@ impl Matcher {
 | `JsValue` 参数或返回值 | `unknown`（未知类型，不做 `any` 宣传） |
 | 常量 `version: JsString` | `export const version: string;` |
 | `Symbol.iterator` 成员 | `[Symbol.iterator](): Iterator<…>;` |
+| `Symbol.dispose` / `Symbol.asyncDispose` 成员 | `[Symbol.dispose](): void;` / `[Symbol.asyncDispose](): Promise<void>;` |
 
 已知局限：TypeScript 无法表达「方法要求内部槽」；生成器只给接口，不生成可 `new` 的值，除非声明了构造器。接受回调等复杂签名可标注为 `unknown`，后续通过显式 `#[ts(...)]` 覆盖。
 
