@@ -20,7 +20,8 @@ yield-harness  →  yield-compiler  →  yield-vm
   → lower        绑定、异常、await  →  LoweredFunction
   → bindings     确定哪些 id 跨函数共享
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
-  → analyze      CFG live-in，包含两条恢复边与处理器边
+  → propagate   在直线路径内转发槽复制，遇控制流入口或相关槽改写时失效
+  → analyze      CFG live-in（含恢复边与异常边），移除无副作用的死写入
   → allocate     跨挂起的值分配固定持久槽，其余按活性区间复用瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
   → Vm           校验、运行、宿主操作、快照 / 恢复
@@ -65,7 +66,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 | --- | --- |
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
-| 绑定逃逸 / 循环头环境省略 | `bindings.rs` 的跨函数共享集合、`promote.rs` 的提升判定与 `elide_iteration_environments`、lowerer 的 `IterationEnvGroup`；删除环境指令时由 `compact_dead_instructions` 统一重映射跳转、异常表、await/yield 站点与 `generator_start` |
+| 绑定逃逸 / 循环头环境省略 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup` |
+| 局部复制 / 死写入 | `propagate.rs` 转发读操作数；`analyze.rs` 在活性不动点中只删除 `Move`、`Const`、`Undefined`；`ir.rs` 统一压缩并重映射 PC |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
@@ -78,7 +80,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 ## 4. 易错点
 
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
-- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器；`slot.kind` 在 `FrameLayout` 重映射前没有意义。普通提升改写保证一条指令换一条指令；删除空迭代环境组是唯一的删除路径，`compact_dead_instructions` 必须同时重映射 `Jump` / `BranchFalse`、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`，漏掉任一张表都会让恢复入口或处理器指向错误指令。
+- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器。指令压缩由 `ir.rs::compact_dead_instructions` 统一重映射跳转、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`；压缩后为空的保护区不再登记。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
 - VM 在 `new` / `restore` 校验后以 `Arc<Build>` 持有只读构建。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。

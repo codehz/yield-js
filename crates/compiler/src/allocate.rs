@@ -15,40 +15,37 @@ use crate::analyze;
 use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::{map_slots, uses_defs};
-use crate::ir::LoweredFunction;
+use crate::ir::{LoweredFunction, compact_dead_instructions, generator_stubs, resume_stubs};
+use crate::propagate::propagate_copies;
 
 pub(crate) fn allocate(
     source: &str,
-    lowered: LoweredFunction,
+    mut lowered: LoweredFunction,
 ) -> Result<BytecodeFunction, CompileError> {
-    let mut resumes = Vec::with_capacity(lowered.awaits.len());
-    for await_site in &lowered.awaits {
-        let result = logical(await_site.result);
-        resumes.push(ResumeEntry {
-            fulfill_pc: await_site.fulfill_pc as u32,
-            fulfill_dst: result,
-            reject_pc: await_site.reject_pc as u32,
-            reject_dst: logical(await_site.reject),
-            saved_slots: Vec::new(),
-        });
-    }
-    let mut generators = Vec::with_capacity(lowered.yields.len());
-    for site in &lowered.yields {
-        generators.push(GeneratorEntry {
-            next_pc: site.next_pc as u32,
-            next_dst: logical(site.next),
-            throw_pc: site.throw_pc as u32,
-            throw_dst: logical(site.thrown),
-            return_pc: site.return_pc as u32,
-            saved_slots: Vec::new(),
-        });
-    }
-
+    propagate_copies(&mut lowered);
+    let mut resumes = resume_stubs(&lowered);
+    let mut generators = generator_stubs(&lowered);
     let suspensions = analyze::Suspensions {
         awaits: &resumes,
         generators: &generators,
     };
-    let live_in = analyze::live_in(&lowered.code, suspensions, &lowered.handlers)?;
+    let analyze::Liveness {
+        mut live_in,
+        dead_writes: dead,
+    } = analyze::live_in_and_dead_writes(&lowered.code, suspensions, &lowered.handlers)?;
+    if !dead.is_empty() {
+        compact_dead_instructions(&mut lowered, &dead)?;
+        // A deleted instruction has exactly its successor's live-in set.
+        // Keeping the surviving entries preserves it even at remapped targets.
+        let mut pc = 0;
+        live_in.retain(|_| {
+            let keep = !dead.contains(&pc);
+            pc += 1;
+            keep
+        });
+        resumes = resume_stubs(&lowered);
+        generators = generator_stubs(&lowered);
+    }
     let mut saved_sets = Vec::with_capacity(resumes.len());
     for resume in &resumes {
         saved_sets.push(saved_set(source, &lowered, &live_in, resume)?);
@@ -139,13 +136,6 @@ pub(crate) fn allocate(
         generator_resumes: remapped_generators,
         handlers,
     })
-}
-
-fn logical(reg: Reg) -> Slot {
-    Slot {
-        kind: SlotKind::Transient,
-        index: reg,
-    }
 }
 
 /// Fixed persistent slots and reusable transient slots.

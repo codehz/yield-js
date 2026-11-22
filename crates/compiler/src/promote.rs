@@ -12,14 +12,16 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use yield_vm::BindingId;
-use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry, Slot, SlotKind};
+use yield_vm::bytecode::{ExceptionHandler, Instr};
 
 use crate::analyze;
 use crate::bindings::BindingFacts;
 use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::may_throw;
-use crate::ir::LoweredFunction;
+use crate::ir::{
+    LoweredFunction, compact_dead_instructions, generator_stubs, logical, resume_stubs,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Declared {
@@ -140,76 +142,6 @@ fn elide_iteration_environments(
         return Ok(());
     }
     compact_dead_instructions(function, &dead)
-}
-
-/// Delete instructions and remap every PC-bearing field. Jump targets that
-/// pointed at a deleted instruction land on the next surviving instruction,
-/// which is the loop header or exit the deleted environment instruction stood
-/// in front of.
-fn compact_dead_instructions(
-    function: &mut LoweredFunction,
-    dead: &BTreeSet<usize>,
-) -> Result<(), CompileError> {
-    let old_len = function.code.len();
-    if dead.iter().any(|&pc| pc >= old_len) {
-        return Err(CompileError::internal(
-            "internal compiler error: deleted instruction is out of range",
-        ));
-    }
-    let mut mapping = Vec::with_capacity(old_len + 1);
-    let mut next = 0u32;
-    for pc in 0..old_len {
-        mapping.push(next);
-        if !dead.contains(&pc) {
-            next = next.checked_add(1).ok_or_else(|| {
-                CompileError::internal("internal compiler error: too many instructions")
-            })?;
-        }
-    }
-    mapping.push(next);
-    let remap = |pc: u32| -> Result<u32, CompileError> {
-        mapping
-            .get(pc as usize)
-            .copied()
-            .ok_or_else(|| CompileError::internal("internal compiler error: PC is out of range"))
-    };
-
-    let mut code = Vec::with_capacity(next as usize);
-    for (pc, instruction) in std::mem::take(&mut function.code).into_iter().enumerate() {
-        if dead.contains(&pc) {
-            continue;
-        }
-        code.push(match instruction {
-            Instr::Jump { target } => Instr::Jump {
-                target: remap(target)?,
-            },
-            Instr::BranchFalse { cond, target } => Instr::BranchFalse {
-                cond,
-                target: remap(target)?,
-            },
-            other => other,
-        });
-    }
-    function.code = code;
-
-    for site in &mut function.awaits {
-        site.fulfill_pc = remap(site.fulfill_pc as u32)? as usize;
-        site.reject_pc = remap(site.reject_pc as u32)? as usize;
-    }
-    for site in &mut function.yields {
-        site.next_pc = remap(site.next_pc as u32)? as usize;
-        site.throw_pc = remap(site.throw_pc as u32)? as usize;
-        site.return_pc = remap(site.return_pc as u32)? as usize;
-    }
-    if let Some(start) = &mut function.generator_start {
-        start.body_pc = remap(start.body_pc as u32)? as usize;
-    }
-    for handler in &mut function.handlers {
-        handler.start_pc = remap(handler.start_pc)?;
-        handler.end_pc = remap(handler.end_pc)?;
-        handler.target_pc = remap(handler.target_pc)?;
-    }
-    Ok(())
 }
 
 /// `true` means the declaration already has a value and must self-move.
@@ -359,46 +291,4 @@ fn rewrite(
         }
         other => other.clone(),
     }
-}
-
-fn logical(reg: Reg) -> Slot {
-    Slot {
-        kind: SlotKind::Transient,
-        index: reg,
-    }
-}
-
-fn generator_stubs(function: &LoweredFunction) -> Vec<GeneratorEntry> {
-    function
-        .yields
-        .iter()
-        .map(|site| GeneratorEntry {
-            next_pc: site.next_pc as u32,
-            next_dst: logical(site.next),
-            throw_pc: site.throw_pc as u32,
-            throw_dst: logical(site.thrown),
-            return_pc: site.return_pc as u32,
-            saved_slots: Vec::new(),
-        })
-        .collect()
-}
-
-fn resume_stubs(function: &LoweredFunction) -> Vec<ResumeEntry> {
-    function
-        .awaits
-        .iter()
-        .map(|site| {
-            let result = Slot {
-                kind: SlotKind::Transient,
-                index: site.result,
-            };
-            ResumeEntry {
-                fulfill_pc: site.fulfill_pc as u32,
-                fulfill_dst: result,
-                reject_pc: site.reject_pc as u32,
-                reject_dst: logical(site.reject),
-                saved_slots: Vec::new(),
-            }
-        })
-        .collect()
 }

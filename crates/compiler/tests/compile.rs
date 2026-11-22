@@ -2031,7 +2031,7 @@ export function* run(a) {
     return x;
   } finally {
     yield 0;
-    a = x;
+    a(x);
   }
 }
 "#,
@@ -2044,7 +2044,7 @@ export function* run(a) {
     return x;
   } finally {
     yield 0;
-    a = 0;
+    a(0);
   }
 }
 "#,

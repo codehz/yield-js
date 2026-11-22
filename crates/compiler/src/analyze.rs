@@ -10,6 +10,10 @@
 //! it is written. The saved set at an await or yield is the union of each
 //! entry's live-in after subtracting that entry's own injected result register;
 //! subtracting after the union would drop a value another entry still needs.
+//!
+//! Only plain slot copies and constant loads may be deleted. Their operands
+//! become live only if the written value is needed, so dead copy chains vanish
+//! in the same fixed point used for allocation.
 use std::collections::BTreeSet;
 
 use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry};
@@ -32,15 +36,28 @@ struct Edge {
     written: Option<Reg>,
 }
 
-pub(crate) fn live_in(
+pub(crate) struct Liveness {
+    pub(crate) live_in: Vec<BTreeSet<Reg>>,
+    pub(crate) dead_writes: BTreeSet<usize>,
+}
+
+pub(crate) fn live_in_and_dead_writes(
     code: &[Instr],
     suspensions: Suspensions<'_>,
     handlers: &[ExceptionHandler],
-) -> Result<Vec<BTreeSet<Reg>>, CompileError> {
+) -> Result<Liveness, CompileError> {
     let mut live_in = vec![BTreeSet::new(); code.len()];
     loop {
         let mut changed = false;
         for pc in (0..code.len()).rev() {
+            if removable_write(&code[pc], live_in.get(pc + 1)) {
+                let next = &live_in[pc + 1];
+                if *next != live_in[pc] {
+                    live_in[pc] = next.clone();
+                    changed = true;
+                }
+                continue;
+            }
             let (uses, defs) = instr::uses_defs(&code[pc]);
             let mut next = BTreeSet::new();
             for edge in edges(code, suspensions, pc)? {
@@ -69,8 +86,32 @@ pub(crate) fn live_in(
             }
         }
         if !changed {
-            return Ok(live_in);
+            let dead_writes = code
+                .iter()
+                .enumerate()
+                .filter_map(|(pc, instruction)| {
+                    removable_write(instruction, live_in.get(pc + 1)).then_some(pc)
+                })
+                .collect();
+            return Ok(Liveness {
+                live_in,
+                dead_writes,
+            });
         }
+    }
+}
+
+/// The allowlist is stronger than `!may_throw`: none of these instructions
+/// can run script, mutate the heap, or change control flow. Compiler-emitted
+/// moves read initialized registers; constants refer to the build's pool.
+fn removable_write(instruction: &Instr, after: Option<&BTreeSet<Reg>>) -> bool {
+    let Some(after) = after else {
+        return false;
+    };
+    match instruction {
+        Instr::Move { dst, src } => dst == src || !after.contains(&dst.index),
+        Instr::Const { dst, .. } | Instr::Undefined { dst } => !after.contains(&dst.index),
+        _ => false,
     }
 }
 

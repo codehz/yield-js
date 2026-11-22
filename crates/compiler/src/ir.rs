@@ -2,15 +2,17 @@
 //!
 //! Instructions still use the VM [`Instr`] enum, but every [`Slot`] is a
 //! logical register: `kind` is meaningless and `index` is a [`Reg`]. Oxc is
-//! gone. Promotion, liveness, and slot allocation are the only consumers.
+//! gone. Promotion, optimization, liveness, and allocation operate on this IR.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oxc::span::Span;
 use yield_vm::BindingId;
-use yield_vm::bytecode::{ExceptionHandler, Instr};
+use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry, Slot, SlotKind};
 
 use crate::emit::Reg;
+use crate::error::CompileError;
 
 /// A value location assigned during lowering, before persistent/transient split.
 pub(crate) type LogicalReg = Reg;
@@ -96,4 +98,117 @@ pub(crate) struct YieldSite {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GeneratorStartSite {
     pub(crate) body_pc: usize,
+}
+
+/// Delete instructions and remap every PC-bearing field. Targets on a
+/// deleted instruction land on the next surviving instruction.
+pub(crate) fn compact_dead_instructions(
+    function: &mut LoweredFunction,
+    dead: &BTreeSet<usize>,
+) -> Result<(), CompileError> {
+    let old_len = function.code.len();
+    if dead.iter().any(|&pc| pc >= old_len) {
+        return Err(CompileError::internal(
+            "internal compiler error: deleted instruction is out of range",
+        ));
+    }
+    let mut mapping = Vec::with_capacity(old_len + 1);
+    let mut next = 0u32;
+    for pc in 0..old_len {
+        mapping.push(next);
+        if !dead.contains(&pc) {
+            next = next.checked_add(1).ok_or_else(|| {
+                CompileError::internal("internal compiler error: too many instructions")
+            })?;
+        }
+    }
+    mapping.push(next);
+    let remap = |pc: u32| -> Result<u32, CompileError> {
+        mapping
+            .get(pc as usize)
+            .copied()
+            .ok_or_else(|| CompileError::internal("internal compiler error: PC is out of range"))
+    };
+
+    let mut code = Vec::with_capacity(next as usize);
+    for (pc, instruction) in std::mem::take(&mut function.code).into_iter().enumerate() {
+        if dead.contains(&pc) {
+            continue;
+        }
+        code.push(match instruction {
+            Instr::Jump { target } => Instr::Jump {
+                target: remap(target)?,
+            },
+            Instr::BranchFalse { cond, target } => Instr::BranchFalse {
+                cond,
+                target: remap(target)?,
+            },
+            other => other,
+        });
+    }
+    function.code = code;
+
+    for site in &mut function.awaits {
+        site.fulfill_pc = remap(site.fulfill_pc as u32)? as usize;
+        site.reject_pc = remap(site.reject_pc as u32)? as usize;
+    }
+    for site in &mut function.yields {
+        site.next_pc = remap(site.next_pc as u32)? as usize;
+        site.throw_pc = remap(site.throw_pc as u32)? as usize;
+        site.return_pc = remap(site.return_pc as u32)? as usize;
+    }
+    if let Some(start) = &mut function.generator_start {
+        start.body_pc = remap(start.body_pc as u32)? as usize;
+    }
+    // Compaction can make distinct ranges equal. The VM prefers the latest
+    // start, then earliest end, then first table entry. Keep that tie order.
+    function
+        .handlers
+        .sort_by_key(|handler| (Reverse(handler.start_pc), handler.end_pc));
+    for handler in &mut function.handlers {
+        handler.start_pc = remap(handler.start_pc)?;
+        handler.end_pc = remap(handler.end_pc)?;
+        handler.target_pc = remap(handler.target_pc)?;
+    }
+    // An empty protected range has no throwing instructions left.
+    function
+        .handlers
+        .retain(|handler| handler.start_pc != handler.end_pc);
+    Ok(())
+}
+
+pub(crate) fn logical(reg: Reg) -> Slot {
+    Slot {
+        kind: SlotKind::Transient,
+        index: reg,
+    }
+}
+
+pub(crate) fn generator_stubs(function: &LoweredFunction) -> Vec<GeneratorEntry> {
+    function
+        .yields
+        .iter()
+        .map(|site| GeneratorEntry {
+            next_pc: site.next_pc as u32,
+            next_dst: logical(site.next),
+            throw_pc: site.throw_pc as u32,
+            throw_dst: logical(site.thrown),
+            return_pc: site.return_pc as u32,
+            saved_slots: Vec::new(),
+        })
+        .collect()
+}
+
+pub(crate) fn resume_stubs(function: &LoweredFunction) -> Vec<ResumeEntry> {
+    function
+        .awaits
+        .iter()
+        .map(|site| ResumeEntry {
+            fulfill_pc: site.fulfill_pc as u32,
+            fulfill_dst: logical(site.result),
+            reject_pc: site.reject_pc as u32,
+            reject_dst: logical(site.reject),
+            saved_slots: Vec::new(),
+        })
+        .collect()
 }

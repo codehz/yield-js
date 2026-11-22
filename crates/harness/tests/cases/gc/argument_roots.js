@@ -2,10 +2,14 @@
 
 import { expect, gc } from 'test';
 
-// Makes one heap object unreachable so the following collection really sweeps.
+function allocateGarbage() {
+  ({ token: 'garbage' });
+}
+
+// Drop the allocating frame so the object is no longer rooted, regardless
+// of whether the compiler kept or reused its slots.
 function collect() {
-  let garbage = { token: 'garbage' };
-  garbage = null;
+  allocateGarbage();
   return gc();
 }
 

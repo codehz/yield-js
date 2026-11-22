@@ -13,7 +13,8 @@
 //!   → bindings   owner table; cross-function reads and writes stay shared
 //!   → promote    unshared bindings become logical registers; non-escaping
 //!                loop bindings leave the per-iteration environment
-//!   → analyze    CFG live-in, including resume and handler edges
+//!   → propagate  local copies stop at control-flow entries and operand writes
+//!   → analyze    CFG live-in and dead pure writes, including resume and handler edges
 //!   → allocate   persistent slots for cross-await values, transient otherwise
 //!   → Build
 //! ```
@@ -30,6 +31,7 @@ mod ir;
 mod lower;
 mod names;
 mod promote;
+mod propagate;
 mod resolver;
 mod session;
 
