@@ -5,7 +5,7 @@ mod workloads;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use workloads::{REACT_REUSE, REMATERIALIZATION, WORKLOADS, Workload};
+use workloads::{REACT_REUSE, REMATERIALIZATION, SNAPSHOT_BUFFER, WORKLOADS, Workload};
 use yield_harness::TestHost;
 use yield_vm::{Build, Snapshot, VerifiedBuild, Vm, perf};
 
@@ -18,6 +18,7 @@ fn main() {
     let mut compile_only = None;
     let mut reuse = false;
     let mut snapshot_codecs = false;
+    let mut capture_profile = false;
     let mut restore_profile = false;
     let mut rematerialization = false;
     while let Some(arg) = args.next() {
@@ -32,6 +33,8 @@ fn main() {
             "--verified-reuse" => panic!("reuse timings require a non-diagnostic build"),
             "--snapshot-codecs" if !perf::ENABLED => snapshot_codecs = true,
             "--snapshot-codecs" => panic!("snapshot timings require a non-diagnostic build"),
+            "--capture-profile" if !perf::ENABLED => capture_profile = true,
+            "--capture-profile" => panic!("capture timings require a non-diagnostic build"),
             "--restore-profile" if !perf::ENABLED => restore_profile = true,
             "--restore-profile" => panic!("restore timings require a non-diagnostic build"),
             "--rematerialization" => rematerialization = true,
@@ -48,6 +51,17 @@ fn main() {
     }
 
     println!("workload,metric,sample,value,unit");
+    if capture_profile {
+        for workload in [&REACT_REUSE, &SNAPSHOT_BUFFER]
+            .into_iter()
+            .chain(WORKLOADS)
+        {
+            if workload.suspend.is_some() {
+                run_capture_profile(workload, samples);
+            }
+        }
+        return;
+    }
     if restore_profile {
         for workload in [&REACT_REUSE].into_iter().chain(WORKLOADS) {
             if workload.suspend.is_some() {
@@ -211,6 +225,65 @@ fn run_restore_profile(workload: &Workload, samples: usize) {
                 })
             };
             vm.start_recovered_operations().unwrap();
+            workload.resume.unwrap()(&mut vm, &mut host, &roots);
+        }
+        if i >= WARMUP_SAMPLES {
+            sample.print(name, i - WARMUP_SAMPLES);
+        }
+    }
+}
+
+fn run_capture_profile(workload: &Workload, samples: usize) {
+    let program = VerifiedBuild::new((workload.build)()).expect("verify build");
+    let mut source_host = TestHost::default();
+    let mut source = Vm::new_verified(program.clone(), &mut source_host).expect("start source");
+    let roots = workload.suspend.unwrap()(&mut source, &mut source_host);
+    let name = workload.name;
+    println!("{name},build_id,0,{},text", program.build_id);
+
+    for i in 0..WARMUP_SAMPLES + samples {
+        let mut sample = Sample::default();
+        let profiled_first = i % 2 == 1;
+        let mut reference_bytes: Option<Vec<u8>> = None;
+        for profiled in [profiled_first, !profiled_first] {
+            let snapshot = if profiled {
+                let (snapshot, profile) =
+                    source.snapshot_profiled(&roots).expect("profile capture");
+                assert_eq!(
+                    profile.total,
+                    profile.trace + profile.records + profile.host_records
+                );
+                sample.times.extend([
+                    ("profiled_capture", profile.total),
+                    ("capture_trace", profile.trace),
+                    ("capture_records", profile.records),
+                    ("capture_host_records", profile.host_records),
+                ]);
+                snapshot
+            } else {
+                sample.time("capture", || source.snapshot(&roots).expect("capture"))
+            };
+            let bytes = if profiled {
+                snapshot.to_bytes().expect("encode profiled snapshot")
+            } else {
+                sample.time("binary_encode", || {
+                    snapshot.to_bytes().expect("encode snapshot")
+                })
+            };
+            if i == 0 && !profiled {
+                println!("{name},snapshot_objects,0,{},count", snapshot.objects.len());
+                println!("{name},binary_size,0,{},bytes", bytes.len());
+            }
+            drop(snapshot);
+            let image = Snapshot::from_bytes(&bytes).expect("decode binary snapshot");
+            if let Some(reference) = reference_bytes.take() {
+                assert!(bytes == reference, "capture bytes differ for {name}");
+            } else {
+                reference_bytes = Some(bytes);
+            }
+            let mut host = TestHost::default();
+            let mut vm = Vm::restore_verified(image, program.clone(), &mut host).expect("restore");
+            vm.start_recovered_operations().expect("rearm operations");
             workload.resume.unwrap()(&mut vm, &mut host, &roots);
         }
         if i >= WARMUP_SAMPLES {

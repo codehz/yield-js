@@ -73,6 +73,19 @@ pub struct Restore {
     pub finalize: Duration,
 }
 
+/// Non-overlapping wall-clock phases of capturing a snapshot, before encoding it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Capture {
+    pub total: Duration,
+    /// Trace roots and check that the VM is ready to be captured.
+    pub trace: Duration,
+    /// Clone and check heap objects, roots, and VM side tables.
+    pub records: Duration,
+    /// Construct host instance, module state, and operation records, including
+    /// payload encoding and checkpoint callbacks.
+    pub host_records: Duration,
+}
+
 std::thread_local! {
     static COUNTERS: Cell<Counters> = const { Cell::new(Counters {
         dispatches: 0,

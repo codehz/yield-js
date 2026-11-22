@@ -47,6 +47,33 @@ pub(super) const REACT_REUSE: Workload =
         |vm, host, _| assert_number(vm, host, "checkFirst", vec![], 1.0),
     );
 
+pub(super) const SNAPSHOT_BUFFER: Workload = Workload::new(
+    "snapshot-buffer-8mib",
+    || build(include_str!("snapshot-buffer.js")),
+    |vm, host| {
+        let roots = suspend_snapshot_buffer(vm, host);
+        resume_snapshot_buffer(vm, host, &roots);
+    },
+)
+.with_snapshot(suspend_snapshot_buffer, resume_snapshot_buffer);
+
+const SNAPSHOT_BUFFER_LABEL: &str = "wait:baseline-buffer";
+
+fn suspend_snapshot_buffer(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+    suspend_pending(vm, host, "run", SNAPSHOT_BUFFER_LABEL)
+}
+
+fn resume_snapshot_buffer(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+    finish_pending(
+        vm,
+        host,
+        roots,
+        SNAPSHOT_BUFFER_LABEL,
+        Completion::Fulfilled(number(42.0)),
+        71.0,
+    );
+}
+
 pub(super) const WORKLOADS: &[Workload] = &[
     Workload::new("react-first-commit", build_react, react_first_commit),
     Workload::new("react-updates", build_react, react_updates),

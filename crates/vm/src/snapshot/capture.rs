@@ -103,6 +103,36 @@ impl Vm {
     /// The caller must hold external logical time and delivery at the same cut;
     /// no event may have been taken out of its source but not yet delivered.
     pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, VmError> {
+        self.capture_image(roots, |_| {})
+    }
+
+    /// Capture through the same path as `snapshot`, timing its phases.
+    #[doc(hidden)]
+    pub fn snapshot_profiled(
+        &self,
+        roots: &[Value],
+    ) -> Result<(Snapshot, crate::perf::Capture), VmError> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut last = start;
+        let mut profile = crate::perf::Capture::default();
+        let snapshot = self.capture_image(roots, |field| {
+            let now = Instant::now();
+            *field(&mut profile) += now.duration_since(last);
+            last = now;
+        })?;
+        let end = Instant::now();
+        profile.records += end.duration_since(last);
+        profile.total = end.duration_since(start);
+        Ok((snapshot, profile))
+    }
+
+    fn capture_image(
+        &self,
+        roots: &[Value],
+        mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
+    ) -> Result<Snapshot, VmError> {
         if !self.microtasks.is_empty() {
             return Err(VmError::InvalidState(
                 "snapshot requires a drained microtask queue".to_owned(),
@@ -120,6 +150,7 @@ impl Vm {
                 "snapshot during pending thenable assimilation".to_owned(),
             ));
         }
+        checkpoint(|profile| &mut profile.trace);
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
@@ -199,6 +230,7 @@ impl Vm {
                 ));
             }
         }
+        checkpoint(|profile| &mut profile.records);
         for (object, instance) in &self.host_instances {
             if !live.objects.contains(object) {
                 continue;
@@ -269,6 +301,7 @@ impl Vm {
                 payload: PayloadRecord { schema, bytes },
             });
         }
+        checkpoint(|profile| &mut profile.host_records);
         for id in live.continuations_seen {
             let continuation = self.continuations.get(&id).ok_or_else(|| {
                 VmError::InvalidState(format!("continuation {id} does not exist"))
@@ -311,6 +344,7 @@ impl Vm {
                 waiting_on,
             });
         }
+        checkpoint(|profile| &mut profile.records);
         for (id, operation) in &self.operations {
             snapshot.operations.push(PendingOperationRecord {
                 id: *id,
@@ -323,6 +357,7 @@ impl Vm {
                 target: operation.target,
             });
         }
+        checkpoint(|profile| &mut profile.host_records);
         for (id, state) in &self.heap.combines {
             if live.objects.contains(id) {
                 snapshot.combines.insert(*id, state.clone());
