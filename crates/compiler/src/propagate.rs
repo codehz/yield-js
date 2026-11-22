@@ -316,6 +316,7 @@ pub(crate) fn optimize(
             dead.extend(start..end);
         }
     }
+    fuse_branch_tests(function, &mut dead);
     function.handlers.retain(|handler| {
         (handler.start_pc as usize..handler.end_pc as usize)
             .any(|pc| !dead.contains(&pc) && may_throw(&function.code[pc]))
@@ -325,6 +326,103 @@ pub(crate) fn optimize(
         compact_dead_instructions(function, &mut dead)?;
     }
     Ok(())
+}
+
+/// Fuses `Binary`/`BinaryConst`/`Unary` followed by `BranchFalse` when the
+/// result register has exactly one use. The branch instruction consumes the
+/// operands and jumps directly, so no result slot is written. A branch that is
+/// itself a control-flow target cannot be removed: some paths would skip the
+/// computation that must precede the new branch.
+fn fuse_branch_tests(function: &mut LoweredFunction, dead: &mut BTreeSet<usize>) {
+    let mut targets = BTreeSet::new();
+    for instruction in &function.code {
+        let target = match instruction {
+            Instr::Jump { target }
+            | Instr::BranchFalse { target, .. }
+            | Instr::BranchTrue { target, .. }
+            | Instr::BranchCompareFalse { target, .. }
+            | Instr::BranchCompareConstFalse { target, .. }
+            | Instr::BranchCompareTrue { target, .. }
+            | Instr::BranchCompareConstTrue { target, .. }
+            | Instr::BranchBinary { target, .. }
+            | Instr::BranchBinaryConst { target, .. }
+            | Instr::BranchUnary { target, .. } => Some(*target as usize),
+            _ => None,
+        };
+        if let Some(target) = target {
+            targets.insert(target);
+        }
+    }
+    targets.extend(
+        function
+            .handlers
+            .iter()
+            .map(|handler| handler.target_pc as usize),
+    );
+    for site in &function.awaits {
+        targets.extend([site.fulfill_pc, site.reject_pc]);
+    }
+    for site in &function.yields {
+        targets.extend([site.next_pc, site.throw_pc, site.return_pc]);
+    }
+    if let Some(start) = function.generator_start {
+        targets.insert(start.body_pc);
+    }
+
+    let mut uses: BTreeMap<Reg, usize> = BTreeMap::new();
+    for (pc, instruction) in function.code.iter().enumerate() {
+        if dead.contains(&pc) {
+            continue;
+        }
+        for reg in uses_defs(instruction).0 {
+            *uses.entry(reg).or_default() += 1;
+        }
+    }
+
+    let mut pc = 0;
+    while pc + 1 < function.code.len() {
+        if dead.contains(&pc) || dead.contains(&(pc + 1)) || targets.contains(&(pc + 1)) {
+            pc += 1;
+            continue;
+        }
+        let Instr::BranchFalse { cond, target } = function.code[pc + 1] else {
+            pc += 1;
+            continue;
+        };
+        let replacement = match function.code[pc] {
+            Instr::Binary { dst, op, lhs, rhs }
+                if dst == cond && uses.get(&dst.index) == Some(&1) =>
+            {
+                Instr::BranchBinary {
+                    op,
+                    lhs,
+                    rhs,
+                    target,
+                }
+            }
+            Instr::BinaryConst {
+                dst,
+                op,
+                lhs,
+                constant,
+            } if dst == cond && uses.get(&dst.index) == Some(&1) => Instr::BranchBinaryConst {
+                op,
+                lhs,
+                constant,
+                target,
+            },
+            Instr::Unary { dst, op, src } if dst == cond && uses.get(&dst.index) == Some(&1) => {
+                Instr::BranchUnary { op, src, target }
+            }
+            _ => {
+                pc += 1;
+                continue;
+            }
+        };
+        function.code[pc] = replacement;
+        dead.insert(pc + 1);
+        pc += 2;
+    }
 }
 
 /// The verifier checks even lexical predecessors that are unreachable. If

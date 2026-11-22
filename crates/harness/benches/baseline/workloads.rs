@@ -47,6 +47,13 @@ pub(super) const WORKLOADS: &[Workload] = &[
         numeric_branch,
     ),
     Workload::new(
+        "builtin-math",
+        || build(include_str!("builtin.js")),
+        |vm, host| {
+            assert_number(vm, host, "run", vec![], 6_294_556.0);
+        },
+    ),
+    Workload::new(
         "short-call",
         || build(include_str!("short-call.js")),
         |vm, host| {

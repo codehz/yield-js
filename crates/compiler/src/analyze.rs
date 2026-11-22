@@ -138,6 +138,9 @@ pub(crate) fn ends_block(instruction: &Instr) -> bool {
                 | Instr::BranchCompareConstFalse { .. }
                 | Instr::BranchCompareTrue { .. }
                 | Instr::BranchCompareConstTrue { .. }
+                | Instr::BranchBinary { .. }
+                | Instr::BranchBinaryConst { .. }
+                | Instr::BranchUnary { .. }
                 | Instr::GeneratorStart
                 | Instr::Return { .. }
                 | Instr::Throw { .. }
@@ -211,7 +214,10 @@ pub(crate) fn edges(
         | Instr::BranchCompareFalse { target, .. }
         | Instr::BranchCompareConstFalse { target, .. }
         | Instr::BranchCompareTrue { target, .. }
-        | Instr::BranchCompareConstTrue { target, .. } => vec![
+        | Instr::BranchCompareConstTrue { target, .. }
+        | Instr::BranchBinary { target, .. }
+        | Instr::BranchBinaryConst { target, .. }
+        | Instr::BranchUnary { target, .. } => vec![
             Edge {
                 pc: *target as usize,
                 written: None,

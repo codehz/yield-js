@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 51;
+pub const BYTECODE_VERSION: u32 = 52;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -560,6 +560,26 @@ pub enum Instr {
         lhs: Slot,
         op: BinaryOp,
         constant: u32,
+        target: u32,
+    },
+    /// Evaluates an arbitrary binary result and branches when it is falsy.
+    BranchBinary {
+        op: BinaryOp,
+        lhs: Slot,
+        rhs: Slot,
+        target: u32,
+    },
+    /// Binary-with-constant variant of `BranchBinary`.
+    BranchBinaryConst {
+        op: BinaryOp,
+        lhs: Slot,
+        constant: u32,
+        target: u32,
+    },
+    /// Evaluates an arbitrary unary result and branches when it is falsy.
+    BranchUnary {
+        op: UnaryOp,
+        src: Slot,
         target: u32,
     },
     Return {
@@ -2081,6 +2101,34 @@ impl Build {
                     }
                     check_target(*target, "BranchCompareConstTrue")?;
                 }
+                Instr::BranchBinary {
+                    op: _,
+                    lhs,
+                    rhs,
+                    target,
+                } => {
+                    check_slot(*lhs, "BranchBinary.lhs")?;
+                    check_slot(*rhs, "BranchBinary.rhs")?;
+                    check_target(*target, "BranchBinary")?;
+                }
+                Instr::BranchBinaryConst {
+                    op: _,
+                    lhs,
+                    constant,
+                    target,
+                } => {
+                    check_slot(*lhs, "BranchBinaryConst.lhs")?;
+                    if *constant as usize >= self.constants.len() {
+                        return Err(format!(
+                            "{location}: BranchBinaryConst at pc {pc} references constant {constant}"
+                        ));
+                    }
+                    check_target(*target, "BranchBinaryConst")?;
+                }
+                Instr::BranchUnary { op: _, src, target } => {
+                    check_slot(*src, "BranchUnary.src")?;
+                    check_target(*target, "BranchUnary")?;
+                }
                 Instr::Return { src } => check_slot(*src, "Return.src")?,
                 Instr::Throw { src } => check_slot(*src, "Throw.src")?,
                 Instr::ThrowAssignmentToConst | Instr::ThrowDeleteSuper => {}
@@ -2279,7 +2327,10 @@ fn has_control_flow_target(function: &Function, target: u32) -> bool {
         | Instr::BranchCompareFalse { target: slot, .. }
         | Instr::BranchCompareConstFalse { target: slot, .. }
         | Instr::BranchCompareTrue { target: slot, .. }
-        | Instr::BranchCompareConstTrue { target: slot, .. } => *slot == target,
+        | Instr::BranchCompareConstTrue { target: slot, .. }
+        | Instr::BranchBinary { target: slot, .. }
+        | Instr::BranchBinaryConst { target: slot, .. }
+        | Instr::BranchUnary { target: slot, .. } => *slot == target,
         _ => false,
     }) || function
         .handlers

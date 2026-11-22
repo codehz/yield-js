@@ -121,6 +121,9 @@ impl Vm {
         let roots = &roots.with(&args);
         Ok(match args.first() {
             None => Invocation::Value(Value::number(0.0)),
+            Some(arg) if let ValueRef::Number(number) = arg.view() => {
+                Invocation::Value(Value::number(number))
+            }
             Some(arg) => match self.coerce_number_allow_bigint(host, roots, arg)? {
                 Ok(number) => Invocation::Value(Value::number(number)),
                 Err(error) => Invocation::Thrown(error),
@@ -135,11 +138,11 @@ impl Vm {
         method: &str,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
-        let roots = &roots.with(&args);
         let undefined = Value::UNDEFINED;
         let arg = args.first().unwrap_or(&undefined);
         let value = match method {
             "parseFloat" | "parseInt" => {
+                let roots = &roots.with(&args);
                 let text = match self.coerce_string(host, roots, arg)? {
                     Ok(text) => text,
                     Err(error) => return Ok(Invocation::Thrown(error)),

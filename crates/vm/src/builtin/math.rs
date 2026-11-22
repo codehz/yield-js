@@ -5,7 +5,7 @@ use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::ops::number_to_uint32;
 use crate::runtime::Invocation;
-use crate::value::Value;
+use crate::value::{Value, ValueRef};
 use crate::vm::Vm;
 
 pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -14,7 +14,7 @@ pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub(crate) mod namespace {
     use std::f64::consts;
 
-    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, ValueRef, Vm, VmError};
 
     #[constant(name = "E")]
     const E: f64 = consts::E;
@@ -40,6 +40,11 @@ pub(crate) mod namespace {
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        if let Some(value) = args.first()
+            && let ValueRef::Number(number) = value.view()
+        {
+            return Ok(Invocation::Value(Value::number(number.abs())));
+        }
         match vm.coerce_number(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
             Ok(number) => Ok(Invocation::Value(Value::number(number.abs()))),
             Err(error) => Ok(Invocation::Thrown(error)),
@@ -85,13 +90,19 @@ impl Vm {
                 let mut saw_infinity = false;
                 // Even NaN and infinity cannot short-circuit later coercions.
                 for arg in args {
-                    match self.coerce_number(host, roots, arg)? {
-                        Ok(number) if method == "hypot" && !number.is_finite() => {
-                            saw_nan |= number.is_nan();
-                            saw_infinity |= number.is_infinite();
+                    let number = if let ValueRef::Number(number) = arg.view() {
+                        number
+                    } else {
+                        match self.coerce_number(host, roots, arg)? {
+                            Ok(number) => number,
+                            Err(error) => return Ok(Invocation::Thrown(error)),
                         }
-                        Ok(number) => result = combine(result, number),
-                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                    if method == "hypot" && !number.is_finite() {
+                        saw_nan |= number.is_nan();
+                        saw_infinity |= number.is_infinite();
+                    } else {
+                        result = combine(result, number);
                     }
                 }
                 if saw_infinity {
@@ -103,23 +114,32 @@ impl Vm {
                 }
             }
             _ => {
-                let x = match self.coerce_number(
-                    host,
-                    roots,
-                    args.first().unwrap_or(&Value::UNDEFINED),
-                )? {
-                    Ok(number) => number,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
+                let x = if let Some(ValueRef::Number(number)) = args.first().map(Value::view) {
+                    number
+                } else {
+                    match self.coerce_number(
+                        host,
+                        roots,
+                        args.first().unwrap_or(&Value::UNDEFINED),
+                    )? {
+                        Ok(number) => number,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
                 };
                 match method {
                     "atan2" | "imul" | "pow" => {
-                        let y = match self.coerce_number(
-                            host,
-                            roots,
-                            args.get(1).unwrap_or(&Value::UNDEFINED),
-                        )? {
-                            Ok(number) => number,
-                            Err(error) => return Ok(Invocation::Thrown(error)),
+                        let y = if let Some(ValueRef::Number(number)) = args.get(1).map(Value::view)
+                        {
+                            number
+                        } else {
+                            match self.coerce_number(
+                                host,
+                                roots,
+                                args.get(1).unwrap_or(&Value::UNDEFINED),
+                            )? {
+                                Ok(number) => number,
+                                Err(error) => return Ok(Invocation::Thrown(error)),
+                            }
                         };
                         match method {
                             "atan2" => x.atan2(y),

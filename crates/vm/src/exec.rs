@@ -415,6 +415,20 @@ impl Vm {
         }
     }
 
+    fn is_comparison(op: BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::StrictEq
+                | BinaryOp::StrictNe
+        )
+    }
+
     /// Evaluates a comparison for a branch without materializing a boolean
     /// `Value` when both operands are numbers.
     fn branch_compare(
@@ -441,6 +455,46 @@ impl Vm {
         match self.binary_value(host, roots, op, lhs, rhs)? {
             Ok(value) => Ok(Ok(value.truthy())),
             Err(error) => Ok(Err(error)),
+        }
+    }
+
+    /// Evaluates a unary operation without committing a destination slot.
+    fn unary_value(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        op: UnaryOp,
+        mut value: Value,
+    ) -> Result<Result<Value, Value>, VmError> {
+        if let ValueRef::Number(number) = value.view()
+            && let Some(result) = match op {
+                UnaryOp::Neg => Some(Value::number(-number)),
+                UnaryOp::Pos => Some(Value::number(number)),
+                UnaryOp::BitNot => Some(Value::number(
+                    (!(ops::number_to_uint32(number) as i32)) as f64,
+                )),
+                UnaryOp::ToNumeric => Some(Value::number(number)),
+                UnaryOp::Increment => Some(Value::number(number + 1.0)),
+                UnaryOp::Decrement => Some(Value::number(number - 1.0)),
+                UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void => None,
+            }
+        {
+            return Ok(Ok(result));
+        }
+        if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Object(_)) {
+            match self.primitive_from_object(host, roots, &value, Hint::Number)? {
+                Invocation::Value(primitive) => value = primitive,
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            }
+        }
+        if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Symbol(_)) {
+            return Ok(Err(self.type_error(ops::SYMBOL_TO_NUMBER)?));
+        }
+        match self.unary(op, value) {
+            Ok(value) => Ok(Ok(value)),
+            Err(BinaryError::TypeError(message)) => Ok(Err(self.type_error(message)?)),
+            Err(BinaryError::RangeError(message)) => Ok(Err(self.make_range_error(message)?)),
+            Err(BinaryError::Vm(error)) => Err(error),
         }
     }
 
@@ -608,44 +662,14 @@ impl Vm {
                 }
             }
             Instr::Unary { dst, op, src } => {
-                let mut value = frame.read(src)?;
-                if let ValueRef::Number(number) = value.view()
-                    && let Some(result) = match op {
-                        UnaryOp::Neg => Some(Value::number(-number)),
-                        UnaryOp::Pos => Some(Value::number(number)),
-                        UnaryOp::BitNot => Some(Value::number(
-                            (!(ops::number_to_uint32(number) as i32)) as f64,
-                        )),
-                        UnaryOp::ToNumeric => Some(Value::number(number)),
-                        UnaryOp::Increment => Some(Value::number(number + 1.0)),
-                        UnaryOp::Decrement => Some(Value::number(number - 1.0)),
-                        UnaryOp::Not | UnaryOp::TypeOf | UnaryOp::Void => None,
+                let value = frame.read(src)?;
+                match self.unary_value(host, frame_roots, op, value)? {
+                    Ok(value) => {
+                        frame.write(dst, value)?;
+                        Ok(Step::Next)
                     }
-                {
-                    frame.write(dst, result)?;
-                    return Ok(Step::Next);
+                    Err(error) => Ok(Step::Throw(error)),
                 }
-                if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Object(_)) {
-                    match self.primitive_from_object(host, frame_roots, &value, Hint::Number)? {
-                        Invocation::Value(primitive) => value = primitive,
-                        Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                    }
-                }
-                if ops::unary_coerces(op) && matches!(value.view(), ValueRef::Symbol(_)) {
-                    return Ok(Step::Throw(self.type_error(ops::SYMBOL_TO_NUMBER)?));
-                }
-                let value = match self.unary(op, value) {
-                    Ok(value) => value,
-                    Err(BinaryError::TypeError(message)) => {
-                        return Ok(Step::Throw(self.type_error(message)?));
-                    }
-                    Err(BinaryError::RangeError(message)) => {
-                        return Ok(Step::Throw(self.make_range_error(message)?));
-                    }
-                    Err(BinaryError::Vm(error)) => return Err(error),
-                };
-                frame.write(dst, value)?;
-                Ok(Step::Next)
             }
             Instr::ToString { dst, src } => {
                 let invocation = self.string_value(host, frame_roots, frame.read_ref(src)?)?;
@@ -1633,6 +1657,70 @@ impl Vm {
                     Err(error) => return Ok(Step::Throw(error)),
                 }
                 Ok(Step::Next)
+            }
+            Instr::BranchBinary {
+                op,
+                lhs,
+                rhs,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = frame.read(rhs)?;
+                if Self::is_comparison(op) {
+                    match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
+                        Ok(true) => {}
+                        Ok(false) => frame.pc = target as usize,
+                        Err(error) => return Ok(Step::Throw(error)),
+                    }
+                    return Ok(Step::Next);
+                }
+                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
+                    Ok(value) => {
+                        if !value.truthy() {
+                            frame.pc = target as usize;
+                        }
+                        Ok(Step::Next)
+                    }
+                    Err(error) => Ok(Step::Throw(error)),
+                }
+            }
+            Instr::BranchBinaryConst {
+                op,
+                lhs,
+                constant,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = Self::constant(constants, constant)?;
+                if Self::is_comparison(op) {
+                    match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
+                        Ok(true) => {}
+                        Ok(false) => frame.pc = target as usize,
+                        Err(error) => return Ok(Step::Throw(error)),
+                    }
+                    return Ok(Step::Next);
+                }
+                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
+                    Ok(value) => {
+                        if !value.truthy() {
+                            frame.pc = target as usize;
+                        }
+                        Ok(Step::Next)
+                    }
+                    Err(error) => Ok(Step::Throw(error)),
+                }
+            }
+            Instr::BranchUnary { op, src, target } => {
+                let value = frame.read(src)?;
+                match self.unary_value(host, frame_roots, op, value)? {
+                    Ok(value) => {
+                        if !value.truthy() {
+                            frame.pc = target as usize;
+                        }
+                        Ok(Step::Next)
+                    }
+                    Err(error) => Ok(Step::Throw(error)),
+                }
             }
             Instr::Return { src } => Ok(Step::Return(frame.read(src)?)),
             Instr::Throw { src } => Ok(Step::Throw(frame.read(src)?)),

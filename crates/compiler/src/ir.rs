@@ -222,6 +222,33 @@ pub(crate) fn compact_dead_instructions(
                 constant,
                 target: remap(target)?,
             },
+            Instr::BranchBinary {
+                op,
+                lhs,
+                rhs,
+                target,
+            } => Instr::BranchBinary {
+                op,
+                lhs,
+                rhs,
+                target: remap(target)?,
+            },
+            Instr::BranchBinaryConst {
+                op,
+                lhs,
+                constant,
+                target,
+            } => Instr::BranchBinaryConst {
+                op,
+                lhs,
+                constant,
+                target: remap(target)?,
+            },
+            Instr::BranchUnary { op, src, target } => Instr::BranchUnary {
+                op,
+                src,
+                target: remap(target)?,
+            },
             Instr::Await { dst, input, resume } => {
                 let id = await_ids[resume as usize].get_or_insert_with(|| {
                     let id = function.awaits.len() as u32;

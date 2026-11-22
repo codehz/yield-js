@@ -59,9 +59,20 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::BranchCompareFalse { op, .. }
         | Instr::BranchCompareConstFalse { op, .. }
         | Instr::BranchCompareTrue { op, .. }
-        | Instr::BranchCompareConstTrue { op, .. } => {
+        | Instr::BranchCompareConstTrue { op, .. }
+        | Instr::BranchBinary { op, .. }
+        | Instr::BranchBinaryConst { op, .. } => {
             !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
         }
+        Instr::BranchUnary { op, .. } => matches!(
+            *op,
+            UnaryOp::Neg
+                | UnaryOp::Pos
+                | UnaryOp::BitNot
+                | UnaryOp::ToNumeric
+                | UnaryOp::Increment
+                | UnaryOp::Decrement
+        ),
         Instr::Unary { op, .. } => {
             matches!(
                 *op,
@@ -432,8 +443,17 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(lhs.index);
             uses.insert(rhs.index);
         }
-        Instr::BranchCompareConstFalse { lhs, .. } | Instr::BranchCompareConstTrue { lhs, .. } => {
+        Instr::BranchCompareConstFalse { lhs, .. }
+        | Instr::BranchCompareConstTrue { lhs, .. }
+        | Instr::BranchBinaryConst { lhs, .. } => {
             uses.insert(lhs.index);
+        }
+        Instr::BranchBinary { lhs, rhs, .. } => {
+            uses.insert(lhs.index);
+            uses.insert(rhs.index);
+        }
+        Instr::BranchUnary { src, .. } => {
+            uses.insert(src.index);
         }
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
@@ -971,6 +991,33 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             lhs: remap(lhs),
             op,
             constant,
+            target,
+        },
+        Instr::BranchBinary {
+            op,
+            lhs,
+            rhs,
+            target,
+        } => Instr::BranchBinary {
+            op,
+            lhs: remap(lhs),
+            rhs: remap(rhs),
+            target,
+        },
+        Instr::BranchBinaryConst {
+            op,
+            lhs,
+            constant,
+            target,
+        } => Instr::BranchBinaryConst {
+            op,
+            lhs: remap(lhs),
+            constant,
+            target,
+        },
+        Instr::BranchUnary { op, src, target } => Instr::BranchUnary {
+            op,
+            src: remap(src),
             target,
         },
         Instr::Return { src } => Instr::Return { src: remap(src) },
