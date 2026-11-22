@@ -1284,6 +1284,82 @@ fn rejects_unsupported_module_syntax() {
 }
 
 #[test]
+fn rejects_unreachable_await_using_in_sync_module() {
+    for (source, column) in [
+        ("\nawait using resource = null;", 1),
+        ("\nif (false) { await using resource = null; }", 14),
+    ] {
+        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        assert_eq!((error.line(), error.column()), (2, column), "{error}");
+        assert_eq!(
+            error.message(),
+            "unsupported syntax: await using outside an async function"
+        );
+    }
+}
+
+#[test]
+fn preserves_oxc_resource_diagnostics() {
+    for (statement, marker, message) in [
+        ("using {x} = {};", "{x}", "may not have binding patterns"),
+        ("using resource;", "resource", "must have an initializer"),
+        (
+            "for (using resource in {}) {}",
+            "using",
+            "for...in statement",
+        ),
+        (
+            "switch (0) { case 0: using resource = null; }",
+            "using",
+            "bare case statement",
+        ),
+        (
+            "function f() { if (false) { await using x = null; } }",
+            "await",
+            "only allowed within async functions",
+        ),
+    ] {
+        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        assert_eq!(
+            (error.line(), error.column()),
+            (2, statement.find(marker).unwrap() + 1),
+            "{error}"
+        );
+        assert!(error.message().contains(message), "{error}");
+        assert!(
+            !error.message().starts_with("unsupported syntax:"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn rejects_resource_loop_heads_even_in_a_resource_scope() {
+    for head in [
+        "for (using inner = null; false;) {}",
+        "for (using inner of []) {}",
+        "for await (await using inner of []) {}",
+    ] {
+        let source = format!("export async function run() {{\n  using outer = null;\n  {head}\n}}");
+        let error = compile(&source, &CompileOptions::default()).unwrap_err();
+        assert_eq!(error.line(), 3, "{error}");
+        assert_eq!(
+            error.message(),
+            "unsupported syntax: resource declaration in a loop head"
+        );
+    }
+}
+
+#[test]
+fn accepts_using_identifier_and_nested_async_resource_declaration() {
+    compile(
+        "const using = null; export async function run() { await using resource = using; }",
+        &CompileOptions::default(),
+    )
+    .unwrap();
+}
+
+#[test]
 fn rejects_unresolved_and_ambiguous_exports_at_the_request() {
     let check = |files: &[(&str, &str)], expected_module, expected_line, expected: &str| {
         let resolver = MemoryResolver::new(files.iter().copied()).unwrap();

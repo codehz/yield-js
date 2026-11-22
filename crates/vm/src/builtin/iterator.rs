@@ -14,9 +14,15 @@ use super::{RootKind, RootSpec, define_builtin_data};
 
 pub(crate) const SYNC_ROOT: &str = "iterator.prototype";
 pub(crate) const ASYNC_ROOT: &str = "asyncIterator.prototype";
+const UNWRAP_ROOT: &str = "asyncIterator.dispose.unwrap";
 pub(crate) const ROOTS: &[RootSpec] = &[
     RootSpec::new(SYNC_ROOT, RootKind::Plain, Some("object.prototype")),
     RootSpec::new(ASYNC_ROOT, RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(
+        UNWRAP_ROOT,
+        RootKind::Native(UNWRAP),
+        Some("function.prototype"),
+    ),
 ];
 
 const DISPOSE: IntrinsicKey = IntrinsicKey::new("Iterator", Slot::PrototypeSymbol, "dispose");
@@ -62,7 +68,7 @@ pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
                         let job = ReactionJob::Script {
                             resolve: Value::object(resolve),
                             reject: Value::object(reject),
-                            on_fulfilled: Some(Value::object(vm.alloc_intrinsic(UNWRAP))),
+                            on_fulfilled: Some(Value::object(vm.builtins.get(UNWRAP_ROOT))),
                             on_rejected: None,
                         };
                         match prepared {

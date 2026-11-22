@@ -1,13 +1,16 @@
 //! Disposal records capture the callable before a binding is initialized. Both
 //! stack and lexical cleanup consume the same LIFO state; only the driver differs.
 
+use super::{RootKind, RootSpec};
+use crate::bytecode::DisposeBuiltin;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    ASYNC_DISPOSE_SYMBOL, DISPOSE_SYMBOL, DisposableResource, DisposeHint, DisposeState, Object,
-    ReactionJob,
+    ASYNC_DISPOSE_SYMBOL, Attributes, DISPOSE_SYMBOL, DisposableResource, DisposeHint,
+    DisposeState, Object, ReactionJob,
 };
 use crate::host::Host;
+use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -22,6 +25,142 @@ enum DisposeStep {
 
 fn nullish(value: &Value) -> bool {
     matches!(value.view(), ValueRef::Undefined | ValueRef::Null)
+}
+
+const fn scope_intrinsic(member: &'static str) -> IntrinsicKey {
+    IntrinsicKey::new("DisposeScope", Slot::Static, member)
+}
+
+// Operand order matches DisposeBuiltin. These have no global names.
+pub(crate) const SCOPE_INTRINSICS: [IntrinsicDef; DisposeBuiltin::COUNT] = [
+    IntrinsicDef::call(scope_intrinsic("newDisposeScope"), 0, |vm, _, _, _, _| {
+        let scope = vm.heap.alloc(Object::DisposeState(DisposeState::default()));
+        Ok(Invocation::Value(Value::object(scope)))
+    }),
+    IntrinsicDef::call(
+        scope_intrinsic("addResource"),
+        3,
+        |vm, host, roots, args, _| {
+            let scope = vm.disposal_scope_arg(&args)?;
+            let [_, value, async_] = args.as_slice() else {
+                return Err(VmError::InvalidState(
+                    "Expected resource registration arguments".into(),
+                ));
+            };
+            let ValueRef::Bool(async_) = async_.view() else {
+                return Err(VmError::InvalidState(
+                    "Expected resource registration hint".into(),
+                ));
+            };
+            match vm.create_disposable_resource(host, roots, value, async_)? {
+                Ok(record) => {
+                    vm.disposal(scope)?.records.extend(record);
+                    Ok(Invocation::Value(Value::UNDEFINED))
+                }
+                Err(error) => Ok(Invocation::Thrown(error)),
+            }
+        },
+    ),
+    IntrinsicDef::call(
+        scope_intrinsic("stepDispose"),
+        1,
+        |vm, host, roots, args, _| {
+            let scope = vm.disposal_scope_arg(&args)?;
+            Ok(Invocation::Value(
+                match vm.step_disposal(host, roots, scope)? {
+                    DisposeStep::Done => Value::UNDEFINED,
+                    DisposeStep::Await(value) => vm.disposal_await_operand(host, roots, value)?,
+                },
+            ))
+        },
+    ),
+    IntrinsicDef::call(
+        scope_intrinsic("recordDisposeThrow"),
+        2,
+        |vm, _, _, args, _| {
+            let scope = vm.disposal_scope_arg(&args)?;
+            let error = args.into_iter().nth(1).unwrap_or(Value::UNDEFINED);
+            vm.record_disposal_error(scope, error)?;
+            Ok(Invocation::Value(Value::UNDEFINED))
+        },
+    ),
+    IntrinsicDef::call(
+        scope_intrinsic("hasDisposeThrow"),
+        1,
+        |vm, _, _, args, _| {
+            let scope = vm.disposal_scope_arg(&args)?;
+            Ok(Invocation::Value(Value::boolean(
+                vm.disposal(scope)?.error.is_some(),
+            )))
+        },
+    ),
+    IntrinsicDef::call(
+        scope_intrinsic("getDisposeThrow"),
+        1,
+        |vm, _, _, args, _| {
+            let scope = vm.disposal_scope_arg(&args)?;
+            Ok(Invocation::Value(
+                vm.disposal(scope)?.error.take().unwrap_or(Value::UNDEFINED),
+            ))
+        },
+    ),
+];
+
+const fn scope_root(builtin: DisposeBuiltin) -> RootSpec {
+    let key = SCOPE_INTRINSICS[builtin as usize - DisposeBuiltin::NewScope as usize].key;
+    RootSpec::new(
+        key.member,
+        RootKind::Native(key),
+        Some("function.prototype"),
+    )
+}
+
+pub(crate) const SCOPE_ROOTS: &[RootSpec] = &[
+    scope_root(DisposeBuiltin::NewScope),
+    scope_root(DisposeBuiltin::AddResource),
+    scope_root(DisposeBuiltin::Step),
+    scope_root(DisposeBuiltin::RecordThrow),
+    scope_root(DisposeBuiltin::HasThrow),
+    scope_root(DisposeBuiltin::GetThrow),
+];
+
+impl Vm {
+    fn disposal_scope_arg(&self, args: &[Value]) -> Result<ObjectId, VmError> {
+        if let Some(ValueRef::Object(id)) = args.first().map(Value::view)
+            && let Object::DisposeState(state) = self.heap.get(id)?
+            && state.result.is_none()
+        {
+            return Ok(id);
+        }
+        Err(VmError::InvalidState(
+            "Expected a lexical disposal scope".into(),
+        ))
+    }
+
+    fn disposal_await_operand(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: Value,
+    ) -> Result<Value, VmError> {
+        if let ValueRef::Object(id) = value.view()
+            && matches!(self.heap.get(id)?, Object::Promise(_))
+        {
+            // Observe the original constructor only in the emitted Await.
+            return Ok(value);
+        }
+        // Undefined is the step's end sentinel. Wrap other await operands in
+        // a private native promise whose identity check cannot run user code.
+        let promise = self.heap.alloc_promise();
+        self.heap.define_data(
+            promise,
+            "constructor",
+            Value::object(self.builtins.get("promise")),
+            Attributes::FIXED,
+        )?;
+        self.resolve_promise(host, roots, promise, value)?;
+        Ok(Value::object(promise))
+    }
 }
 
 impl Vm {

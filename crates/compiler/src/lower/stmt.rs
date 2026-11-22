@@ -7,7 +7,7 @@ use yield_vm::BindingId;
 use yield_vm::bytecode::{BinaryOp, Instr};
 
 use super::control::{CloseMode, JumpTarget};
-use super::{FunctionSource, Lowerer, for_each_binding_name, local_declaration};
+use super::{FunctionSource, Lowerer, disposal_hint, for_each_binding_name, local_declaration};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
 use crate::ir::IterationEnvGroup;
@@ -96,6 +96,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Statement::ForStatement(statement) => {
                 self.env.enter_block();
                 if let Some(ForStatementInit::VariableDeclaration(declaration)) = &statement.init {
+                    self.reject_resource_loop_head(declaration)?;
                     self.predeclare_variable_list(declaration)?;
                 }
                 if let Some(init) = &statement.init {
@@ -289,10 +290,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
+    // Resource heads require their own lifetime, not the surrounding scope.
+    // Replace this guard when resource loop-head execution is implemented.
+    fn reject_resource_loop_head(
+        &self,
+        declaration: &VariableDeclaration<'_>,
+    ) -> Result<(), CompileError> {
+        if declaration.kind.is_using() {
+            return Err(unsupported(
+                self.source_text(),
+                declaration.span,
+                "resource declaration in a loop head",
+            ));
+        }
+        Ok(())
+    }
+
     fn compile_for_in(
         &mut self,
         statement: &'ast ForInStatement<'ast>,
     ) -> Result<(), CompileError> {
+        if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
+            self.reject_resource_loop_head(declaration)?;
+        }
         self.env.enter_block();
         let bindings = self.declare_iteration_bindings(&statement.left, "for-in")?;
         let source = self.compile_expression(&statement.right)?;
@@ -338,6 +358,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         statement: &'ast ForOfStatement<'ast>,
     ) -> Result<(), CompileError> {
+        if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
+            self.reject_resource_loop_head(declaration)?;
+        }
         if statement.r#await {
             return self.compile_for_await_of(statement);
         }
@@ -684,6 +707,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for case in &statement.cases {
             self.predeclare_scope(&case.consequent)?;
         }
+        let hint = disposal_hint(
+            statement
+                .cases
+                .iter()
+                .flat_map(|case| case.consequent.iter()),
+        );
+        self.compile_disposal_scope(hint, |this| this.compile_switch_body(statement, disc))?;
+        self.env.exit_block();
+        Ok(())
+    }
+
+    fn compile_switch_body(
+        &mut self,
+        statement: &'ast SwitchStatement<'ast>,
+        disc: Reg,
+    ) -> Result<(), CompileError> {
         self.control.push_switch();
 
         // Test chain: (branch_to_next_test, jump_to_body, case index).
@@ -750,7 +789,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for jump in switch_context.break_jumps {
             self.patch_jump(jump, end)?;
         }
-        self.env.exit_block();
         Ok(())
     }
 

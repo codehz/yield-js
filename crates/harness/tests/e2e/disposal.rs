@@ -54,3 +54,40 @@ export async function run() {
     run.complete("wait:b", Completion::Rejected(JsValue::string("B")));
     assert_eq!(run.state(), PromiseState::Fulfilled(Value::boolean(true)));
 }
+
+#[test]
+fn resource_lexical_cleanup_survives_validated_binary_restore() {
+    let mut run = Suspended::start(
+        r#"
+import { wait } from "test";
+export async function run() {
+    let trace = "";
+    async function body() {
+        using a = { [Symbol.dispose]() { trace += "A"; throw "A"; } };
+        await using b = { [Symbol.asyncDispose]() { trace += "B"; return wait("b"); } };
+        a[Symbol.dispose] = undefined;
+        await wait("body");
+        return 42;
+    }
+    try { await body(); }
+    catch (e) {
+        return trace === "BA" && e instanceof SuppressedError &&
+            e.error === "A" && e.suppressed === "B";
+    }
+    return false;
+}
+"#,
+        vec![],
+    );
+    for (label, completion) in [
+        ("wait:body", Completion::Fulfilled(JsValue::undefined())),
+        ("wait:b", Completion::Rejected(JsValue::string("B"))),
+    ] {
+        let roots = run.roots();
+        run.vm.collect_garbage(&roots).unwrap();
+        let image = Snapshot::from_bytes(&run.snapshot().to_bytes().unwrap()).unwrap();
+        run.restore_validated(image).unwrap();
+        run.complete(label, completion);
+    }
+    assert_eq!(run.state(), PromiseState::Fulfilled(Value::boolean(true)));
+}

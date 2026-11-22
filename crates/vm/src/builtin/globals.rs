@@ -147,6 +147,7 @@ pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]
             super::iterator::INTRINSICS,
             generator::INTRINSICS,
             async_generator::INTRINSICS,
+            super::disposal::SCOPE_INTRINSICS.as_slice(),
         ])
 }
 
@@ -160,6 +161,7 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
         super::iterator::ROOTS,
         generator::ROOTS,
         async_generator::ROOTS,
+        super::disposal::SCOPE_ROOTS,
     ]
     .into_iter()
     .chain(owners().map(move |owner| {
@@ -173,6 +175,10 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
 
 impl Vm {
     pub(crate) fn builtin_value(&self, index: u32) -> Result<Value, VmError> {
+        if let Some(offset) = crate::bytecode::DisposeBuiltin::offset(index) {
+            let key = super::disposal::SCOPE_INTRINSICS[offset].key;
+            return Ok(Value::object(self.builtins.get(key.member)));
+        }
         match GLOBALS.get(index as usize) {
             Some(Global::Owner(owner)) => Ok(Value::object(self.builtins.get(owner.root))),
             Some(Global::Number(number)) => Ok(Value::number(*number)),

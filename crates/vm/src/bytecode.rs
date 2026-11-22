@@ -24,6 +24,31 @@ const BUILD_HEADER_LEN: usize = 12;
 
 pub use crate::builtin::BUILTINS;
 
+/// Compiler-only builtins. A separate range leaves the public global indices
+/// stable when new names are appended to `BUILTINS`.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+#[repr(u32)]
+pub enum DisposeBuiltin {
+    NewScope = 0x10000,
+    AddResource,
+    Step,
+    RecordThrow,
+    HasThrow,
+    GetThrow,
+}
+
+impl DisposeBuiltin {
+    pub(crate) const COUNT: usize = Self::GetThrow as usize - Self::NewScope as usize + 1;
+
+    pub(crate) fn offset(index: u32) -> Option<usize> {
+        let offset = index.checked_sub(Self::NewScope as u32)? as usize;
+        (offset < Self::COUNT).then_some(offset)
+    }
+}
+
+const _: () = assert!(BUILTINS.len() <= DisposeBuiltin::NewScope as usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotKind {
@@ -1324,7 +1349,7 @@ impl Build {
         pc: usize,
         what: &str,
     ) -> Result<(), String> {
-        if builtin as usize >= BUILTINS.len() {
+        if builtin as usize >= BUILTINS.len() && DisposeBuiltin::offset(builtin).is_none() {
             return Err(format!(
                 "{location}: {what} at pc {pc} references builtin {builtin}"
             ));

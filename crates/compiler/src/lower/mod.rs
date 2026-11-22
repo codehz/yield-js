@@ -618,6 +618,7 @@ struct Lowerer<'ast, 'borrow, 'src> {
     class_scope: Option<Reg>,
     emit: Emitter<'src>,
     control: Control<'ast>,
+    dispose_scope: Option<Reg>,
     param_bindings: Vec<BindingId>,
     rest_binding: Option<BindingId>,
     this_binding: Option<BindingId>,
@@ -668,6 +669,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             class_scope: None,
             emit: Emitter::new(module.source, span),
             control: Control::new(),
+            dispose_scope: None,
             param_bindings: Vec::new(),
             rest_binding: None,
             this_binding: None,
@@ -741,9 +743,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 // A separate function environment keeps even deeply nested var
                 // declarations local to this static block.
                 self.predeclare_function_body(&block.body)?;
-                for statement in &block.body {
-                    self.compile_statement(statement)?;
-                }
+                self.compile_disposable_body(&block.body)?;
                 self.emit_implicit_return()?;
             }
             FunctionSource::Script(statements) => {
@@ -751,9 +751,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     self.hoist_script(statements)?;
                     self.hoist_anonymous_default(statements)?;
                 } else {
-                    for statement in statements {
-                        self.compile_statement(statement)?;
-                    }
+                    self.compile_disposable_body(statements)?;
                 }
                 self.emit_implicit_return()?;
             }
@@ -769,17 +767,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     )
                 })?;
                 self.predeclare_function_body(&body.statements)?;
-                for statement in &body.statements {
-                    self.compile_statement(statement)?;
-                }
+                self.compile_disposable_body(&body.statements)?;
                 self.emit_implicit_return()?;
             }
             FunctionSource::Arrow(arrow) => match &arrow.body {
                 ArrowFunctionBody::FunctionBody(body) => {
                     self.predeclare_function_body(&body.statements)?;
-                    for statement in &body.statements {
-                        self.compile_statement(statement)?;
-                    }
+                    self.compile_disposable_body(&body.statements)?;
                     self.emit_implicit_return()?;
                 }
                 other => {
@@ -1108,7 +1102,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         kind: VariableDeclarationKind,
         span: Span,
     ) -> Result<(BindingId, bool), CompileError> {
-        let binding_kind = as_binding_kind(self.source_text(), kind, span)?;
+        let binding_kind = as_binding_kind(kind);
         let source = self.module.source;
         self.env
             .declare(self.session.binding_ids(), source, name, binding_kind, span)
@@ -1284,8 +1278,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for (_, function) in &scan.functions {
             self.hoisted.insert(function.span.start);
         }
-        for (name, span) in &scan.vars {
-            self.predeclare_name(name, VariableDeclarationKind::Var, *span)?;
+        for name in scan.vars.keys() {
+            self.predeclare_name(name, VariableDeclarationKind::Var);
         }
         self.predeclare_scope(statements)?;
         let function_names = scan
@@ -1359,10 +1353,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         statements: &'ast [Statement<'ast>],
     ) -> Result<(), CompileError> {
         let vars = collect_list(self.source_text(), statements, false, &mut Vec::new())?;
-        for (name, span) in vars {
-            if let Some(binding) =
-                self.predeclare_name(&name, VariableDeclarationKind::Var, span)?
-            {
+        for name in vars.into_keys() {
+            if let Some(binding) = self.predeclare_name(&name, VariableDeclarationKind::Var) {
                 self.emit(Instr::DeclareBinding { binding });
             }
         }
@@ -1378,20 +1370,20 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         for statement in statements {
             match local_declaration(statement) {
                 Some(Declaration::VariableDeclaration(declaration)) => {
-                    lexical.extend(self.register_declarators(declaration)?);
+                    lexical.extend(self.register_declarators(declaration));
                 }
                 Some(Declaration::FunctionDeclaration(function)) => {
                     if let Some(identifier) = &function.id {
                         let name = identifier.name.as_str();
                         function_names.insert(name.to_owned());
-                        self.predeclare_name(name, VariableDeclarationKind::Let, function.span)?;
+                        self.predeclare_name(name, VariableDeclarationKind::Let);
                     }
                 }
                 Some(Declaration::ClassDeclaration(class)) => {
                     if let Some(id) = &class.id {
                         let name = id.name.as_str();
                         if let Some(binding) =
-                            self.predeclare_name(name, VariableDeclarationKind::Let, id.span)?
+                            self.predeclare_name(name, VariableDeclarationKind::Let)
                         {
                             lexical.push((binding, name.to_owned()));
                         }
@@ -1405,18 +1397,14 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         if let Some(identifier) = &function.id {
                             let name = identifier.name.as_str();
                             function_names.insert(name.to_owned());
-                            self.predeclare_name(
-                                name,
-                                VariableDeclarationKind::Let,
-                                function.span,
-                            )?;
+                            self.predeclare_name(name, VariableDeclarationKind::Let);
                         }
                     }
                     ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                         if let Some(id) = &class.id {
                             let name = id.name.as_str();
                             if let Some(binding) =
-                                self.predeclare_name(name, VariableDeclarationKind::Let, id.span)?
+                                self.predeclare_name(name, VariableDeclarationKind::Let)
                             {
                                 lexical.push((binding, name.to_owned()));
                             }
@@ -1488,32 +1476,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         declaration: &'ast VariableDeclaration<'ast>,
     ) -> Result<(), CompileError> {
-        let lexical = self.register_declarators(declaration)?;
+        let lexical = self.register_declarators(declaration);
         self.open_pending(lexical.into_iter().map(|(binding, _)| binding))
     }
 
     fn register_declarators(
         &mut self,
         declaration: &'ast VariableDeclaration<'ast>,
-    ) -> Result<Vec<(BindingId, String)>, CompileError> {
+    ) -> Vec<(BindingId, String)> {
         let mut lexical = Vec::new();
-        let is_lexical = matches!(
-            declaration.kind,
-            VariableDeclarationKind::Let | VariableDeclarationKind::Const
-        );
+        let is_lexical = declaration.kind.is_lexical();
         for declarator in &declaration.declarations {
             for_each_binding_name(&declarator.id, &mut |identifier| {
                 let name = identifier.name.as_str();
-                if let Some(binding) =
-                    self.predeclare_name(name, declaration.kind, identifier.span)?
+                if let Some(binding) = self.predeclare_name(name, declaration.kind)
                     && is_lexical
                 {
                     lexical.push((binding, name.to_owned()));
                 }
-                Ok::<(), CompileError>(())
-            })?;
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("infallible binding walk");
         }
-        Ok(lexical)
+        lexical
     }
 
     /// Declare and store `undefined` for lexical bindings at scope entry.
@@ -1553,21 +1538,15 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    fn predeclare_name(
-        &mut self,
-        name: &str,
-        kind: VariableDeclarationKind,
-        span: Span,
-    ) -> Result<Option<BindingId>, CompileError> {
-        let binding_kind = as_binding_kind(self.source_text(), kind, span)?;
+    fn predeclare_name(&mut self, name: &str, kind: VariableDeclarationKind) -> Option<BindingId> {
+        let binding_kind = as_binding_kind(kind);
         if self.module_declaration
             && let Some(&id) = self.module.slots.get(name)
         {
-            return Ok(self.env.predeclare(&mut { id }, name, binding_kind));
+            return self.env.predeclare(&mut { id }, name, binding_kind);
         }
-        Ok(self
-            .env
-            .predeclare(self.session.binding_ids(), name, binding_kind))
+        self.env
+            .predeclare(self.session.binding_ids(), name, binding_kind)
     }
 
     pub(super) fn compile_block(
@@ -1576,22 +1555,28 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     ) -> Result<(), CompileError> {
         self.env.enter_block();
         self.predeclare_scope(&block.body)?;
-        for statement in &block.body {
-            self.compile_statement(statement)?;
-        }
+        self.compile_disposable_body(&block.body)?;
         self.env.exit_block();
         Ok(())
+    }
+
+    fn compile_disposable_body(
+        &mut self,
+        statements: &'ast [Statement<'ast>],
+    ) -> Result<(), CompileError> {
+        self.compile_disposal_scope(disposal_hint(statements.iter()), |this| {
+            for statement in statements {
+                this.compile_statement(statement)?;
+            }
+            Ok(())
+        })
     }
 
     pub(super) fn compile_variable_declaration(
         &mut self,
         declaration: &'ast VariableDeclaration<'ast>,
     ) -> Result<(), CompileError> {
-        as_binding_kind(self.source_text(), declaration.kind, declaration.span)?;
-        let lexical = matches!(
-            declaration.kind,
-            VariableDeclarationKind::Let | VariableDeclarationKind::Const
-        );
+        let lexical = declaration.kind.is_lexical();
         for declarator in &declaration.declarations {
             let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
                 for_each_binding_name(&declarator.id, &mut |identifier| {
@@ -1623,6 +1608,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     // declaration. The declaration overwrites that write.
                     self.emit_undefined()?
                 };
+                if declaration.kind.is_using() {
+                    self.emit_add_resource(value, declaration.kind.is_await_using())?;
+                }
                 self.emit(Instr::SetBinding {
                     binding,
                     src: self.slot(value),
@@ -1645,25 +1633,30 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 }
 
-fn as_binding_kind(
-    source: &str,
-    kind: VariableDeclarationKind,
-    span: Span,
-) -> Result<BindingKind, CompileError> {
+fn as_binding_kind(kind: VariableDeclarationKind) -> BindingKind {
     match kind {
-        VariableDeclarationKind::Var => Ok(BindingKind::Var),
-        VariableDeclarationKind::Let => Ok(BindingKind::Lexical),
-        VariableDeclarationKind::Const => Ok(BindingKind::Const),
-        other => Err(unsupported(
-            source,
-            span,
-            match other {
-                VariableDeclarationKind::Using => "using declaration",
-                VariableDeclarationKind::AwaitUsing => "await using declaration",
-                _ => "variable declaration kind",
-            },
-        )),
+        VariableDeclarationKind::Var => BindingKind::Var,
+        VariableDeclarationKind::Let => BindingKind::Lexical,
+        VariableDeclarationKind::Const
+        | VariableDeclarationKind::Using
+        | VariableDeclarationKind::AwaitUsing => BindingKind::Const,
     }
+}
+
+/// Inspect only declarations that belong to this statement list's scope.
+fn disposal_hint<'ast>(statements: impl Iterator<Item = &'ast Statement<'ast>>) -> Option<bool> {
+    let mut hint = None;
+    for statement in statements {
+        if let Some(Declaration::VariableDeclaration(declaration)) = local_declaration(statement) {
+            if declaration.kind.is_await_using() {
+                return Some(true);
+            }
+            if declaration.kind.is_using() {
+                hint = Some(false);
+            }
+        }
+    }
+    hint
 }
 
 /// Not a JavaScript identifier, so script cannot name or shadow this binding.
@@ -2073,10 +2066,12 @@ fn bind_declaration(
                 VariableDeclarationKind::Var => {
                     vars.entry(name.to_owned()).or_insert(identifier.span);
                 }
-                VariableDeclarationKind::Let | VariableDeclarationKind::Const => {
+                VariableDeclarationKind::Let
+                | VariableDeclarationKind::Const
+                | VariableDeclarationKind::Using
+                | VariableDeclarationKind::AwaitUsing => {
                     add_lexical(source, lexical, name, identifier.span)?;
                 }
-                _ => {}
             }
             Ok::<(), CompileError>(())
         })?;

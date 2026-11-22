@@ -31,6 +31,7 @@
 - 生成器对象是普通对象加一份暂停帧（状态、函数 ID、环境、按入口 `saved_slots` 排列的值）。`next` / `throw` / `return` 是共享生成器原型上的内建方法：恢复前取走保存状态并标记执行中，同步生成器被重入时抛可捕获的 `TypeError`；`next` 同步返回 `{ value, done: false }`，正文返回或落底给出 `done: true`，未捕获异常使生成器完成并原样抛出；已完成状态不再持有帧。`[Symbol.iterator]` 返回 `this`，因此 `for…of`、数组展开等现有消费路径不需要生成器特判，`finally` 中的 `yield` 保留待完成的 `return`。
 - async generator 对象在同一份记录上另有 FIFO 请求队列（完成种类、参数、请求 Promise）和等待状态，且只由异步生成器使用；`[Symbol.asyncIterator]` 返回 `this`，没有同步迭代入口。三个请求方法先入队再驱动，队首就是进行中的请求，执行中重入只追加而不抛错。`yield` 兑现队首 `{ value, done: false }`，正文返回或落底兑现 `done: true`，未捕获脚本异常使生成器完成并拒绝该请求；`await` 挂起时请求留在队首、生成器标为等待，恢复的是同一正文而不是新请求。首次 `next` 忽略参数，未启动的 `throw` / `return` 不进入正文。已完成后 `next` 立即兑现 `{ value: undefined, done: true }`，`throw` 原样拒绝，`return` 先经可持久化的 Promise reaction 同化参数再兑现 `done: true`，期间后续请求不越过队首；参数准备或同化失败只拒绝该请求。`yield`、`return` 的操作数以及挂起处注入的 `return` 参数都先经隐式 `await`，拒绝走词法 `catch` / `finally`。
 - 生成器帧、异步请求队列和续体目标参与运行期 GC 与快照：暂停的环境、保存槽、请求参数、请求 Promise 和续体目标都是强引用边，完成后释放；快照格式 **61** 保存普通对象身份、原型、状态、函数 ID、恢复表索引、按表排列的槽值、有序请求队列和续体目标种类，不写瞬时槽或运行时 PC。恢复在发布 VM 前拒绝执行中状态、非生成器函数、非法表索引、值数不符、重复的请求 Promise，以及无主或重复关联的等待续体 / 关闭 reaction。
+- 单名 `using` / `await using` 接受初始化器，初始化绑定前捕获释放方法，无隐式等待初始化器。函数、块和模块求值的清理由隐式 `finally` 路由；同步模块及同步函数不允许 `await using`。没有资源声明的作用域不分配清理列表。编译器使用私有内建登记和单步清理，异步等待沿普通 `Await` 保存待完成值与清理状态；恢复不会重做登记或已执行的释放。`yield` 不退出作用域，生成器恢复注入的 `return` / `throw` 才按完成路径清理。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的值分配到瞬时槽，活性区间不相交的值可复用同一个瞬时槽；持久槽不复用。挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
@@ -116,6 +117,7 @@
 - 标准 Error 构造器均可直接调用或用 `new` 构造，返回可抛出和捕获的对象，提供继承的 `name`、可选自有 `message` 与简化 `stack`（只含名称和消息）。各子类原型继承 `Error.prototype`；`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - `SuppressedError(error, suppressed, message?)` 不读取 `cause` 选项，前两个值存为可写、可配置、不可枚举的自有属性。快照格式 **62** 保存新增的固有根并保留两个释放协议 Symbol。
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。
+- 快照格式 **64** 增加编译器私有清理函数根；这些函数不出现在全局名表或 `globalThis`。字节码仍使用现有的 `GetBuiltin`、调用和 `Await` 指令。
 - 错误消息、`Symbol()` 的描述和 `Symbol.for()` 的键使用字符串 hint 转换。借用 `Array.prototype.join` 或 `toString` 时，接收者可以是对象或非空值原始类型。`join` 先按数字 hint 转换 `length`、截断并限制在 `0..=2^53−1`，再转换分隔符；原始字符串直接按 UTF-16 码元连接，不创建包装。若继承的 getter 或代理可观察接收者，则使用同一个包装对象；`toString` 也以该包装调用查找到的 `join`。数组 `length` 的赋值和定义依次执行 `ToUint32` 与独立的 `ToNumber`；结果不一致抛出 `RangeError`。这些入口都保留转换方法抛出的原值。
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。

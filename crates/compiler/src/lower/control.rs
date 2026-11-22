@@ -6,7 +6,7 @@
 //! `await` records both resume entries before slot allocation fills `saved_slots`.
 
 use oxc::ast::ast::*;
-use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, ExceptionHandler, Instr};
+use yield_vm::bytecode::{BinaryOp, CallArgs, Constant, DisposeBuiltin, ExceptionHandler, Instr};
 
 use super::{Lowerer, for_each_binding_name};
 use crate::emit::Reg;
@@ -945,11 +945,9 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             if let Some(parameter) = &handler.param {
                 let mut bindings = Vec::new();
                 for_each_binding_name(&parameter.pattern, &mut |identifier| {
-                    if let Some(binding) = self.predeclare_name(
-                        identifier.name.as_str(),
-                        VariableDeclarationKind::Let,
-                        identifier.span,
-                    )? {
+                    if let Some(binding) =
+                        self.predeclare_name(identifier.name.as_str(), VariableDeclarationKind::Let)
+                    {
                         bindings.push(binding);
                     }
                     Ok::<(), CompileError>(())
@@ -970,57 +968,18 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         if has_finalizer {
-            // Abrupt completions in the finalizer must not re-enter it.
-            let mut context = self.control.finalizers.pop().expect("finalizer stack");
-            let throw_stub = self.pc();
-            self.emit(Instr::Move {
-                dst: self.slot(context.payload),
-                src: self.slot(exception),
-            });
-            let throw_kind = self.emit_number(Completion::Throw.value())?;
-            self.emit(Instr::Move {
-                dst: self.slot(context.kind),
-                src: self.slot(throw_kind),
-            });
-            let jump = self.jump();
-            context.entry_jumps.push(jump);
-
-            if let Some((catch_start, catch_region_end)) = catch_body {
-                self.control.push_handler(ExceptionHandler {
-                    start_pc: catch_start as u32,
-                    end_pc: catch_region_end as u32,
-                    target_pc: throw_stub as u32,
-                    dst: self.slot(exception),
-                });
-                self.control.push_handler(ExceptionHandler {
-                    start_pc: try_start as u32,
-                    end_pc: try_end as u32,
-                    target_pc: catch_start as u32,
-                    dst: self.slot(exception),
-                });
+            let protected = if let Some((catch_start, catch_end)) = catch_body {
+                self.protect_region((try_start, try_end), catch_start, exception);
+                (catch_start, catch_end)
             } else {
-                self.control.push_handler(ExceptionHandler {
-                    start_pc: try_start as u32,
-                    end_pc: try_end as u32,
-                    target_pc: throw_stub as u32,
-                    dst: self.slot(exception),
-                });
-            }
-
-            let entry = self.pc();
-            for jump in context.entry_jumps.drain(..) {
-                self.patch_jump(jump, entry)?;
-            }
-            self.compile_block(statement.finalizer.as_ref().expect("finalizer"))?;
-            self.dispatch_finally(&context)?;
+                (try_start, try_end)
+            };
+            self.finish_protected_finalizer(protected, exception, |this, _| {
+                this.compile_block(statement.finalizer.as_ref().expect("finalizer"))
+            })?;
         } else {
             if let Some((catch_start, _)) = catch_body {
-                self.control.push_handler(ExceptionHandler {
-                    start_pc: try_start as u32,
-                    end_pc: try_end as u32,
-                    target_pc: catch_start as u32,
-                    dst: self.slot(exception),
-                });
+                self.protect_region((try_start, try_end), catch_start, exception);
             }
             let end = self.pc();
             for jump in end_jumps {
@@ -1028,6 +987,169 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
         }
 
+        Ok(())
+    }
+
+    fn protect_region(&mut self, (start, end): (usize, usize), target: usize, exception: Reg) {
+        self.control.push_handler(ExceptionHandler {
+            start_pc: start as u32,
+            end_pc: end as u32,
+            target_pc: target as u32,
+            dst: self.slot(exception),
+        });
+    }
+
+    /// Normal and explicit abrupt exits jump directly to the finalizer;
+    /// exceptions first pass through a stub that sets the pending completion.
+    fn finish_protected_finalizer(
+        &mut self,
+        protected: (usize, usize),
+        exception: Reg,
+        finalize: impl FnOnce(&mut Self, &Finalizer) -> Result<(), CompileError>,
+    ) -> Result<(), CompileError> {
+        // Exits from the finalizer itself can only reach outer finalizers.
+        let context = self.control.finalizers.pop().expect("finalizer stack");
+        let throw_stub = self.pc();
+        self.set_finalizer_throw(&context, exception)?;
+        self.protect_region(protected, throw_stub, exception);
+
+        let entry = self.pc();
+        for &jump in &context.entry_jumps {
+            self.patch_jump(jump, entry)?;
+        }
+        finalize(self, &context)?;
+        self.dispatch_finally(&context)?;
+        Ok(())
+    }
+
+    fn set_finalizer_throw(
+        &mut self,
+        context: &Finalizer,
+        exception: Reg,
+    ) -> Result<(), CompileError> {
+        self.emit(Instr::Move {
+            dst: self.slot(context.payload),
+            src: self.slot(exception),
+        });
+        let kind = self.emit_number(Completion::Throw.value())?;
+        self.emit(Instr::Move {
+            dst: self.slot(context.kind),
+            src: self.slot(kind),
+        });
+        Ok(())
+    }
+
+    /// Allocate a disposal scope only where the lexical scan found a resource declaration.
+    pub(super) fn compile_disposal_scope(
+        &mut self,
+        hint: Option<bool>,
+        body: impl FnOnce(&mut Self) -> Result<(), CompileError>,
+    ) -> Result<(), CompileError> {
+        let Some(async_) = hint else {
+            return body(self);
+        };
+        let scope = self.emit_dispose_call(DisposeBuiltin::NewScope, &[])?;
+        let exception = self.alloc_reg()?;
+        self.push_finalizer()?;
+        let start = self.pc();
+        let outer = self.dispose_scope.replace(scope);
+        let result = body(self);
+        self.dispose_scope = outer;
+        result?;
+        let end = self.pc();
+        self.route_completion(Completion::Normal, None)?;
+        self.finish_protected_finalizer((start, end), exception, |this, context| {
+            this.emit_dispose_finalizer(scope, async_, context)
+        })
+    }
+
+    pub(super) fn emit_add_resource(
+        &mut self,
+        value: Reg,
+        async_: bool,
+    ) -> Result<(), CompileError> {
+        let scope = self
+            .dispose_scope
+            .expect("resource declaration outside disposal scope");
+        let hint = self.emit_constant(Constant::Bool(async_))?;
+        self.emit_dispose_call(DisposeBuiltin::AddResource, &[scope, value, hint])?;
+        Ok(())
+    }
+
+    fn emit_dispose_call(
+        &mut self,
+        builtin: DisposeBuiltin,
+        args: &[Reg],
+    ) -> Result<Reg, CompileError> {
+        let callee = self.alloc_reg()?;
+        self.emit(Instr::GetBuiltin {
+            dst: self.slot(callee),
+            builtin: builtin as u32,
+        });
+        let result = self.alloc_reg()?;
+        let slots: Vec<_> = args.iter().map(|&reg| self.slot(reg)).collect();
+        self.emit(Instr::CallValue {
+            dst: self.slot(result),
+            callee: self.slot(callee),
+            args: CallArgs::Slots(slots.into()),
+            receiver: None,
+        });
+        Ok(result)
+    }
+
+    fn emit_dispose_finalizer(
+        &mut self,
+        scope: Reg,
+        async_: bool,
+        context: &Finalizer,
+    ) -> Result<(), CompileError> {
+        let throw_kind = self.emit_number(Completion::Throw.value())?;
+        let is_throw = self.alloc_reg()?;
+        self.emit(Instr::Binary {
+            dst: self.slot(is_throw),
+            op: BinaryOp::StrictEq,
+            lhs: self.slot(context.kind),
+            rhs: self.slot(throw_kind),
+        });
+        let skip_record = self.branch_false(is_throw);
+        self.emit_dispose_call(DisposeBuiltin::RecordThrow, &[scope, context.payload])?;
+        self.patch_jump(skip_record, self.pc())?;
+
+        if async_ {
+            let exception = self.alloc_reg()?;
+            let undefined = self.emit_undefined()?;
+            let step = self.pc();
+            let pending = self.emit_dispose_call(DisposeBuiltin::Step, &[scope])?;
+            let drained = self.alloc_reg()?;
+            self.emit(Instr::Binary {
+                dst: self.slot(drained),
+                op: BinaryOp::StrictEq,
+                lhs: self.slot(pending),
+                rhs: self.slot(undefined),
+            });
+            let must_await = self.branch_false(drained);
+            let finish = self.jump();
+            self.patch_jump(must_await, self.pc())?;
+            self.emit_await(pending)?;
+            // Include Await itself and its out-of-line rejection throw.
+            let protected_end = self.pc();
+            self.jump_to(step);
+
+            let record = self.pc();
+            self.emit_dispose_call(DisposeBuiltin::RecordThrow, &[scope, exception])?;
+            self.jump_to(step);
+            self.protect_region((step, protected_end), record, exception);
+            self.patch_jump(finish, self.pc())?;
+        } else {
+            // With only synchronous records, Step always drains in one call.
+            self.emit_dispose_call(DisposeBuiltin::Step, &[scope])?;
+        }
+
+        let has_throw = self.emit_dispose_call(DisposeBuiltin::HasThrow, &[scope])?;
+        let keep_completion = self.branch_false(has_throw);
+        let exception = self.emit_dispose_call(DisposeBuiltin::GetThrow, &[scope])?;
+        self.set_finalizer_throw(context, exception)?;
+        self.patch_jump(keep_completion, self.pc())?;
         Ok(())
     }
 

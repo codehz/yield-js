@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Disposable stack records and async disposal state extend the snapshot schema.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 63;
+// The snapshot roots include private resource cleanup intrinsics.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 64;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
