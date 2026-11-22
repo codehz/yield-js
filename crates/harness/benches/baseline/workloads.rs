@@ -119,6 +119,46 @@ pub(super) const WORKLOADS: &[Workload] = &[
     .with_snapshot(suspend_async_generator, resume_generator),
 ];
 
+// Same bytecode build and completion in both variants. The only intended
+// difference is whether the literal load executes before or after suspension.
+pub(super) const REMATERIALIZATION: &[Workload] = &[
+    Workload::new("literal-saved", build_rematerialization, |vm, host| {
+        let roots = suspend_literal_saved(vm, host);
+        resume_literal(vm, host, &roots);
+    })
+    .with_snapshot(suspend_literal_saved, resume_literal),
+    Workload::new("literal-reloaded", build_rematerialization, |vm, host| {
+        let roots = suspend_literal_reloaded(vm, host);
+        resume_literal(vm, host, &roots);
+    })
+    .with_snapshot(suspend_literal_reloaded, resume_literal),
+];
+
+const LITERAL_LABEL: &str = "wait:literal";
+
+fn build_rematerialization() -> Build {
+    build(include_str!("rematerialization.js"))
+}
+
+fn suspend_literal_saved(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+    suspend_pending(vm, host, "saved", LITERAL_LABEL)
+}
+
+fn suspend_literal_reloaded(vm: &mut Vm, host: &mut TestHost) -> Vec<Value> {
+    suspend_pending(vm, host, "reloaded", LITERAL_LABEL)
+}
+
+fn resume_literal(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
+    finish_pending(
+        vm,
+        host,
+        roots,
+        LITERAL_LABEL,
+        Completion::Fulfilled(number(7.0)),
+        20.0,
+    );
+}
+
 #[track_caller]
 fn start(vm: &mut Vm, host: &mut TestHost, entry: &str, args: Vec<JsValue>) -> Value {
     vm.start(host, entry, args)

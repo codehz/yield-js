@@ -5,7 +5,7 @@ mod workloads;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use workloads::{REACT_REUSE, WORKLOADS, Workload};
+use workloads::{REACT_REUSE, REMATERIALIZATION, WORKLOADS, Workload};
 use yield_harness::TestHost;
 use yield_vm::{Build, Snapshot, VerifiedBuild, Vm, perf};
 
@@ -19,6 +19,7 @@ fn main() {
     let mut reuse = false;
     let mut snapshot_codecs = false;
     let mut restore_profile = false;
+    let mut rematerialization = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => {}
@@ -33,6 +34,7 @@ fn main() {
             "--snapshot-codecs" => panic!("snapshot timings require a non-diagnostic build"),
             "--restore-profile" if !perf::ENABLED => restore_profile = true,
             "--restore-profile" => panic!("restore timings require a non-diagnostic build"),
+            "--rematerialization" => rematerialization = true,
             _ => panic!("unknown baseline option: {arg}"),
         }
     }
@@ -69,6 +71,12 @@ fn main() {
             .unwrap();
         for workload in [&REACT_REUSE, await_success] {
             run_reuse(workload, samples);
+        }
+        return;
+    }
+    if rematerialization {
+        for workload in REMATERIALIZATION {
+            run(workload, if perf::ENABLED { 1 } else { samples });
         }
         return;
     }
