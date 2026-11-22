@@ -83,7 +83,10 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let target = args.first().unwrap_or(&UNDEFINED_VALUE);
         if let ValueRef::Object(id) = target.view() {
-            let id = self.heap.proxy_target(id)?;
+            let id = match self.proxy_base(roots, id)? {
+                Ok(id) => id,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
             // A view over a resizable buffer can still gain and lose elements,
             // so it cannot be made non-extensible.
             if self
@@ -119,7 +122,11 @@ impl Vm {
     ) -> Result<Invocation, VmError> {
         let extensible = match args.first().map(Value::view) {
             Some(ValueRef::Object(id)) => {
-                self.heap.get(self.heap.proxy_target(id)?)?.is_extensible()
+                let base = match self.proxy_base(roots, id)? {
+                    Ok(base) => base,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                self.heap.get(base)?.is_extensible()
             }
             _ if reflect => {
                 return self.throw_type_error(roots, "Reflect.isExtensible requires an object");
@@ -152,12 +159,10 @@ impl Vm {
                 },
             );
         };
-        Ok(Invocation::Value(
-            self.heap
-                .get(self.heap.proxy_target(target)?)?
-                .prototype()
-                .map_or(Value::NULL, Value::object),
-        ))
+        Ok(match self.proxy_prototype(roots, target)? {
+            Ok(proto) => Invocation::Value(proto.map_or(Value::NULL, Value::object)),
+            Err(error) => Invocation::Thrown(error),
+        })
     }
 
     pub(crate) fn set_prototype_of(
@@ -188,7 +193,11 @@ impl Vm {
         let ValueRef::Object(target_id) = target.view() else {
             return Ok(Invocation::Value(target.clone()));
         };
-        let accepted = self.heap.set_prototype(target_id, prototype)?;
+        let base = match self.proxy_base(roots, target_id)? {
+            Ok(base) => base,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let accepted = self.heap.set_prototype(base, prototype)?;
         if reflect {
             Ok(Invocation::Value(Value::boolean(accepted)))
         } else if accepted {
@@ -210,7 +219,10 @@ impl Vm {
         let ValueRef::Object(id) = target.view() else {
             return Ok(Invocation::Value(target.clone()));
         };
-        let base = self.heap.proxy_target(id)?;
+        let base = match self.proxy_base(roots, id)? {
+            Ok(base) => base,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         // A typed array's elements are defined one by one, so a non-empty view
         // cannot be frozen; the per-key path reports that as a TypeError.
         if base == id && self.heap.typed_array(id)?.is_none() {
@@ -260,7 +272,10 @@ impl Vm {
         let Some(ValueRef::Object(id)) = args.first().map(Value::view) else {
             return result(true);
         };
-        let base = self.heap.proxy_target(id)?;
+        let base = match self.proxy_base(roots, id)? {
+            Ok(base) => base,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         if base == id {
             return result(self.heap.get(base)?.test_integrity_level(level));
         }

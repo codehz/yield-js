@@ -93,6 +93,40 @@ impl Vm {
                     };
                 self.call_promise_capability(host, roots, result, &reject, reason)
             }
+            "withResolvers" => {
+                let (promise, resolve, reject) =
+                    match self.new_promise_capability(host, roots, receiver)? {
+                        Ok(capability) => capability,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                let result = self.heap.alloc_plain();
+                self.heap.set_own_string(result, "promise", promise)?;
+                self.heap.set_own_string(result, "resolve", resolve)?;
+                self.heap.set_own_string(result, "reject", reject)?;
+                Ok(Invocation::Value(Value::object(result)))
+            }
+            "try" => {
+                let (result, resolve, reject) =
+                    match self.new_promise_capability(host, &roots.with(&args), receiver)? {
+                        Ok(capability) => capability,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                let capability = (&result, &resolve, &reject);
+                let undefined = Value::UNDEFINED;
+                let (callback, args) = args.split_first().unwrap_or((&undefined, &[]));
+                let completion = self.invoke(
+                    host,
+                    &roots.with(&capability),
+                    callback,
+                    Arguments::Values(args),
+                    &Value::UNDEFINED,
+                )?;
+                let (settle, value) = match completion {
+                    Invocation::Value(value) => (&resolve, value),
+                    Invocation::Thrown(error) => (&reject, error),
+                };
+                self.call_promise_capability(host, roots, result, settle, value)
+            }
             "all" => self.combine(host, roots, receiver, CombineKind::All, args),
             "allSettled" => self.combine(host, roots, receiver, CombineKind::AllSettled, args),
             "race" => self.combine(host, roots, receiver, CombineKind::Race, args),

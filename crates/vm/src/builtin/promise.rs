@@ -48,7 +48,7 @@ pub(crate) mod members {
         get symbol(SPECIES_SYMBOL) species: 0 => |_, _, _, _, receiver| {
             Ok(Invocation::Value(receiver.clone()))
         };
-        resolve: 1 | reject: 1 | all: 1 | allSettled: 1 | race: 1 | any: 1 as key => |vm, host, roots, args, receiver| {
+        resolve: 1 | reject: 1 | all: 1 | allSettled: 1 | race: 1 | any: 1 | withResolvers: 0 | try: 1 as key => |vm, host, roots, args, receiver| {
             vm.call_promise_static(host, roots, receiver, key, args)
         };
     }

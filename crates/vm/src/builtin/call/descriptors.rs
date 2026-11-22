@@ -727,7 +727,10 @@ impl Vm {
         key: PropertyKey,
         mut update: DescriptorUpdate,
     ) -> Result<Result<bool, Value>, VmError> {
-        let target = self.heap.proxy_target(target)?;
+        let target = match self.proxy_base(roots, target)? {
+            Ok(target) => target,
+            Err(error) => return Ok(Err(error)),
+        };
         let roots = &roots.with(&target);
         // Integer-indexed exotic [[DefineOwnProperty]].
         match self.heap.typed_index(target, key.borrowed())? {

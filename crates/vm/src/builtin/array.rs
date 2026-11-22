@@ -16,6 +16,8 @@ use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
+mod unscopables;
+
 const MAX_LENGTH: u64 = u32::MAX as u64;
 const MAX_SAFE_LENGTH: u64 = (1 << 53) - 1;
 
@@ -27,7 +29,7 @@ mod members {
         get symbol(SPECIES_SYMBOL) species: 0 => |_, _, _, _, receiver| {
             Ok(Invocation::Value(receiver.clone()))
         };
-        isArray: 1 | from: 1 | of: 0 as name => |vm, host, roots, args, receiver| {
+        isArray: 1 | from: 1 | fromAsync: 1 | of: 0 as name => |vm, host, roots, args, receiver| {
             vm.array_operation(host, roots, name, receiver, args)
         };
     }
@@ -123,6 +125,9 @@ macro_rules! script {
     };
 }
 
+mod from_async;
+pub use from_async::ArrayFromAsyncJob;
+
 fn invocation(result: Completion<Value>) -> Result<Invocation, VmError> {
     Ok(match result? {
         Ok(value) => Invocation::Value(value),
@@ -156,6 +161,7 @@ impl Vm {
         link_constructor(self, constructor, prototype);
         self.heap.array_prototype = Some(prototype);
         members::install_members(self, constructor, prototype);
+        unscopables::install(self, prototype);
         // `values` is already rooted; both properties must point to that object.
         define_builtin_data(
             self,
@@ -278,14 +284,12 @@ impl Vm {
         )
     }
 
-    fn is_array(&self, value: &Value) -> Result<bool, VmError> {
-        Ok(match value.view() {
-            ValueRef::Object(id) => matches!(
-                self.heap.get(self.heap.proxy_target(id)?)?,
-                Object::Array(_)
-            ),
-            _ => false,
-        })
+    fn is_array(&mut self, roots: &ActiveRoots<'_>, value: &Value) -> Completion<bool> {
+        let ValueRef::Object(id) = value.view() else {
+            return Ok(Ok(false));
+        };
+        let base = script!(self.proxy_base(roots, id));
+        Ok(Ok(matches!(self.heap.get(base)?, Object::Array(_))))
     }
 
     fn construct_array_result(
@@ -321,11 +325,13 @@ impl Vm {
                 return invocation(self.array_of(host, roots, receiver, args));
             }
             "isArray" => {
-                return Ok(Invocation::Value(Value::boolean(
-                    self.is_array(arg(&args, 0))?,
-                )));
+                return invocation(
+                    self.is_array(roots, arg(&args, 0))
+                        .map(|r| r.map(Value::boolean)),
+                );
             }
             "from" => return invocation(self.array_from(host, roots, receiver, &args)),
+            "fromAsync" => return self.array_from_async(host, roots, receiver, &args),
             _ => {}
         }
         invocation(self.array_prototype_operation(host, roots, name, receiver, &args))
@@ -672,7 +678,7 @@ impl ArrayAccess<'_> {
 
     fn species_create(&mut self, length: u64) -> Completion<ArrayResult> {
         let source = Value::object(self.id);
-        if self.vm.is_array(&source)? {
+        if script!(self.vm.is_array(self.roots, &source)) {
             let mut constructor = script!(completion(self.vm.read_property(
                 self.host,
                 self.roots,
@@ -1241,7 +1247,7 @@ impl ArrayAccess<'_> {
             PropertyKeyRef::Symbol(IS_CONCAT_SPREADABLE_SYMBOL)
         )));
         Ok(Ok(if matches!(spreadable.view(), ValueRef::Undefined) {
-            self.vm.is_array(value)?
+            script!(self.vm.is_array(self.roots, value))
         } else {
             spreadable.truthy()
         }))
@@ -1259,7 +1265,7 @@ impl ArrayAccess<'_> {
         loop {
             if depth > 0.0
                 && let ValueRef::Object(id) = value.view()
-                && self.vm.is_array(&value)?
+                && script!(self.vm.is_array(self.roots, &value))
             {
                 let view = (result, FlattenRoots(&stack));
                 let len = script!(

@@ -54,7 +54,13 @@ impl Vm {
             ValueRef::Object(id) if self.heap.is_environment(id) == Some(true) => {
                 return self.throw_type_error(roots, "incompatible Object.prototype receiver");
             }
-            ValueRef::Object(id) => self.object_tag(id)?,
+            ValueRef::Object(id) => {
+                let target = match self.proxy_base(roots, id)? {
+                    Ok(target) => target,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                self.object_tag(id, target)?
+            }
             ValueRef::Undefined => {
                 return Ok(Invocation::Value(Value::string(
                     "[object Undefined]".into(),
@@ -90,8 +96,7 @@ impl Vm {
         )))
     }
 
-    pub(crate) fn object_tag(&self, id: ObjectId) -> Result<&'static str, VmError> {
-        let target = self.heap.proxy_target(id)?;
+    fn object_tag(&self, id: ObjectId, target: ObjectId) -> Result<&'static str, VmError> {
         Ok(match self.heap.get(target)? {
             Object::Date { .. } if id == target => "Date",
             Object::Boxed { primitive, .. } => match primitive {
@@ -106,6 +111,7 @@ impl Vm {
             | Object::Native(_)
             | Object::Bound(_)
             | Object::PromiseCallback { .. }
+            | Object::ProxyRevoker { .. }
             | Object::Resolution(_) => "Function",
             Object::Promise(_) => "Promise",
             Object::Map { .. } => "Map",

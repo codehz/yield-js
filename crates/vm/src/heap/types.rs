@@ -45,8 +45,10 @@ pub(crate) const DISPOSE_SYMBOL: SymbolId = 12;
 pub(crate) const DISPOSE_DESCRIPTION: &str = "Symbol.dispose";
 pub(crate) const ASYNC_DISPOSE_SYMBOL: SymbolId = 13;
 pub(crate) const ASYNC_DISPOSE_DESCRIPTION: &str = "Symbol.asyncDispose";
+pub(crate) const UNSCOPABLES_SYMBOL: SymbolId = 14;
+pub(crate) const UNSCOPABLES_DESCRIPTION: &str = "Symbol.unscopables";
 /// Bound for ordinary symbols. Every reserved well-known symbol stays below it.
-pub(crate) const NEXT_SYMBOL_ID: SymbolId = ASYNC_DISPOSE_SYMBOL + 1;
+pub(crate) const NEXT_SYMBOL_ID: SymbolId = UNSCOPABLES_SYMBOL + 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -851,14 +853,19 @@ pub struct PlainObject {
     pub(crate) is_error: bool,
     #[serde(default)]
     pub(crate) module_namespace: Option<u32>,
+    #[serde(default)]
+    pub(crate) is_raw_json: bool,
 }
 
 impl Serialize for PlainObject {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // JSON omits None; positional formats always need the option tag.
         let has_namespace = !serializer.is_human_readable() || self.module_namespace.is_some();
-        let mut record =
-            serializer.serialize_struct("PlainObject", 5 + usize::from(has_namespace))?;
+        let has_raw_json = !serializer.is_human_readable() || self.is_raw_json;
+        let mut record = serializer.serialize_struct(
+            "PlainObject",
+            5 + usize::from(has_namespace) + usize::from(has_raw_json),
+        )?;
         record.serialize_field("props", &PropertyPairs(&self.props))?;
         record.serialize_field("symbol_props", &self.symbol_props)?;
         record.serialize_field("prototype", &self.prototype)?;
@@ -866,6 +873,9 @@ impl Serialize for PlainObject {
         record.serialize_field("is_error", &self.is_error)?;
         if has_namespace {
             record.serialize_field("module_namespace", &self.module_namespace)?;
+        }
+        if has_raw_json {
+            record.serialize_field("is_raw_json", &self.is_raw_json)?;
         }
         record.end()
     }
@@ -888,6 +898,7 @@ impl PlainObject {
             extensible: true,
             is_error: false,
             module_namespace: None,
+            is_raw_json: false,
         }
     }
 
@@ -1457,8 +1468,7 @@ pub enum Object {
     TextDecoder(TextDecoderObject),
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
-        target: ObjectId,
-        handler: ObjectId,
+        slots: Option<(ObjectId, ObjectId)>, // (target, handler); absent after revocation
         object: PlainObject,
     },
     // Deleted slots remain empty so live cursors never shift.
@@ -1490,6 +1500,10 @@ pub enum Object {
         array: Option<ObjectId>,
         kind: ArrayIterationKind,
         next_index: u64,
+    },
+    IteratorHelper {
+        object: PlainObject,
+        state: crate::builtin::iterator::helpers::HelperState,
     },
     StringIterator {
         object: PlainObject,
@@ -1529,6 +1543,10 @@ pub enum Object {
         records: Vec<DisposableResource>,
     },
     DisposeState(DisposeState),
+    ProxyRevoker {
+        object: PlainObject,
+        proxy: Option<ObjectId>,
+    },
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -1623,16 +1641,24 @@ impl PartialEq for Object {
             (Date { object: x, time: a }, Date { object: y, time: b }) => x == y && a == b,
             (
                 Proxy {
-                    target: a,
-                    handler: h,
+                    slots: a,
                     object: x,
                 },
                 Proxy {
-                    target: b,
-                    handler: i,
+                    slots: b,
                     object: y,
                 },
-            ) => a == b && h == i && x == y,
+            ) => a == b && x == y,
+            (
+                ProxyRevoker {
+                    proxy: a,
+                    object: x,
+                },
+                ProxyRevoker {
+                    proxy: b,
+                    object: y,
+                },
+            ) => a == b && x == y,
             (
                 Map {
                     object: x,
@@ -1703,6 +1729,16 @@ impl PartialEq for Object {
                     next_index: m,
                 },
             ) => x == y && a == b && k == l && n == m,
+            (
+                IteratorHelper {
+                    object: a,
+                    state: x,
+                },
+                IteratorHelper {
+                    object: b,
+                    state: y,
+                },
+            ) => a == b && x == y,
             (
                 StringIterator {
                     object: x,

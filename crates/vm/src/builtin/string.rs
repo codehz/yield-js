@@ -1,5 +1,7 @@
 //! UTF-16 string operations.
 
+use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
+
 static UNDEFINED: Value = Value::UNDEFINED;
 
 use crate::JsString;
@@ -37,6 +39,10 @@ enum StringMethod {
     EndsWith,
     Slice,
     Substring,
+    Substr,
+    IsWellFormed,
+    ToWellFormed,
+    Normalize,
     ToUpperCase,
     ToLowerCase,
     Trim,
@@ -54,6 +60,23 @@ enum StringMethod {
     Search,
     ToString,
     ValueOf,
+    Html(&'static str, Option<&'static str>),
+}
+
+impl StringMethod {
+    const ANCHOR: Self = Self::Html("a", Some("name"));
+    const BIG: Self = Self::Html("big", None);
+    const BLINK: Self = Self::Html("blink", None);
+    const BOLD: Self = Self::Html("b", None);
+    const FIXED: Self = Self::Html("tt", None);
+    const FONTCOLOR: Self = Self::Html("font", Some("color"));
+    const FONTSIZE: Self = Self::Html("font", Some("size"));
+    const ITALICS: Self = Self::Html("i", None);
+    const LINK: Self = Self::Html("a", Some("href"));
+    const SMALL: Self = Self::Html("small", None);
+    const STRIKE: Self = Self::Html("strike", None);
+    const SUB: Self = Self::Html("sub", None);
+    const SUP: Self = Self::Html("sup", None);
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +102,9 @@ pub(crate) mod members {
         endsWith: 1 = StringMethod::EndsWith,
         slice: 2 = StringMethod::Slice,
         substring: 2 = StringMethod::Substring,
+        isWellFormed: 0 = StringMethod::IsWellFormed,
+        toWellFormed: 0 = StringMethod::ToWellFormed,
+        normalize: 0 = StringMethod::Normalize,
         toUpperCase: 0 = StringMethod::ToUpperCase,
         toLowerCase: 0 = StringMethod::ToLowerCase,
         trim: 0 = StringMethod::Trim,
@@ -96,6 +122,20 @@ pub(crate) mod members {
         search: 1 = StringMethod::Search,
         toString: 0 = StringMethod::ToString,
         valueOf: 0 = StringMethod::ValueOf,
+        substr: 2 = StringMethod::Substr,
+        anchor: 1 = StringMethod::ANCHOR,
+        big: 0 = StringMethod::BIG,
+        blink: 0 = StringMethod::BLINK,
+        bold: 0 = StringMethod::BOLD,
+        fixed: 0 = StringMethod::FIXED,
+        fontcolor: 1 = StringMethod::FONTCOLOR,
+        fontsize: 1 = StringMethod::FONTSIZE,
+        italics: 0 = StringMethod::ITALICS,
+        link: 1 = StringMethod::LINK,
+        small: 0 = StringMethod::SMALL,
+        strike: 0 = StringMethod::STRIKE,
+        sub: 0 = StringMethod::SUB,
+        sup: 0 = StringMethod::SUP,
     )]
     fn call_method(
         vm: &mut Vm,
@@ -213,6 +253,18 @@ impl Vm {
             )
             .expect("String.prototype stores Symbol.iterator");
         members::install_members(self, constructor, prototype);
+        for (alias, canonical) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
+            let property = self
+                .heap
+                .get(prototype)
+                .expect("String prototype")
+                .own_property(PropertyKeyRef::String(canonical))
+                .expect("String trim method");
+            let value = property.data_value().expect("String method value").clone();
+            self.heap
+                .define_data(prototype, alias, value, Attributes::METHOD)
+                .expect("String trim alias");
+        }
     }
 
     fn init_string_iterator_prototype(&mut self, prototype: ObjectId, identity: ObjectId) {
@@ -348,6 +400,17 @@ impl Vm {
             StringMethod::EndsWith => self.string_affix(&text, host, roots, args, false),
             StringMethod::Slice => self.string_slice(&text, host, roots, args),
             StringMethod::Substring => self.string_substring(&text, host, roots, args),
+            StringMethod::Substr => self.string_substr(&text, host, roots, args),
+            StringMethod::IsWellFormed => Ok(Invocation::Value(Value::boolean(
+                text.is_latin1() || char::decode_utf16(text.units()).all(|item| item.is_ok()),
+            ))),
+            StringMethod::ToWellFormed => {
+                Ok(Invocation::Value(Value::string(to_well_formed(text))))
+            }
+            StringMethod::Normalize => self.string_normalize(text, host, roots, arg(args, 0)),
+            StringMethod::Html(tag, attribute) => {
+                self.string_html(&text, host, roots, arg(args, 0), tag, attribute)
+            }
             StringMethod::ToUpperCase => string_case(&text, true),
             StringMethod::ToLowerCase => string_case(&text, false),
             StringMethod::Trim => string_trim(&text, true, true),
@@ -634,6 +697,118 @@ impl Vm {
         Ok(Invocation::Value(Value::string(slice_units(
             text, start, end,
         ))))
+    }
+
+    fn string_substr(
+        &mut self,
+        text: &JsString,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let size = text.unit_len() as f64;
+        let start = match self.integer_index(host, roots, arg(args, 0), false)? {
+            Ok(start) if start < 0.0 => (size + start).max(0.0),
+            Ok(start) => start.min(size),
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let length = arg(args, 1);
+        let remaining = size - start;
+        let length = if matches!(length.view(), ValueRef::Undefined) {
+            remaining
+        } else {
+            match self.integer_index(host, roots, length, false)? {
+                Ok(length) => length.clamp(0.0, remaining),
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        };
+        Ok(Invocation::Value(Value::string(
+            text.slice_units(start as usize..(start + length) as usize),
+        )))
+    }
+
+    fn string_normalize(
+        &mut self,
+        text: JsString,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        form: &Value,
+    ) -> Result<Invocation, VmError> {
+        let normalization = if matches!(form.view(), ValueRef::Undefined) {
+            Normalization::Compose(ComposingNormalizerBorrowed::new_nfc())
+        } else {
+            let form = match self.coerce_string(host, roots, form)? {
+                Ok(form) => form,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            if form == "NFC" {
+                Normalization::Compose(ComposingNormalizerBorrowed::new_nfc())
+            } else if form == "NFD" {
+                Normalization::Decompose(DecomposingNormalizerBorrowed::new_nfd())
+            } else if form == "NFKC" {
+                Normalization::Compose(ComposingNormalizerBorrowed::new_nfkc())
+            } else if form == "NFKD" {
+                Normalization::Decompose(DecomposingNormalizerBorrowed::new_nfkd())
+            } else {
+                return self.range_error(roots, "Invalid normalization form");
+            }
+        };
+        if text.is_latin1() && text.units().all(|unit| unit <= 0x7f) {
+            return Ok(Invocation::Value(Value::string(text)));
+        }
+        match normalize_text(&text, normalization) {
+            Some(result) => Ok(Invocation::Value(Value::string(result))),
+            None => self.range_error(roots, "Invalid string length"),
+        }
+    }
+
+    fn string_html(
+        &mut self,
+        text: &JsString,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: &Value,
+        tag: &str,
+        attribute: Option<&str>,
+    ) -> Result<Invocation, VmError> {
+        let attribute = if let Some(name) = attribute {
+            let value = match self.coerce_string(host, roots, value)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            Some((name, value))
+        } else {
+            None
+        };
+        let attr_size = attribute.as_ref().map_or(0, |(name, value)| {
+            4 + name.len() + value.unit_len() + 5 * value.units().filter(|&u| u == 0x22).count()
+        });
+        let size = 5 + 2 * tag.len() + attr_size + text.unit_len();
+        if size > MAX_LENGTH {
+            return self.range_error(roots, "Invalid string length");
+        }
+        let mut out = Vec::with_capacity(size);
+        out.push(b'<' as u16);
+        out.extend(tag.encode_utf16());
+        if let Some((name, value)) = attribute {
+            out.push(b' ' as u16);
+            out.extend(name.encode_utf16());
+            out.extend("=\"".encode_utf16());
+            for unit in value.units() {
+                if unit == 0x22 {
+                    out.extend("&quot;".encode_utf16());
+                } else {
+                    out.push(unit);
+                }
+            }
+            out.push(b'"' as u16);
+        }
+        out.push(b'>' as u16);
+        out.extend(text.units());
+        out.extend("</".encode_utf16());
+        out.extend(tag.encode_utf16());
+        out.push(b'>' as u16);
+        Ok(Invocation::Value(Value::string(JsString::from_units(out))))
     }
 
     fn string_split(
@@ -1394,6 +1569,90 @@ fn find_last(text: &JsString, needle: &JsString, start: f64) -> f64 {
         .find(|&position| matches_at(text, needle, position))
         .map(|position| position as f64)
         .unwrap_or(-1.0)
+}
+
+fn to_well_formed(text: JsString) -> JsString {
+    if text.is_latin1() {
+        return text;
+    }
+    let mut items = char::decode_utf16(text.units());
+    let mut prefix = 0;
+    for item in items.by_ref() {
+        if let Ok(ch) = item {
+            prefix += ch.len_utf16();
+        } else {
+            let mut out = Vec::with_capacity(text.unit_len());
+            out.extend(text.units().take(prefix));
+            out.push(0xfffd);
+            for item in items {
+                out.extend_from_slice(item.unwrap_or('\u{fffd}').encode_utf16(&mut [0; 2]));
+            }
+            return JsString::from_units(out);
+        }
+    }
+    text
+}
+
+enum Normalization {
+    Compose(ComposingNormalizerBorrowed<'static>),
+    Decompose(DecomposingNormalizerBorrowed<'static>),
+}
+
+fn normalize_text(text: &JsString, normalization: Normalization) -> Option<JsString> {
+    let mut items = char::decode_utf16(text.units());
+    // Preserve the existing storage unless the normalized code units differ.
+    let mut original = text.units();
+    let mut length = 0;
+    let mut changed: Option<Vec<u16>> = None;
+    let mut append_units = |units: &[u16]| {
+        let previous_length = length;
+        length += units.len();
+        if length > MAX_LENGTH {
+            return None;
+        }
+        if let Some(out) = &mut changed {
+            out.extend_from_slice(units);
+        } else if !original
+            .by_ref()
+            .take(units.len())
+            .eq(units.iter().copied())
+        {
+            let mut out = Vec::with_capacity(length.max(text.unit_len().min(MAX_LENGTH)));
+            out.extend(text.units().take(previous_length));
+            out.extend_from_slice(units);
+            changed = Some(out);
+        }
+        Some(())
+    };
+    loop {
+        // Lone surrogates are unchanged and cannot compose with their neighbors.
+        let mut separator = None;
+        let run = std::iter::from_fn(|| match items.next()? {
+            Ok(ch) => Some(ch),
+            Err(error) => {
+                separator = Some(error.unpaired_surrogate());
+                None
+            }
+        })
+        .fuse();
+        let append = |ch: char| append_units(ch.encode_utf16(&mut [0; 2]));
+        match &normalization {
+            Normalization::Compose(normalizer) => {
+                normalizer.normalize_iter(run).try_for_each(append)?;
+            }
+            Normalization::Decompose(normalizer) => {
+                normalizer.normalize_iter(run).try_for_each(append)?;
+            }
+        }
+        let Some(separator) = separator else {
+            return Some(match changed {
+                Some(out) => JsString::from_units(out),
+                None if length == text.unit_len() => text.clone(),
+                None => text.slice_units(0..length),
+            });
+        };
+        append_units(&[separator])?;
+    }
 }
 
 fn string_case(text: &JsString, upper: bool) -> Result<Invocation, VmError> {

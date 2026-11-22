@@ -13,7 +13,8 @@ use super::types::{
     PrivateElement, PrivateMemberKind, PromiseObject, PromiseState, Property, PropertyTable,
     REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
     SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
-    TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, WeakKey, array_index,
+    TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, UNSCOPABLES_DESCRIPTION,
+    UNSCOPABLES_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -88,6 +89,7 @@ impl Heap {
                 (TO_STRING_TAG_SYMBOL, Some(TO_STRING_TAG_DESCRIPTION.into())),
                 (DISPOSE_SYMBOL, Some(DISPOSE_DESCRIPTION.into())),
                 (ASYNC_DISPOSE_SYMBOL, Some(ASYNC_DISPOSE_DESCRIPTION.into())),
+                (UNSCOPABLES_SYMBOL, Some(UNSCOPABLES_DESCRIPTION.into())),
             ]),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: NEXT_SYMBOL_ID,
@@ -309,6 +311,38 @@ impl Heap {
         self.alloc(Object::Plain(PlainObject::new(prototype)))
     }
 
+    pub(crate) fn alloc_raw_json(&mut self, text: JsString) -> Result<ObjectId, VmError> {
+        let mut object = PlainObject::new(None);
+        object.is_raw_json = true;
+        object.extensible = false;
+        object.props.update(
+            "rawJSON".into(),
+            Some(Attributes {
+                writable: false,
+                enumerable: true,
+                configurable: false,
+            }),
+            |_| Property::Data(Value::string(text)),
+        );
+        Ok(self.alloc(Object::Plain(object)))
+    }
+
+    pub(crate) fn raw_json_text(&self, id: ObjectId) -> Result<Option<&JsString>, VmError> {
+        let object = self.get(id)?;
+        if !matches!(object, Object::Plain(plain) if plain.is_raw_json) {
+            return Ok(None);
+        }
+        if let Some(OwnProperty::Stored(Property::Data(value), _)) =
+            object.own_property(PropertyKeyRef::String("rawJSON"))
+            && let ValueRef::String(source) = value.view()
+        {
+            return Ok(Some(source));
+        }
+        Err(VmError::InvalidState(
+            "raw JSON object is missing its source".into(),
+        ))
+    }
+
     pub(crate) fn alloc_module_namespace(&mut self, module: u32) -> ObjectId {
         let mut object = PlainObject::new(None);
         object.module_namespace = Some(module);
@@ -437,24 +471,27 @@ impl Heap {
         self.objects.get(&id).ok_or_else(|| missing_object(id))
     }
 
-    /// The ultimate target for operations with no Proxy trap.
-    pub(crate) fn proxy_target(&self, mut id: ObjectId) -> Result<ObjectId, VmError> {
+    /// The ultimate target for operations with no Proxy trap, or None if revoked.
+    pub(crate) fn proxy_target(&self, mut id: ObjectId) -> Result<Option<ObjectId>, VmError> {
         let mut remaining = self.objects.len();
-        while let Object::Proxy { target, .. } = self.get(id)? {
+        while let Object::Proxy { slots, .. } = self.get(id)? {
+            let Some((target, _)) = *slots else {
+                return Ok(None);
+            };
             if remaining == 0 {
                 return Err(VmError::InvalidState(format!(
                     "proxy target chain at object {id} is cyclic"
                 )));
             }
             remaining -= 1;
-            id = *target;
+            id = target;
         }
-        Ok(id)
+        Ok(Some(id))
     }
 
-    /// Read an internal prototype with no Proxy trap.
+    /// Read the direct internal prototype of an ordinary object.
     pub(crate) fn prototype_of(&self, id: ObjectId) -> Result<Option<ObjectId>, VmError> {
-        Ok(self.get(self.proxy_target(id)?)?.prototype())
+        Ok(self.get(id)?.prototype())
     }
 
     pub(crate) fn get_mut(&mut self, id: ObjectId) -> Result<&mut Object, VmError> {
@@ -534,7 +571,6 @@ impl Heap {
         id: ObjectId,
         prototype: Option<ObjectId>,
     ) -> Result<bool, VmError> {
-        let id = self.proxy_target(id)?;
         let object = self.get(id)?;
         if object.prototype() == prototype {
             return Ok(true);
@@ -546,7 +582,10 @@ impl Heap {
         // link can only form a cycle if its chain leads back to the receiver.
         let mut current = prototype;
         while let Some(ancestor) = current {
-            let ancestor = self.proxy_target(ancestor)?;
+            let Some(ancestor) = self.proxy_target(ancestor)? else {
+                // A revoked proxy has no target to follow and cannot form a cycle.
+                break;
+            };
             if ancestor == id {
                 return Ok(false);
             }
@@ -558,11 +597,6 @@ impl Heap {
             .expect("every extensible object has a prototype slot") = prototype;
         Ok(true)
     }
-
-    pub(crate) fn has_own(&self, id: ObjectId, key: &PropertyKey) -> Result<bool, VmError> {
-        Ok(self.own_property(id, key.borrowed())?.is_some())
-    }
-
     pub(crate) fn delete_own(
         &mut self,
         id: ObjectId,
@@ -739,6 +773,7 @@ impl Heap {
             | Object::WeakSet { object: plain, .. }
             | Object::CollectionIterator { object: plain, .. }
             | Object::ArrayIterator { object: plain, .. }
+            | Object::IteratorHelper { object: plain, .. }
             | Object::StringIterator { object: plain, .. }
             | Object::RegExpStringIterator { object: plain, .. } => plain,
             _ => {

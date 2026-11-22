@@ -34,11 +34,13 @@
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
 | `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
-| `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥），不保证覆盖全部 Annex B 兼容语法。字符串方法仍查找相应的 Symbol 协议，但内建 `[Symbol.matchAll]` / `[Symbol.split]` 克隆匹配器时不使用 species；直接调用内建 `[Symbol.matchAll]` 也要求全局标志 |
+| `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥）。不实现 Annex B 的 `compile` 和旧式静态匹配属性，不保证覆盖全部 Annex B 兼容语法。 |
 | `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
+
+未提供的全局名包括 `Iterator`（因此 `Iterator.from` / `Iterator.concat` 不可用）、`WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics`、`Intl`、`eval`、`encodeURI` / `decodeURI`、`encodeURIComponent` / `decodeURIComponent`，以及全局 `parseInt` / `parseFloat` / `isNaN` / `isFinite`。`Temporal` 的规范出版目标为 ES2027，不属于 ES2026。
 
 ## 5. 结构性缺口
 
@@ -59,7 +61,7 @@
 - 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
-- 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
+- 代理函数/构造器，以及 design 未点名的其它 Proxy traps；`Proxy.revocable` 与 `new Proxy` 共享当前目标和 trap 限制。
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配；二进制镜像还要求当前 `SNAPSHOT_BINARY_VERSION`，不做容器迁移。
 - 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取旧 JSON 产物。
@@ -72,7 +74,7 @@
 - 数组、对象解构赋值模式只能配 `=`；复合及逻辑赋值要求简单赋值目标，自增减也要求有效的赋值目标。
 - 模块顶层及仅嵌套在其中的箭头函数不能使用 `new.target`。普通函数有自己的 `new.target`，嵌套箭头函数可捕获它。
 - 同一个 `switch` 中重复 `default`，以及默认导出以外的匿名函数声明，都是语法错误。
-- 严格模式下不能使用 `with`，也不能删除裸标识符（包括加括号的标识符）。
+- 严格模式下不能使用 `with`（不影响 `Symbol.unscopables` 和数组名单的反射），也不能删除裸标识符（包括加括号的标识符）。
 
 ## 8. 真实源码兼容性探针
 

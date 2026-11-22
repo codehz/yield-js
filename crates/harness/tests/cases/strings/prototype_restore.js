@@ -9,6 +9,9 @@ export async function run() {
   const text = String.fromCodePoint(233, 128512, 122);
   const proto = String.prototype;
   const iteratorMethod = proto[Symbol.iterator];
+  const repair = proto.toWellFormed;
+  const normalize = proto.normalize;
+  const trimLeft = proto.trimLeft;
   const iterator = text[Symbol.iterator]();
   const first = iterator.next();
   proto.readLength = function () { return this.length; };
@@ -27,4 +30,7 @@ export async function run() {
   expect(!!iterator.next().done).toBe(true);
   expect(text.slice(1, 3)).toBe("😀");
   expect(String.fromCharCode(122)).toBe("z");
+  expect(repair.call('\uD800😀')).toBe('\uFFFD😀');
+  expect(normalize.call('e\u0301')).toBe('é');
+  expect(trimLeft === proto.trimStart && trimLeft === proto.trimLeft).toBe(true);
 }

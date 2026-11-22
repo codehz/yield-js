@@ -85,8 +85,9 @@ const REGEXP_ROOTS: &[RootSpec] = &[
 mod members {
     use super::RegExpMethod::*;
     use crate::heap::{
-        MATCH_ALL_SYMBOL, MATCH_SYMBOL, REPLACE_SYMBOL, SEARCH_SYMBOL, SPLIT_SYMBOL,
+        MATCH_ALL_SYMBOL, MATCH_SYMBOL, REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL,
     };
+    use crate::runtime::Invocation;
 
     prototype_calls! {
         exec: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Exec, receiver, &args);
@@ -106,6 +107,9 @@ mod members {
 
     static_calls! {
         escape: 1 => |vm, host, roots, args, receiver| vm.call_regexp_method(host, roots, Escape, receiver, &args);
+        get symbol(SPECIES_SYMBOL) species: 0 => |_, _, _, _, receiver| {
+            Ok(Invocation::Value(receiver.clone()))
+        };
     }
 
     prototype_calls! {
@@ -426,7 +430,7 @@ impl Vm {
                             Ok(index) => index,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };
-                        let next = advance_string_index(&string, last_index, unicode) as f64;
+                        let next = advance_string_index(&string, last_index, unicode);
                         if let Err(error) = self.regexp_set_last_index(host, roots, id, next)? {
                             return Ok(Invocation::Thrown(error));
                         }
@@ -455,20 +459,23 @@ impl Vm {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
+        let constructor = match self.species_constructor(host, roots, &receiver, members::ROOT)? {
+            Ok(constructor) => constructor,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&constructor);
         let flags = match self.regexp_flags(host, roots, &receiver)? {
             Ok(flags) => flags,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        if !flags_contains(&flags, b'g') {
-            return self
-                .throw_type_error(roots, "String.prototype.matchAll requires a global RegExp");
-        }
-        let created = self.construct_regexp(
+        let global = flags_contains(&flags, b'g');
+        let full_unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
+        let created = self.construct_with(
             host,
             roots,
-            &[receiver.clone(), Value::string(flags.clone())],
-            None,
-            false,
+            &constructor,
+            Arguments::Values(&[receiver, Value::string(flags)]),
+            &constructor,
         )?;
         let Invocation::Value(value) = &created else {
             return Ok(created);
@@ -476,32 +483,21 @@ impl Vm {
         let ValueRef::Object(matcher) = value.view() else {
             return Ok(created);
         };
-        let last_index = match self.read_property(
-            host,
-            &roots.with(&matcher),
-            &receiver,
-            PropertyKeyRef::String("lastIndex"),
-        )? {
-            Invocation::Value(value) => value,
-            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+        let roots = &roots.with(&matcher);
+        let last_index = match self.regexp_last_index(host, roots, id)? {
+            Ok(index) => index,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        if let thrown @ Invocation::Thrown(_) = self.set_property(
-            host,
-            roots,
-            matcher,
-            &Value::object(matcher),
-            PropertyKey::String("lastIndex".into()),
-            last_index,
-            true,
-        )? {
-            return Ok(thrown);
+        if let Err(error) =
+            self.regexp_set_last_index(host, roots, matcher, to_length(last_index))?
+        {
+            return Ok(Invocation::Thrown(error));
         }
-        let full_unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
         let iterator = self.heap.alloc(Object::RegExpStringIterator {
             object: PlainObject::new(Some(self.builtins.get("regexpIterator.prototype"))),
             regexp: matcher,
             string,
-            global: true,
+            global,
             full_unicode,
             done: false,
         });
@@ -564,11 +560,16 @@ impl Vm {
                             Ok(index) => index,
                             Err(error) => return Ok(Invocation::Thrown(error)),
                         };
-                        let next = advance_string_index(&string, last_index, full_unicode) as f64;
+                        let next = advance_string_index(&string, last_index, full_unicode);
                         if let Err(error) = self.regexp_set_last_index(host, roots, regexp, next)? {
                             return Ok(Invocation::Thrown(error));
                         }
                     }
+                } else {
+                    let Object::RegExpStringIterator { done, .. } = self.heap.get_mut(id)? else {
+                        unreachable!("iterator kind does not change");
+                    };
+                    *done = true;
                 }
                 self.iterator_result(result, false)
             }
@@ -647,7 +648,7 @@ impl Vm {
                                 Ok(index) => index,
                                 Err(error) => return Ok(Invocation::Thrown(error)),
                             };
-                            let next = advance_string_index(&string, last_index, unicode) as f64;
+                            let next = advance_string_index(&string, last_index, unicode);
                             if let Err(error) = self.regexp_set_last_index(host, roots, id, next)? {
                                 return Ok(Invocation::Thrown(error));
                             }
@@ -757,6 +758,34 @@ impl Vm {
                 Ok(string) => string,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
+        let constructor = match self.species_constructor(host, roots, &receiver, members::ROOT)? {
+            Ok(constructor) => constructor,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&constructor);
+        let mut splitter_flags = match self.regexp_flags(host, roots, &receiver)? {
+            Ok(flags) => flags,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let unicode =
+            flags_contains(&splitter_flags, b'u') || flags_contains(&splitter_flags, b'v');
+        if !flags_contains(&splitter_flags, b'y') {
+            splitter_flags.push('y');
+        }
+        let created = self.construct_with(
+            host,
+            roots,
+            &constructor,
+            Arguments::Values(&[receiver, Value::string(splitter_flags)]),
+            &constructor,
+        )?;
+        let Invocation::Value(value) = &created else {
+            return Ok(created);
+        };
+        let ValueRef::Object(splitter) = value.view() else {
+            return Ok(created);
+        };
+        let roots = &roots.with(&splitter);
         let limit = match args.get(1) {
             Some(value) if !matches!(value.view(), ValueRef::Undefined) => {
                 match self.coerce_number(host, roots, value)? {
@@ -766,35 +795,16 @@ impl Vm {
             }
             _ => u32::MAX as usize,
         };
-        let flags = match self.regexp_flags(host, roots, &receiver)? {
-            Ok(flags) => flags,
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        };
-        let unicode = flags_contains(&flags, b'u') || flags_contains(&flags, b'v');
-        let mut splitter_flags = flags.clone();
-        if !flags_contains(&flags, b'y') {
-            splitter_flags.push('y');
-        }
-        let created = self.construct_regexp(
-            host,
-            roots,
-            &[receiver.clone(), Value::string(splitter_flags)],
-            None,
-            false,
-        )?;
-        let Invocation::Value(value) = &created else {
-            return Ok(created);
-        };
-        let ValueRef::Object(splitter) = value.view() else {
-            return Ok(created);
-        };
-        let roots = &roots.with(&splitter);
         let size = string.unit_len();
-        let encoded = encode_input_with_flags(&string, &flags).into_owned();
         let mut parts = Vec::new();
         if limit == 0 {
             return self.array_result(parts);
         }
+        // A species constructor can return a RegExp with entirely different flags.
+        let encoded = match self.heap.get(splitter)? {
+            Object::RegExp { flags, .. } => Some(encode_input(&string, *flags)),
+            _ => None,
+        };
         if size == 0 {
             match self.regexp_exec_with_encoded(
                 host,
@@ -802,7 +812,7 @@ impl Vm {
                 &Value::object(splitter),
                 splitter,
                 string.clone(),
-                Some(encoded.as_ref()),
+                encoded.as_deref(),
             )? {
                 Invocation::Value(value) if matches!(value.view(), ValueRef::Null) => {
                     parts.push(Value::string(string))
@@ -812,7 +822,6 @@ impl Vm {
             }
             return self.array_result(parts);
         }
-        let mut last = 0usize;
         let mut start = 0usize;
         let mut cursor = 0usize;
         while cursor < size {
@@ -828,50 +837,33 @@ impl Vm {
                 &Value::object(splitter),
                 splitter,
                 string.clone(),
-                Some(encoded.as_ref()),
+                encoded.as_deref(),
             )?;
             let Invocation::Value(result) = result else {
                 return Ok(result);
             };
             let ValueRef::Object(array) = result.view() else {
-                cursor = advance_string_index(&string, cursor as f64, unicode);
+                cursor = advance_string_index(&string, cursor as f64, unicode) as usize;
                 continue;
             };
             let roots = &roots.with(&array);
-            let capture_roots = &roots.with(&parts);
-            let index = match self.regexp_element(host, &roots.with(&parts), array, "index")? {
-                Ok(value) => match self.coerce_number(host, capture_roots, &value)? {
-                    Ok(number) => to_integer(number).max(0.0) as usize,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                },
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            };
-            let end = match self.regexp_capture(host, capture_roots, array, 0)? {
-                Ok(value) => match self.coerce_string(host, capture_roots, &value)? {
-                    Ok(matched) => (index + matched.unit_len()).min(size),
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                },
+            let end = match self.regexp_last_index(host, &roots.with(&parts), splitter)? {
+                Ok(index) => (to_length(index) as usize).min(size),
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
             if end == start {
-                cursor = advance_string_index(&string, cursor as f64, unicode);
+                cursor = advance_string_index(&string, cursor as f64, unicode) as usize;
                 continue;
             }
-            let index = index.min(size);
-            if start <= index {
-                parts.push(Value::string(string.slice_units(last.min(index)..index)));
-            } else {
-                parts.push(Value::string(JsString::default()));
-            }
+            parts.push(Value::string(string.slice_units(start.min(cursor)..cursor)));
             if parts.len() == limit {
                 return self.array_result(parts);
             }
-            last = end;
             start = end;
             cursor = end;
             let count = match self.regexp_element(host, &roots.with(&parts), array, "length")? {
-                Ok(value) => match self.coerce_number(host, roots, &value)? {
-                    Ok(number) => to_integer(number).clamp(0.0, u32::MAX as f64) as usize,
+                Ok(value) => match self.coerce_number(host, &roots.with(&parts), &value)? {
+                    Ok(number) => to_length(number) as usize,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 },
                 Err(error) => return Ok(Invocation::Thrown(error)),
@@ -887,9 +879,7 @@ impl Vm {
                 }
             }
         }
-        if last <= size {
-            parts.push(Value::string(string.slice_units(last..size)));
-        }
+        parts.push(Value::string(string.slice_units(start..size)));
         self.array_result(parts)
     }
 
@@ -1477,26 +1467,22 @@ fn to_integer(number: f64) -> f64 {
     }
 }
 
+fn to_length(number: f64) -> f64 {
+    to_integer(number).clamp(0.0, 9_007_199_254_740_991.0) + 0.0
+}
+
 /// `AdvanceStringIndex`: one code unit, or one code point in Unicode modes.
-fn advance_string_index(text: &JsString, index: f64, unicode: bool) -> usize {
-    let length = text.unit_len();
-    let index = if index.is_nan() || index < 0.0 {
-        0
-    } else if index > length as f64 {
-        length
-    } else {
-        index as usize
-    };
-    if !unicode {
-        return index + 1;
+fn advance_string_index(text: &JsString, index: f64, unicode: bool) -> f64 {
+    let index = to_length(index);
+    if unicode && index < text.unit_len() as f64 {
+        let offset = index as usize;
+        if matches!(text.unit_at(offset), Some(0xd800..=0xdbff))
+            && matches!(text.unit_at(offset + 1), Some(0xdc00..=0xdfff))
+        {
+            return index + 2.0;
+        }
     }
-    match text.unit_at(index) {
-        Some(first) if (0xd800..=0xdbff).contains(&first) => match text.unit_at(index + 1) {
-            Some(second) if (0xdc00..=0xdfff).contains(&second) => index + 2,
-            _ => index + 1,
-        },
-        _ => index + 1,
-    }
+    index + 1.0
 }
 
 fn escaped_source(source: &JsString) -> JsString {

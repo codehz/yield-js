@@ -346,6 +346,7 @@ pub enum WellKnownSymbol {
     ToStringTag,
     Dispose,
     AsyncDispose,
+    Unscopables,
 }
 
 impl WellKnownSymbol {
@@ -363,6 +364,7 @@ impl WellKnownSymbol {
             Self::ToStringTag => "Symbol.toStringTag",
             Self::Dispose => "Symbol.dispose",
             Self::AsyncDispose => "Symbol.asyncDispose",
+            Self::Unscopables => "Symbol.unscopables",
         }
     }
 
@@ -380,6 +382,7 @@ impl WellKnownSymbol {
             Self::ToStringTag => crate::heap::TO_STRING_TAG_SYMBOL,
             Self::Dispose => crate::heap::DISPOSE_SYMBOL,
             Self::AsyncDispose => crate::heap::ASYNC_DISPOSE_SYMBOL,
+            Self::Unscopables => crate::heap::UNSCOPABLES_SYMBOL,
         }
     }
 }

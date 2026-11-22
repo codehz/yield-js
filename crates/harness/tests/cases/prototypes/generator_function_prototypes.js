@@ -18,5 +18,20 @@ export async function run() {
       Object.getPrototypeOf(asyncGeneratorProto) !== Function.prototype) {
     return "function prototype chain";
   }
+  for (const [prototype, value, tag] of [
+    [generatorProto, generator, "GeneratorFunction"],
+    [generatorProto.prototype, generator(), "Generator"],
+    [asyncGeneratorProto, asyncGenerator, "AsyncGeneratorFunction"],
+    [asyncGeneratorProto.prototype, asyncGenerator(), "AsyncGenerator"],
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, Symbol.toStringTag);
+    if (!descriptor || descriptor.value !== tag || descriptor.writable ||
+        descriptor.enumerable || !descriptor.configurable) {
+      return tag + " descriptor";
+    }
+    if (Object.prototype.toString.call(value) !== "[object " + tag + "]") {
+      return tag + " branding";
+    }
+  }
   return "ok";
 }

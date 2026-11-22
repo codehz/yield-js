@@ -25,6 +25,7 @@ pub(crate) enum Dispatch<'a> {
     },
     Resolution(ObjectId),
     PromiseCallback(ObjectId),
+    ProxyRevoker(ObjectId),
     Bound(&'a BoundObject),
     Native {
         target: CallableTarget,
@@ -55,6 +56,7 @@ pub(crate) fn is_callable_object(object: &Object) -> bool {
             | Object::Resolution(_)
             | Object::Bound(_)
             | Object::PromiseCallback { .. }
+            | Object::ProxyRevoker { .. }
             | Object::Native(_)
     )
 }

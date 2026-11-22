@@ -857,7 +857,7 @@ impl Vm {
         }
     }
 
-    fn iterator_step_result(
+    pub(crate) fn iterator_step_result(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -1287,10 +1287,10 @@ impl Vm {
                     self.host_classes[class].prototype,
                 )));
             }
-            if let Object::Proxy {
-                target, handler, ..
-            } = *object
-            {
+            if let Object::Proxy { slots, .. } = *object {
+                let Some((target, handler)) = slots else {
+                    return self.throw_type_error(roots, "Proxy has been revoked");
+                };
                 let receiver = receiver(self);
                 return self.proxy_get(host, roots, target, handler, key, &receiver);
             }
@@ -1487,7 +1487,12 @@ impl Vm {
             Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
         };
         // Prototype links are kept acyclic by set_prototype and snapshot restore.
-        while let Some(parent) = self.heap.prototype_of(current)? {
+        loop {
+            let parent = match self.proxy_prototype(roots, current)? {
+                Ok(Some(parent)) => parent,
+                Ok(None) => break,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
             if parent == prototype {
                 return Ok(Invocation::Value(Value::boolean(true)));
             }
@@ -1524,10 +1529,10 @@ impl Vm {
         let mut current = Some(target);
         while let Some(id) = current {
             let object = self.heap.get(id)?;
-            if let Object::Proxy {
-                target, handler, ..
-            } = *object
-            {
+            if let Object::Proxy { slots, .. } = *object {
+                let Some((target, handler)) = slots else {
+                    return self.throw_type_error(roots, "Proxy has been revoked");
+                };
                 return self.proxy_presence(host, roots, target, handler, key, false);
             }
             match self.heap.typed_index(id, key)? {
@@ -1567,10 +1572,11 @@ impl Vm {
             }
         };
         if let ValueRef::Object(id) = target.view()
-            && let Object::Proxy {
-                target, handler, ..
-            } = *self.heap.get(id)?
+            && let Object::Proxy { slots, .. } = *self.heap.get(id)?
         {
+            let Some((target, handler)) = slots else {
+                return self.throw_type_error(roots, "Proxy has been revoked");
+            };
             return self.proxy_presence(host, roots, target, handler, key, true);
         }
         let deleted = match (target.view(), key) {
@@ -1761,10 +1767,10 @@ impl Vm {
         let mut property = None;
         while let Some(id) = current {
             let object = self.heap.get(id)?;
-            if let Object::Proxy {
-                target, handler, ..
-            } = *object
-            {
+            if let Object::Proxy { slots, .. } = *object {
+                let Some((target, handler)) = slots else {
+                    return self.throw_type_error(roots, "Proxy has been revoked");
+                };
                 return self.proxy_set(
                     host,
                     roots,

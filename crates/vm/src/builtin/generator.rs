@@ -7,7 +7,7 @@
 
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::exec::GeneratorCompletion;
-use crate::heap::{Attributes, ITERATOR_SYMBOL};
+use crate::heap::{Attributes, ITERATOR_SYMBOL, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value};
@@ -61,6 +61,18 @@ impl Vm {
             Value::object(prototype),
             Attributes::FIXED,
         );
+        for (target, tag) in [
+            (function_prototype, "GeneratorFunction"),
+            (prototype, "Generator"),
+        ] {
+            super::define_builtin_data(
+                self,
+                target,
+                PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+                Value::string(tag.into()),
+                Attributes::FUNCTION_METADATA,
+            );
+        }
         for key in [NEXT, RETURN, THROW] {
             let method = self.alloc_intrinsic(key);
             super::define_builtin_data(

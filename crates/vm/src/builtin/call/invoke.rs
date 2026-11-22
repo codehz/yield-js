@@ -125,6 +125,7 @@ impl Vm {
             Some(Dispatch::PromiseCallback(id)) => {
                 self.call_promise_callback(host, roots, id, args)
             }
+            Some(Dispatch::ProxyRevoker(id)) => self.revoke_proxy(id),
             Some(Dispatch::Bound(bound)) => {
                 let target = Value::object(bound.target);
                 let bound_this = bound.bound_this.clone();
@@ -548,6 +549,7 @@ impl Vm {
         Ok(match self.heap.get(id)? {
             Object::Resolution(_) => Some(Dispatch::Resolution(id)),
             Object::PromiseCallback { .. } => Some(Dispatch::PromiseCallback(id)),
+            Object::ProxyRevoker { .. } => Some(Dispatch::ProxyRevoker(id)),
             Object::Bound(bound) => Some(Dispatch::Bound(bound)),
             Object::Native(native) => Some(Dispatch::Native {
                 target: native.target(),

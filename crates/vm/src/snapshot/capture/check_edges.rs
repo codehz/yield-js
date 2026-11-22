@@ -14,6 +14,7 @@ use crate::snapshot::record::valid_string_position;
 pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
+    let mut revocable = BTreeSet::new();
     use crate::bytecode::Instr;
     let definitions = build
         .functions
@@ -232,6 +233,13 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                 "array iterator {id} references missing source {array}"
             )));
         }
+        if let Object::IteratorHelper { state, .. } = heap.get(id)?
+            && !state.valid(heap)
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "iterator helper {id} has invalid suspended state"
+            )));
+        }
         if let Object::StringIterator {
             string, position, ..
         } = heap.get(id)?
@@ -376,7 +384,8 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
             }
         }
         if let Object::Proxy {
-            target, handler, ..
+            slots: Some((target, handler)),
+            ..
         } = heap.get(id)?
         {
             if !matches!(
@@ -408,6 +417,15 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
             // Follow the target before reading its prototype. This checks both
             // target-only cycles and cycles involving ordinary prototype links.
             prototypes.insert(id, *target);
+        } else if let Object::ProxyRevoker {
+            proxy: Some(proxy), ..
+        } = heap.get(id)?
+            && (!matches!(heap.get(*proxy), Ok(Object::Proxy { slots: Some(_), .. }))
+                || !revocable.insert(*proxy))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "proxy revoker {id} has invalid or duplicate authority over proxy {proxy}"
+            )));
         }
     }
 

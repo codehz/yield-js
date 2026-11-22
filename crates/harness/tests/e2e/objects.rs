@@ -2,8 +2,45 @@
 
 use super::support::{Suspended, baseline_at_first_await, count_delta, json_round_trip};
 use yield_harness::number;
+use yield_vm::Snapshot;
 use yield_vm::heap::{Property, WeakKey};
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value, VmError};
+
+#[test]
+fn raw_json_brand_round_trips_and_requires_a_frozen_shape() {
+    let mut run = Suspended::start(
+        r#"
+        import { wait } from 'test';
+        export async function run() {
+            const raw = JSON.rawJSON('9007199254740993');
+            await wait('raw');
+            return JSON.isRawJSON(raw) && JSON.stringify(raw);
+        }
+        "#,
+        vec![],
+    );
+    let snapshot = run.snapshot();
+    let mut corrupt = serde_json::to_value(&snapshot).unwrap();
+    let raw = corrupt["objects"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .filter_map(|record| record.get_mut("object")?.get_mut("plain"))
+        .find(|plain| plain.get("is_raw_json").and_then(|brand| brand.as_bool()) == Some(true))
+        .expect("raw JSON record");
+    raw["extensible"] = serde_json::json!(true);
+    assert!(matches!(
+        run.restore_validated(serde_json::from_value(corrupt).unwrap()),
+        Err(VmError::InvalidSnapshot(detail)) if detail.contains("invalid raw JSON object")
+    ));
+    let decoded = Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap();
+    run.restore_validated(decoded).unwrap();
+    run.complete("wait:raw", Completion::Fulfilled(number(0.0)));
+    assert_eq!(
+        run.state(),
+        PromiseState::Fulfilled(Value::string("9007199254740993".into()))
+    );
+}
 
 #[test]
 fn restore_rejects_private_stamp_with_non_class_brand() {
@@ -683,7 +720,8 @@ fn restore_rejects_malformed_proxy_records() {
     ] {
         let mut corrupt = snapshot.clone();
         let Object::Proxy {
-            target, handler, ..
+            slots: Some((target, handler)),
+            ..
         } = &mut corrupt.objects[index].object
         else {
             unreachable!("proxy record");

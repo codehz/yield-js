@@ -2,13 +2,12 @@
 
 use std::fmt::Write;
 
-use super::UNDEFINED_VALUE;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
 use crate::host::Host;
 use crate::runtime::Invocation;
-use crate::value::{JsString, ObjectId, Value, ValueRef};
+use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 impl Vm {
     pub(crate) fn construct_error(
@@ -20,34 +19,11 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let (errors, message_arg) = if name == "AggregateError" {
-            let iterable = args.first().unwrap_or(&UNDEFINED_VALUE);
-            let mut errors = Vec::new();
-            if !matches!(iterable.view(), ValueRef::Undefined) {
-                let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
-                    Ok(iterator) => iterator,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                };
-                loop {
-                    match self.iterator_step(
-                        host,
-                        &roots.with(&(&iterator, &next, &errors)),
-                        &iterator,
-                        &next,
-                    )? {
-                        Ok(Some(value)) => errors.push(value),
-                        Ok(None) => break,
-                        Err(error) => return Ok(Invocation::Thrown(error)),
-                    }
-                }
-            }
-            (Some(errors), args.get(1))
-        } else if name == "SuppressedError" {
-            (None, args.get(2))
-        } else {
-            (None, args.first())
+        let message_arg = match name {
+            "AggregateError" => args.get(1),
+            "SuppressedError" => args.get(2),
+            _ => args.first(),
         };
-        let roots = &roots.with(&errors);
         let message = match message_arg.unwrap_or(&Value::UNDEFINED) {
             value if matches!(value.view(), ValueRef::Undefined) => None,
             value => match self.coerce_string(host, roots, value)? {
@@ -72,7 +48,50 @@ impl Vm {
             return Ok(Invocation::Value(value));
         }
         let error = self.alloc_error(roots, self.builtins.get(prototype), name, message)?;
-        if let (Some(errors), ValueRef::Object(id)) = (errors, error.view()) {
+        let ValueRef::Object(id) = error.view() else {
+            unreachable!()
+        };
+        let roots = &roots.with(&error);
+        let options = args.get(if name == "AggregateError" { 2 } else { 1 });
+        if let Some(options) = options
+            && let ValueRef::Object(options_id) = options.view()
+        {
+            let key = PropertyKeyRef::String("cause");
+            match self.has_property_key(host, roots, options_id, key)? {
+                Invocation::Value(present) if present.truthy() => {
+                    let cause = match self.read_property(host, roots, options, key)? {
+                        Invocation::Value(cause) => cause,
+                        Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+                    };
+                    self.heap
+                        .define_data(id, "cause", cause, Attributes::METHOD)?;
+                }
+                Invocation::Value(_) => {}
+                Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
+            }
+        }
+        if name == "AggregateError" {
+            let undefined = Value::UNDEFINED;
+            let iterable = args.first().unwrap_or(&undefined);
+            let mut errors = Vec::new();
+            if !matches!(iterable.view(), ValueRef::Undefined) {
+                let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
+                    Ok(iterator) => iterator,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                loop {
+                    match self.iterator_step(
+                        host,
+                        &roots.with(&(&iterator, &next, &errors)),
+                        &iterator,
+                        &next,
+                    )? {
+                        Ok(Some(value)) => errors.push(value),
+                        Ok(None) => break,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                }
+            }
             let errors = self.heap.alloc_array(errors);
             self.heap
                 .define_data(id, "errors", Value::object(errors), Attributes::METHOD)?;

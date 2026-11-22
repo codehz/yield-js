@@ -5,12 +5,15 @@ use crate::heap::{
     ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_SYMBOL, Attributes, DISPOSE_SYMBOL, HAS_INSTANCE_SYMBOL,
     IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, REPLACE_SYMBOL,
     SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_SYMBOL,
+    UNSCOPABLES_SYMBOL,
 };
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::value::Value;
+use crate::value::{PropertyKey, Value};
 use crate::vm::Vm;
 
 pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(members::NAME, Slot::Global, "");
+const TO_PRIMITIVE: IntrinsicKey =
+    IntrinsicKey::new(members::NAME, Slot::PrototypeSymbol, "toPrimitive");
 const PROTOTYPE: &str = "symbol.prototype";
 
 #[yield_binding_macros::builtin_global(name = "Symbol", root = "symbol", kind = "constructor")]
@@ -47,6 +50,11 @@ pub(crate) const OWNER: Owner = Owner::new(
             |vm, host, roots, args, _| vm.symbol_constructor(host, roots, args),
         )],
         members::INTRINSICS,
+        &[IntrinsicDef::call(
+            TO_PRIMITIVE,
+            1,
+            |vm, _, roots, _, receiver| vm.symbol_method(roots, receiver, "valueOf"),
+        )],
     ],
     Some(install),
 );
@@ -56,6 +64,21 @@ fn install(vm: &mut Vm, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
     members::install_members(vm, constructor, prototype);
+    let to_primitive = vm.alloc_intrinsic(TO_PRIMITIVE);
+    define_builtin_data(
+        vm,
+        prototype,
+        PropertyKey::Symbol(TO_PRIMITIVE_SYMBOL),
+        Value::object(to_primitive),
+        Attributes::FUNCTION_METADATA,
+    );
+    define_builtin_data(
+        vm,
+        prototype,
+        PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+        Value::string("Symbol".into()),
+        Attributes::FUNCTION_METADATA,
+    );
     for (name, id) in [
         ("iterator", ITERATOR_SYMBOL),
         ("toPrimitive", TO_PRIMITIVE_SYMBOL),
@@ -71,6 +94,7 @@ fn install(vm: &mut Vm, _: &Value) {
         ("toStringTag", TO_STRING_TAG_SYMBOL),
         ("dispose", DISPOSE_SYMBOL),
         ("asyncDispose", ASYNC_DISPOSE_SYMBOL),
+        ("unscopables", UNSCOPABLES_SYMBOL),
     ] {
         define_builtin_data(vm, constructor, name, Value::symbol(id), Attributes::FIXED);
     }

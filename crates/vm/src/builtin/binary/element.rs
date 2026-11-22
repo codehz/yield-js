@@ -185,7 +185,8 @@ pub(crate) fn f64_to_f16_bits(value: f64) -> u16 {
 }
 
 fn round_shift_even(value: u64, shift: i32) -> u64 {
-    if shift >= 65 {
+    // Binary64 significands use at most 53 bits, so these shifts round to zero.
+    if shift >= 64 {
         return 0;
     }
     let shift = shift as u32;

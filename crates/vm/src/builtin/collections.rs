@@ -51,6 +51,8 @@ struct SetRecord {
 enum WeakMapMethod {
     Get,
     Set,
+    GetOrInsert,
+    GetOrInsertComputed,
     Has,
     Delete,
 }
@@ -316,10 +318,12 @@ mod weak_map_members {
     use super::WeakMapMethod::*;
 
     prototype_calls! {
-        get: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Get, receiver, &args);
-        set: 2 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Set, receiver, &args);
-        has: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Has, receiver, &args);
-        delete: 1 => |vm, _, roots, args, receiver| vm.weakmap_method(roots, Delete, receiver, &args);
+        get: 1 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, Get, receiver, &args);
+        set: 2 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, Set, receiver, &args);
+        has: 1 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, Has, receiver, &args);
+        delete: 1 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, Delete, receiver, &args);
+        getOrInsert: 2 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, GetOrInsert, receiver, &args);
+        getOrInsertComputed: 2 => |vm, host, roots, args, receiver| vm.weakmap_method(host, roots, GetOrInsertComputed, receiver, &args);
     }
 }
 
@@ -463,6 +467,7 @@ impl Vm {
 
     fn weakmap_method(
         &mut self,
+        host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         method: WeakMapMethod,
         receiver: &Value,
@@ -476,13 +481,50 @@ impl Vm {
         }
         let Some(key) = args.first().and_then(|value| self.heap.weak_key(value)) else {
             return match method {
-                WeakMapMethod::Set => self.throw_type_error(roots, INVALID_WEAK_KEY),
+                WeakMapMethod::Set
+                | WeakMapMethod::GetOrInsert
+                | WeakMapMethod::GetOrInsertComputed => {
+                    self.throw_type_error(roots, INVALID_WEAK_KEY)
+                }
                 WeakMapMethod::Get => Ok(Invocation::Value(Value::UNDEFINED)),
                 WeakMapMethod::Has | WeakMapMethod::Delete => {
                     Ok(Invocation::Value(Value::boolean(false)))
                 }
             };
         };
+        let undefined = Value::UNDEFINED;
+        let second = args.get(1).unwrap_or(&undefined);
+        if matches!(method, WeakMapMethod::GetOrInsertComputed) {
+            if !self.is_callable(second) {
+                return self.throw_type_error(
+                    roots,
+                    "WeakMap getOrInsertComputed callback is not callable",
+                );
+            }
+            let Object::WeakMap { entries, .. } = self.heap.get(id)? else {
+                unreachable!("receiver brand already checked");
+            };
+            if let Some(existing) = entries.get(&key) {
+                return Ok(Invocation::Value(existing.clone()));
+            }
+            let inputs = (receiver, args);
+            let roots = &roots.with(&inputs);
+            let value = match self.invoke(
+                host,
+                roots,
+                second,
+                Arguments::Values(&args[..1]),
+                &Value::UNDEFINED,
+            )? {
+                Invocation::Value(value) => value,
+                thrown => return Ok(thrown),
+            };
+            let Object::WeakMap { entries, .. } = self.heap.get_mut(id)? else {
+                unreachable!("receiver brand already checked");
+            };
+            entries.insert(key, value.clone());
+            return Ok(Invocation::Value(value));
+        }
         let Object::WeakMap { entries, .. } = self.heap.get_mut(id)? else {
             unreachable!("receiver brand already checked");
         };
@@ -492,6 +534,10 @@ impl Vm {
                 entries.insert(key, args.get(1).cloned().unwrap_or(Value::UNDEFINED));
                 receiver.clone()
             }
+            WeakMapMethod::GetOrInsert => {
+                entries.entry(key).or_insert_with(|| second.clone()).clone()
+            }
+            WeakMapMethod::GetOrInsertComputed => unreachable!("handled above"),
             WeakMapMethod::Has => Value::boolean(entries.contains_key(&key)),
             WeakMapMethod::Delete => Value::boolean(entries.remove(&key).is_some()),
         }))

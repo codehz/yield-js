@@ -78,6 +78,7 @@ pub enum ReactionJob {
         state: ObjectId,
         result: ObjectId,
     },
+    ArrayFromAsync(crate::builtin::array::ArrayFromAsyncJob),
 }
 
 /// Project a field of the ordinary-object record an object kind stores.
@@ -95,6 +96,7 @@ macro_rules! map_object_storage {
             | Object::Boxed { object: $storage, .. }
             | Object::RegExp { object: $storage, .. }
             | Object::Proxy { object: $storage, .. }
+            | Object::ProxyRevoker { object: $storage, .. }
             | Object::Map { object: $storage, .. }
             | Object::Date { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
@@ -107,6 +109,7 @@ macro_rules! map_object_storage {
             | Object::WeakSet { object: $storage, .. }
             | Object::CollectionIterator { object: $storage, .. }
             | Object::ArrayIterator { object: $storage, .. }
+            | Object::IteratorHelper { object: $storage, .. }
             | Object::StringIterator { object: $storage, .. }
             | Object::RegExpStringIterator { object: $storage, .. }
             | Object::Bound(BoundObject { object: $storage, .. })
@@ -364,11 +367,15 @@ impl Object {
         }
         match self {
             Self::Proxy {
-                target, handler, ..
+                slots: Some((target, handler)),
+                ..
             } => {
                 out.push(OwnedEdge::Object(*target));
                 out.push(OwnedEdge::Object(*handler));
             }
+            Self::ProxyRevoker {
+                proxy: Some(proxy), ..
+            } => out.push(OwnedEdge::Object(*proxy)),
             Self::Promise(promise) => {
                 if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) =
                     &promise.state
@@ -431,6 +438,8 @@ impl Object {
             }
             Self::Native(_)
             | Self::Plain(_)
+            | Self::Proxy { slots: None, .. }
+            | Self::ProxyRevoker { proxy: None, .. }
             | Self::RegExp { .. }
             | Self::Date { .. }
             | Self::TextEncoder { .. }
@@ -465,6 +474,11 @@ impl Object {
             Self::ArrayIterator { array, .. } => {
                 if let Some(id) = array {
                     out.push(OwnedEdge::Object(*id));
+                }
+            }
+            Self::IteratorHelper { state, .. } => {
+                for value in state.values() {
+                    push_value(out, value);
                 }
             }
             Self::ForInIterator { current, .. } => {
@@ -593,6 +607,7 @@ impl ReactionJob {
                 out.push(OwnedEdge::Object(*state));
                 out.push(OwnedEdge::Object(*result));
             }
+            Self::ArrayFromAsync(job) => job.write_edges(out),
         }
     }
 

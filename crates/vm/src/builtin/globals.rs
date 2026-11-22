@@ -18,7 +18,7 @@ use crate::builtin::string;
 use crate::builtin::{async_generator, error_family, generator, queue_family, symbol_family};
 use crate::error::VmError;
 use crate::exec;
-use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL};
+use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{PropertyKey, Value};
 use crate::vm::Vm;
@@ -238,12 +238,26 @@ impl Vm {
             Value::object(has_instance),
             Attributes::FIXED,
         );
-        super::iterator::install(self);
         let identity = Value::object(self.alloc_intrinsic(ITERATOR_IDENTITY));
+        super::iterator::install(self, &identity);
         for owner in owners() {
             if let Some(install) = owner.install {
                 install(self, &identity);
             }
+        }
+        for (root, tag) in [
+            (math::OWNER.root, "Math"),
+            (json::OWNER.root, "JSON"),
+            (reflect_namespace::OWNER.root, "Reflect"),
+            ("promise.prototype", "Promise"),
+        ] {
+            super::define_builtin_data(
+                self,
+                self.builtins.get(root),
+                PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+                Value::string(tag.into()),
+                Attributes::FUNCTION_METADATA,
+            );
         }
         self.install_generator_methods();
         self.install_async_generator_methods();

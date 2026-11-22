@@ -14,16 +14,34 @@ use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, Value
 use crate::vm::Vm;
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
+const REVOCABLE: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Static, "revocable");
 
-pub(crate) const PROXY_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::constructor(
-    CONSTRUCTOR,
-    2,
-    |vm, _, roots, _, _| vm.throw_type_error(roots, "Proxy requires new"),
-    |vm, _, roots, args, _| vm.construct_proxy(roots, &args),
-)
-.without_new_target_prototype()];
+const PROXY_INTRINSICS: &[IntrinsicDef] = &[
+    IntrinsicDef::constructor(
+        CONSTRUCTOR,
+        2,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "Proxy requires new"),
+        |vm, _, roots, args, _| vm.construct_proxy(roots, &args),
+    )
+    .without_new_target_prototype(),
+    IntrinsicDef::call(REVOCABLE, 2, |vm, _, roots, args, _| {
+        vm.proxy_revocable(roots, &args)
+    }),
+];
 
-pub(crate) const OWNER: Owner = Owner::new(ROOT_PROXY, PROXY_ROOTS, &[PROXY_INTRINSICS], None);
+pub(crate) const OWNER: Owner =
+    Owner::new(ROOT_PROXY, PROXY_ROOTS, &[PROXY_INTRINSICS], Some(install));
+
+fn install(vm: &mut Vm, _: &Value) {
+    let method = vm.alloc_intrinsic(REVOCABLE);
+    super::define_builtin_data(
+        vm,
+        vm.builtins.get(ROOT_PROXY),
+        REVOCABLE.member,
+        Value::object(method),
+        Attributes::METHOD,
+    );
+}
 
 pub(crate) const PROXY_ROOTS: &[RootSpec] = &[RootSpec::new(
     ROOT_PROXY,
@@ -41,20 +59,96 @@ macro_rules! unwrap_script {
 }
 
 impl Vm {
+    pub(crate) fn proxy_base(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<Result<ObjectId, Value>, VmError> {
+        match self.heap.proxy_target(id)? {
+            Some(target) => Ok(Ok(target)),
+            None => Ok(Err(self.type_error(roots, "Proxy has been revoked")?)),
+        }
+    }
+
+    pub(crate) fn proxy_prototype(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+    ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
+        let base = unwrap_script!(self.proxy_base(roots, id));
+        Ok(Ok(self.heap.prototype_of(base)?))
+    }
+
+    fn proxy_revocable(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let proxy = match self.create_proxy(roots, args)? {
+            Ok(proxy) => proxy,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let revoke = self.heap.alloc(Object::ProxyRevoker {
+            object: PlainObject::callable(
+                Some(self.builtins.get(ROOT_FUNCTION_PROTOTYPE)),
+                0.0,
+                "".into(),
+            ),
+            proxy: Some(proxy),
+        });
+        let result = self.heap.alloc_plain();
+        self.heap
+            .define_data(result, "proxy", Value::object(proxy), Attributes::ORDINARY)?;
+        self.heap.define_data(
+            result,
+            "revoke",
+            Value::object(revoke),
+            Attributes::ORDINARY,
+        )?;
+        Ok(Invocation::Value(Value::object(result)))
+    }
+
+    pub(crate) fn revoke_proxy(&mut self, id: ObjectId) -> Result<Invocation, VmError> {
+        let Object::ProxyRevoker { proxy, .. } = self.heap.get_mut(id)? else {
+            return Err(VmError::InvalidState("expected a proxy revoker".into()));
+        };
+        if let Some(proxy) = proxy.take() {
+            let Object::Proxy { slots, .. } = self.heap.get_mut(proxy)? else {
+                return Err(VmError::InvalidState("revoker has an invalid proxy".into()));
+            };
+            *slots = None;
+        }
+        Ok(Invocation::Value(Value::UNDEFINED))
+    }
+
     fn construct_proxy(
         &mut self,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
+        Ok(match self.create_proxy(roots, args)? {
+            Ok(proxy) => Invocation::Value(Value::object(proxy)),
+            Err(error) => Invocation::Thrown(error),
+        })
+    }
+
+    fn create_proxy(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Result<ObjectId, Value>, VmError> {
         let Some(ValueRef::Object(target)) = args.first().map(Value::view) else {
-            return self.throw_type_error(roots, "Proxy requires an object target");
+            return Ok(Err(
+                self.type_error(roots, "Proxy requires an object target")?
+            ));
         };
         let Some(ValueRef::Object(handler)) = args.get(1).map(Value::view) else {
-            return self.throw_type_error(roots, "Proxy requires an object handler");
+            return Ok(Err(
+                self.type_error(roots, "Proxy requires an object handler")?
+            ));
         };
-        let base = self.heap.proxy_target(target)?;
         if !matches!(
-            self.heap.get(base)?,
+            self.heap.get(target)?,
             Object::Plain(_)
                 | Object::Array(_)
                 | Object::Boxed { .. }
@@ -62,19 +156,17 @@ impl Vm {
                 | Object::ArrayBuffer(_)
                 | Object::TypedArray(_)
                 | Object::DataView(_)
+                | Object::Proxy { .. }
         ) {
-            return self.throw_type_error(
+            return Ok(Err(self.type_error(
                 roots,
                 "Proxy supports only plain object, array, primitive wrapper, Date, and binary targets",
-            );
+            )?));
         }
-        Ok(Invocation::Value(Value::object(self.heap.alloc(
-            Object::Proxy {
-                target,
-                handler,
-                object: PlainObject::new(None),
-            },
-        ))))
+        Ok(Ok(self.heap.alloc(Object::Proxy {
+            slots: Some((target, handler)),
+            object: PlainObject::new(None),
+        })))
     }
 
     fn proxy_trap(
@@ -241,10 +333,11 @@ impl Vm {
             Ok(None) => return self.has_property_key(host, roots, target, key),
         };
         if flag == delete {
-            let extensible = self
-                .heap
-                .get(self.heap.proxy_target(target)?)?
-                .is_extensible();
+            let base = match self.proxy_base(roots, target)? {
+                Ok(base) => base,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let extensible = self.heap.get(base)?.is_extensible();
             match self.own_descriptor(host, roots, target, key)? {
                 Err(error) => return Ok(Invocation::Thrown(error)),
                 Ok(Some((_, attrs))) if !attrs.configurable || !extensible => return self.throw_type_error(roots, "Proxy trap contradicts a protected own property"),
@@ -263,15 +356,17 @@ impl Vm {
         include_metadata: bool,
     ) -> Result<Result<Vec<PropertyKey>, Value>, VmError> {
         let roots = &roots.with(&id);
-        let Object::Proxy {
-            target, handler, ..
-        } = *self.heap.get(id)?
-        else {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
             if let Some(keys) = self.heap.typed_own_keys(id, include_metadata)? {
                 return Ok(Ok(keys));
             }
             return Ok(Ok(self.heap.get(id)?.own_keys(include_metadata).collect()));
         };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let trap_slots = (target, handler);
+        let roots = &roots.with(&trap_slots);
         let Some(result) = unwrap_script!(self.proxy_trap(
             host,
             roots,
@@ -286,8 +381,7 @@ impl Vm {
                 self.type_error(roots, "Proxy ownKeys trap must return an object")?
             ));
         }
-        let root_view = (target, &result);
-        let roots = &roots.with(&root_view);
+        let roots = &roots.with(&result);
         let length =
             match self.read_property(host, roots, &result, PropertyKeyRef::String("length"))? {
                 Invocation::Value(value) => value,
@@ -367,10 +461,8 @@ impl Vm {
             }
             keys.push(key);
         }
-        let extensible = self
-            .heap
-            .get(self.heap.proxy_target(target)?)?
-            .is_extensible();
+        let base = unwrap_script!(self.proxy_base(roots, target));
+        let extensible = self.heap.get(base)?.is_extensible();
         let roots = &roots.with(&keys);
         let target_keys = unwrap_script!(self.own_keys(host, roots, target, false));
         if !extensible && target_keys.len() != keys.len() {
@@ -432,16 +524,18 @@ impl Vm {
     ) -> Result<Result<Option<(Property, Attributes)>, Value>, VmError> {
         let root_view = (id, key);
         let roots = &roots.with(&root_view);
-        let Object::Proxy {
-            target, handler, ..
-        } = *self.heap.get(id)?
-        else {
+        let Object::Proxy { slots, .. } = *self.heap.get(id)? else {
             let property = self.heap.own_property(id, key)?;
             return Ok(Ok(property.map(|property| {
                 let attrs = property.attributes();
                 (property.into_owned(), attrs)
             })));
         };
+        let Some((target, handler)) = slots else {
+            return Ok(Err(self.type_error(roots, "Proxy has been revoked")?));
+        };
+        let trap_slots = (target, handler);
+        let roots = &roots.with(&trap_slots);
         let Some(result) = unwrap_script!(self.proxy_trap(
             host,
             roots,
@@ -459,10 +553,8 @@ impl Vm {
         }
         let roots = &roots.with(&result);
         let current = unwrap_script!(self.own_descriptor(host, roots, target, key));
-        let extensible = self
-            .heap
-            .get(self.heap.proxy_target(target)?)?
-            .is_extensible();
+        let base = unwrap_script!(self.proxy_base(roots, target));
+        let extensible = self.heap.get(base)?.is_extensible();
         let invalid = |vm: &mut Self| {
             Ok(Err(vm.type_error(
                 roots,
@@ -569,7 +661,7 @@ impl Vm {
                     }
                     visited.insert(key);
                 } else {
-                    let prototype = self.heap.prototype_of(id)?;
+                    let prototype = unwrap_script!(self.proxy_prototype(roots, id));
                     let Object::ForInIterator {
                         current, pending, ..
                     } = self.heap.get_mut(iterator)?

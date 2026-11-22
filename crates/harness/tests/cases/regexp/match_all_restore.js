@@ -3,12 +3,26 @@
 // @fulfill ["wait:next", true]
 // @fulfilled "1:1|2:2|done"
 
-import { expect, wait } from 'test';
+import { expect, gc, wait } from 'test';
 
 export async function run() {
   const source = Object.getOwnPropertyDescriptor(RegExp.prototype, 'source');
   const matchAll = RegExp.prototype[Symbol.matchAll];
   const iterator = "a1b2".matchAll(/(\d)/g);
+  const species = Object.getOwnPropertyDescriptor(RegExp, Symbol.species).get;
+  const receiver = /ignored/;
+  receiver.constructor = {
+    [Symbol.species]: function () {
+      return {
+        prefix: 'species:',
+        exec(input) { gc(); return { 0: this.prefix + input }; },
+      };
+    },
+  };
+  const custom = receiver[Symbol.matchAll]('restore');
+  const exhausted = receiver[Symbol.matchAll]('exhausted');
+  expect(exhausted.next().value[0]).toBe('species:exhausted');
+  gc();
   let trace = "";
   const first = iterator.next();
   trace += `${first.value[0]}:${first.value[1]}|`;
@@ -23,6 +37,11 @@ export async function run() {
   expect(source.get).toBe(Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get);
   expect(Reflect.apply(source.get, /x/, [])).toBe('x');
   expect(matchAll).toBe(RegExp.prototype[Symbol.matchAll]);
+  expect(Object.getOwnPropertyDescriptor(RegExp, Symbol.species).get).toBe(species);
+  gc();
+  expect(custom.next().value[0]).toBe('species:restore');
+  expect(custom.next().done).toBe(true);
+  expect(exhausted.next().done).toBe(true);
   const second = iterator.next();
   trace += `${second.value[0]}:${second.value[1]}|`;
   if (iterator.next().done) trace += "done";

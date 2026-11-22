@@ -860,6 +860,12 @@ impl Vm {
                     result,
                     ref settlement,
                 } => self.resume_disposal(host, roots, state, result, settlement)?,
+                Microtask::ArrayFromAsync {
+                    ref state,
+                    ref settlement,
+                } => {
+                    self.resume_array_from_async(host, roots, state, settlement)?;
+                }
                 Microtask::Call {
                     ref function,
                     ref args,
@@ -1191,6 +1197,10 @@ impl Vm {
                     result,
                     settlement,
                 });
+            }
+            ReactionJob::ArrayFromAsync(state) => {
+                self.microtasks
+                    .push_back(Microtask::ArrayFromAsync { state, settlement });
             }
         }
         Ok(())

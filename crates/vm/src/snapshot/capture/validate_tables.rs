@@ -13,7 +13,7 @@ use crate::heap::{
     MATCH_DESCRIPTION, MATCH_SYMBOL, Object, OwnProperty, Property, REPLACE_DESCRIPTION,
     REPLACE_SYMBOL, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
     SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
-    TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL,
+    TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, UNSCOPABLES_DESCRIPTION, UNSCOPABLES_SYMBOL,
 };
 use crate::value::{ObjectId, PropertyKeyRef};
 
@@ -70,6 +70,7 @@ pub(super) fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError>
             TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
             DISPOSE_SYMBOL => Some(DISPOSE_DESCRIPTION),
             ASYNC_DISPOSE_SYMBOL => Some(ASYNC_DISPOSE_DESCRIPTION),
+            UNSCOPABLES_SYMBOL => Some(UNSCOPABLES_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -100,6 +101,7 @@ pub(super) fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError>
         (TO_STRING_TAG_SYMBOL, TO_STRING_TAG_DESCRIPTION),
         (DISPOSE_SYMBOL, DISPOSE_DESCRIPTION),
         (ASYNC_DISPOSE_SYMBOL, ASYNC_DISPOSE_DESCRIPTION),
+        (UNSCOPABLES_SYMBOL, UNSCOPABLES_DESCRIPTION),
     ] {
         if !snapshot
             .symbols
@@ -129,6 +131,7 @@ pub(super) fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError>
             TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
             DISPOSE_SYMBOL => Some(DISPOSE_DESCRIPTION),
             ASYNC_DISPOSE_SYMBOL => Some(ASYNC_DISPOSE_DESCRIPTION),
+            UNSCOPABLES_SYMBOL => Some(UNSCOPABLES_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(
@@ -202,6 +205,31 @@ pub(super) fn validate_source_modules(
                 }
             }
             Object::Plain(object) => {
+                if object.is_raw_json {
+                    let invalid =
+                        || VmError::InvalidSnapshot(format!("invalid raw JSON object {id}"));
+                    let source = heap
+                        .raw_json_text(id)
+                        .map_err(|_| invalid())?
+                        .ok_or_else(invalid)?;
+                    let stored = heap.get(id)?;
+                    let Some(OwnProperty::Stored(_, attributes)) =
+                        stored.own_property(PropertyKeyRef::String("rawJSON"))
+                    else {
+                        return Err(invalid());
+                    };
+                    if object.is_error
+                        || object.module_namespace.is_some()
+                        || object.prototype.is_some()
+                        || stored.is_extensible()
+                        || attributes != crate::vm::MODULE_EXPORT_ATTRIBUTES
+                        || object.props.iter().count() != 1
+                        || object.symbol_props.iter().next().is_some()
+                        || !crate::builtin::json::is_raw_json_source(source)
+                    {
+                        return Err(invalid());
+                    }
+                }
                 if let Some(module) = object.module_namespace
                     && namespaces.get(module as usize) != Some(&id)
                 {

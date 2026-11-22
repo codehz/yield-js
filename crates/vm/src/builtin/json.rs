@@ -1,8 +1,11 @@
 //! JSON parsing and serialization for the VM's JSON builtin.
 
+use std::collections::HashMap;
+use std::ops::Range;
+
 use crate::error::VmError;
-use crate::gc::ActiveRoots;
-use crate::heap::{Attributes, BoxedPrimitive, Object};
+use crate::gc::{ActiveRoots, TraceRoots, Tracer};
+use crate::heap::{Attributes, BoxedPrimitive, DescriptorUpdate, Object};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -31,6 +34,30 @@ pub(crate) mod namespace {
     ) -> Result<Invocation, VmError> {
         vm.json_stringify(host, roots, args)
     }
+
+    #[function(name = "rawJSON", length = 1)]
+    fn raw_json(
+        vm: &mut Vm,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        vm.json_raw_json(host, roots, args)
+    }
+
+    #[function(name = "isRawJSON", length = 1)]
+    fn is_raw_json(
+        vm: &mut Vm,
+        _host: &mut dyn Host,
+        _roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let branded = match args.first().map(Value::view) {
+            Some(super::ValueRef::Object(id)) => vm.heap.raw_json_text(id)?.is_some(),
+            _ => false,
+        };
+        Ok(Invocation::Value(Value::boolean(branded)))
+    }
 }
 
 const MAX_DEPTH: usize = 256;
@@ -41,8 +68,49 @@ enum JsonValue {
     Bool(bool),
     Number(f64),
     String(JsString),
+    Raw(JsString),
     Array(Vec<JsonValue>),
     Object(Vec<(JsString, JsonValue)>),
+}
+
+enum Parsed {
+    Primitive(Value, Range<usize>),
+    Array(Vec<Parsed>),
+    Object(Vec<(JsString, Parsed)>),
+}
+
+struct ParseRecord {
+    value: Value,
+    children: Children,
+}
+
+enum Children {
+    None,
+    Source(Range<usize>),
+    Array(Vec<ParseRecord>),
+    Object(HashMap<JsString, ParseRecord>),
+}
+
+impl TraceRoots for ParseRecord {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        self.value.trace(tracer)?;
+        match &self.children {
+            Children::Array(elements) => elements.trace(tracer)?,
+            Children::Object(entries) => {
+                for entry in entries.values() {
+                    entry.trace(tracer)?;
+                }
+            }
+            Children::None | Children::Source(_) => {}
+        }
+        Ok(())
+    }
+}
+
+struct Reviver<'a> {
+    function: &'a Value,
+    text: &'a JsString,
+    depth: usize,
 }
 
 struct Parser<'a> {
@@ -76,31 +144,41 @@ impl Parser<'_> {
         }
     }
 
-    fn value(&mut self, depth: usize) -> Result<JsonValue, String> {
+    fn value(&mut self, depth: usize) -> Result<Parsed, String> {
         if depth > MAX_DEPTH {
             return Err("JSON nesting exceeds maximum depth".into());
         }
         self.ws();
         match self.peek() {
-            Some('n') if self.literal("null") => Ok(JsonValue::Null),
-            Some('t') if self.literal("true") => Ok(JsonValue::Bool(true)),
-            Some('f') if self.literal("false") => Ok(JsonValue::Bool(false)),
-            Some('"') => self.string().map(JsonValue::String),
             Some('[') => self.array(depth + 1),
             Some('{') => self.object(depth + 1),
-            Some('-' | '0'..='9') => self.number(),
+            _ => {
+                let start = self.pos;
+                let value = self.primitive()?;
+                Ok(Parsed::Primitive(value, start..self.pos))
+            }
+        }
+    }
+
+    fn primitive(&mut self) -> Result<Value, String> {
+        match self.peek() {
+            Some('n') if self.literal("null") => Ok(Value::NULL),
+            Some('t') if self.literal("true") => Ok(Value::boolean(true)),
+            Some('f') if self.literal("false") => Ok(Value::boolean(false)),
+            Some('"') => self.string().map(Value::string),
+            Some('-' | '0'..='9') => self.number().map(Value::number),
             _ => Err("invalid JSON".into()),
         }
     }
 
     fn literal(&mut self, literal: &str) -> bool {
-        let units = literal.encode_utf16().collect::<Vec<_>>();
-        if self
-            .text
-            .get(self.pos..)
-            .is_some_and(|rest| rest.starts_with(&units))
+        if self.text[self.pos..]
+            .iter()
+            .take(literal.len())
+            .copied()
+            .eq(literal.bytes().map(u16::from))
         {
-            self.pos += units.len();
+            self.pos += literal.len();
             true
         } else {
             false
@@ -108,15 +186,20 @@ impl Parser<'_> {
     }
 
     fn string(&mut self) -> Result<JsString, String> {
+        let mut units = Vec::new();
+        self.scan_string(|unit| units.push(unit))?;
+        Ok(JsString::from_units(units))
+    }
+
+    fn scan_string(&mut self, mut unit_out: impl FnMut(u16)) -> Result<(), String> {
         if !self.take('"') {
             return Err("invalid JSON string".into());
         }
-        let mut result = Vec::new();
         loop {
             let unit = *self.text.get(self.pos).ok_or("unterminated JSON string")?;
             self.pos += 1;
             if unit == u16::from(b'"') {
-                return Ok(JsString::from_units(result));
+                return Ok(());
             }
             if unit == u16::from(b'\\') {
                 let escaped_unit = *self
@@ -126,7 +209,7 @@ impl Parser<'_> {
                 let escaped =
                     char::from_u32(u32::from(escaped_unit)).ok_or("invalid JSON escape")?;
                 self.pos += 1;
-                result.push(match escaped {
+                unit_out(match escaped {
                     '"' | '\\' | '/' => escaped as u16,
                     'b' => 0x08,
                     'f' => 0x0c,
@@ -139,7 +222,7 @@ impl Parser<'_> {
             } else if unit <= 0x1f {
                 return Err("unescaped control character".into());
             } else {
-                result.push(unit);
+                unit_out(unit);
             }
         }
     }
@@ -157,8 +240,18 @@ impl Parser<'_> {
         Ok(value)
     }
 
-    fn number(&mut self) -> Result<JsonValue, String> {
+    fn number(&mut self) -> Result<f64, String> {
         let start = self.pos;
+        self.scan_number()?;
+        self.text[start..self.pos]
+            .iter()
+            .map(|&unit| char::from(unit as u8))
+            .collect::<String>()
+            .parse::<f64>()
+            .map_err(|_| "invalid JSON number".into())
+    }
+
+    fn scan_number(&mut self) -> Result<(), String> {
         self.take('-');
         match self.peek() {
             Some('0') => {
@@ -194,24 +287,15 @@ impl Parser<'_> {
                 self.pos += 1;
             }
         }
-        let number = self.text[start..self.pos]
-            .iter()
-            .map(|&unit| char::from(unit as u8))
-            .collect::<String>()
-            .parse::<f64>()
-            .map_err(|_| "invalid JSON number")?;
-        if !number.is_finite() {
-            return Err("JSON number is not finite".into());
-        }
-        Ok(JsonValue::Number(number))
+        Ok(())
     }
 
-    fn array(&mut self, depth: usize) -> Result<JsonValue, String> {
+    fn array(&mut self, depth: usize) -> Result<Parsed, String> {
         self.take('[');
         self.ws();
         let mut values = Vec::new();
         if self.take(']') {
-            return Ok(JsonValue::Array(values));
+            return Ok(Parsed::Array(values));
         }
         loop {
             values.push(self.value(depth)?);
@@ -227,15 +311,15 @@ impl Parser<'_> {
                 return Err("trailing comma".into());
             }
         }
-        Ok(JsonValue::Array(values))
+        Ok(Parsed::Array(values))
     }
 
-    fn object(&mut self, depth: usize) -> Result<JsonValue, String> {
+    fn object(&mut self, depth: usize) -> Result<Parsed, String> {
         self.take('{');
         self.ws();
         let mut values = Vec::new();
         if self.take('}') {
-            return Ok(JsonValue::Object(values));
+            return Ok(Parsed::Object(values));
         }
         loop {
             self.ws();
@@ -257,8 +341,27 @@ impl Parser<'_> {
                 return Err("trailing comma".into());
             }
         }
-        Ok(JsonValue::Object(values))
+        Ok(Parsed::Object(values))
     }
+}
+
+pub(crate) fn is_raw_json_source(text: &JsString) -> bool {
+    let units = text.to_utf16();
+    let mut parser = Parser {
+        text: &units,
+        pos: 0,
+    };
+    // Unlike full JSON parsing, raw JSON accepts only a primitive token and
+    // does not consume surrounding whitespace.
+    let valid = match parser.peek() {
+        Some('n') => parser.literal("null"),
+        Some('t') => parser.literal("true"),
+        Some('f') => parser.literal("false"),
+        Some('"') => parser.scan_string(|_| {}).is_ok(),
+        Some('-' | '0'..='9') => parser.scan_number().is_ok(),
+        _ => false,
+    };
+    valid && parser.pos == units.len()
 }
 
 fn quote(text: &JsString, out: &mut Vec<u16>) {
@@ -296,6 +399,7 @@ fn encode(value: &JsonValue, out: &mut Vec<u16>, gap: &JsString, indent: usize) 
         }
         JsonValue::Number(value) => out.extend(ryu_js::Buffer::new().format(*value).encode_utf16()),
         JsonValue::String(value) => quote(value, out),
+        JsonValue::Raw(value) => out.extend(value.units()),
         JsonValue::Array(values) => {
             encode_list(out, gap, indent, true, values.len(), |out, next| {
                 for (index, value) in values.iter().enumerate() {
@@ -385,37 +489,71 @@ impl Vm {
                 Ok(value)
             }
         });
-        let value = match parsed {
-            Ok(value) => self.materialize_json(value)?,
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
             Err(message) if message.contains("depth") => {
                 return self.throw_range_error(roots, &message);
             }
-            Err(message) => {
-                let error = self.alloc_error(
-                    roots,
-                    self.builtins.get("syntaxerror.prototype"),
-                    "SyntaxError",
-                    Some(message.into()),
-                )?;
-                return Ok(Invocation::Thrown(error));
-            }
+            Err(message) => return self.json_syntax_error(roots, message.into()),
         };
-        let Some(reviver) = args.get(1).filter(|value| self.is_callable(value)) else {
-            return Ok(Invocation::Value(value));
+        let function = args.get(1).filter(|value| self.is_callable(value));
+        let record = self.materialize_json(parsed, function.is_some())?;
+        let Some(function) = function else {
+            return Ok(Invocation::Value(record.value));
+        };
+        let reviver = Reviver {
+            function,
+            text: &text,
+            depth: 0,
         };
         let holder = self.heap.alloc_plain();
         self.heap.define_data(
             holder,
             PropertyKey::String(JsString::new()),
-            value,
+            record.value.clone(),
             Attributes::ORDINARY,
         )?;
         let root = JsString::new();
-        let roots = &roots.with(&holder);
-        match self.revive(host, roots, reviver, holder, &root)? {
-            Ok(()) => self.read_data(holder, &root),
+        // A callback can remove an unvisited object from the live parse
+        // result. Keep all original identities rooted for SameValue checks.
+        let roots = &roots.with(&record);
+        match self.revive(host, roots, &reviver, holder, &root, Some(&record))? {
+            Ok(value) => Ok(Invocation::Value(value)),
             Err(error) => Ok(Invocation::Thrown(error)),
         }
+    }
+
+    fn json_raw_json(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let text =
+            match self.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
+                Ok(text) => text,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        if !is_raw_json_source(&text) {
+            return self.json_syntax_error(roots, "Invalid raw JSON text".into());
+        }
+        let raw = self.heap.alloc_raw_json(text)?;
+        Ok(Invocation::Value(Value::object(raw)))
+    }
+
+    fn json_syntax_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        message: JsString,
+    ) -> Result<Invocation, VmError> {
+        let error = self.alloc_error(
+            roots,
+            self.builtins.get("syntaxerror.prototype"),
+            "SyntaxError",
+            Some(message),
+        )?;
+        Ok(Invocation::Thrown(error))
     }
 
     fn json_stringify(
@@ -427,16 +565,22 @@ impl Vm {
         let roots = &roots.with(&args);
         let value = args.first().cloned().unwrap_or(Value::UNDEFINED);
         let replacer = args.get(1);
-        let listed = match replacer.map(Value::view) {
-            Some(ValueRef::Object(id)) if matches!(self.heap.get(id)?, Object::Array(_)) => {
-                match self.json_property_list(host, roots, id)? {
+        let mut listed = None;
+        let function = replacer.filter(|value| self.is_callable(value));
+        if function.is_none()
+            && let Some(ValueRef::Object(id)) = replacer.map(Value::view)
+        {
+            let target = match self.proxy_base(roots, id)? {
+                Ok(target) => target,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            if matches!(self.heap.get(target)?, Object::Array(_)) {
+                listed = match self.json_property_list(host, roots, id)? {
                     Ok(keys) => Some(keys),
                     Err(error) => return Ok(Invocation::Thrown(error)),
-                }
+                };
             }
-            _ => None,
-        };
-        let function = replacer.filter(|value| self.is_callable(value));
+        }
         let gap = match self.json_gap(host, roots, args.get(2).unwrap_or(&Value::UNDEFINED))? {
             Ok(gap) => gap,
             Err(error) => return Ok(Invocation::Thrown(error)),
@@ -488,10 +632,20 @@ impl Vm {
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            ValueRef::Object(_) => match self.coerce_number(host, roots, space)? {
-                Ok(number) => Value::number(number),
-                Err(error) => return Ok(Err(error)),
-            },
+            ValueRef::Object(id)
+                if matches!(
+                    self.heap.get(id)?,
+                    Object::Boxed {
+                        primitive: BoxedPrimitive::Number(_),
+                        ..
+                    }
+                ) =>
+            {
+                match self.coerce_number(host, roots, space)? {
+                    Ok(number) => Value::number(number),
+                    Err(error) => return Ok(Err(error)),
+                }
+            }
             _ => space.clone(),
         };
         Ok(Ok(match space.view() {
@@ -511,9 +665,9 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
-        let length = match self.heap.get(id)? {
-            Object::Array(array) => array.length,
-            _ => 0,
+        let length = match self.length_of_array_like(host, roots, id)? {
+            Ok(length) => length,
+            Err(error) => return Ok(Err(error)),
         };
         let mut keys = Vec::new();
         for index in 0..length {
@@ -562,25 +716,20 @@ impl Vm {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
-        if let ValueRef::Object(id) = value.view() {
-            let receiver = Value::object(id);
-            let roots = &roots.with(&receiver);
-            let method = match self.read_property(
-                host,
-                roots,
-                &receiver,
-                PropertyKeyRef::String("toJSON"),
-            )? {
-                Invocation::Value(method) => method,
-                Invocation::Thrown(error) => return Ok(Err(error)),
-            };
+        if matches!(value.view(), ValueRef::Object(_) | ValueRef::BigInt(_)) {
+            let roots = &roots.with(&value);
+            let method =
+                match self.read_property(host, roots, &value, PropertyKeyRef::String("toJSON"))? {
+                    Invocation::Value(method) => method,
+                    Invocation::Thrown(error) => return Ok(Err(error)),
+                };
             if self.is_callable(&method) {
                 value = match self.invoke(
                     host,
                     roots,
                     &method,
                     Arguments::Values(&[Value::string(key.clone())]),
-                    &receiver,
+                    &value,
                 )? {
                     Invocation::Value(value) => value,
                     Invocation::Thrown(error) => return Ok(Err(error)),
@@ -609,6 +758,11 @@ impl Vm {
         state: &mut Serialize<'_>,
         value: Value,
     ) -> Result<Result<Option<JsonValue>, Value>, VmError> {
+        if let ValueRef::Object(id) = value.view()
+            && let Some(text) = self.heap.raw_json_text(id)?
+        {
+            return Ok(Ok(Some(JsonValue::Raw(text.clone()))));
+        }
         let tree = match value.view() {
             ValueRef::Null => JsonValue::Null,
             ValueRef::Bool(value) => JsonValue::Bool(value),
@@ -621,21 +775,22 @@ impl Vm {
                 ));
             }
             ValueRef::Object(_) if self.is_callable(&value) => return Ok(Ok(None)),
-            ValueRef::Object(id)
-                if matches!(
-                    self.heap.get(self.heap.proxy_target(id)?)?,
-                    Object::Array(_)
-                ) =>
-            {
-                match self.serialize_array(host, roots, state, id)? {
-                    Ok(value) => value,
+            ValueRef::Object(id) => {
+                let roots = &roots.with(&id);
+                let target = match self.proxy_base(roots, id)? {
+                    Ok(target) => target,
+                    Err(error) => return Ok(Err(error)),
+                };
+                let result = if matches!(self.heap.get(target)?, Object::Array(_)) {
+                    self.serialize_array(host, roots, state, id)?
+                } else {
+                    self.serialize_object(host, roots, state, id)?
+                };
+                match result {
+                    Ok(tree) => tree,
                     Err(error) => return Ok(Err(error)),
                 }
             }
-            ValueRef::Object(id) => match self.serialize_object(host, roots, state, id)? {
-                Ok(value) => value,
-                Err(error) => return Ok(Err(error)),
-            },
             ValueRef::Undefined | ValueRef::Symbol(_) => return Ok(Ok(None)),
         };
         Ok(Ok(Some(tree)))
@@ -653,35 +808,15 @@ impl Vm {
             return Ok(Err(error));
         }
         state.stack.push(id);
-        let is_proxy = matches!(self.heap.get(id)?, Object::Proxy { .. });
-        let length = match self.heap.get(id)? {
-            Object::Array(array) => array.length,
-            _ => {
-                let length = match self.read_property(
-                    host,
-                    roots,
-                    &Value::object(id),
-                    PropertyKeyRef::String("length"),
-                )? {
-                    Invocation::Value(value) => value,
-                    Invocation::Thrown(error) => return Ok(Err(error)),
-                };
-                match self.coerce_number(host, roots, &length)? {
-                    Ok(length) => length.clamp(0.0, 9_007_199_254_740_991.0) as usize,
-                    Err(error) => return Ok(Err(error)),
-                }
-            }
+        let length = match self.length_of_array_like(host, roots, id)? {
+            Ok(length) => length,
+            Err(error) => return Ok(Err(error)),
         };
-        let mut values = Vec::with_capacity(if is_proxy { 0 } else { length });
+        let mut values = Vec::new();
         let saved = state.path.clone();
         for index in 0..length {
             state.path = format!("{saved}[{index}]");
             let key = JsString::from(index.to_string());
-            let owned = PropertyKey::String(key.clone());
-            if !is_proxy && !self.heap.has_own(id, &owned)? {
-                values.push(JsonValue::Null);
-                continue;
-            }
             match self.serialize_property(host, roots, state, id, &key)? {
                 Ok(Some(value)) => values.push(value),
                 Ok(None) => values.push(JsonValue::Null),
@@ -752,111 +887,193 @@ impl Vm {
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
-        reviver: &Value,
+        reviver: &Reviver<'_>,
         holder: ObjectId,
         key: &JsString,
-    ) -> Result<Result<(), Value>, VmError> {
-        let root_view = (holder, reviver);
-        let roots = &roots.with(&root_view);
-        let initial = match self.read_data(holder, key)? {
-            Invocation::Value(value) => value,
-            Invocation::Thrown(error) => return Ok(Err(error)),
-        };
-        if let ValueRef::Object(id) = initial.view() {
-            let roots = &roots.with(&initial);
-            let nested = match self.heap.get(id)? {
-                Object::Array(array) => (0..array.length)
-                    .map(|index| JsString::from(index.to_string()))
-                    .collect(),
-                _ => self
-                    .heap
-                    .get(id)?
-                    .own_keys(true)
-                    .filter_map(|key| match key {
-                        PropertyKey::String(key) => Some(key),
-                        PropertyKey::Symbol(_) => None,
-                    })
-                    .collect::<Vec<_>>(),
+        record: Option<&ParseRecord>,
+    ) -> Result<Result<Value, Value>, VmError> {
+        let roots = &roots.with(&holder);
+        if reviver.depth > MAX_DEPTH {
+            return self
+                .type_error(roots, "Maximum JSON nesting exceeded")
+                .map(Err);
+        }
+        let receiver = Value::object(holder);
+        let value =
+            match self.read_property(host, roots, &receiver, PropertyKeyRef::JsString(key))? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => return Ok(Err(error)),
             };
-            if nested.len() > MAX_DEPTH {
-                return self
-                    .type_error(roots, "Maximum JSON nesting exceeded")
-                    .map(Err);
-            }
-            for name in nested {
-                if let Err(error) = self.revive(host, roots, reviver, id, &name)? {
-                    return Ok(Err(error));
+        let children = record
+            .filter(|record| crate::ops::same_value(&record.value, &value))
+            .map(|record| &record.children);
+        if let ValueRef::Object(id) = value.view() {
+            let roots = &roots.with(&id);
+            let next = Reviver {
+                depth: reviver.depth + 1,
+                ..*reviver
+            };
+            let target = match self.proxy_base(roots, id)? {
+                Ok(target) => target,
+                Err(error) => return Ok(Err(error)),
+            };
+            if matches!(self.heap.get(target)?, Object::Array(_)) {
+                let length = match self.length_of_array_like(host, roots, id)? {
+                    Ok(length) => length,
+                    Err(error) => return Ok(Err(error)),
+                };
+                for index in 0..length {
+                    let record = match children {
+                        Some(Children::Array(elements)) => usize::try_from(index)
+                            .ok()
+                            .and_then(|index| elements.get(index)),
+                        _ => None,
+                    };
+                    let name = JsString::from(index.to_string());
+                    let result = self.revive(host, roots, &next, id, &name, record)?;
+                    if let Err(error) = self.apply_reviver_result(host, roots, id, name, result)? {
+                        return Ok(Err(error));
+                    }
+                }
+            } else {
+                let keys = match self.enumerable_string_keys(host, roots, id)? {
+                    Ok(keys) => keys,
+                    Err(error) => return Ok(Err(error)),
+                };
+                for name in keys {
+                    let record = match children {
+                        Some(Children::Object(entries)) => entries.get(&name),
+                        _ => None,
+                    };
+                    let result = self.revive(host, roots, &next, id, &name, record)?;
+                    if let Err(error) = self.apply_reviver_result(host, roots, id, name, result)? {
+                        return Ok(Err(error));
+                    }
                 }
             }
         }
-        let value = match self.read_data(holder, key)? {
-            Invocation::Value(value) => value,
-            Invocation::Thrown(error) => return Ok(Err(error)),
+        let context = self.heap.alloc_plain();
+        if let Some(Children::Source(span)) = children {
+            self.heap.define_data(
+                context,
+                "source",
+                Value::string(reviver.text.slice_units(span.clone())),
+                Attributes::ORDINARY,
+            )?;
+        }
+        Ok(
+            match self.invoke(
+                host,
+                roots,
+                reviver.function,
+                Arguments::Values(&[Value::string(key.clone()), value, Value::object(context)]),
+                &receiver,
+            )? {
+                Invocation::Value(value) => Ok(value),
+                Invocation::Thrown(error) => Err(error),
+            },
+        )
+    }
+
+    fn apply_reviver_result(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        holder: ObjectId,
+        key: JsString,
+        result: Result<Value, Value>,
+    ) -> Result<Result<(), Value>, VmError> {
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => return Ok(Err(error)),
         };
-        let replaced = match self.invoke(
-            host,
-            roots,
-            reviver,
-            Arguments::Values(&[Value::string(key.clone()), value]),
-            &Value::object(holder),
-        )? {
-            Invocation::Value(value) => value,
-            Invocation::Thrown(error) => return Ok(Err(error)),
-        };
-        if matches!(replaced.view(), ValueRef::Undefined) {
-            self.heap
-                .delete_own(holder, PropertyKeyRef::JsString(key))?;
+        if matches!(value.view(), ValueRef::Undefined) {
+            if let Invocation::Thrown(error) =
+                self.delete_property(host, roots, &Value::object(holder), &Value::string(key))?
+            {
+                return Ok(Err(error));
+            }
         } else {
-            self.heap
-                .set_own(holder, PropertyKey::String(key.clone()), replaced)?;
+            let update = DescriptorUpdate {
+                value: Some(value),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+                ..Default::default()
+            };
+            if let Err(error) = self.try_apply_property_update(
+                host,
+                roots,
+                holder,
+                PropertyKey::String(key),
+                update,
+            )? {
+                return Ok(Err(error));
+            }
         }
         Ok(Ok(()))
     }
 
-    fn read_data(&self, id: ObjectId, key: &JsString) -> Result<Invocation, VmError> {
-        let property = self
-            .heap
-            .get(id)?
-            .own_property(PropertyKeyRef::JsString(key));
-        let property = property.map(crate::heap::OwnProperty::into_owned);
-        Ok(Invocation::Value(match property {
-            Some(crate::heap::Property::Data(value)) => value,
-            _ => Value::UNDEFINED,
-        }))
-    }
-
-    fn materialize_json(&mut self, value: JsonValue) -> Result<Value, VmError> {
-        match value {
-            JsonValue::Null => Ok(Value::NULL),
-            JsonValue::Bool(value) => Ok(Value::boolean(value)),
-            JsonValue::Number(value) => Ok(Value::number(value)),
-            JsonValue::String(value) => Ok(Value::string(value)),
-            JsonValue::Array(values) => {
+    fn materialize_json(&mut self, parsed: Parsed, track: bool) -> Result<ParseRecord, VmError> {
+        let (value, children) = match parsed {
+            Parsed::Primitive(value, span) => (
+                value,
+                if track {
+                    Children::Source(span)
+                } else {
+                    Children::None
+                },
+            ),
+            Parsed::Array(values) => {
                 let id = self.heap.alloc_array(Vec::new());
-                for (index, value) in values.into_iter().enumerate() {
-                    let value = self.materialize_json(value)?;
-                    self.heap.define_data(
-                        id,
-                        PropertyKey::String(index.to_string().into()),
-                        value,
-                        Attributes::ORDINARY,
-                    )?;
+                let mut elements = Vec::new();
+                if track {
+                    elements.reserve(values.len());
                 }
-                Ok(Value::object(id))
+                for (index, parsed) in values.into_iter().enumerate() {
+                    let record = self.materialize_json(parsed, track)?;
+                    let key = PropertyKey::String(index.to_string().into());
+                    if track {
+                        self.heap.define_data(
+                            id,
+                            key,
+                            record.value.clone(),
+                            Attributes::ORDINARY,
+                        )?;
+                        elements.push(record);
+                    } else {
+                        self.heap
+                            .define_data(id, key, record.value, Attributes::ORDINARY)?;
+                    }
+                }
+                (Value::object(id), Children::Array(elements))
             }
-            JsonValue::Object(values) => {
+            Parsed::Object(values) => {
                 let id = self.heap.alloc_plain();
-                for (key, value) in values {
-                    let value = self.materialize_json(value)?;
-                    self.heap.define_data(
-                        id,
-                        PropertyKey::String(key),
-                        value,
-                        Attributes::ORDINARY,
-                    )?;
+                let mut entries = HashMap::new();
+                for (key, parsed) in values {
+                    let record = self.materialize_json(parsed, track)?;
+                    if track {
+                        self.heap.define_data(
+                            id,
+                            PropertyKey::String(key.clone()),
+                            record.value.clone(),
+                            Attributes::ORDINARY,
+                        )?;
+                        // The final spelling/value for duplicate decoded keys wins.
+                        entries.insert(key, record);
+                    } else {
+                        self.heap.define_data(
+                            id,
+                            PropertyKey::String(key),
+                            record.value,
+                            Attributes::ORDINARY,
+                        )?;
+                    }
                 }
-                Ok(Value::object(id))
+                (Value::object(id), Children::Object(entries))
             }
-        }
+        };
+        Ok(ParseRecord { value, children })
     }
 }

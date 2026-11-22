@@ -16,6 +16,7 @@ pub(super) fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
     let mut adopts: BTreeMap<ObjectId, usize> = BTreeMap::new();
     let mut closes: BTreeMap<ObjectId, Vec<(ObjectId, ObjectId)>> = BTreeMap::new();
     let mut disposals = BTreeMap::new();
+    let mut array_jobs = BTreeSet::new();
     for (id, object) in heap.iter() {
         match object {
             Object::Promise(promise) => {
@@ -56,6 +57,17 @@ pub(super) fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                             {
                                 return Err(VmError::InvalidSnapshot(format!(
                                     "invalid disposal reaction on Promise {id}"
+                                )));
+                            }
+                        }
+                        ReactionJob::ArrayFromAsync(job) => {
+                            if !matches!(promise.state, PromiseState::Pending)
+                                || !job
+                                    .validate(heap)
+                                    .is_some_and(|target| array_jobs.insert(target))
+                            {
+                                return Err(VmError::InvalidSnapshot(format!(
+                                    "invalid Array.fromAsync reaction on Promise {id}"
                                 )));
                             }
                         }

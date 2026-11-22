@@ -87,12 +87,17 @@ pub(crate) mod members {
                 }
                 _ => return result(false),
             };
-            let mut prototype = vm.heap.prototype_of(target)?;
-            while let Some(id) = prototype {
+            let mut current = target;
+            loop {
+                let id = match vm.proxy_prototype(roots, current)? {
+                    Ok(Some(id)) => id,
+                    Ok(None) => break,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
                 if id == receiver {
                     return result(true);
                 }
-                prototype = vm.heap.prototype_of(id)?;
+                current = id;
             }
             result(false)
         };

@@ -4,6 +4,7 @@ use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::Attributes;
+use crate::heap::Object;
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
@@ -14,6 +15,17 @@ use crate::vm::Vm;
 /// prototype chain, so it is registered under the `error.prototype` owner.
 const PROTOTYPE_TO_STRING: IntrinsicKey =
     IntrinsicKey::new("error.prototype", Slot::Prototype, "toString");
+const IS_ERROR: IntrinsicKey = IntrinsicKey::new("Error", Slot::Static, "isError");
+const ERROR_STATIC_INTRINSICS: &[IntrinsicDef] =
+    &[IntrinsicDef::call(IS_ERROR, 1, |vm, _, _, args, _| {
+        let branded = match args.first().map(Value::view) {
+            Some(ValueRef::Object(id)) => {
+                matches!(vm.heap.get(id)?, Object::Plain(o) if o.is_error)
+            }
+            _ => false,
+        };
+        Ok(Invocation::Value(Value::boolean(branded)))
+    })];
 const ERROR_PROTOTYPE_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
     PROTOTYPE_TO_STRING,
     0,
@@ -90,12 +102,13 @@ macro_rules! error_class {
             $parent,
             $base,
             $length,
-            FUNCTION_PARENT,
-            $base,
-            NO_PROTOTYPE_INTRINSICS
+            Some("error"),
+            true,
+            NO_PROTOTYPE_INTRINSICS,
+            &[]
         );
     };
-    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:expr) => {
+    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:expr, $static_intrinsics:expr) => {
         pub(crate) const $owner: Owner = {
             const PROTOTYPE: &str = concat!($root, ".prototype");
             const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
@@ -120,6 +133,7 @@ macro_rules! error_class {
                         },
                     )],
                     $prototype_intrinsics,
+                    $static_intrinsics,
                 ],
                 Some(|vm, _| {
                     let prototype = vm.builtins.get(PROTOTYPE);
@@ -141,6 +155,14 @@ macro_rules! error_class {
                         );
                     }
                     if $root == "error" {
+                        let method = vm.alloc_intrinsic(IS_ERROR);
+                        define_builtin_data(
+                            vm,
+                            constructor,
+                            "isError",
+                            Value::object(method),
+                            Attributes::METHOD,
+                        );
                         let method = vm.alloc_intrinsic(PROTOTYPE_TO_STRING);
                         define_builtin_data(
                             vm,
@@ -166,7 +188,8 @@ error_class!(
     1,
     FUNCTION_PARENT,
     true,
-    ERROR_PROTOTYPE_INTRINSICS
+    ERROR_PROTOTYPE_INTRINSICS,
+    ERROR_STATIC_INTRINSICS
 );
 error_class!(
     TYPE_ERROR,
@@ -233,5 +256,6 @@ error_class!(
     3,
     Some("error"),
     true,
-    NO_PROTOTYPE_INTRINSICS
+    NO_PROTOTYPE_INTRINSICS,
+    &[]
 );
