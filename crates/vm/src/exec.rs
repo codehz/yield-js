@@ -9,8 +9,8 @@ use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::string::utf16_unit_string;
 use crate::bytecode::{
-    AccessorPrefix, BinaryOp, CallArgs, ExceptionHandler, Function, Instr, PropertyDefinition,
-    Slot, SlotKind, UnaryOp,
+    AccessorPrefix, BinaryOp, CallArgs, Constant, ExceptionHandler, Function, Instr,
+    PropertyDefinition, Slot, SlotKind, UnaryOp,
 };
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -310,7 +310,7 @@ impl Vm {
             if crate::perf::ENABLED {
                 crate::perf::record(|counters| counters.dispatches += 1);
             }
-            match self.step(host, roots, &mut frame, instr)? {
+            match self.step(host, roots, &mut frame, instr, &build.constants)? {
                 Step::Next => {}
                 Step::Suspend => return Ok(ExecOutcome::Suspended),
                 Step::Yield { value, delegate } => {
@@ -404,13 +404,14 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,
+        constants: &[Constant],
     ) -> Result<Step, VmError> {
         // Reentrant calls borrow the initialized slots; destination writes
         // happen after the last use of this view in each instruction.
         let frame_roots = &roots.with(&*frame);
         match *instr {
             Instr::Const { dst, constant } => {
-                frame.write(dst, self.constant(constant)?)?;
+                frame.write(dst, Self::constant(constants, constant)?)?;
                 Ok(Step::Next)
             }
             Instr::Undefined { dst } => {
@@ -1044,6 +1045,20 @@ impl Vm {
                     frame_roots,
                     frame.read_ref(object)?,
                     frame.read_ref(key)?,
+                )?;
+                store_invocation(frame, dst, invocation)
+            }
+            Instr::GetMemberConstKey { dst, object, key } => {
+                let Some(Constant::String(key)) = constants.get(key as usize) else {
+                    return Err(VmError::InvalidState(format!(
+                        "GetMemberConstKey requires a string constant at index {key}"
+                    )));
+                };
+                let invocation = self.read_property(
+                    host,
+                    frame_roots,
+                    frame.read_ref(object)?,
+                    PropertyKeyRef::JsString(key),
                 )?;
                 store_invocation(frame, dst, invocation)
             }
@@ -2880,18 +2895,16 @@ impl Vm {
         unary_op(operator, value)
     }
 
-    fn constant(&self, index: u32) -> Result<Value, VmError> {
-        let constant = self
-            .build
-            .constants
+    fn constant(constants: &[Constant], index: u32) -> Result<Value, VmError> {
+        let constant = constants
             .get(index as usize)
             .ok_or_else(|| VmError::InvalidState(format!("constant {index} does not exist")))?;
         Ok(match constant {
-            crate::bytecode::Constant::Null => Value::NULL,
-            crate::bytecode::Constant::Bool(value) => Value::boolean(*value),
-            crate::bytecode::Constant::Number(value) => Value::number(*value),
-            crate::bytecode::Constant::String(value) => Value::string(value.clone()),
-            crate::bytecode::Constant::BigInt(value) => Value::bigint(value.clone()),
+            Constant::Null => Value::NULL,
+            Constant::Bool(value) => Value::boolean(*value),
+            Constant::Number(value) => Value::number(*value),
+            Constant::String(value) => Value::string(value.clone()),
+            Constant::BigInt(value) => Value::bigint(value.clone()),
         })
     }
 

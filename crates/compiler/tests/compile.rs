@@ -838,6 +838,61 @@ fn rejects_malformed_property_definition_and_method_metadata() {
 }
 
 #[test]
+fn selects_const_keys_only_for_syntax_known_string_reads() {
+    use yield_vm::bytecode::Constant;
+
+    let mut build = compile(
+        r#"export function run(o, key) {
+            return o.field + o[("\u0066ield")] + o[`field`] + o[key];
+        }"#,
+        &CompileOptions::default(),
+    )
+    .expect("member reads compile");
+    let mut keys = Vec::new();
+    let mut dynamic = 0;
+    for instr in build.functions.iter().flat_map(|function| &function.code) {
+        match instr {
+            Instr::GetMemberConstKey { key, .. } => keys.push(*key),
+            Instr::GetMember { .. } => dynamic += 1,
+            Instr::Const { .. } => panic!("the key should not be loaded into a slot"),
+            _ => {}
+        }
+    }
+    let key = keys[0] as usize;
+    assert_eq!(keys, [key as u32; 3]);
+    assert_eq!(dynamic, 1);
+    assert_eq!(build.constants[key], Constant::String("field".into()));
+    build.validate().expect("valid string key references");
+
+    let missing = build.constants.len() as u32;
+    let instr = build
+        .functions
+        .iter_mut()
+        .flat_map(|function| &mut function.code)
+        .find(|instr| matches!(instr, Instr::GetMemberConstKey { .. }))
+        .expect("static member read");
+    let Instr::GetMemberConstKey { key, .. } = instr else {
+        unreachable!();
+    };
+    *key = missing;
+    build.finalize();
+    assert!(
+        build
+            .validate()
+            .unwrap_err()
+            .contains("requires a string constant")
+    );
+    build.constants.push(Constant::Null);
+    build.finalize();
+    assert!(
+        build
+            .validate()
+            .unwrap_err()
+            .contains("requires a string constant")
+    );
+}
+
+#[test]
 fn lowers_promise_member_call_and_constructor() {
     let source = r#"
 function run() {
@@ -863,8 +918,8 @@ function run() {
     );
     assert!(
         code.iter()
-            .any(|instruction| matches!(instruction, Instr::GetMember { .. })),
-        "Promise.then lowers to GetMember"
+            .any(|instruction| matches!(instruction, Instr::GetMemberConstKey { .. })),
+        "Promise.then lowers to GetMemberConstKey"
     );
     assert!(
         code.iter()

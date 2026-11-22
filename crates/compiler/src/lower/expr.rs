@@ -331,8 +331,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Expression::ObjectExpression(expression) => self.compile_object(expression),
             Expression::ArrayExpression(expression) => self.compile_array(expression),
             expression if let Some(member) = expression.as_member_expression() => {
-                let reference = self.compile_member_ref(member, None)?;
-                self.emit_get_property(reference)
+                Ok(self.compile_member_read(member, None)?.0)
             }
             Expression::NewExpression(expression) => self.compile_new(expression),
             Expression::ThisExpression(_) => self.compile_this(),
@@ -939,7 +938,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let (value, receiver) = if let ChainElement::CallExpression(call) = &chain.expression {
             (self.compile_call_inner(call, Some(&mut exits))?, None)
         } else if let Some(member) = chain.expression.as_member_expression() {
-            let (value, object) = self.compile_chain_member(member, &mut exits)?;
+            let (value, object) = self.compile_member_read(member, Some(&mut exits))?;
             (value, preserve_receiver.then_some(object))
         } else {
             return Err(unsupported(
@@ -998,20 +997,11 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Expression::CallExpression(call) = expression {
             Ok((self.compile_call_inner(call, Some(exits))?, None))
         } else if let Some(member) = expression.as_member_expression() {
-            let (value, receiver) = self.compile_chain_member(member, exits)?;
+            let (value, receiver) = self.compile_member_read(member, Some(exits))?;
             Ok((value, Some(receiver)))
         } else {
             Ok((self.compile_expression(expression)?, None))
         }
-    }
-
-    fn compile_chain_member(
-        &mut self,
-        member: &'ast MemberExpression<'ast>,
-        exits: &mut Vec<usize>,
-    ) -> Result<(Reg, Reg), CompileError> {
-        let reference = self.compile_member_ref(member, Some(exits))?;
-        Ok((self.emit_get_property(reference)?, reference.receiver()))
     }
 
     fn emit_get_member(&mut self, object: Reg, key: Reg) -> Result<Reg, CompileError> {
@@ -1243,11 +1233,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         if let Expression::ChainExpression(chain) = callee {
             self.compile_chain(chain, true)
         } else if let Some(member) = callee.as_member_expression() {
-            let reference = self.compile_member_ref(member, None)?;
-            Ok((
-                self.emit_get_property(reference)?,
-                Some(reference.receiver()),
-            ))
+            let (value, receiver) = self.compile_member_read(member, None)?;
+            Ok((value, Some(receiver)))
         } else {
             Ok((self.compile_expression(callee)?, None))
         }
@@ -1568,6 +1555,50 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Target::ProbeMissing => 0,
         };
         Ok(if expression.prefix { updated } else { numeric })
+    }
+
+    fn compile_member_read(
+        &mut self,
+        member: &'ast MemberExpression<'ast>,
+        exits: Option<&mut Vec<usize>>,
+    ) -> Result<(Reg, Reg), CompileError> {
+        let key = match member {
+            MemberExpression::StaticMemberExpression(member)
+                if !matches!(member.object, Expression::Super(_)) =>
+            {
+                Some(member.property.name.as_str().into())
+            }
+            MemberExpression::ComputedMemberExpression(member)
+                if !matches!(member.object, Expression::Super(_)) =>
+            {
+                match member.expression.without_parentheses() {
+                    Expression::StringLiteral(literal) => Some(self.string_literal_text(literal)?),
+                    Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
+                        template
+                            .quasis
+                            .first()
+                            .map(|element| self.template_element_text(element))
+                            .transpose()?
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(key) = key {
+            let object = self.compile_member_object(member.object(), member.optional(), exits)?;
+            let key = self.session.intern(Constant::String(key));
+            let dst = self.alloc_reg()?;
+            self.emit(Instr::GetMemberConstKey {
+                dst: self.slot(dst),
+                object: self.slot(object),
+                key,
+            });
+            return Ok((dst, object));
+        }
+
+        let reference = self.compile_member_ref(member, exits)?;
+        Ok((self.emit_get_property(reference)?, reference.receiver()))
     }
 
     pub(super) fn compile_member_ref(

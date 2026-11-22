@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 46;
+pub const BYTECODE_VERSION: u32 = 47;
 
 pub use crate::builtin::BUILTINS;
 
@@ -383,6 +383,12 @@ pub enum Instr {
         dst: Slot,
         object: Slot,
         key: Slot,
+    },
+    /// Reads a property whose key is a string in the constant pool.
+    GetMemberConstKey {
+        dst: Slot,
+        object: Slot,
+        key: u32,
     },
     /// Tests property presence without reading the property value.
     HasProperty {
@@ -1614,6 +1620,15 @@ impl Build {
                     check_slot(*dst, "GetMember.dst")?;
                     check_slot(*object, "GetMember.object")?;
                     check_slot(*key, "GetMember.key")?;
+                }
+                Instr::GetMemberConstKey { dst, object, key } => {
+                    check_slot(*dst, "GetMemberConstKey.dst")?;
+                    check_slot(*object, "GetMemberConstKey.object")?;
+                    if !matches!(self.constants.get(*key as usize), Some(Constant::String(_))) {
+                        return Err(format!(
+                            "{location}: GetMemberConstKey at pc {pc} requires a string constant, got index {key}"
+                        ));
+                    }
                 }
                 Instr::GetDestructuredMember { dst, object, key } => {
                     check_slot(*dst, "GetDestructuredMember.dst")?;
