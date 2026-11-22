@@ -291,8 +291,8 @@ pub(crate) struct Tracer<'a> {
     continuations: &'a BTreeMap<ContinuationId, Continuation>,
     host_instances: &'a BTreeMap<ObjectId, HostInstance>,
     live: LiveSet,
-    weak_maps: Vec<ObjectId>,
-    object_queue: VecDeque<ObjectId>,
+    weak_maps: Vec<&'a BTreeMap<WeakKey, Value>>,
+    object_queue: VecDeque<(ObjectId, &'a Object)>,
     continuation_queue: VecDeque<ContinuationId>,
     edges: Vec<OwnedEdge>,
 }
@@ -339,13 +339,11 @@ impl<'a> Tracer<'a> {
     }
 
     fn mark_object(&mut self, id: ObjectId) -> Result<(), VmError> {
-        if !self.heap.contains(id) {
-            return Err(VmError::InvalidState(format!(
-                "snapshot root references missing object {id}"
-            )));
-        }
         if self.live.objects.insert(id) {
-            self.object_queue.push_back(id);
+            let object = self.heap.get(id).map_err(|_| {
+                VmError::InvalidState(format!("snapshot root references missing object {id}"))
+            })?;
+            self.object_queue.push_back((id, object));
         }
         Ok(())
     }
@@ -373,9 +371,9 @@ impl<'a> Tracer<'a> {
     fn drain(&mut self) -> Result<(), VmError> {
         loop {
             let mut progressed = false;
-            while let Some(id) = self.object_queue.pop_front() {
+            while let Some((id, object)) = self.object_queue.pop_front() {
                 progressed = true;
-                self.walk_object(id)?;
+                self.walk_object(id, object)?;
             }
             while let Some(id) = self.continuation_queue.pop_front() {
                 progressed = true;
@@ -389,15 +387,11 @@ impl<'a> Tracer<'a> {
     }
 
     fn mark_ephemerons(&mut self) -> Result<(), VmError> {
-        let heap = self.heap;
         loop {
             // Values can reveal more keys (or more WeakMaps), even without queuing objects.
             let before = (self.live.objects.len(), self.live.symbols.len());
             for index in 0..self.weak_maps.len() {
-                let Object::WeakMap { entries, .. } = heap.get(self.weak_maps[index])? else {
-                    unreachable!("only WeakMaps are deferred");
-                };
-                for (key, value) in entries {
+                for (key, value) in self.weak_maps[index] {
                     if self.live.contains_weak_key(*key) {
                         self.mark_value(value)?;
                     }
@@ -410,12 +404,12 @@ impl<'a> Tracer<'a> {
         }
     }
 
-    fn walk_object(&mut self, id: ObjectId) -> Result<(), VmError> {
-        if matches!(self.heap.get(id)?, Object::WeakMap { .. }) {
-            self.weak_maps.push(id);
+    fn walk_object(&mut self, id: ObjectId, object: &'a Object) -> Result<(), VmError> {
+        if let Object::WeakMap { entries, .. } = object {
+            self.weak_maps.push(entries);
         }
         let mut edges = std::mem::take(&mut self.edges);
-        self.heap.write_edges(id, &mut edges)?;
+        self.heap.write_edges(id, object, &mut edges);
         for edge in &edges {
             match *edge {
                 OwnedEdge::Object(target)

@@ -215,13 +215,9 @@ impl Heap {
         self.generators.get_mut(&id)
     }
 
-    /// Object edges plus combine-state edges. This is the reachability list.
-    pub(crate) fn write_edges(
-        &self,
-        id: ObjectId,
-        out: &mut Vec<OwnedEdge>,
-    ) -> Result<(), VmError> {
-        self.get(id)?.write_edges(out);
+    /// Edges from an already fetched object and its heap side records.
+    pub(crate) fn write_edges(&self, id: ObjectId, object: &Object, out: &mut Vec<OwnedEdge>) {
+        object.write_edges(out);
         if let Some(state) = self.combines.get(&id) {
             push_value(out, &state.capability);
             for value in &state.results {
@@ -251,7 +247,6 @@ impl Heap {
                 }
             }
         }
-        Ok(())
     }
 
     pub(crate) fn install_private_methods(

@@ -1364,12 +1364,13 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 "RegExp {id} has an invalid lastIndex property"
             )));
         }
+        let object = heap.get(id)?;
         if let Object::ForInIterator {
             current,
             pending,
             visited,
             string_indices,
-        } = heap.get(id)?
+        } = object
             && (current.is_some_and(|source| {
                 matches!(
                     heap.get(source),
@@ -1386,8 +1387,8 @@ fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
                 "for-in iterator {id} has invalid cursor state"
             )));
         }
-        heap.write_edges(id, &mut edges)?;
-        match heap.get(id)? {
+        heap.write_edges(id, object, &mut edges);
+        match object {
             Object::WeakMap { entries, .. } => {
                 for (&key, value) in entries {
                     validate_weak_key(heap, "WeakMap", id, key)?;
