@@ -16,6 +16,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
+mod instr;
+
+pub use instr::Instr;
+
 pub const BYTECODE_VERSION: u32 = 55;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
@@ -190,511 +194,6 @@ pub enum PrivateDefinition {
     Method,
     Get,
     Set,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Instr {
-    Const {
-        dst: Slot,
-        constant: u32,
-    },
-    Undefined {
-        dst: Slot,
-    },
-    Move {
-        dst: Slot,
-        src: Slot,
-    },
-    Binary {
-        dst: Slot,
-        op: BinaryOp,
-        lhs: Slot,
-        rhs: Slot,
-    },
-    /// Binary operation whose right operand is a build constant.
-    BinaryConst {
-        dst: Slot,
-        op: BinaryOp,
-        lhs: Slot,
-        constant: u32,
-    },
-    InstanceOf {
-        dst: Slot,
-        value: Slot,
-        constructor: Slot,
-    },
-    Unary {
-        dst: Slot,
-        op: UnaryOp,
-        src: Slot,
-    },
-    /// Applies JavaScript ToString, including string-hint ToPrimitive.
-    ToString {
-        dst: Slot,
-        src: Slot,
-    },
-    /// Converts a computed key before its reference or definition is reused.
-    ToPropertyKey {
-        dst: Slot,
-        src: Slot,
-        /// For member read-modify-write, validate the base before converting.
-        object: Option<Slot>,
-    },
-    GetImport {
-        dst: Slot,
-        import: ImportDecl,
-    },
-    GetModuleBinding {
-        dst: Slot,
-        module: u32,
-        binding: BindingId,
-    },
-    GetModuleNamespace {
-        dst: Slot,
-        module: u32,
-    },
-    CallValue {
-        dst: Slot,
-        callee: Slot,
-        args: CallArgs,
-        /// `None` is a bare call (`this` is `undefined`). `Some` is the member
-        /// base, evaluated once and passed as the receiver.
-        receiver: Option<Slot>,
-    },
-    /// Constructs `callee` with `args`. The new instance, not a member base, is `this`.
-    Construct {
-        dst: Slot,
-        callee: Slot,
-        args: CallArgs,
-    },
-    SetHome {
-        function: Slot,
-        home: Slot,
-    },
-    SetFunctionName {
-        function: Slot,
-        key: Slot,
-        prefix: Option<AccessorPrefix>,
-    },
-    GetSuperBase {
-        dst: Slot,
-        home: Slot,
-    },
-    GetSuper {
-        dst: Slot,
-        base: Slot,
-        key: Slot,
-        receiver: Slot,
-    },
-    SetSuper {
-        base: Slot,
-        key: Slot,
-        receiver: Slot,
-        src: Slot,
-    },
-    GetDerivedThis {
-        dst: Slot,
-        context: Slot,
-    },
-    GetSuperConstructor {
-        dst: Slot,
-        context: Slot,
-    },
-    SuperConstruct {
-        dst: Slot,
-        context: Slot,
-        callee: Slot,
-        args: CallArgs,
-    },
-    /// Creates a closure that captures the frame's current environment.
-    Closure {
-        dst: Slot,
-        function: u32,
-    },
-    NewClassScope {
-        dst: Slot,
-        parent: Option<Slot>,
-    },
-    LoadClassBinding {
-        dst: Slot,
-        scope: Option<Slot>,
-        binding: BindingId,
-    },
-    InitClassBinding {
-        scope: Slot,
-        binding: BindingId,
-        src: Slot,
-    },
-    CreateClass {
-        dst: Slot,
-        scope: Option<Slot>,
-        heritage: Option<Slot>,
-        name_key: Option<Slot>,
-        constructor: u32,
-        default_constructor: bool,
-        private_count: u32,
-        private_binding: Option<BindingId>,
-    },
-    ScopedClosure {
-        dst: Slot,
-        scope: Slot,
-        function: u32,
-    },
-    DefineClassMethod {
-        class: Slot,
-        key: Slot,
-        src: Slot,
-        is_static: bool,
-        kind: PropertyDefinition,
-    },
-    AddClassPrivate {
-        class: Slot,
-        index: u32,
-        lexical: BindingId,
-        src: Option<Slot>,
-        is_static: bool,
-        kind: PrivateDefinition,
-    },
-    GetPrivate {
-        dst: Slot,
-        object: Slot,
-        brand: Slot,
-        index: u32,
-        lexical: BindingId,
-    },
-    SetPrivate {
-        object: Slot,
-        brand: Slot,
-        src: Slot,
-        index: u32,
-        lexical: BindingId,
-    },
-    HasPrivate {
-        dst: Slot,
-        object: Slot,
-        brand: Slot,
-        index: u32,
-        lexical: BindingId,
-    },
-    AddClassField {
-        class: Slot,
-        key: Slot,
-        initializer: Option<Slot>,
-        is_static: bool,
-    },
-    AddClassBlock {
-        class: Slot,
-        body: Slot,
-    },
-    RunClassStatic {
-        class: Slot,
-    },
-    NewObject {
-        dst: Slot,
-    },
-    /// Allocates a fresh literal using the intrinsic RegExp prototype.
-    NewRegExp {
-        dst: Slot,
-        source: JsString,
-        flags: String,
-    },
-    /// Copies enumerable own properties from source onto target.
-    CopyDataProperties {
-        target: Slot,
-        source: Slot,
-    },
-    NewArray {
-        dst: Slot,
-        elements: Vec<Slot>,
-    },
-    /// Appends one value to an array created by [`Instr::NewArray`].
-    ArrayAppend {
-        array: Slot,
-        src: Slot,
-    },
-    /// Grows an array's `length` by one without creating an element property,
-    /// forming a sparse hole.
-    ArrayHole {
-        array: Slot,
-    },
-    GetMember {
-        dst: Slot,
-        object: Slot,
-        key: Slot,
-    },
-    /// Reads a property whose key is a string in the constant pool.
-    GetMemberConstKey {
-        dst: Slot,
-        object: Slot,
-        key: u32,
-    },
-    /// Tests property presence without reading the property value.
-    HasProperty {
-        dst: Slot,
-        object: Slot,
-        key: Slot,
-    },
-    /// Deletes an own property through a strict-mode member reference.
-    DeleteMember {
-        dst: Slot,
-        object: Slot,
-        key: Slot,
-    },
-    SetMember {
-        object: Slot,
-        key: Slot,
-        src: Slot,
-    },
-    DefineProperty {
-        object: Slot,
-        key: Slot,
-        src: Slot,
-        kind: PropertyDefinition,
-    },
-    GetBinding {
-        dst: Slot,
-        binding: BindingId,
-    },
-    SetBinding {
-        binding: BindingId,
-        src: Slot,
-    },
-    DeclareBinding {
-        binding: BindingId,
-    },
-    /// Reads a binding through a statically known number of environment
-    /// parents. `depth` is relative to the frame's current environment.
-    GetBindingDirect {
-        dst: Slot,
-        depth: u16,
-        binding: BindingId,
-    },
-    /// Writes a binding through a statically known environment depth.
-    SetBindingDirect {
-        depth: u16,
-        binding: BindingId,
-        src: Slot,
-    },
-    /// Reads a source module's own binding without walking the closure
-    /// environment chain. Unlike the linked `GetModuleBinding`, this keeps the
-    /// ordinary binding read rule that a present but uninitialized slot yields
-    /// `undefined`.
-    GetModuleBindingDirect {
-        dst: Slot,
-        module: u32,
-        binding: BindingId,
-    },
-    /// Writes a source module's own binding directly. It removes the module
-    /// TDZ marker only when the writing frame is the module environment itself,
-    /// matching `SetBinding` for a nested function.
-    SetModuleBindingDirect {
-        module: u32,
-        binding: BindingId,
-        src: Slot,
-    },
-    /// Writes the frame's current environment to `dst`. Used by loops that
-    /// need a fresh per-iteration environment and must restore the outer one.
-    SaveEnv {
-        dst: Slot,
-    },
-    /// Allocates a fresh environment whose parent is `parent` and copies the
-    /// listed bindings from the frame's current environment, then installs the
-    /// new environment for the loop body. Generator and async-generator bodies
-    /// keep the same environment object across a yield only when it is the one
-    /// selected by this instruction, so closures created in an iteration keep
-    /// that iteration's values.
-    NewIterationEnv {
-        parent: Slot,
-        bindings: Vec<BindingId>,
-    },
-    /// Restores the frame's environment from `src` after a loop.
-    RestoreEnv {
-        src: Slot,
-    },
-    /// Suspends the current async frame. The VM writes the awaited value to
-    /// either resume destination and branches to the matching resume PC.
-    Await {
-        dst: Slot,
-        input: Slot,
-        resume: u32,
-    },
-    /// Suspends a generator, handing `input` to its consumer.
-    ///
-    /// The VM stores `generator_resumes[generator].saved_slots` and returns the
-    /// yielded value. Resuming enters `next_pc` (the fall-through here) or
-    /// `throw_pc` with the injected value already written, or `return_pc` with
-    /// a pending completion payload for `LoadGeneratorReturn`.
-    ///
-    /// An async generator never yields a delegate result object: the compiler
-    /// awaits the operand and the request queue wraps the value.
-    Yield {
-        input: Slot,
-        generator: u32,
-        /// `input` is already the delegate's own result object, handed back
-        /// unwrapped instead of being wrapped in a fresh iteration result.
-        delegate: bool,
-    },
-    /// Ends the invocation after a generator's parameters were initialized.
-    ///
-    /// The VM captures the environment and `generator_start.saved_slots` into a
-    /// new generator object and returns it. Control never falls through here.
-    GeneratorStart,
-    /// Reads the return payload of the current generator resume. Valid only as
-    /// the first instruction of a `GeneratorEntry::return_pc`, so the pending
-    /// completion value never lives in VM-global state.
-    LoadGeneratorReturn {
-        dst: Slot,
-    },
-    Jump {
-        target: u32,
-    },
-    BranchFalse {
-        cond: Slot,
-        target: u32,
-    },
-    /// Branches when the condition is truthy.
-    BranchTrue {
-        cond: Slot,
-        target: u32,
-    },
-    /// Evaluates a comparison and branches when its boolean result is false.
-    /// The result never occupies a frame slot.
-    BranchCompareFalse {
-        lhs: Slot,
-        op: BinaryOp,
-        rhs: Slot,
-        target: u32,
-    },
-    /// Comparison-with-constant variant of `BranchCompareFalse`.
-    BranchCompareConstFalse {
-        lhs: Slot,
-        op: BinaryOp,
-        constant: u32,
-        target: u32,
-    },
-    /// Evaluates a comparison and branches when its boolean result is true.
-    BranchCompareTrue {
-        lhs: Slot,
-        op: BinaryOp,
-        rhs: Slot,
-        target: u32,
-    },
-    /// Comparison-with-constant variant of `BranchCompareTrue`.
-    BranchCompareConstTrue {
-        lhs: Slot,
-        op: BinaryOp,
-        constant: u32,
-        target: u32,
-    },
-    /// Evaluates an arbitrary binary result and branches when it is falsy.
-    BranchBinary {
-        op: BinaryOp,
-        lhs: Slot,
-        rhs: Slot,
-        target: u32,
-    },
-    /// Binary-with-constant variant of `BranchBinary`.
-    BranchBinaryConst {
-        op: BinaryOp,
-        lhs: Slot,
-        constant: u32,
-        target: u32,
-    },
-    /// Evaluates an arbitrary unary result and branches when it is falsy.
-    BranchUnary {
-        op: UnaryOp,
-        src: Slot,
-        target: u32,
-    },
-    Return {
-        src: Slot,
-    },
-    Throw {
-        src: Slot,
-    },
-    /// Throws a TypeError for an assignment to a constant binding.
-    ThrowAssignmentToConst,
-    ThrowDeleteSuper,
-    /// Loads a cached builtin value (object builtins, or the number globals
-    /// `NaN` and `Infinity`).
-    GetBuiltin {
-        dst: Slot,
-        builtin: u32,
-    },
-    /// Loads the cached frozen template object for one tagged-template call site.
-    GetTemplate {
-        dst: Slot,
-        template: u32,
-    },
-    /// Calls the intrinsic `Symbol.iterator` method and caches the result's `next` method.
-    GetIterator {
-        iterator: Slot,
-        next: Slot,
-        iterable: Slot,
-    },
-    /// Calls one iterator method with the iterator as receiver and requires an
-    /// object result, preserving that result object's own identity.
-    ///
-    /// `argument` is `None` for a method called with no arguments.
-    IteratorCall {
-        dst: Slot,
-        iterator: Slot,
-        method: Slot,
-        argument: Option<Slot>,
-    },
-    /// Calls cached `next` and reads `done`, then `value` only when not done.
-    IteratorNext {
-        done: Slot,
-        value: Slot,
-        iterator: Slot,
-        next: Slot,
-    },
-    /// Calls the optional `return` method. A pending throw takes precedence over script errors.
-    IteratorClose {
-        iterator: Slot,
-        preserve_throw: bool,
-    },
-    /// Creates an internal property enumeration cursor, independent of Symbol.iterator.
-    GetForInIterator {
-        dst: Slot,
-        source: Slot,
-    },
-    /// Advances the property enumeration cursor and yields a string key or undefined.
-    ForInNext {
-        done: Slot,
-        value: Slot,
-        iterator: Slot,
-    },
-    /// Throws a TypeError for null or undefined without otherwise converting the value.
-    AssertObjectCoercible {
-        src: Slot,
-    },
-    /// Throws a TypeError unless `src` is an object, without converting it.
-    ///
-    /// An asynchronous iterator method resolves to an object that must be
-    /// rechecked after the implicit `await`.
-    RequireObject {
-        src: Slot,
-    },
-    /// Reads a property, projecting primitive sources as needed. The key is already converted.
-    GetDestructuredMember {
-        dst: Slot,
-        object: Slot,
-        key: Slot,
-    },
-    /// Copies own enumerable properties into a new object, excluding converted keys.
-    ObjectRest {
-        dst: Slot,
-        src: Slot,
-        excluded: Vec<Slot>,
-    },
-    /// Calls cached `next` and reads only `done`, without accessing `value`.
-    IteratorSkip {
-        done: Slot,
-        iterator: Slot,
-        next: Slot,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1545,6 +1044,11 @@ impl Build {
                     ))
                 }
             };
+            // Slot-range-only instructions are checked from the instruction
+            // table; everything else keeps a handwritten arm below.
+            if instr.validate_slots_only(&check_slot)? {
+                continue;
+            }
             match instr {
                 Instr::Const { dst, constant } => {
                     check_slot(*dst, "Const.dst")?;
@@ -1553,16 +1057,6 @@ impl Build {
                             "{location}: Const at pc {pc} references constant {constant}"
                         ));
                     }
-                }
-                Instr::Undefined { dst } => check_slot(*dst, "Undefined.dst")?,
-                Instr::Move { dst, src } => {
-                    check_slot(*dst, "Move.dst")?;
-                    check_slot(*src, "Move.src")?;
-                }
-                Instr::Binary { dst, lhs, rhs, .. } => {
-                    check_slot(*dst, "Binary.dst")?;
-                    check_slot(*lhs, "Binary.lhs")?;
-                    check_slot(*rhs, "Binary.rhs")?;
                 }
                 Instr::BinaryConst {
                     dst, lhs, constant, ..
@@ -1574,30 +1068,6 @@ impl Build {
                             "{location}: BinaryConst at pc {pc} references constant {constant}"
                         ));
                     }
-                }
-                Instr::InstanceOf {
-                    dst,
-                    value,
-                    constructor,
-                } => {
-                    check_slot(*dst, "InstanceOf.dst")?;
-                    check_slot(*value, "InstanceOf.value")?;
-                    check_slot(*constructor, "InstanceOf.constructor")?;
-                }
-                Instr::Unary { dst, src, .. } => {
-                    check_slot(*dst, "Unary.dst")?;
-                    check_slot(*src, "Unary.src")?;
-                }
-                Instr::ToString { dst, src } => {
-                    check_slot(*dst, "ToString.dst")?;
-                    check_slot(*src, "ToString.src")?;
-                }
-                Instr::ToPropertyKey { dst, src, object } => {
-                    if let Some(object) = object {
-                        check_slot(*object, "ToPropertyKey.object")?;
-                    }
-                    check_slot(*dst, "ToPropertyKey.dst")?;
-                    check_slot(*src, "ToPropertyKey.src")?;
                 }
                 Instr::GetImport { dst, import } => {
                     check_slot(*dst, "GetImport.dst")?;
@@ -1625,67 +1095,17 @@ impl Build {
                         format!("{location}: GetModuleNamespace at pc {pc}: {err}")
                     })?;
                 }
-                Instr::CallValue {
+                Instr::SuperConstruct {
                     dst,
+                    context,
                     callee,
                     args,
-                    receiver,
                 } => {
-                    check_slot(*dst, "CallValue.dst")?;
-                    check_slot(*callee, "CallValue.callee")?;
-                    for arg in args.slots() {
-                        check_slot(*arg, "CallValue.arg")?;
-                    }
-                    if let Some(slot) = receiver {
-                        check_slot(*slot, "CallValue.receiver")?;
-                    }
-                }
-                Instr::Construct { dst, callee, args } => {
-                    check_slot(*dst, "Construct.dst")?;
-                    check_slot(*callee, "Construct.callee")?;
-                    for arg in args.slots() {
-                        check_slot(*arg, "Construct.arg")?;
-                    }
-                }
-                Instr::SetHome { function, home } => {
-                    check_slot(*function, "SetHome.function")?;
-                    check_slot(*home, "SetHome.home")?;
-                }
-                Instr::SetFunctionName { function, key, .. } => {
-                    check_slot(*function, "SetFunctionName.function")?;
-                    check_slot(*key, "SetFunctionName.key")?;
-                }
-                Instr::GetSuperBase { dst, home } => {
-                    check_slot(*dst, "GetSuperBase.dst")?;
-                    check_slot(*home, "GetSuperBase.home")?;
-                }
-                Instr::GetSuper {
-                    dst: result,
-                    base,
-                    key,
-                    receiver,
-                }
-                | Instr::SetSuper {
-                    src: result,
-                    base,
-                    key,
-                    receiver,
-                } => {
-                    check_slot(*result, "super value")?;
-                    check_slot(*base, "super base")?;
-                    check_slot(*key, "super key")?;
-                    check_slot(*receiver, "super receiver")?;
-                }
-                Instr::GetDerivedThis { dst, context }
-                | Instr::GetSuperConstructor { dst, context }
-                | Instr::SuperConstruct { dst, context, .. } => {
                     check_slot(*dst, "derived constructor result")?;
                     check_slot(*context, "derived constructor context")?;
-                    if let Instr::SuperConstruct { args, callee, .. } = instr {
-                        check_slot(*callee, "SuperConstruct.callee")?;
-                        for arg in args.slots() {
-                            check_slot(*arg, "SuperConstruct.arg")?;
-                        }
+                    check_slot(*callee, "SuperConstruct.callee")?;
+                    for arg in args.slots() {
+                        check_slot(*arg, "SuperConstruct.arg")?;
                     }
                 }
                 Instr::Closure {
@@ -1704,16 +1124,15 @@ impl Build {
                         ));
                     }
                 }
-                Instr::NewClassScope { dst, parent }
-                | Instr::LoadClassBinding {
-                    dst, scope: parent, ..
+                Instr::LoadClassBinding {
+                    dst,
+                    scope,
+                    binding,
                 } => {
-                    if let Instr::LoadClassBinding { binding, .. } = instr {
-                        check_binding(*binding)?;
-                    }
+                    check_binding(*binding)?;
                     check_slot(*dst, "class scope result")?;
-                    if let Some(parent) = parent {
-                        check_slot(*parent, "class scope")?;
+                    if let Some(scope) = scope {
+                        check_slot(*scope, "class scope")?;
                     }
                 }
                 Instr::InitClassBinding {
@@ -1769,13 +1188,6 @@ impl Build {
                         ));
                     }
                 }
-                Instr::DefineClassMethod {
-                    class, key, src, ..
-                } => {
-                    check_slot(*class, "DefineClassMethod.class")?;
-                    check_slot(*key, "DefineClassMethod.key")?;
-                    check_slot(*src, "DefineClassMethod.src")?;
-                }
                 Instr::AddClassPrivate {
                     class,
                     index,
@@ -1820,64 +1232,11 @@ impl Build {
                     check_slot(*brand, "private element brand")?;
                     check_private(*lexical, *index)?;
                 }
-                Instr::AddClassField {
-                    class,
-                    key,
-                    initializer,
-                    ..
-                } => {
-                    check_slot(*class, "AddClassField.class")?;
-                    check_slot(*key, "AddClassField.key")?;
-                    if let Some(slot) = initializer {
-                        check_slot(*slot, "AddClassField.initializer")?;
-                    }
-                }
-                Instr::AddClassBlock { class, body } => {
-                    check_slot(*class, "AddClassBlock.class")?;
-                    check_slot(*body, "AddClassBlock.body")?;
-                }
-                Instr::RunClassStatic { class } => check_slot(*class, "RunClassStatic.class")?,
-                Instr::NewObject { dst } => check_slot(*dst, "NewObject.dst")?,
                 Instr::NewRegExp { dst, source, flags } => {
                     check_slot(*dst, "NewRegExp.dst")?;
                     crate::regexp::validate_regexp_string(source, flags).map_err(|message| {
                         format!("{location}: invalid NewRegExp at pc {pc}: {message}")
                     })?;
-                }
-                Instr::CopyDataProperties { target, source } => {
-                    check_slot(*target, "CopyDataProperties.target")?;
-                    check_slot(*source, "CopyDataProperties.source")?;
-                }
-                Instr::AssertObjectCoercible { src } => {
-                    check_slot(*src, "AssertObjectCoercible.src")?;
-                }
-                Instr::RequireObject { src } => {
-                    check_slot(*src, "RequireObject.src")?;
-                }
-                Instr::ObjectRest { dst, src, excluded } => {
-                    check_slot(*dst, "ObjectRest.dst")?;
-                    check_slot(*src, "ObjectRest.src")?;
-                    for key in excluded {
-                        check_slot(*key, "ObjectRest.excluded")?;
-                    }
-                }
-                Instr::NewArray { dst, elements } => {
-                    check_slot(*dst, "NewArray.dst")?;
-                    for element in elements {
-                        check_slot(*element, "NewArray.element")?;
-                    }
-                }
-                Instr::ArrayAppend { array, src } => {
-                    check_slot(*array, "ArrayAppend.array")?;
-                    check_slot(*src, "ArrayAppend.src")?;
-                }
-                Instr::ArrayHole { array } => {
-                    check_slot(*array, "ArrayHole.array")?;
-                }
-                Instr::GetMember { dst, object, key } => {
-                    check_slot(*dst, "GetMember.dst")?;
-                    check_slot(*object, "GetMember.object")?;
-                    check_slot(*key, "GetMember.key")?;
                 }
                 Instr::GetMemberConstKey { dst, object, key } => {
                     check_slot(*dst, "GetMemberConstKey.dst")?;
@@ -1887,21 +1246,6 @@ impl Build {
                             "{location}: GetMemberConstKey at pc {pc} requires a string constant, got index {key}"
                         ));
                     }
-                }
-                Instr::GetDestructuredMember { dst, object, key } => {
-                    check_slot(*dst, "GetDestructuredMember.dst")?;
-                    check_slot(*object, "GetDestructuredMember.object")?;
-                    check_slot(*key, "GetDestructuredMember.key")?;
-                }
-                Instr::HasProperty { dst, object, key } => {
-                    check_slot(*dst, "HasProperty.dst")?;
-                    check_slot(*object, "HasProperty.object")?;
-                    check_slot(*key, "HasProperty.key")?;
-                }
-                Instr::DeleteMember { dst, object, key } => {
-                    check_slot(*dst, "DeleteMember.dst")?;
-                    check_slot(*object, "DeleteMember.object")?;
-                    check_slot(*key, "DeleteMember.key")?;
                 }
                 Instr::GetIterator {
                     iterator,
@@ -1916,19 +1260,6 @@ impl Build {
                         ));
                     }
                     check_slot(*iterable, "GetIterator.iterable")?;
-                }
-                Instr::IteratorCall {
-                    dst,
-                    iterator,
-                    method,
-                    argument,
-                } => {
-                    check_slot(*dst, "IteratorCall.dst")?;
-                    check_slot(*iterator, "IteratorCall.iterator")?;
-                    check_slot(*method, "IteratorCall.method")?;
-                    if let Some(argument) = argument {
-                        check_slot(*argument, "IteratorCall.argument")?;
-                    }
                 }
                 Instr::IteratorNext {
                     done,
@@ -1946,22 +1277,6 @@ impl Build {
                     check_slot(*iterator, "IteratorNext.iterator")?;
                     check_slot(*next, "IteratorNext.next")?;
                 }
-                Instr::IteratorSkip {
-                    done,
-                    iterator,
-                    next,
-                } => {
-                    check_slot(*done, "IteratorSkip.done")?;
-                    check_slot(*iterator, "IteratorSkip.iterator")?;
-                    check_slot(*next, "IteratorSkip.next")?;
-                }
-                Instr::IteratorClose { iterator, .. } => {
-                    check_slot(*iterator, "IteratorClose.iterator")?;
-                }
-                Instr::GetForInIterator { dst, source } => {
-                    check_slot(*dst, "GetForInIterator.dst")?;
-                    check_slot(*source, "GetForInIterator.source")?;
-                }
                 Instr::ForInNext {
                     done,
                     value,
@@ -1975,18 +1290,6 @@ impl Build {
                         ));
                     }
                     check_slot(*iterator, "ForInNext.iterator")?;
-                }
-                Instr::SetMember { object, key, src } => {
-                    check_slot(*object, "SetMember.object")?;
-                    check_slot(*key, "SetMember.key")?;
-                    check_slot(*src, "SetMember.src")?;
-                }
-                Instr::DefineProperty {
-                    object, key, src, ..
-                } => {
-                    check_slot(*object, "DefineProperty.object")?;
-                    check_slot(*key, "DefineProperty.key")?;
-                    check_slot(*src, "DefineProperty.src")?;
                 }
                 Instr::GetBinding { dst, binding } => {
                     check_binding(*binding)?;
@@ -2046,7 +1349,6 @@ impl Build {
                         return Err(format!("{location}: redeclares module binding {binding}"));
                     }
                 }
-                Instr::SaveEnv { dst } => check_slot(*dst, "SaveEnv.dst")?,
                 Instr::NewIterationEnv { parent, bindings } => {
                     check_slot(*parent, "NewIterationEnv.parent")?;
                     let mut seen = BTreeSet::new();
@@ -2059,7 +1361,6 @@ impl Build {
                         }
                     }
                 }
-                Instr::RestoreEnv { src } => check_slot(*src, "RestoreEnv.src")?,
                 Instr::Await { dst, input, resume } => {
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));
@@ -2098,9 +1399,6 @@ impl Build {
                             "{location}: GeneratorStart in a non-generator function"
                         ));
                     }
-                }
-                Instr::LoadGeneratorReturn { dst } => {
-                    check_slot(*dst, "LoadGeneratorReturn.dst")?;
                 }
                 Instr::Jump { target } => check_target(*target, "Jump")?,
                 Instr::BranchFalse { cond, target } => {
@@ -2191,9 +1489,6 @@ impl Build {
                     check_slot(*src, "BranchUnary.src")?;
                     check_target(*target, "BranchUnary")?;
                 }
-                Instr::Return { src } => check_slot(*src, "Return.src")?,
-                Instr::Throw { src } => check_slot(*src, "Throw.src")?,
-                Instr::ThrowAssignmentToConst | Instr::ThrowDeleteSuper => {}
                 Instr::GetBuiltin { dst, builtin } => {
                     check_slot(*dst, "GetBuiltin.dst")?;
                     self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
@@ -2206,6 +1501,9 @@ impl Build {
                         ));
                     }
                 }
+                // Everything else was fully checked from the instruction table
+                // before the match, so no arm here may be reachable.
+                _ => unreachable!("slot-only instruction already validated"),
             }
         }
 
@@ -2406,4 +1704,24 @@ fn falls_through(instruction: &Instr) -> bool {
         instruction,
         Instr::Jump { .. } | Instr::Return { .. } | Instr::Throw { .. } | Instr::GeneratorStart
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Variant order and field order are the artifact wire format: existing
+    /// builds must keep decoding, so this pins one encoding instead of only
+    /// round-tripping through the current serializer.
+    #[test]
+    fn instr_encoding_is_stable() {
+        let instruction = Instr::Move {
+            dst: Slot::transient(1),
+            src: Slot::persistent(2),
+        };
+        let encoded = build_codec().serialize(&instruction).expect("serialize");
+        assert_eq!(encoded, [2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 2, 0]);
+        let decoded: Instr = build_codec().deserialize(&encoded).expect("deserialize");
+        assert_eq!(decoded, instruction);
+    }
 }

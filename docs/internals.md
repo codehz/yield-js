@@ -74,7 +74,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
 | 值传播 / 普通跳转 / 死写入 | `propagate.rs` 按 CFG 边求交，折叠已知原始值的严格比较和少量 Number 运算；`cfg/cleanup.rs` 清理普通跳转，`cfg/verify.rs` 校验入口与边；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 生成跳转 PC 和挂起表，并从块内活性流式累积槽区间，不保留逐 PC 活性表 |
-| 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（step 按语义族分派；分支体在 `vm/src/exec/{value,branch,env,call,class,object,iterator}.rs`，值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
+| 新 opcode | `vm/src/bytecode/instr.rs`（指令表）、`vm/src/exec.rs`（step 按语义族分派；分支体在 `vm/src/exec/{value,branch,env,call,class,object,iterator}.rs`，值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/init.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture/` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture/` |
 | 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `write_member` 预热与布局守卫（`SetMember` 指令分支在 `vm/src/exec/object.rs`） |
@@ -89,7 +89,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
 - 分配物理槽之前，每个 `Slot` 都只是塞进 `SlotKind::Transient` 的逻辑寄存器。优化不改写 PC；最终布局才把块边编码成跳转、恢复表和异常表，保留生成器独占入口，不登记没有存活可抛指令的保护区。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
-- `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
+- `compiler/src/instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
 - VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。
 - Error 位置随指令穿过 CFG，最终按 PC 保存位置变化；`(0, 0)` 终止有来源区段，空表隐藏函数。位置表及定义模块索引参与构建摘要和校验，只在分配 Error 时沿 `ActiveRoots` 读取活动帧，使用预增 PC 减一查询。栈文本保留为普通字符串属性，不改变快照记录。
@@ -121,7 +121,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/compiler/src/lib.rs` — 流水线与 `compile`
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
-- `crates/vm/src/bytecode.rs` — `Instr`、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`、`Build::to_bytes` / `Build::from_bytes`
+- `crates/vm/src/bytecode/instr.rs` — 指令表：`define_instructions!` 同时生成 `Instr` 与槽位校验；变体顺序与字段顺序即产物编码
+- `crates/vm/src/bytecode.rs` — `Instr`（再导出）、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`、`Build::to_bytes` / `Build::from_bytes`
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
 - `crates/vm/src/init.rs` — VM 构造与模块初始化：`Vm::new*`、`prepare`、导入链接（`resolve_imports` / `install_imports` / `restore_imports`）与模块图实例化、求值
 - `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec
@@ -132,7 +133,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 ## 6. 代码约定细节
 
-- 新增 opcode：先加到 `yield_vm::bytecode::Instr`，再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
+- 新增 opcode：先在 `vm/src/bytecode/instr.rs` 的指令表加一项（变体、字段与顺序即产物编码，只能在末尾追加），`slots[...]` 只列槽位范围检查、`custom` 表示还有别的语义并在 `Build::validate_function` 里保留手写臂；再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
 - 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）；产物容器、magic 或 bincode 编码选项改动升 `BUILD_FORMAT_VERSION`（`crates/vm/src/bytecode.rs`）。三个契约各自独立，只有对应契约变化才升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
 - 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。

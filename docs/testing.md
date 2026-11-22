@@ -9,7 +9,7 @@
 3. `crates/harness/tests/cases/` — 由 `build.rs` 生成测试的语义 `.js` 用例（见下）。
 4. `crates/host-dts/src/lib.rs` 单元测试，以及 `crates/binding-macros/tests/host_dts_fixture.rs`：它构建一个一次性消费 crate 并运行 `cargo check`，证明“已声明但未实现”的导出在宏展开期失败。
 
-没有 insta，没有覆盖率门槛，禁止 `#[ignore]` / `#[should_panic]`，禁止在 `vm` 或 `compiler` 源码内加单元测试模块——VM 一律经 `yield-harness` 测试。
+没有 insta，没有覆盖率门槛，禁止 `#[ignore]` / `#[should_panic]`。VM 的行为经 `yield-harness` 测试，不要在 `vm` 或 `compiler` 源码内加行为测试模块。唯一例外是 `crates/vm/src/bytecode.rs` 与 `crates/vm/src/bytecode/instr.rs` 的字节码契约单元测试：产物编码字节、指令表里 `slots[...]` 的检查顺序与标签。它们不经宿主，也不该为测试放宽 `pub(super)` 的验证入口。
 
 需要堆身份、槽表或拒绝恢复的断言写进 `e2e.rs`；可观察的 JS 行为写 `.js` 用例，不要新增 Rust harness。
 
