@@ -6,11 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::perf::BuildDigestTiming;
 use crate::value::{BindingId, JsBigInt, JsString};
 
 pub const BYTECODE_VERSION: u32 = 47;
@@ -838,6 +840,10 @@ impl Build {
         self.build_id = self.compute_id();
     }
     pub fn compute_id(&self) -> String {
+        self.compute_id_profiled::<false>().0
+    }
+
+    fn compute_id_profiled<const PROFILE: bool>(&self) -> (String, Option<BuildDigestTiming>) {
         let input = DigestInput {
             bytecode_version: self.bytecode_version,
             // Reject artifacts from older builtin semantics even when their
@@ -851,15 +857,26 @@ impl Build {
             entry: self.entry,
             preload: self.preload,
         };
+        let json_started = PROFILE.then(Instant::now);
         let bytes = serde_json::to_vec(&input).expect("bytecode digest serialization cannot fail");
-        let digest = Sha256::digest(bytes);
+        let sha256_started = PROFILE.then(Instant::now);
+        let digest = Sha256::digest(bytes.as_slice());
+        let sha256_elapsed = sha256_started.map(|started| started.elapsed());
+        let timing = match (json_started, sha256_started, sha256_elapsed) {
+            (Some(json_started), Some(sha256_started), Some(sha256)) => Some(BuildDigestTiming {
+                json: sha256_started.duration_since(json_started),
+                sha256,
+            }),
+            _ => None,
+        };
+        drop(bytes);
         let mut out = String::with_capacity(7 + digest.len() * 2);
         out.push_str("sha256:");
         for byte in digest {
             use std::fmt::Write;
             write!(out, "{byte:02x}").expect("writing to a String cannot fail");
         }
-        out
+        (out, timing)
     }
 
     pub fn function(&self, id: u32) -> Option<&Function> {
@@ -874,12 +891,12 @@ impl Build {
 
     /// Structural validation performed before any script code runs.
     pub fn validate(&self) -> Result<(), String> {
-        self.validate_with_digest_checkpoint(|| {})
+        self.validate_with_digest_checkpoint::<false>(|_| {})
     }
 
-    pub(crate) fn validate_with_digest_checkpoint(
+    pub(crate) fn validate_with_digest_checkpoint<const PROFILE: bool>(
         &self,
-        after_digest: impl FnOnce(),
+        after_digest: impl FnOnce(Option<BuildDigestTiming>),
     ) -> Result<(), String> {
         if self.bytecode_version != BYTECODE_VERSION {
             return Err(format!(
@@ -887,10 +904,11 @@ impl Build {
                 self.bytecode_version, BYTECODE_VERSION
             ));
         }
-        if self.build_id != self.compute_id() {
+        let (id, timing) = self.compute_id_profiled::<PROFILE>();
+        if self.build_id != id {
             return Err("build_id does not match the bytecode content".to_owned());
         }
-        after_digest();
+        after_digest(timing);
         let mut func_ids = std::collections::BTreeSet::new();
         let mut func_names = std::collections::BTreeSet::new();
         for function in &self.functions {

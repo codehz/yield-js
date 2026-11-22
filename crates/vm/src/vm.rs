@@ -277,9 +277,9 @@ impl Vm {
         };
         let mut digest_checked = None;
         build
-            .validate_with_digest_checkpoint(|| {
-                if PROFILE {
-                    digest_checked = Some(std::time::Instant::now());
+            .validate_with_digest_checkpoint::<PROFILE>(|timing| {
+                if let Some(timing) = timing {
+                    digest_checked = Some((std::time::Instant::now(), timing));
                 }
             })
             .map_err(VmError::InvalidBuild)?;
@@ -319,12 +319,14 @@ impl Vm {
         let profile = if PROFILE {
             let finished = std::time::Instant::now();
             let started = started.expect("startup start time");
-            let digest_checked = digest_checked.expect("digest check end time");
+            let (digest_checked, digest_timing) = digest_checked.expect("digest check timing");
             let validated = validated.expect("validation end time");
             let initializing = initializing.expect("initialization start time");
             Some(crate::perf::Startup {
                 prepare: initializing.duration_since(started),
                 build_identity: digest_checked.duration_since(started),
+                build_digest_json: digest_timing.json,
+                build_digest_sha256: digest_timing.sha256,
                 build_structure: validated.duration_since(digest_checked),
                 link_and_setup: initializing.duration_since(validated),
                 initialize: finished.duration_since(initializing),

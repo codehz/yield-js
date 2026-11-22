@@ -32,6 +32,11 @@ pub struct Counters {
     pub suspensions: u64,
 }
 
+pub(crate) struct BuildDigestTiming {
+    pub(crate) json: Duration,
+    pub(crate) sha256: Duration,
+}
+
 /// Wall-clock durations from a profiled VM construction.
 #[derive(Clone, Copy, Debug)]
 pub struct Startup {
@@ -40,6 +45,10 @@ pub struct Startup {
     pub prepare: Duration,
     /// Bytecode version and build identity checks, including JSON and SHA-256.
     pub build_identity: Duration,
+    /// JSON serialization of the input to the build digest, not artifact encoding.
+    pub build_digest_json: Duration,
+    /// SHA-256 of the serialized digest input, excluding digest formatting.
+    pub build_digest_sha256: Duration,
     /// Structural checks on modules, functions, and instructions.
     pub build_structure: Duration,
     /// Host linking, derived metadata, and VM setup after validation.
