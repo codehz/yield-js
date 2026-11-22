@@ -159,6 +159,15 @@ impl Vm {
         self.collect_with_roots(roots, None)
     }
 
+    /// Monotonic allocation totals for host GC scheduling, read between VM
+    /// calls. `objects` counts every allocation since VM creation; `bytes`
+    /// counts the backing storage of byte buffers allocated in the same span.
+    /// Compare against values taken at the previous collection; a restored VM
+    /// starts both at zero even though its heap is non-empty.
+    pub fn allocation_totals(&self) -> (u64, u64) {
+        (self.heap.allocations, self.heap.alloc_bytes)
+    }
+
     pub(crate) fn collect_active(
         &mut self,
         roots: &[Value],

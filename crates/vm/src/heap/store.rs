@@ -3,13 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::object::{EnvRole, OwnedEdge, push_value};
 use super::types::{
-    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, ArrayObject, Attributes, CombineState,
-    DescriptorUpdate, EnvironmentObject, FunctionObject, GeneratorObject, HAS_INSTANCE_DESCRIPTION,
-    HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL,
-    ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL,
-    MATCH_DESCRIPTION, MATCH_SYMBOL, NEXT_SYMBOL_ID, NativeObject, Object, OrderedProperty,
-    OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject, PromiseState,
-    Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
+    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, ArrayBufferObject, ArrayObject, Attributes,
+    CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject, GeneratorObject,
+    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
+    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NEXT_SYMBOL_ID, NativeObject, Object,
+    OrderedProperty, OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject,
+    PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
     SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
     SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION,
     TO_STRING_TAG_SYMBOL, WeakKey, array_index,
@@ -36,6 +36,13 @@ pub(crate) struct Heap {
     /// Suspended generator frames keyed by their ordinary generator object.
     pub(crate) generators: BTreeMap<ObjectId, GeneratorObject>,
     pub(crate) private: BTreeMap<ObjectId, PrivateElements>,
+    /// Monotonic allocation counters for host GC scheduling. IDs are never
+    /// reused, so `allocations` counts every object this heap ever created;
+    /// `alloc_bytes` counts the backing storage of byte buffers, which is the
+    /// only allocation whose size dominates object counts. Both are runtime
+    /// state, never captured in snapshots.
+    pub(crate) allocations: u64,
+    pub(crate) alloc_bytes: u64,
     /// Uncalled resolution objects. Capture conservatively rejects any id in
     /// this set that the tracer did not reach. At a GC safepoint, unreachable
     /// resolutions can be discarded with their owning objects.
@@ -57,6 +64,8 @@ impl Heap {
         Self {
             objects: BTreeMap::new(),
             next_id: 1,
+            allocations: 0,
+            alloc_bytes: 0,
             symbols: BTreeMap::from([
                 (ITERATOR_SYMBOL, Some(ITERATOR_DESCRIPTION.into())),
                 (TO_PRIMITIVE_SYMBOL, Some(TO_PRIMITIVE_DESCRIPTION.into())),
@@ -123,6 +132,12 @@ impl Heap {
             .next_id
             .checked_add(1)
             .expect("object id space exhausted");
+        self.allocations += 1;
+        if let Object::ArrayBuffer(ArrayBufferObject { bytes, .. }) = &object {
+            if let Some(bytes) = bytes {
+                self.alloc_bytes += bytes.len() as u64;
+            }
+        }
         self.objects.insert(id, object);
         id
     }

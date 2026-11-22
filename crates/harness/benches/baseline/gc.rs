@@ -10,11 +10,39 @@ use crate::workloads::WORKLOADS;
 const ROUNDS: u32 = 64;
 
 pub(super) fn run(workload: &str, policy: &str) {
-    let interval = match policy {
-        "none" => None,
-        "every-1" => Some(1),
-        "every-8" => Some(8),
-        _ => panic!("unknown GC policy: {policy}"),
+    enum Trigger {
+        None,
+        Every(u32),
+        /// Collect once the allocation delta since the last collection crosses
+        /// either threshold: `objects` object allocations or `bytes` of buffer
+        /// backing storage, whichever comes first. Zero disables a component.
+        Alloc {
+            objects: u64,
+            bytes: u64,
+        },
+    }
+    let trigger = match policy {
+        "none" => Trigger::None,
+        "every-1" => Trigger::Every(1),
+        "every-8" => Trigger::Every(8),
+        other => {
+            let rest = other
+                .strip_prefix("alloc-")
+                .unwrap_or_else(|| panic!("unknown GC policy: {other}"));
+            let mut parts = rest.split('-');
+            let objects: u64 = parts
+                .next()
+                .expect("object threshold")
+                .parse()
+                .expect("integer object threshold");
+            let bytes: u64 = parts
+                .next()
+                .expect("byte threshold")
+                .parse()
+                .expect("integer byte threshold");
+            assert!(parts.next().is_none(), "unknown GC policy: {other}");
+            Trigger::Alloc { objects, bytes }
+        }
     };
     let react = match workload {
         "react-updates" => Some(
@@ -32,7 +60,12 @@ pub(super) fn run(workload: &str, policy: &str) {
     };
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host).expect("start GC workload");
-    let mut pauses = Vec::with_capacity(interval.map_or(0, |n| (ROUNDS / n) as usize));
+    let mut pauses = Vec::with_capacity(match &trigger {
+        Trigger::None => 0,
+        Trigger::Every(n) => (ROUNDS / n) as usize,
+        Trigger::Alloc { .. } => ROUNDS as usize,
+    });
+    let mut load_baseline = vm.allocation_totals();
 
     let start = Instant::now();
     for round in 1..=ROUNDS {
@@ -46,11 +79,28 @@ pub(super) fn run(workload: &str, policy: &str) {
             vm.run_until_idle(&mut host).expect("drain buffer workload");
             assert_eq!(value, Value::number(marker));
         }
-        if interval.is_some_and(|n| round % n == 0) {
+        let due = match &trigger {
+            Trigger::None => false,
+            Trigger::Every(n) => round % n == 0,
+            Trigger::Alloc { objects, bytes } => {
+                let (allocated_objects, allocated_bytes) = vm.allocation_totals();
+                allocated_objects - load_baseline.0 >= *objects
+                    || allocated_bytes - load_baseline.1 >= *bytes
+            }
+        };
+        if due {
             let roots = host.gc_roots();
             let start = Instant::now();
             let removed = vm.collect_garbage(roots).expect("collect at idle boundary");
-            pauses.push((round, start.elapsed(), removed));
+            let (allocated_objects, allocated_bytes) = vm.allocation_totals();
+            pauses.push((
+                round,
+                start.elapsed(),
+                removed,
+                allocated_objects - load_baseline.0,
+                allocated_bytes - load_baseline.1,
+            ));
+            load_baseline = vm.allocation_totals();
         }
     }
     let elapsed = start.elapsed();
@@ -58,12 +108,14 @@ pub(super) fn run(workload: &str, policy: &str) {
     assert!(host.pending_labels().is_empty(), "unexpected pending work");
 
     println!("workload,policy,round,metric,value,unit");
-    for (round, pause, removed) in pauses {
+    for (round, pause, removed, load_objects, load_bytes) in pauses {
         println!(
             "{workload},{policy},{round},gc_pause,{},ns",
             pause.as_nanos()
         );
         println!("{workload},{policy},{round},gc_removed,{removed},count");
+        println!("{workload},{policy},{round},gc_load_objects,{load_objects},count");
+        println!("{workload},{policy},{round},gc_load_bytes,{load_bytes},bytes");
     }
     println!(
         "{workload},{policy},{ROUNDS},loop_total,{},ns",

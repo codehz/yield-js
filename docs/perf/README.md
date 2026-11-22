@@ -11,6 +11,7 @@
 |`bytecode-optimization.md`|离线字节码优化计划与正确性/交付门槛。|
 |`next-optimizations.md`|下一轮优化方向（快照捕获、GC 调度、执行吞吐、离线编译）。|
 |`gc.md`|GC 调度策略与进程峰值内存对照。|
+|`gc-alloc-trigger.md`|按分配量（对象数 / buffer 字节）触发的 GC 调度对照，与固定间隔策略的等价性验证。|
 
 ## 通用方法约定
 
