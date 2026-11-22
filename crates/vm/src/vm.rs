@@ -208,7 +208,7 @@ impl FunctionTable {
 
 #[derive(Debug)]
 pub struct Vm {
-    pub(crate) build: Build,
+    pub(crate) build: Arc<Build>,
     functions: FunctionTable,
     pub(crate) bindings: Arc<Bindings>,
     pub(crate) heap: Heap,
@@ -284,7 +284,7 @@ impl Vm {
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
         Self {
             functions: FunctionTable::from_validated(&build),
-            build,
+            build: Arc::new(build),
             bindings,
             heap: Heap::new(),
             host_tasks: BTreeMap::new(),
@@ -1825,7 +1825,7 @@ impl Vm {
             .collect();
         Self {
             functions: FunctionTable::from_validated(&build),
-            build,
+            build: Arc::new(build),
             bindings,
             heap,
             continuations,

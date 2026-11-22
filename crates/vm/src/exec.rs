@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
@@ -296,15 +297,15 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         mut frame: Frame,
     ) -> Result<ExecOutcome, VmError> {
+        // Own a read-only build handle so dispatch can borrow the code across
+        // mutable VM operations, including nested calls.
+        let build = Arc::clone(&self.build);
+        let code = &build.functions[frame.function].code;
         loop {
-            let instr = {
-                let function = &self.build.functions[frame.function];
-                if frame.pc >= function.code.len() {
-                    return Ok(ExecOutcome::Return(Value::UNDEFINED));
-                }
-                function.code[frame.pc].clone()
-            };
             let pc = frame.pc;
+            let Some(instr) = code.get(pc) else {
+                return Ok(ExecOutcome::Return(Value::UNDEFINED));
+            };
             frame.pc += 1;
             match self.step(host, roots, &mut frame, instr)? {
                 Step::Next => {}
@@ -399,12 +400,12 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
-        instr: Instr,
+        instr: &Instr,
     ) -> Result<Step, VmError> {
         // Reentrant calls borrow the initialized slots; destination writes
         // happen after the last use of this view in each instruction.
         let frame_roots = &roots.with(&*frame);
-        match instr {
+        match *instr {
             Instr::Const { dst, constant } => {
                 frame.write(dst, self.constant(constant)?)?;
                 Ok(Step::Next)
@@ -558,12 +559,16 @@ impl Vm {
             Instr::CallValue {
                 dst,
                 callee,
-                args,
+                ref args,
                 receiver,
             } => self.call_value(host, roots, frame, dst, callee, args, receiver),
-            Instr::Construct { dst, callee, args } => {
+            Instr::Construct {
+                dst,
+                callee,
+                ref args,
+            } => {
                 let callee = frame.read(callee)?;
-                let invocation = match &args {
+                let invocation = match args {
                     CallArgs::Slots(slots) => self.construct_with(
                         host,
                         frame_roots,
@@ -701,10 +706,10 @@ impl Vm {
                 dst,
                 context,
                 callee,
-                args,
+                ref args,
             } => {
                 let context = object_id(frame.read_ref(context)?, "super construction context")?;
-                let invocation = match &args {
+                let invocation = match args {
                     CallArgs::Slots(slots) => self.super_construct(
                         host,
                         frame_roots,
@@ -998,13 +1003,17 @@ impl Vm {
                 frame.write(dst, Value::object(id))?;
                 Ok(Step::Next)
             }
-            Instr::NewRegExp { dst, source, flags } => {
-                let id = self.alloc_regexp(&source, &flags)?;
+            Instr::NewRegExp {
+                dst,
+                ref source,
+                ref flags,
+            } => {
+                let id = self.alloc_regexp(source, flags)?;
                 frame.write(dst, Value::object(id))?;
                 Ok(Step::Next)
             }
-            Instr::NewArray { dst, elements } => {
-                let elements = frame.read_list(&elements)?;
+            Instr::NewArray { dst, ref elements } => {
+                let elements = frame.read_list(elements)?;
                 let id = self.heap.alloc_array(elements);
                 frame.write(dst, Value::object(id))?;
                 Ok(Step::Next)
@@ -1258,7 +1267,11 @@ impl Vm {
                     ))
                 }
             }
-            Instr::ObjectRest { dst, src, excluded } => {
+            Instr::ObjectRest {
+                dst,
+                src,
+                ref excluded,
+            } => {
                 let source = frame.read_ref(src)?;
                 if matches!(source.view(), ValueRef::Null | ValueRef::Undefined) {
                     return Ok(Step::Throw(
@@ -1266,7 +1279,8 @@ impl Vm {
                     ));
                 }
                 let excluded = excluded
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .map(|slot| converted_property_key(frame.read_ref(slot)?))
                     .collect::<Result<BTreeSet<_>, _>>()?;
                 let target = self.heap.alloc_plain();
@@ -1304,7 +1318,10 @@ impl Vm {
                 frame.write(dst, Value::object(env))?;
                 Ok(Step::Next)
             }
-            Instr::NewIterationEnv { parent, bindings } => {
+            Instr::NewIterationEnv {
+                parent,
+                ref bindings,
+            } => {
                 let parent = object_id(&frame.read(parent)?, "iteration environment parent")?;
                 if !matches!(self.heap.get(parent)?, Object::Environment(_)) {
                     return Err(VmError::InvalidState(
@@ -1315,7 +1332,7 @@ impl Vm {
                     VmError::InvalidState("iteration environment without a current env".to_owned())
                 })?;
                 let mut values = BTreeMap::new();
-                for binding in bindings {
+                for &binding in bindings {
                     values.insert(binding, self.heap.get_binding(current, binding)?);
                 }
                 frame.env = Some(self.heap.alloc_environment(Some(parent), values));
@@ -1379,7 +1396,7 @@ impl Vm {
         frame: &mut Frame,
         dst: Slot,
         callee: Slot,
-        args: CallArgs,
+        args: &CallArgs,
         receiver: Option<Slot>,
     ) -> Result<Step, VmError> {
         let callee = frame.read(callee)?;
@@ -1387,7 +1404,7 @@ impl Vm {
             Some(slot) => frame.read(slot)?,
             None => Value::UNDEFINED,
         };
-        let invocation = match &args {
+        let invocation = match args {
             CallArgs::Slots(slots) => self.invoke(
                 host,
                 &roots.with(&*frame),
