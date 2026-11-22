@@ -414,7 +414,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn type_error(&mut self, message: impl Into<String>) -> JsError {
-        let message = format!("TypeError: {}", message.into());
+        let message = message.into();
         match self.vm.type_error(self.roots, &message) {
             Ok(value) => JsError::Throw(self.js_value(value)),
             Err(error) => JsError::Fault(HostFault::new(error.to_string())),
