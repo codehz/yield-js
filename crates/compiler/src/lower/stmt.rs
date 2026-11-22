@@ -54,8 +54,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                         Ok(())
                     };
                 }
-                let test = self.compile_expression(&statement.test)?;
-                let branch = self.branch_false(test);
+                let branch = self.compile_condition(&statement.test)?;
                 self.compile_statement(&statement.consequent)?;
                 let end = self.jump();
                 let alternate = self.pc();
@@ -69,8 +68,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Statement::WhileStatement(statement) => {
                 let start = self.emit.loop_header();
-                let test = self.compile_expression(&statement.test)?;
-                let exit_branch = self.branch_false(test);
+                let exit_branch = self.compile_condition(&statement.test)?;
                 self.control.push_loop(Some(start));
                 self.compile_statement(&statement.body)?;
                 let loop_context = self.control.pop_loop();
@@ -88,8 +86,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 for jump in loop_context.continue_jumps.drain(..) {
                     self.patch_jump(jump, test_pc)?;
                 }
-                let test = self.compile_expression(&statement.test)?;
-                self.branch_false(test);
+                self.compile_condition(&statement.test)?;
                 let back = self.pc();
                 self.jump_to(start);
                 let end = self.pc();
@@ -128,8 +125,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 }
                 let test_pc = self.emit.loop_header();
                 let exit_branch = if let Some(test) = &statement.test {
-                    let test = self.compile_expression(test)?;
-                    Some(self.branch_false(test))
+                    Some(self.compile_condition(test)?)
                 } else {
                     None
                 };
@@ -708,14 +704,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 continue;
             };
             let test_reg = self.compile_expression(test)?;
-            let match_reg = self.alloc_reg()?;
-            self.emit(Instr::Binary {
-                dst: self.slot(match_reg),
-                op: BinaryOp::StrictEq,
-                lhs: self.slot(disc),
-                rhs: self.slot(test_reg),
-            });
-            let branch = self.branch_false(match_reg);
+            let branch = self.branch_compare_false(disc, BinaryOp::StrictEq, test_reg);
             let entry = self.jump();
             tests.push((branch, entry, index));
         }

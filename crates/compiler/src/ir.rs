@@ -174,6 +174,28 @@ pub(crate) fn compact_dead_instructions(
                 cond,
                 target: remap(target)?,
             },
+            Instr::BranchCompareFalse {
+                lhs,
+                op,
+                rhs,
+                target,
+            } => Instr::BranchCompareFalse {
+                lhs,
+                op,
+                rhs,
+                target: remap(target)?,
+            },
+            Instr::BranchCompareConstFalse {
+                lhs,
+                op,
+                constant,
+                target,
+            } => Instr::BranchCompareConstFalse {
+                lhs,
+                op,
+                constant,
+                target: remap(target)?,
+            },
             Instr::Await { dst, input, resume } => {
                 let id = await_ids[resume as usize].get_or_insert_with(|| {
                     let id = function.awaits.len() as u32;

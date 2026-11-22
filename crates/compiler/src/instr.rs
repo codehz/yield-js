@@ -56,6 +56,9 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         Instr::Binary { op, .. } | Instr::BinaryConst { op, .. } => {
             !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
         }
+        Instr::BranchCompareFalse { op, .. } | Instr::BranchCompareConstFalse { op, .. } => {
+            !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
+        }
         Instr::Unary { op, .. } => {
             matches!(
                 *op,
@@ -420,6 +423,13 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         Instr::Jump { .. } => {}
         Instr::BranchFalse { cond, .. } => {
             uses.insert(cond.index);
+        }
+        Instr::BranchCompareFalse { lhs, rhs, .. } => {
+            uses.insert(lhs.index);
+            uses.insert(rhs.index);
+        }
+        Instr::BranchCompareConstFalse { lhs, .. } => {
+            uses.insert(lhs.index);
         }
         Instr::Return { src } | Instr::Throw { src } => {
             uses.insert(src.index);
@@ -909,6 +919,28 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
         Instr::Jump { target } => Instr::Jump { target },
         Instr::BranchFalse { cond, target } => Instr::BranchFalse {
             cond: remap(cond),
+            target,
+        },
+        Instr::BranchCompareFalse {
+            lhs,
+            op,
+            rhs,
+            target,
+        } => Instr::BranchCompareFalse {
+            lhs: remap(lhs),
+            op,
+            rhs: remap(rhs),
+            target,
+        },
+        Instr::BranchCompareConstFalse {
+            lhs,
+            op,
+            constant,
+            target,
+        } => Instr::BranchCompareConstFalse {
+            lhs: remap(lhs),
+            op,
+            constant,
             target,
         },
         Instr::Return { src } => Instr::Return { src: remap(src) },

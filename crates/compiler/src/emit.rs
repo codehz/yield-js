@@ -5,7 +5,7 @@
 //! is what assigns real frame slots.
 
 use oxc::span::Span;
-use yield_vm::bytecode::{Instr, Slot, SlotKind};
+use yield_vm::bytecode::{BinaryOp, Instr, Slot, SlotKind};
 
 use crate::error::CompileError;
 
@@ -90,10 +90,36 @@ impl<'src> Emitter<'src> {
         })
     }
 
+    pub(crate) fn branch_compare_false(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
+        self.emit(Instr::BranchCompareFalse {
+            lhs: self.slot(lhs),
+            op,
+            rhs: self.slot(rhs),
+            target: u32::MAX,
+        })
+    }
+
+    pub(crate) fn branch_compare_const_false(
+        &mut self,
+        lhs: Reg,
+        op: BinaryOp,
+        constant: u32,
+    ) -> usize {
+        self.emit(Instr::BranchCompareConstFalse {
+            lhs: self.slot(lhs),
+            op,
+            constant,
+            target: u32::MAX,
+        })
+    }
+
     pub(crate) fn patch(&mut self, index: usize, target: usize) -> Result<(), CompileError> {
         let target = target as u32;
         match self.code.get_mut(index) {
-            Some(Instr::Jump { target: slot }) | Some(Instr::BranchFalse { target: slot, .. }) => {
+            Some(Instr::Jump { target: slot })
+            | Some(Instr::BranchFalse { target: slot, .. })
+            | Some(Instr::BranchCompareFalse { target: slot, .. })
+            | Some(Instr::BranchCompareConstFalse { target: slot, .. }) => {
                 *slot = target;
                 Ok(())
             }

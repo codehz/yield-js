@@ -2,7 +2,7 @@
 
 当前实现由代码推导的覆盖范围清单。语法子集与未覆盖项见 [`docs/gaps.md`](gaps.md)。
 
-- 字节码 **49** 将源码模块图、声明与求值函数、入口、可选 preload、最终导出目标、生成器恢复表、标签模板表和 BigInt 常量纳入构建摘要。摘要输入使用 bincode 固定整数小端编码，哈希为 xxh3-128；编码选项或 crate 版本变化会改变所有 `build_id`。构建产物使用 `Build::to_bytes` / `Build::from_bytes` 的 `YIELDBLD` + `BUILD_FORMAT_VERSION` + bincode 固定整数小端容器；JSON 往返仅用于测试和调试。加载时校验模块索引、可达性、绑定归属、getter、指令结构，以及生成器函数的种类、唯一启动边界、三个恢复落点、槽范围与升序 `saved_slots`；`async function*` 可同时拥有 `await` 恢复表和生成器恢复表，两张表各自独立校验；普通控制流不得进入 `throw` / `return` / 正文入口，坏产物返回 `InvalidBuild`。
+- 字节码 **50** 将源码模块图、声明与求值函数、入口、可选 preload、最终导出目标、生成器恢复表、标签模板表和 BigInt 常量纳入构建摘要。摘要输入使用 bincode 固定整数小端编码，哈希为 xxh3-128；编码选项或 crate 版本变化会改变所有 `build_id`。构建产物使用 `Build::to_bytes` / `Build::from_bytes` 的 `YIELDBLD` + `BUILD_FORMAT_VERSION` + bincode 固定整数小端容器；JSON 往返仅用于测试和调试。加载时校验模块索引、可达性、绑定归属、getter、指令结构，以及生成器函数的种类、唯一启动边界、三个恢复落点、槽范围与升序 `saved_slots`；`async function*` 可同时拥有 `await` 恢复表和生成器恢复表，两张表各自独立校验；普通控制流不得进入 `throw` / `return` / 正文入口，坏产物返回 `InvalidBuild`。
 - 标签模板由编译器直接降级为普通调用：标签引用按成员/调用语义求值并保留接收者，随后按调用点取得缓存的模板对象，最后从左到右求值替换表达式并以原值传入，不做字符串转换。每个调用点在 VM 启动时分配一个模板对象：冻结的 cooked 数组、冻结的 raw 数组，以及不可写、不可枚举、不可配置的 `raw` 自有属性；非法转义在 cooked 数组中是 `undefined`，raw 保留源码文本。模板对象是 GC 与快照根，快照格式 **61** 按构建的调用点顺序保存对象身份；恢复拒绝数量不符、重复、未冻结或内容不匹配的记录。
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, &mut host)` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - `compile(entry, preload, resolver, options)` 用同步 `ModuleResolver` 链接可达源码；`MemoryResolver` 和 `FileResolver` 使用根相对规范 ID。`CompileOptions::from_dts` 从宿主声明文件（`.d.ts`）单独读出模块与值导出清单；无法解释的导出语法按位置拒绝。支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出。星号不传递 `default`；相同最终目标不冲突，不同目标的同名导出从命名空间排除，对该名字的显式请求报错。
@@ -39,6 +39,7 @@
 - 函数声明提升；函数表达式、箭头函数、函数值成员调用。`this` 是隐式参数：方法调用传入接收者（给成员表达式加括号不改变接收者），普通调用传入 `undefined`，箭头函数沿词法链读取。
 - 点属性、字符串字面量下标及无替换的模板字面量下标可降为 `GetMemberConstKey`，包括方法调用及可选链中的读取。VM 从常量池借用字符串，跳过键槽和键转换，仍走通用属性读取。加载时拒绝非字符串或越界的键索引。
 - 二元运算的右侧为字面量时降为 `BinaryConst`，从构建常量取右操作数，跳过一条 `Const`；左侧仍先求值，非字面量右侧保持 `Binary`。加载时校验槽和常量池索引。
+- `if` / `while` / `do…while` / `for` 条件、条件表达式和 `switch` 的 `===` 比较直接降为 `BranchCompareFalse`；右侧字面量使用 `BranchCompareConstFalse`，不写布尔结果槽。VM 对双 Number 直接比较，其他类型复用通用比较和转换路径，转换抛错仍走当前异常处理器。
 - 变量声明（含命名导出）、函数与箭头函数形参、`catch`、`for…in` / `for…of` 左侧和 `=` 赋值均支持嵌套的对象与数组解构。默认值仅在读到 `undefined` 时求值，形参从左到右初始化。对象 rest 复制未匹配的自有可枚举键（含 Symbol），与对象展开共用复制规则；计算键只求值和转换一次。解构 `null` / `undefined` 抛出可捕获的 `TypeError`。
 - `const` 声明正常初始化（含解构与 `for…of` 的每轮写入）。之后对该绑定写入时才抛出可捕获的 `TypeError`（`Assignment to constant variable.`）：包括普通、复合、逻辑赋值、自增减、解构赋值和闭包中的写入。逻辑赋值短路时不写入、不抛错；解构按赋值顺序在第一个实际写入的 `const` 目标处抛错，之前的副作用与写入保留。内层同名绑定按自身的声明规则处理；`const` 不冻结对象或数组。绑定的可变性在编译期解析，不需要写入快照。
 - 函数与箭头函数支持 rest 形参（含解构模式）。每次调用把超出位置形参的实参收集到一个新数组；没有剩余实参时得到空数组。普通绑定和槽位的快照机制保留跨 `await` 使用的 rest 数组。

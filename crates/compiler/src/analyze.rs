@@ -133,6 +133,8 @@ pub(crate) fn ends_block(instruction: &Instr) -> bool {
             instruction,
             Instr::Jump { .. }
                 | Instr::BranchFalse { .. }
+                | Instr::BranchCompareFalse { .. }
+                | Instr::BranchCompareConstFalse { .. }
                 | Instr::GeneratorStart
                 | Instr::Return { .. }
                 | Instr::Throw { .. }
@@ -201,7 +203,9 @@ pub(crate) fn edges(
             pc: *target as usize,
             written: None,
         }],
-        Instr::BranchFalse { target, .. } => vec![
+        Instr::BranchFalse { target, .. }
+        | Instr::BranchCompareFalse { target, .. }
+        | Instr::BranchCompareConstFalse { target, .. } => vec![
             Edge {
                 pc: *target as usize,
                 written: None,

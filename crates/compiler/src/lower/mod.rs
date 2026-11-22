@@ -18,7 +18,9 @@ use oxc::span::{GetSpan, Span};
 use oxc::syntax::operator::UnaryOperator;
 use oxc::syntax::scope::ScopeFlags;
 use yield_vm::BindingId;
-use yield_vm::bytecode::{Build, Constant, Instr, ModuleExport, ModuleTarget, SourceModule};
+use yield_vm::bytecode::{
+    BinaryOp, Build, Constant, Instr, ModuleExport, ModuleTarget, SourceModule,
+};
 
 use crate::allocate;
 use crate::bindings;
@@ -1040,6 +1042,19 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
     pub(super) fn branch_false(&mut self, cond: Reg) -> usize {
         self.emit.branch_false(cond)
+    }
+
+    pub(super) fn branch_compare_false(&mut self, lhs: Reg, op: BinaryOp, rhs: Reg) -> usize {
+        self.emit.branch_compare_false(lhs, op, rhs)
+    }
+
+    pub(super) fn branch_compare_const_false(
+        &mut self,
+        lhs: Reg,
+        op: BinaryOp,
+        constant: u32,
+    ) -> usize {
+        self.emit.branch_compare_const_false(lhs, op, constant)
     }
 
     pub(super) fn patch_jump(&mut self, index: usize, target: usize) -> Result<(), CompileError> {

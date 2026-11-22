@@ -290,8 +290,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                     });
                 }
                 let result = self.alloc_reg()?;
-                let test = self.compile_expression(&expression.test)?;
-                let alternate_branch = self.branch_false(test);
+                let alternate_branch = self.compile_condition(&expression.test)?;
                 let consequent = self.compile_expression(&expression.consequent)?;
                 self.emit(Instr::Move {
                     dst: self.slot(result),
@@ -756,6 +755,29 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             rhs: self.slot(rhs),
         });
         Ok(dst)
+    }
+
+    /// Emits a conditional branch, fusing a direct comparison with its
+    /// branch. The comparison never writes a result slot, so conditions such
+    /// as `i < n` need neither a `Const` nor a boolean destination.
+    pub(super) fn compile_condition(
+        &mut self,
+        expression: &'ast Expression<'ast>,
+    ) -> Result<usize, CompileError> {
+        let expression = expression.without_parentheses();
+        if let Expression::BinaryExpression(binary) = expression
+            && let Some(op) = comparison_operator(binary.operator)
+        {
+            let lhs = self.compile_expression(&binary.left)?;
+            if let Some(constant) = self.binary_constant(&binary.right)? {
+                let constant = self.session.intern(constant);
+                return Ok(self.branch_compare_const_false(lhs, op, constant));
+            }
+            let rhs = self.compile_expression(&binary.right)?;
+            return Ok(self.branch_compare_false(lhs, op, rhs));
+        }
+        let value = self.compile_expression(expression)?;
+        Ok(self.branch_false(value))
     }
 
     /// A literal right operand has no evaluation side effects and can be
@@ -2017,4 +2039,18 @@ fn decode_string_body(body: &str, template: bool) -> Option<JsString> {
         }
     }
     Some(JsString::from_units(units))
+}
+
+fn comparison_operator(operator: BinaryOperator) -> Option<BinaryOp> {
+    Some(match operator {
+        BinaryOperator::LessThan => BinaryOp::Lt,
+        BinaryOperator::LessEqualThan => BinaryOp::Le,
+        BinaryOperator::GreaterThan => BinaryOp::Gt,
+        BinaryOperator::GreaterEqualThan => BinaryOp::Ge,
+        BinaryOperator::Equality => BinaryOp::Eq,
+        BinaryOperator::Inequality => BinaryOp::Ne,
+        BinaryOperator::StrictEquality => BinaryOp::StrictEq,
+        BinaryOperator::StrictInequality => BinaryOp::StrictNe,
+        _ => return None,
+    })
 }

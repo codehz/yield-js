@@ -415,6 +415,35 @@ impl Vm {
         }
     }
 
+    /// Evaluates a comparison for a branch without materializing a boolean
+    /// `Value` when both operands are numbers.
+    fn branch_compare_false(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        op: BinaryOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Result<bool, Value>, VmError> {
+        if let (ValueRef::Number(left), ValueRef::Number(right)) = (lhs.view(), rhs.view())
+            && let Some(result) = match op {
+                BinaryOp::Lt => Some(left < right),
+                BinaryOp::Le => Some(left <= right),
+                BinaryOp::Gt => Some(left > right),
+                BinaryOp::Ge => Some(left >= right),
+                BinaryOp::Eq | BinaryOp::StrictEq => Some(left == right),
+                BinaryOp::Ne | BinaryOp::StrictNe => Some(left != right),
+                _ => None,
+            }
+        {
+            return Ok(Ok(result));
+        }
+        match self.binary_value(host, roots, op, lhs, rhs)? {
+            Ok(value) => Ok(Ok(value.truthy())),
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
     fn binary_value(
         &mut self,
         host: &mut dyn Host,
@@ -1520,6 +1549,36 @@ impl Vm {
             Instr::BranchFalse { cond, target } => {
                 if !frame.read(cond)?.truthy() {
                     frame.pc = target as usize;
+                }
+                Ok(Step::Next)
+            }
+            Instr::BranchCompareFalse {
+                lhs,
+                op,
+                rhs,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = frame.read(rhs)?;
+                match self.branch_compare_false(host, frame_roots, op, lhs, rhs)? {
+                    Ok(true) => {}
+                    Ok(false) => frame.pc = target as usize,
+                    Err(error) => return Ok(Step::Throw(error)),
+                }
+                Ok(Step::Next)
+            }
+            Instr::BranchCompareConstFalse {
+                lhs,
+                op,
+                constant,
+                target,
+            } => {
+                let lhs = frame.read(lhs)?;
+                let rhs = Self::constant(constants, constant)?;
+                match self.branch_compare_false(host, frame_roots, op, lhs, rhs)? {
+                    Ok(true) => {}
+                    Ok(false) => frame.pc = target as usize,
+                    Err(error) => return Ok(Step::Throw(error)),
                 }
                 Ok(Step::Next)
             }
