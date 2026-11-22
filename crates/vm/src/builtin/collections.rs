@@ -17,12 +17,33 @@ use crate::vm::Vm;
 enum CollectionMethod {
     Get,
     Insert,
+    GetOrInsert,
+    GetOrInsertComputed,
     Has,
     Delete,
     Clear,
     Size,
     ForEach,
     Iterate(CollectionIteration),
+}
+
+#[derive(Clone, Copy)]
+enum SetOperation {
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    IsSubsetOf,
+    IsSupersetOf,
+    IsDisjointFrom,
+}
+
+/// GetSetRecord result: a set-like object with its size and cached methods.
+struct SetRecord {
+    object: Value,
+    size: f64,
+    has: Value,
+    keys: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -150,9 +171,19 @@ const WEAK_SET_ROOTS: &[RootSpec] = &[
 mod map_members {
     use super::{CollectionIteration::*, CollectionKind, CollectionMethod::*};
 
+    static_calls! {
+        groupBy: 2 => |vm, host, roots, args, _| vm.map_group_by(host, roots, &args);
+    }
+
     prototype_calls! {
         get: 1 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Get, receiver, &args)
+        };
+        getOrInsert: 2 => |vm, host, roots, args, receiver| {
+            vm.collection_method(host, roots, CollectionKind::Map, GetOrInsert, receiver, &args)
+        };
+        getOrInsertComputed: 2 => |vm, host, roots, args, receiver| {
+            vm.collection_method(host, roots, CollectionKind::Map, GetOrInsertComputed, receiver, &args)
         };
         set: 2 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Map, Insert, receiver, &args)
@@ -216,11 +247,34 @@ mod set_members {
 // Set's aliases are installed between `values` and `entries`.
 #[yield_binding_macros::builtin_global(name = "Set", root = "set", kind = "constructor")]
 mod set_entries {
-    use super::{CollectionIteration::Entries, CollectionKind, CollectionMethod::Iterate};
+    use super::{
+        CollectionIteration::Entries, CollectionKind, CollectionMethod::Iterate, SetOperation,
+    };
 
     prototype_calls! {
         entries: 0 => |vm, host, roots, args, receiver| {
             vm.collection_method(host, roots, CollectionKind::Set, Iterate(Entries), receiver, &args)
+        };
+        union: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::Union, receiver, &args)
+        };
+        intersection: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::Intersection, receiver, &args)
+        };
+        difference: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::Difference, receiver, &args)
+        };
+        symmetricDifference: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::SymmetricDifference, receiver, &args)
+        };
+        isSubsetOf: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::IsSubsetOf, receiver, &args)
+        };
+        isSupersetOf: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::IsSupersetOf, receiver, &args)
+        };
+        isDisjointFrom: 1 => |vm, host, roots, args, receiver| {
+            vm.set_operation(host, roots, SetOperation::IsDisjointFrom, receiver, &args)
         };
     }
 }
@@ -601,9 +655,9 @@ impl Vm {
         let ValueRef::Object(id) = receiver.view() else {
             return self.throw_type_error(roots, invalid);
         };
-        let object = self.heap.get_mut(id)?;
+        let object = self.heap.get(id)?;
         if !matches!(
-            (kind, &*object),
+            (kind, object),
             (CollectionKind::Map, Object::Map { .. }) | (CollectionKind::Set, Object::Set { .. })
         ) {
             return self.throw_type_error(roots, invalid);
@@ -645,7 +699,11 @@ impl Vm {
                 }
                 Value::UNDEFINED
             }
-            _ => match object {
+            GetOrInsert => return self.map_get_or_insert(id, key, second),
+            GetOrInsertComputed => {
+                return self.map_get_or_insert_computed(host, roots, id, key, second);
+            }
+            _ => match self.heap.get_mut(id)? {
                 Object::Map { entries, .. } => collection_slot_method(
                     entries,
                     method,
@@ -668,6 +726,574 @@ impl Vm {
             },
         };
         Ok(Invocation::Value(value))
+    }
+
+    /// Inserts without consulting script-replaceable `get` / `has` / `set`.
+    fn map_get_or_insert(
+        &mut self,
+        id: ObjectId,
+        key: &Value,
+        value: &Value,
+    ) -> Result<Invocation, VmError> {
+        let key = canonical_key(key);
+        let Object::Map { entries, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        match entries
+            .iter_mut()
+            .flatten()
+            .find(|(entry, _)| same_value_zero(entry, &key))
+        {
+            Some((_, existing)) => Ok(Invocation::Value(existing.clone())),
+            None => {
+                entries.push(Some((key, value.clone())));
+                Ok(Invocation::Value(value.clone()))
+            }
+        }
+    }
+
+    fn map_get_or_insert_computed(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        key: &Value,
+        callback: &Value,
+    ) -> Result<Invocation, VmError> {
+        if !self.is_callable(callback) {
+            return self.throw_type_error(
+                roots,
+                "collection getOrInsertComputed callback is not callable",
+            );
+        }
+        let key = canonical_key(key);
+        let roots = &roots.with(&key);
+        if let Some(existing) = self.map_live_value(id, &key)? {
+            return Ok(Invocation::Value(existing));
+        }
+        let callback = callback.clone();
+        let roots = &roots.with(&callback);
+        let arguments = [key.clone()];
+        let value = match self.invoke(
+            host,
+            roots,
+            &callback,
+            Arguments::Values(&arguments),
+            &Value::UNDEFINED,
+        )? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        // The callback may have inserted the key; update in place to keep the slot position.
+        let Object::Map { entries, .. } = self.heap.get_mut(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        match entries
+            .iter_mut()
+            .flatten()
+            .find(|(entry, _)| same_value_zero(entry, &key))
+        {
+            Some((_, existing)) => *existing = value.clone(),
+            None => entries.push(Some((key, value.clone()))),
+        }
+        Ok(Invocation::Value(value))
+    }
+
+    fn map_live_value(&self, id: ObjectId, key: &Value) -> Result<Option<Value>, VmError> {
+        let Object::Map { entries, .. } = self.heap.get(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(entries
+            .iter()
+            .flatten()
+            .find(|(entry, _)| same_value_zero(entry, key))
+            .map(|(_, value)| value.clone()))
+    }
+
+    fn map_group_by(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let undefined = Value::UNDEFINED;
+        let items = args.first().unwrap_or(&undefined);
+        if matches!(items.view(), ValueRef::Undefined | ValueRef::Null) {
+            return self.throw_type_error(roots, "Map.groupBy requires a non-nullish value");
+        }
+        let callback = args.get(1).unwrap_or(&undefined);
+        if !self.is_callable(callback) {
+            return self.throw_type_error(roots, "Map.groupBy requires a callable callback");
+        }
+        let iterator_pair = match self.get_iterator(host, roots, items)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&iterator_pair);
+        let (iterator, next) = &iterator_pair;
+        let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+        let mut index = 0u64;
+        loop {
+            let roots = &roots.with(&groups);
+            if index >= (1u64 << 53) - 1 {
+                let error =
+                    self.type_error(roots, "Map.groupBy exceeded the maximum group count")?;
+                self.close_iterator(host, &roots.with(&error), iterator)?;
+                return Ok(Invocation::Thrown(error));
+            }
+            let item = match self.iterator_step(host, roots, iterator, next)? {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&item);
+            let call_args = [item.clone(), Value::number(index as f64)];
+            let roots = &roots.with(&call_args);
+            let key = match self.invoke(
+                host,
+                roots,
+                callback,
+                Arguments::Values(&call_args),
+                &undefined,
+            )? {
+                Invocation::Value(key) => key,
+                Invocation::Thrown(error) => {
+                    self.close_iterator(host, &roots.with(&error), iterator)?;
+                    return Ok(Invocation::Thrown(error));
+                }
+            };
+            let key = canonical_key(&key);
+            match groups
+                .iter_mut()
+                .find(|(existing, _)| same_value_zero(existing, &key))
+            {
+                Some((_, elements)) => elements.push(item),
+                None => groups.push((key, vec![item])),
+            }
+            index += 1;
+        }
+        let prototype = self.builtins.get("map.prototype");
+        let entries = groups
+            .into_iter()
+            .map(|(key, elements)| Some((key, Value::object(self.heap.alloc_array(elements)))))
+            .collect();
+        Ok(Invocation::Value(Value::object(self.heap.alloc(
+            Object::Map {
+                object: PlainObject::new(Some(prototype)),
+                entries,
+            },
+        ))))
+    }
+
+    fn set_operation(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        operation: SetOperation,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let receiver_args = (receiver, args);
+        let roots = &roots.with(&receiver_args);
+        let invalid = "incompatible collection receiver";
+        let ValueRef::Object(id) = receiver.view() else {
+            return self.throw_type_error(roots, invalid);
+        };
+        if !matches!(self.heap.get(id)?, Object::Set { .. }) {
+            return self.throw_type_error(roots, invalid);
+        }
+        let undefined = Value::UNDEFINED;
+        let other = args.first().unwrap_or(&undefined);
+        let record = match self.get_set_record(host, roots, other)? {
+            Ok(record) => record,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let record_view = (&record.object, &record.has, &record.keys);
+        let roots = &roots.with(&record_view);
+        match operation {
+            SetOperation::Union => self.set_union(host, roots, id, &record),
+            SetOperation::Intersection => self.set_intersection(host, roots, id, &record),
+            SetOperation::Difference => self.set_difference(host, roots, id, &record),
+            SetOperation::SymmetricDifference => {
+                self.set_symmetric_difference(host, roots, id, &record)
+            }
+            SetOperation::IsSubsetOf => self.set_is_subset_of(host, roots, id, &record),
+            SetOperation::IsSupersetOf => self.set_is_superset_of(host, roots, id, &record),
+            SetOperation::IsDisjointFrom => self.set_is_disjoint_from(host, roots, id, &record),
+        }
+    }
+
+    fn get_set_record(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        other: &Value,
+    ) -> Result<Result<SetRecord, Value>, VmError> {
+        if !matches!(other.view(), ValueRef::Object(_)) {
+            return Ok(Err(
+                self.type_error(roots, "set operation requires an object argument")?
+            ));
+        }
+        let roots = &roots.with(other);
+        let size = match self.read_property(host, roots, other, PropertyKeyRef::String("size"))? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let roots = &roots.with(&size);
+        let size = match self.coerce_number(host, roots, &size)? {
+            Ok(size) => size,
+            Err(error) => return Ok(Err(error)),
+        };
+        if size.is_nan() {
+            return Ok(Err(self.type_error(roots, "set-like size must not be NaN")?));
+        }
+        let size = size.trunc();
+        if size < 0.0 {
+            return Ok(Err(
+                self.make_range_error(roots, "set-like size must not be negative")?
+            ));
+        }
+        let has = match self.read_property(host, roots, other, PropertyKeyRef::String("has"))? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let roots = &roots.with(&has);
+        if !self.is_callable(&has) {
+            return Ok(Err(self.type_error(roots, "set-like has must be callable")?));
+        }
+        let keys = match self.read_property(host, roots, other, PropertyKeyRef::String("keys"))? {
+            Invocation::Value(value) => value,
+            Invocation::Thrown(error) => return Ok(Err(error)),
+        };
+        let roots = &roots.with(&keys);
+        if !self.is_callable(&keys) {
+            return Ok(Err(
+                self.type_error(roots, "set-like keys must be callable")?
+            ));
+        }
+        Ok(Ok(SetRecord {
+            object: other.clone(),
+            size,
+            has,
+            keys,
+        }))
+    }
+
+    fn set_elements_copy(&self, id: ObjectId) -> Result<Vec<Option<Value>>, VmError> {
+        let Object::Set { elements, .. } = self.heap.get(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(elements.clone())
+    }
+
+    fn set_live_count(&self, id: ObjectId) -> Result<usize, VmError> {
+        let Object::Set { elements, .. } = self.heap.get(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(elements.iter().flatten().count())
+    }
+
+    fn set_live_contains(&self, id: ObjectId, value: &Value) -> Result<bool, VmError> {
+        let Object::Set { elements, .. } = self.heap.get(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(live_contains(elements, value))
+    }
+
+    /// Clones the value at `index`, then advances past it. Appended slots stay reachable.
+    fn set_next_element(&self, id: ObjectId, index: &mut usize) -> Result<Option<Value>, VmError> {
+        let Object::Set { elements, .. } = self.heap.get(id)? else {
+            unreachable!("receiver brand already checked");
+        };
+        Ok(next_slot(elements, index).cloned())
+    }
+
+    fn alloc_set(&mut self, elements: Vec<Option<Value>>) -> Value {
+        let prototype = self.builtins.get("set.prototype");
+        Value::object(self.heap.alloc(Object::Set {
+            object: PlainObject::new(Some(prototype)),
+            elements,
+        }))
+    }
+
+    fn call_set_has(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        record: &SetRecord,
+        value: &Value,
+    ) -> Result<Result<bool, Value>, VmError> {
+        let arguments = [value.clone()];
+        let root_view = (&record.object, &record.has, &arguments);
+        let roots = &roots.with(&root_view);
+        match self.invoke(
+            host,
+            roots,
+            &record.has,
+            Arguments::Values(&arguments),
+            &record.object,
+        )? {
+            Invocation::Value(result) => Ok(Ok(result.truthy())),
+            Invocation::Thrown(error) => Ok(Err(error)),
+        }
+    }
+
+    fn set_keys_iterator(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        record: &SetRecord,
+    ) -> Result<Result<(Value, Value), Value>, VmError> {
+        self.get_iterator_from_method(host, roots, &record.object, &record.keys)
+    }
+
+    fn set_union(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        let pair = match self.set_keys_iterator(host, roots, record)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&pair);
+        let mut result = self.set_elements_copy(id)?;
+        loop {
+            let roots = &roots.with(&result);
+            let item = match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let item = canonical_key(&item);
+            if !live_contains(&result, &item) {
+                result.push(Some(item));
+            }
+        }
+        Ok(Invocation::Value(self.alloc_set(result)))
+    }
+
+    fn set_intersection(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        let mut result: Vec<Option<Value>> = Vec::new();
+        if (self.set_live_count(id)? as f64) <= record.size {
+            let mut index = 0;
+            while let Some(entry) = self.set_next_element(id, &mut index)? {
+                let root_view = (&entry, &result);
+                let roots = &roots.with(&root_view);
+                let in_other = match self.call_set_has(host, roots, record, &entry)? {
+                    Ok(value) => value,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                if in_other && !live_contains(&result, &entry) {
+                    result.push(Some(entry));
+                }
+            }
+        } else {
+            let pair = match self.set_keys_iterator(host, roots, record)? {
+                Ok(pair) => pair,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&pair);
+            loop {
+                let item = {
+                    let roots = &roots.with(&result);
+                    match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                };
+                let item = canonical_key(&item);
+                if self.set_live_contains(id, &item)? && !live_contains(&result, &item) {
+                    result.push(Some(item));
+                }
+            }
+        }
+        Ok(Invocation::Value(self.alloc_set(result)))
+    }
+
+    fn set_difference(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        let mut result = self.set_elements_copy(id)?;
+        if (self.set_live_count(id)? as f64) <= record.size {
+            let mut index = 0;
+            while let Some(entry) = next_slot(&result, &mut index).cloned() {
+                let root_view = (&entry, &result);
+                let roots = &roots.with(&root_view);
+                let in_other = match self.call_set_has(host, roots, record, &entry)? {
+                    Ok(value) => value,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                if in_other {
+                    live_remove(&mut result, &entry);
+                }
+            }
+        } else {
+            let pair = match self.set_keys_iterator(host, roots, record)? {
+                Ok(pair) => pair,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&pair);
+            loop {
+                let item = {
+                    let roots = &roots.with(&result);
+                    match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break,
+                        Err(error) => return Ok(Invocation::Thrown(error)),
+                    }
+                };
+                let item = canonical_key(&item);
+                live_remove(&mut result, &item);
+            }
+        }
+        Ok(Invocation::Value(self.alloc_set(result)))
+    }
+
+    fn set_symmetric_difference(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        let pair = match self.set_keys_iterator(host, roots, record)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let mut result = self.set_elements_copy(id)?;
+        let roots = &roots.with(&pair);
+        loop {
+            let item = {
+                let roots = &roots.with(&result);
+                match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
+            };
+            let item = canonical_key(&item);
+            let position = live_position(&result, &item);
+            if self.set_live_contains(id, &item)? {
+                if let Some(position) = position {
+                    result[position] = None;
+                }
+            } else if position.is_none() {
+                result.push(Some(item));
+            }
+        }
+        Ok(Invocation::Value(self.alloc_set(result)))
+    }
+
+    fn set_is_subset_of(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        if (self.set_live_count(id)? as f64) > record.size {
+            return Ok(Invocation::Value(Value::boolean(false)));
+        }
+        let mut index = 0;
+        while let Some(entry) = self.set_next_element(id, &mut index)? {
+            let roots = &roots.with(&entry);
+            let in_other = match self.call_set_has(host, roots, record, &entry)? {
+                Ok(value) => value,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            if !in_other {
+                return Ok(Invocation::Value(Value::boolean(false)));
+            }
+        }
+        Ok(Invocation::Value(Value::boolean(true)))
+    }
+
+    fn set_is_superset_of(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        if (self.set_live_count(id)? as f64) < record.size {
+            return Ok(Invocation::Value(Value::boolean(false)));
+        }
+        let pair = match self.set_keys_iterator(host, roots, record)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&pair);
+        loop {
+            let item = match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            if !self.set_live_contains(id, &item)? {
+                return match self.close_iterator(host, roots, &pair.0)? {
+                    Invocation::Value(_) => Ok(Invocation::Value(Value::boolean(false))),
+                    Invocation::Thrown(error) => Ok(Invocation::Thrown(error)),
+                };
+            }
+        }
+        Ok(Invocation::Value(Value::boolean(true)))
+    }
+
+    fn set_is_disjoint_from(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        record: &SetRecord,
+    ) -> Result<Invocation, VmError> {
+        if (self.set_live_count(id)? as f64) <= record.size {
+            let mut index = 0;
+            while let Some(entry) = self.set_next_element(id, &mut index)? {
+                let roots = &roots.with(&entry);
+                let in_other = match self.call_set_has(host, roots, record, &entry)? {
+                    Ok(value) => value,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                if in_other {
+                    return Ok(Invocation::Value(Value::boolean(false)));
+                }
+            }
+        } else {
+            let pair = match self.set_keys_iterator(host, roots, record)? {
+                Ok(pair) => pair,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&pair);
+            loop {
+                let item = match self.iterator_step(host, roots, &pair.0, &pair.1)? {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                };
+                if self.set_live_contains(id, &item)? {
+                    return match self.close_iterator(host, roots, &pair.0)? {
+                        Invocation::Value(_) => Ok(Invocation::Value(Value::boolean(false))),
+                        Invocation::Thrown(error) => Ok(Invocation::Thrown(error)),
+                    };
+                }
+            }
+        }
+        Ok(Invocation::Value(Value::boolean(true)))
     }
 
     fn collection_pair(
@@ -731,6 +1357,25 @@ impl Vm {
         };
         self.iterator_result(value, false)
     }
+}
+
+fn live_position(slots: &[Option<Value>], value: &Value) -> Option<usize> {
+    slots.iter().position(|slot| {
+        slot.as_ref()
+            .is_some_and(|entry| same_value_zero(entry, value))
+    })
+}
+
+fn live_contains(slots: &[Option<Value>], value: &Value) -> bool {
+    live_position(slots, value).is_some()
+}
+
+fn live_remove(slots: &mut [Option<Value>], value: &Value) -> bool {
+    let Some(position) = live_position(slots, value) else {
+        return false;
+    };
+    slots[position] = None;
+    true
 }
 
 fn next_slot<'a, T>(slots: &'a [Option<T>], index: &mut usize) -> Option<&'a T> {

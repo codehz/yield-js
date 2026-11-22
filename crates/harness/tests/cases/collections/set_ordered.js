@@ -19,7 +19,7 @@ export function run() {
   expect(Set.prototype.constructor).toBe(Set);
   expect(Object.getPrototypeOf(Set.prototype)).toBe(Object.prototype);
   const keys = Reflect.ownKeys(Set.prototype);
-  expect(keys.slice(0, -1).join(',')).toBe('constructor,add,has,delete,clear,size,forEach,values,keys,entries');
+  expect(keys.slice(0, -1).join(',')).toBe('constructor,add,has,delete,clear,size,forEach,values,keys,entries,union,intersection,difference,symmetricDifference,isSubsetOf,isSupersetOf,isDisjointFrom');
   expect(keys[keys.length - 1]).toBe(Symbol.iterator);
   const e = s.entries();
   expect(e[Symbol.iterator]()).toBe(e);
