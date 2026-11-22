@@ -47,7 +47,7 @@
 | 表达式 | `number` 与 `bigint` 字面量（BigInt 支持十进制、`0x` / `0o` / `0b` 前缀及数字分隔符，不带小数点或指数）、布尔、字符串、`null`、正则字面量与数组/对象字面量（含空洞、计算属性、展开）；模板字面量与标签模板（标签函数按调用点取得缓存且冻结的模板对象，替换值原样传递）；普通/成员/构造调用与实参展开；算术、位运算、比较、赋值、自增减、短路、三元、逗号、可选链、`??` 与逻辑赋值；`typeof`、`void`、`delete`、`in`、`instanceof`。 |
 | 控制流 | `if`、`switch`、`for`、`while`、`do…while`、`for…in`、同步 `for…of`（含提前退出时的 iterator close）、`for await…of`（含异步 iterator close）；标签、`break`、`continue`、`return`、`throw`、`try/catch/finally`。 |
 | 异步 | `async` 函数与 `await`；generator（`function*`、`yield`、`yield*`）、async generator（`async function*`）；thenable 同化、异常拒绝、Promise 微任务顺序与已结算 Promise 的异步恢复。 |
-| 显式资源管理 | `using` / `await using` 单名声明、C 风格 `for` 声明头、同步与异步 `for…of` 资源头，以及项目扩展 `using void` 迭代头。模块求值仅支持同步 `using`；清理协议与内建见下文。 |
+| 显式资源管理 | `using` / `await using` 单名声明、C 风格 `for` 声明头、同步与异步 `for…of` 资源头。模块求值仅支持同步 `using`；清理协议与内建见下文。 |
 
 `class`（含 `extends`、字段和私有成员）是一等支持的语法：字节码编译器直接编译类声明与类表达式，不经离线转译降级——转译私有字段会生成额外的弱映射/闭包代码，破坏快照可恢复性和代码量目标。类语义（构造器、继承链、`super`、静态成员、字段初始化、私有字段/方法/访问器）在编译器与 VM 内建层面实现；宿主类声明（`#[host_class]`）与脚本类共用同一套 VM 类对象表示。标签模板同样由编译器直接编译，不经离线构建降级：每个调用点分配一个模板对象，包含冻结的 cooked 字符串数组、冻结的 raw 字符串数组以及只读的 `raw` 属性；cooked 元素在非法转义处为 `undefined`，替换表达式按源码顺序求值并原样作为实参传入，不做字符串转换。模板对象的调用点身份与冻结状态属于堆状态，随快照保存并恢复；动态模块加载、`eval`、`Function` 动态构造、`with` 不在首版契约内。直接输入中不支持的语法在编译期报告特性名和源码位置；缺失声明的宿主绑定在装载时拒绝。普通 JS 的可选全局探测保留标准语义（如未声明的 `MessageChannel` 在 `typeof` 中返回 `"undefined"`）。
 
@@ -63,7 +63,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 
 ### 显式资源管理：`using` 与 `await using`
 
-`using` / `await using` 由编译器直接编译。声明只接受单名绑定，一般声明和 C 风格 `for` 头必须带初始化器，`for…of` / `for await…of` 头必须无初始化器。迭代方式与资源释放 hint 独立，`await using` 不隐式等待初始化器。项目扩展仅允许 `for (using void of expr)` / `for await (using void of expr)`：登记当前迭代值，使用同步 hint，不创建绑定。模块求值为同步帧，即使在嵌套块或循环中也拒绝 `await using`；同步函数同样拒绝，不可达语句不例外。模块顶层同步 `using` 在求值时登记和清理。
+`using` / `await using` 由编译器直接编译。声明只接受单名绑定，一般声明和 C 风格 `for` 头必须带初始化器，`for…of` / `for await…of` 头必须无初始化器。迭代方式与资源释放 hint 独立，`await using` 不隐式等待初始化器。模块求值为同步帧，即使在嵌套块或循环中也拒绝 `await using`；同步函数同样拒绝，不可达语句不例外。模块顶层同步 `using` 在求值时登记和清理。
 
 依据 ECMA-262 的 [CreateDisposableResource](https://tc39.es/ecma262/#sec-createdisposableresource)、[AddDisposableResource](https://tc39.es/ecma262/#sec-adddisposableresource) 和 [DisposeResources](https://tc39.es/ecma262/#sec-disposeresources)：初始化器求值后、绑定初始化前，对对象按普通属性访问查找并捕获释放方法。同步只查 `Symbol.dispose`；异步先查 `Symbol.asyncDispose`，仅在其为 `null` 或 `undefined` 时回退至 `Symbol.dispose`。非对象资源、缺失或不可调用的方法抛 `TypeError`，访问器异常原样传递，不登记失败的资源。同步空值不登记；异步空值登记无方法记录。退出时按 LIFO 先弹出记录，再以资源为 `this` 无参调用已捕获的方法。同步忽略返回值；异步等待真正异步方法的结果，回退包装忽略同步返回值但将同步抛错转为拒绝。按 `needsAwait` / `hasAwaited` 合并异步空记录的等待边界，不在每条记录后无条件等待。释放失败继续处理其余记录；若已有 throw completion，使用内建 `SuppressedError` 原型构造新异常，`error` 是新错误，`suppressed` 是此前异常（即使为 `undefined`），不设置 `cause`。
 

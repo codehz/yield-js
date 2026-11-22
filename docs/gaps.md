@@ -52,7 +52,7 @@
 7. **静态属性键不缓存读取。** 专用读取指令只跳过字符串键的槽读写和转换；`SetMember` 对普通对象的自有可写数据属性有写侧单态缓存，但读取、计算键、复合赋值和 `super` 仍走通用属性路径。
 8. **CFG 常量传播不折叠通用 JS 运算。** 只传播已有字面量和槽复制、判断已知字面量的真假值；不做跨函数常量传播或运行时类型专用化。
 9. **快照不是不可信导入格式。** 默认恢复不重查受信镜像的堆图；应用负责来源、完整性和读入大小。`Vm::restore_validated` 用于诊断镜像不变量，不提供认证、隔离或资源预算。
-10. **显式资源管理未实现。** `using` / `await using`、`using void` for 头、`DisposableStack` / `AsyncDisposableStack`、`SuppressedError` 与 `Symbol.dispose` / `Symbol.asyncDispose` 均未实现；编译期目前把 `using` 语法按不支持拒绝。完整目标设计见 [`design.md`](design.md) 的「显式资源管理」。
+10. **显式资源管理未实现。** `using` / `await using`、`DisposableStack` / `AsyncDisposableStack`、`SuppressedError` 与 `Symbol.dispose` / `Symbol.asyncDispose` 均未实现；编译期目前把 `using` 语法按不支持拒绝。完整目标设计见 [`design.md`](design.md) 的「显式资源管理」。
 
 ## 6. 首版范围之外（不是首版缺口）
 
