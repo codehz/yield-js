@@ -7,15 +7,16 @@ use crate::builtin::roots::BuiltinRoots;
 use crate::bytecode::{BYTECODE_VERSION, Build};
 use crate::error::VmError;
 use crate::heap::{
-    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, AsyncCompletion, Attributes, CombineKind,
-    EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_DESCRIPTION,
-    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, IntegrityLevel,
-    MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NativeObject, Object,
-    OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind, PromiseCallback, PromiseState,
-    Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob, RejectionStatus,
-    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
-    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION,
-    TO_STRING_TAG_SYMBOL, WeakKey,
+    ASYNC_DISPOSE_DESCRIPTION, ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_DESCRIPTION,
+    ASYNC_ITERATOR_SYMBOL, AsyncCompletion, Attributes, CombineKind, DISPOSE_DESCRIPTION,
+    DISPOSE_SYMBOL, EnvRole, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, Heap,
+    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
+    ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION,
+    MATCH_SYMBOL, NativeObject, Object, OwnProperty, OwnedEdge, PrivateElement, PrivateMemberKind,
+    PromiseCallback, PromiseState, Property, REPLACE_DESCRIPTION, REPLACE_SYMBOL, ReactionJob,
+    RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL,
+    SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL,
+    TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, WeakKey,
 };
 use crate::heap::{CollectionIteration, CollectionKind, GeneratorStatus, push_value};
 use crate::host::Host;
@@ -642,6 +643,8 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
             TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
+            DISPOSE_SYMBOL => Some(DISPOSE_DESCRIPTION),
+            ASYNC_DISPOSE_SYMBOL => Some(ASYNC_DISPOSE_DESCRIPTION),
             _ => None,
         };
         if let Some(expected) = reserved
@@ -670,6 +673,8 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
         ),
         (ASYNC_ITERATOR_SYMBOL, ASYNC_ITERATOR_DESCRIPTION),
         (TO_STRING_TAG_SYMBOL, TO_STRING_TAG_DESCRIPTION),
+        (DISPOSE_SYMBOL, DISPOSE_DESCRIPTION),
+        (ASYNC_DISPOSE_SYMBOL, ASYNC_DISPOSE_DESCRIPTION),
     ] {
         if !snapshot
             .symbols
@@ -697,6 +702,8 @@ fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {
             IS_CONCAT_SPREADABLE_SYMBOL => Some(IS_CONCAT_SPREADABLE_DESCRIPTION),
             ASYNC_ITERATOR_SYMBOL => Some(ASYNC_ITERATOR_DESCRIPTION),
             TO_STRING_TAG_SYMBOL => Some(TO_STRING_TAG_DESCRIPTION),
+            DISPOSE_SYMBOL => Some(DISPOSE_DESCRIPTION),
+            ASYNC_DISPOSE_SYMBOL => Some(ASYNC_DISPOSE_DESCRIPTION),
             _ => None,
         } {
             return Err(VmError::InvalidSnapshot(format!(

@@ -107,7 +107,7 @@ pub(crate) const MAP_ROOTS: &[RootSpec] = &[
     RootSpec::new(
         "mapIterator.prototype",
         RootKind::Plain,
-        Some("object.prototype"),
+        Some(super::iterator::SYNC_ROOT),
     ),
 ];
 pub(crate) const SET_ROOTS: &[RootSpec] = &[
@@ -116,7 +116,7 @@ pub(crate) const SET_ROOTS: &[RootSpec] = &[
     RootSpec::new(
         "setIterator.prototype",
         RootKind::Plain,
-        Some("object.prototype"),
+        Some(super::iterator::SYNC_ROOT),
     ),
 ];
 pub(crate) const WEAK_MAP_ROOTS: &[RootSpec] = &[

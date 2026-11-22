@@ -9,7 +9,6 @@
 `Value` 仍是 `Undefined / Null / Bool / Number(f64) / BigInt(Arc<BigInt>) / String / Symbol(SymbolId) / Object(ObjectId)`。`BigInt` 的任意精度内容由 Arc 持有，不是新的堆对象；`RegExp` 实例与显式包装对象通过堆对象表示，也不是新的 `Value` 变体。
 
 - `Symbol.asyncIterator` 作为保留 well-known Symbol 提供，由 async generator 与 `for await…of` 消费；`for await…of` 由编译器展开，同步回退不分配可反射的 `AsyncFromSyncIterator` 包装器（也没有其它内建异步迭代器），并且只对每轮的 `value` 做隐式 `await`。`JSON.stringify` 查找字符串键 `toJSON`；标准没有 `Symbol.toJSON`。
-- `Symbol.dispose` / `Symbol.asyncDispose` 尚未提供；显式资源管理的现状见第 5 节，目标设计见 [`design.md`](design.md) 的「显式资源管理」。
 
 ## 2. 合法输入的编译期限制
 
@@ -52,7 +51,7 @@
 7. **静态属性键不缓存读取。** 专用读取指令只跳过字符串键的槽读写和转换；`SetMember` 对普通对象的自有可写数据属性有写侧单态缓存，但读取、计算键、复合赋值和 `super` 仍走通用属性路径。
 8. **CFG 常量传播不折叠通用 JS 运算。** 只传播已有字面量和槽复制、判断已知字面量的真假值；不做跨函数常量传播或运行时类型专用化。
 9. **快照不是不可信导入格式。** 默认恢复不重查受信镜像的堆图；应用负责来源、完整性和读入大小。`Vm::restore_validated` 用于诊断镜像不变量，不提供认证、隔离或资源预算。
-10. **显式资源管理未实现。** `using` / `await using`、`DisposableStack` / `AsyncDisposableStack`、`SuppressedError` 与 `Symbol.dispose` / `Symbol.asyncDispose` 均未实现；编译期目前把 `using` 语法按不支持拒绝。完整目标设计见 [`design.md`](design.md) 的「显式资源管理」。
+10. **显式资源管理尚未接入源码。** `using` / `await using` 仍按不支持的语法拒绝，两个标准栈尚未实现。已提供释放协议符号、共享迭代器释放方法与 `SuppressedError`。完整目标设计见 [`design.md`](design.md) 的「显式资源管理」。
 
 ## 6. 首版范围之外（不是首版缺口）
 

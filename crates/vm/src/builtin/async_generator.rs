@@ -23,7 +23,7 @@ const ITERABLE: IntrinsicKey =
     IntrinsicKey::new("AsyncGenerator", Slot::PrototypeSymbol, "asyncIterator");
 
 pub(crate) const ROOTS: &[RootSpec] = &[
-    RootSpec::new(ROOT, RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(ROOT, RootKind::Plain, Some(super::iterator::ASYNC_ROOT)),
     // %AsyncGeneratorFunction.prototype%: the internal prototype of async
     // generator functions. Its `.prototype` is the shared instance prototype.
     RootSpec::new(

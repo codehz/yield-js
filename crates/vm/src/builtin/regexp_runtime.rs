@@ -77,7 +77,7 @@ const REGEXP_ROOTS: &[RootSpec] = &[
     RootSpec::new(
         "regexpIterator.prototype",
         RootKind::Plain,
-        Some("object.prototype"),
+        Some(super::iterator::SYNC_ROOT),
     ),
 ];
 

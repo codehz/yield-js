@@ -7,13 +7,25 @@ use crate::value::{JsString, Value};
 
 macro_rules! error_class {
     ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal) => {
+        error_class!(
+            $owner,
+            $name,
+            $root,
+            $parent,
+            $base,
+            $length,
+            FUNCTION_PARENT,
+            $base
+        );
+    };
+    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:literal) => {
         pub(crate) const $owner: Owner = {
             const PROTOTYPE: &str = concat!($root, ".prototype");
             const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
             Owner::new(
                 $root,
                 &[
-                    RootSpec::new($root, RootKind::Native(KEY), FUNCTION_PARENT)
+                    RootSpec::new($root, RootKind::Native(KEY), $constructor_parent)
                         .fixed(PROTOTYPE)
                         .backlink(Some(Attributes::METHOD)),
                     RootSpec::new(PROTOTYPE, RootKind::Plain, $parent).with_fixed_parent(!$base),
@@ -39,7 +51,7 @@ macro_rules! error_class {
                         Value::string($name.into()),
                         Attributes::METHOD,
                     );
-                    if $base {
+                    if $own_message {
                         define_builtin_data(
                             vm,
                             prototype,
@@ -111,4 +123,14 @@ error_class!(
     Some("error.prototype"),
     false,
     2
+);
+error_class!(
+    SUPPRESSED_ERROR,
+    "SuppressedError",
+    "suppressederror",
+    Some("error.prototype"),
+    false,
+    3,
+    Some("error"),
+    true
 );

@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Binary arrays persist one byte sequence per buffer and a buffer reference per view.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 61;
+// Explicit resource management adds reserved disposal symbols and builtin roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 62;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

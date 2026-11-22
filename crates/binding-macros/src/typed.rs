@@ -1331,6 +1331,8 @@ fn member_key(opts: &HashMap<String, Meta>, span: Span) -> Result<((bool, String
                     | "Split"
                     | "HasInstance"
                     | "ToStringTag"
+                    | "Dispose"
+                    | "AsyncDispose"
             ) {
                 return Err(Error::new_spanned(
                     variant,

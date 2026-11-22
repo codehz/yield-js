@@ -344,6 +344,8 @@ pub enum WellKnownSymbol {
     Split,
     HasInstance,
     ToStringTag,
+    Dispose,
+    AsyncDispose,
 }
 
 impl WellKnownSymbol {
@@ -359,6 +361,8 @@ impl WellKnownSymbol {
             Self::Split => "Symbol.split",
             Self::HasInstance => "Symbol.hasInstance",
             Self::ToStringTag => "Symbol.toStringTag",
+            Self::Dispose => "Symbol.dispose",
+            Self::AsyncDispose => "Symbol.asyncDispose",
         }
     }
 
@@ -374,6 +378,8 @@ impl WellKnownSymbol {
             Self::Split => crate::heap::SPLIT_SYMBOL,
             Self::HasInstance => crate::heap::HAS_INSTANCE_SYMBOL,
             Self::ToStringTag => crate::heap::TO_STRING_TAG_SYMBOL,
+            Self::Dispose => crate::heap::DISPOSE_SYMBOL,
+            Self::AsyncDispose => crate::heap::ASYNC_DISPOSE_SYMBOL,
         }
     }
 }

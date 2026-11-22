@@ -1841,7 +1841,6 @@ impl Vm {
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
-        let prototype = self.builtins.get(prototype);
         let (errors, message_arg) = if name == "AggregateError" {
             let iterable = args.first().unwrap_or(&UNDEFINED_VALUE);
             let mut errors = Vec::new();
@@ -1864,6 +1863,8 @@ impl Vm {
                 }
             }
             (Some(errors), args.get(1))
+        } else if name == "SuppressedError" {
+            (None, args.get(2))
         } else {
             (None, args.first())
         };
@@ -1875,7 +1876,22 @@ impl Vm {
                 Err(error) => return Ok(Invocation::Thrown(error)),
             },
         };
-        let error = self.alloc_error(prototype, name, message)?;
+        if name == "SuppressedError" {
+            let error = args.first().cloned().unwrap_or(Value::UNDEFINED);
+            let suppressed = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
+            let value = if message.is_some() {
+                self.alloc_suppressed_error_with_message(
+                    self.builtins.get(prototype),
+                    error,
+                    suppressed,
+                    message,
+                )?
+            } else {
+                self.alloc_suppressed_error(error, suppressed)?
+            };
+            return Ok(Invocation::Value(value));
+        }
+        let error = self.alloc_error(self.builtins.get(prototype), name, message)?;
         if let (Some(errors), ValueRef::Object(id)) = (errors, error.view()) {
             let errors = self.heap.alloc_array(errors);
             self.heap
@@ -1903,6 +1919,38 @@ impl Vm {
             .define_data(id, "stack", Value::string(stack), Attributes::METHOD)?;
         Ok(Value::object(id))
     }
+
+    pub(crate) fn alloc_suppressed_error(
+        &mut self,
+        error: Value,
+        suppressed: Value,
+    ) -> Result<Value, VmError> {
+        self.alloc_suppressed_error_with_message(
+            self.builtins.get("suppressederror.prototype"),
+            error,
+            suppressed,
+            None,
+        )
+    }
+
+    fn alloc_suppressed_error_with_message(
+        &mut self,
+        prototype: ObjectId,
+        error: Value,
+        suppressed: Value,
+        message: Option<JsString>,
+    ) -> Result<Value, VmError> {
+        let value = self.alloc_error(prototype, "SuppressedError", message)?;
+        let ValueRef::Object(id) = value.view() else {
+            unreachable!()
+        };
+        self.heap
+            .define_data(id, "error", error, Attributes::METHOD)?;
+        self.heap
+            .define_data(id, "suppressed", suppressed, Attributes::METHOD)?;
+        Ok(value)
+    }
+
     pub(crate) fn alloc_aggregate_error(&mut self, errors: Vec<Value>) -> Result<Value, VmError> {
         let error = self.alloc_error(
             self.builtins.get("aggregateerror.prototype"),

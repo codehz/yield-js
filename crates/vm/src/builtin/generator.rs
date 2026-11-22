@@ -21,7 +21,7 @@ const THROW: IntrinsicKey = IntrinsicKey::new("Generator", Slot::Prototype, "thr
 const ITERABLE: IntrinsicKey = IntrinsicKey::new("Generator", Slot::PrototypeSymbol, "iterator");
 
 pub(crate) const ROOTS: &[RootSpec] = &[
-    RootSpec::new(ROOT, RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(ROOT, RootKind::Plain, Some(super::iterator::SYNC_ROOT)),
     // %GeneratorFunction.prototype%: the internal prototype of generator
     // functions. Its `.prototype` is the shared instance prototype above.
     RootSpec::new(

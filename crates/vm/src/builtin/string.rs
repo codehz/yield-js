@@ -184,7 +184,7 @@ pub(crate) const STRING_ROOTS: &[RootSpec] = &[
     RootSpec::new(
         ROOT_STRING_ITERATOR_PROTOTYPE,
         RootKind::Plain,
-        Some(ROOT_OBJECT_PROTOTYPE),
+        Some(super::iterator::SYNC_ROOT),
     ),
 ];
 

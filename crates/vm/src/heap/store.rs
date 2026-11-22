@@ -3,16 +3,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::object::{EnvRole, OwnedEdge, push_value};
 use super::types::{
-    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, ArrayBufferObject, ArrayObject, Attributes,
-    CombineState, DescriptorUpdate, EnvironmentObject, FunctionObject, GeneratorObject,
-    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, IS_CONCAT_SPREADABLE_DESCRIPTION,
-    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION, ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION,
-    MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL, NEXT_SYMBOL_ID, NativeObject, Object,
-    OrderedProperty, OwnProperty, PlainObject, PrivateElement, PrivateMemberKind, PromiseObject,
-    PromiseState, Property, PropertyTable, REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus,
-    SEARCH_DESCRIPTION, SEARCH_SYMBOL, SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION,
-    SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION,
-    TO_STRING_TAG_SYMBOL, WeakKey, array_index,
+    ASYNC_DISPOSE_DESCRIPTION, ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_DESCRIPTION,
+    ASYNC_ITERATOR_SYMBOL, ArrayBufferObject, ArrayObject, Attributes, CombineState,
+    DISPOSE_DESCRIPTION, DISPOSE_SYMBOL, DescriptorUpdate, EnvironmentObject, FunctionObject,
+    GeneratorObject, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL,
+    IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
+    ITERATOR_SYMBOL, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION, MATCH_SYMBOL,
+    NEXT_SYMBOL_ID, NativeObject, Object, OrderedProperty, OwnProperty, PlainObject,
+    PrivateElement, PrivateMemberKind, PromiseObject, PromiseState, Property, PropertyTable,
+    REPLACE_DESCRIPTION, REPLACE_SYMBOL, RejectionStatus, SEARCH_DESCRIPTION, SEARCH_SYMBOL,
+    SPECIES_DESCRIPTION, SPECIES_SYMBOL, SPLIT_DESCRIPTION, SPLIT_SYMBOL, TO_PRIMITIVE_DESCRIPTION,
+    TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_DESCRIPTION, TO_STRING_TAG_SYMBOL, WeakKey, array_index,
 };
 use crate::error::VmError;
 use crate::gc::LiveSet;
@@ -85,6 +86,8 @@ impl Heap {
                     Some(ASYNC_ITERATOR_DESCRIPTION.into()),
                 ),
                 (TO_STRING_TAG_SYMBOL, Some(TO_STRING_TAG_DESCRIPTION.into())),
+                (DISPOSE_SYMBOL, Some(DISPOSE_DESCRIPTION.into())),
+                (ASYNC_DISPOSE_SYMBOL, Some(ASYNC_DISPOSE_DESCRIPTION.into())),
             ]),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: NEXT_SYMBOL_ID,

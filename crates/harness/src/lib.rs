@@ -64,6 +64,17 @@ impl Node {
         Self::label(cx, this)
     }
 
+    #[method(symbol = Dispose)]
+    fn dispose(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        Self::label(cx, this)
+    }
+
+    #[method(symbol = AsyncDispose)]
+    fn async_dispose(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        let label = this.instance().payload(cx)?.label.clone();
+        cx.promise(Wait { label })
+    }
+
     fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.extend_from_slice(self.label.as_bytes());
         Ok(())

@@ -41,8 +41,12 @@ pub(crate) const ASYNC_ITERATOR_SYMBOL: SymbolId = 10;
 pub(crate) const ASYNC_ITERATOR_DESCRIPTION: &str = "Symbol.asyncIterator";
 pub(crate) const TO_STRING_TAG_SYMBOL: SymbolId = 11;
 pub(crate) const TO_STRING_TAG_DESCRIPTION: &str = "Symbol.toStringTag";
+pub(crate) const DISPOSE_SYMBOL: SymbolId = 12;
+pub(crate) const DISPOSE_DESCRIPTION: &str = "Symbol.dispose";
+pub(crate) const ASYNC_DISPOSE_SYMBOL: SymbolId = 13;
+pub(crate) const ASYNC_DISPOSE_DESCRIPTION: &str = "Symbol.asyncDispose";
 /// Bound for ordinary symbols. Every reserved well-known symbol stays below it.
-pub(crate) const NEXT_SYMBOL_ID: SymbolId = TO_STRING_TAG_SYMBOL + 1;
+pub(crate) const NEXT_SYMBOL_ID: SymbolId = ASYNC_DISPOSE_SYMBOL + 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

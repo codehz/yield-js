@@ -125,6 +125,7 @@ builtin_globals! {
     "BigUint64Array" => Global::Root("bigUint64Array"),
     "TextEncoder" => Global::Owner(binary::text::ENCODER_OWNER),
     "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
+    "SuppressedError" => Global::Owner(error_family::SUPPRESSED_ERROR),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -140,6 +141,7 @@ pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]
         .chain([
             exec::FUNCTION_INTRINSICS,
             ITERATOR_INTRINSICS,
+            super::iterator::INTRINSICS,
             generator::INTRINSICS,
             async_generator::INTRINSICS,
         ])
@@ -152,6 +154,7 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
         object,
         function,
         function_rest,
+        super::iterator::ROOTS,
         generator::ROOTS,
         async_generator::ROOTS,
     ]
@@ -226,6 +229,7 @@ impl Vm {
             Value::object(has_instance),
             Attributes::FIXED,
         );
+        super::iterator::install(self);
         let identity = Value::object(self.alloc_intrinsic(ITERATOR_IDENTITY));
         for owner in owners() {
             if let Some(install) = owner.install {

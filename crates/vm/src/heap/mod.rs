@@ -17,8 +17,9 @@ pub(crate) use store::{Heap, object_id};
 pub(crate) use types::ViewRange;
 pub(crate) use types::view_range;
 pub(crate) use types::{
-    ASYNC_ITERATOR_DESCRIPTION, ASYNC_ITERATOR_SYMBOL, Attributes, ClassElement, DescriptorUpdate,
-    HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, HostClassRecord,
+    ASYNC_DISPOSE_DESCRIPTION, ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_DESCRIPTION,
+    ASYNC_ITERATOR_SYMBOL, Attributes, ClassElement, DISPOSE_DESCRIPTION, DISPOSE_SYMBOL,
+    DescriptorUpdate, HAS_INSTANCE_DESCRIPTION, HAS_INSTANCE_SYMBOL, HostClassRecord,
     IS_CONCAT_SPREADABLE_DESCRIPTION, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_DESCRIPTION,
     ITERATOR_SYMBOL, IntegrityLevel, MATCH_ALL_DESCRIPTION, MATCH_ALL_SYMBOL, MATCH_DESCRIPTION,
     MATCH_SYMBOL, OwnProperty, PrivateElement, PrivateMember, PrivateMemberKind,

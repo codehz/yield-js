@@ -7,9 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::error::VmError;
 use crate::heap::{
-    ASYNC_ITERATOR_SYMBOL, HAS_INSTANCE_SYMBOL, Heap, IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_SYMBOL,
-    MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object, OwnedEdge, REPLACE_SYMBOL, SEARCH_SYMBOL,
-    SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL, TO_STRING_TAG_SYMBOL, WeakKey,
+    ASYNC_DISPOSE_SYMBOL, ASYNC_ITERATOR_SYMBOL, DISPOSE_SYMBOL, HAS_INSTANCE_SYMBOL, Heap,
+    IS_CONCAT_SPREADABLE_SYMBOL, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
+    OwnedEdge, REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
+    TO_STRING_TAG_SYMBOL, WeakKey,
 };
 use crate::runtime::{Continuation, HostInstance, HostSlot};
 use crate::value::{
@@ -284,6 +285,8 @@ impl Vm {
             IS_CONCAT_SPREADABLE_SYMBOL,
             ASYNC_ITERATOR_SYMBOL,
             TO_STRING_TAG_SYMBOL,
+            DISPOSE_SYMBOL,
+            ASYNC_DISPOSE_SYMBOL,
         ]);
         tracer
             .live
