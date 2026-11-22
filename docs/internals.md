@@ -122,7 +122,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
 - `crates/vm/src/bytecode/instr.rs` — 指令表：`define_instructions!` 同时生成 `Instr` 与槽位校验；变体顺序与字段顺序即产物编码
-- `crates/vm/src/bytecode.rs` — `Instr`（再导出）、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`、`Build::to_bytes` / `Build::from_bytes`
+- `crates/vm/src/bytecode.rs` — `Instr`（再导出）、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::to_bytes` / `Build::from_bytes`
+- `crates/vm/src/bytecode/validate.rs` — `Build::validate`，检查模块、函数、指令与续体表
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
 - `crates/vm/src/init.rs` — VM 构造与模块初始化：`Vm::new*`、`prepare`、导入链接（`resolve_imports` / `install_imports` / `restore_imports`）与模块图实例化、求值
 - `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec

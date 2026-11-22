@@ -395,6 +395,31 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
 }
 
 #[test]
+fn loader_rejects_duplicate_generator_start_boundaries() {
+    let mut artifact = build("function* run() { yield 1; }");
+    artifact.validate().expect("valid generator bytecode");
+
+    let run = artifact
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "run")
+        .unwrap();
+    let instruction = run
+        .code
+        .iter_mut()
+        .find(|instruction| matches!(instruction, Instr::Yield { .. }))
+        .expect("generator has a Yield");
+    *instruction = Instr::GeneratorStart;
+    artifact.finalize();
+
+    let error = artifact.validate().expect_err("duplicate GeneratorStart");
+    assert!(
+        error.ends_with("generator needs exactly one start boundary"),
+        "{error}"
+    );
+}
+
+#[test]
 fn loader_rejects_out_of_range_import_indices() {
     let mut host = TestHost::default();
     let mut corrupt = build("import { inspect } from 'test'; inspect(1);");
