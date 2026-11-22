@@ -12,9 +12,9 @@ YIELD_VM_BENCH_DIAGNOSTICS=1 cargo bench --locked -p yield-harness --bench basel
 
 - 默认 Cargo bench profile（继承 release）。计时用两个独立进程，每组负载每进程预跑 2 次后保留 9 个样本。计数单独编译运行，同样的字节码及输入，每阶段一个样本；普通构建不启用计数。不要对诊断构建计时。
 - 每个计时样本都先测离线编译和二进制产物编码，再从已生成的内存字节解码。不计文件 I/O，不刷新进程外缓存。`startup_prepare` 包含校验、宿主链接、派生元数据及 VM 初始化准备；`startup_initialize` 包含模块实例化、求值和初始化微任务。`entry_first` 使用新 VM；`entry_steady_5` 是同一 VM 连续再运行 5 次的总时长，包含出参校验及固定输入下的宿主驱动。React 使用测试宿主的虚拟时钟，不等待墙钟。它测量整次提交路径，不是纯解释器循环。
-- 产物使用 `Build::to_bytes` / `Build::from_bytes`：`YIELDBLD` magic、`BUILD_FORMAT_VERSION` 和 bincode fixed-int little-endian。历史 CSV 中的 artifact 指标来自 JSON 产物；当前 `artifact_size`、`artifact_encode`、`artifact_decode` 均为二进制产物。
-- 最新基准还输出 `startup_build_identity`（版本检查及摘要输入编码；当前为 xxh3-128 + bincode 固定整数小端编码，历史基线为 JSON + SHA-256/xxh3-128）、`startup_build_structure`（字节码结构校验）和 `startup_link_and_setup`（校验后的宿主链接、派生元数据及 VM 准备）；三项之和是 `startup_prepare`。这些子项不在本页的历史 CSV 中；首轮分项见[加载实验](bytecode-loading.md)。
-- `startup_build_digest` 是 `startup_build_identity` 内的摘要耗时：二进制编码与 xxh3-128 哈希合计，不含版本检查或 ID 比较。历史 CSV 中该区间分为 `startup_build_digest_json` 和 `startup_build_digest_hash`（JSON 序列化与哈希）；更早的 SHA-256 基线使用 `startup_build_digest_sha256`。它不等同于产物的编码和解码。
+- 产物使用 `Build::to_bytes` / `Build::from_bytes`：`YIELDBLD` magic、`BUILD_FORMAT_VERSION` 和 bincode fixed-int little-endian；`artifact_size`、`artifact_encode`、`artifact_decode` 均为二进制产物。
+- 启动准备分项：`startup_build_identity`（版本检查及摘要输入编码；xxh3-128 + bincode 固定整数小端）、`startup_build_structure`（字节码结构校验）和 `startup_link_and_setup`（校验后的宿主链接、派生元数据及 VM 准备）；三项之和是 `startup_prepare`。分项数据见[加载实验](bytecode-loading.md)。
+- `startup_build_digest` 是 `startup_build_identity` 内的摘要耗时：二进制编码与 xxh3-128 哈希合计，不含版本检查或 ID 比较，也不等同于产物的编码和解码。
 - 挂起负载另用新 VM 构造可恢复状态。单独计初次挂起、捕获、JSON 编解码、恢复、宿主 operation 重挂，以及恢复后的续跑校验；不把外部等待计入任何阶段。`restore` 包括重新校验构建，但不包含恢复输入的克隆或解码。
 - `--capture-profile` 单独测普通捕获、分项捕获和二进制编码，并验证两条路径产出相同的镜像。夹具和结果见[快照捕获分项实测](next-optimizations.md#快照捕获分项实测)。
 - `--gc <workload> <policy>` 在单个进程内测显式 GC 暂停；与 `/usr/bin/time -l` 配合取峰值 RSS。见 [GC 暂停与进程峰值内存](gc.md)。
@@ -46,4 +46,4 @@ YIELD_VM_BENCH_DIAGNOSTICS=1 cargo bench --locked -p yield-harness --bench basel
 - **诊断计数**：稳态 5 次中，静态属性负载为 66,640 次分派、15,365 次属性探测、5 次帧构造；短调用为 5,125 次帧构造；闭包读写是 20,500 次环境探测。React 更新为 220,875 次分派、29,600 次属性探测、52,410 次环境探测。这些次数刻画工作量，不代表 CPU 时间占比。四个挂起负载初次构造镜像时分别保存 0、2、1、3 个槽值（含初次生成器捕获）。
 - **离线内存**：每负载一个进程级 RSS 样本。React 两种负载编译同一份产物，测得 47.9 和 48.1 MiB；其他负载为 5.0–5.5 MiB。
 
-下一轮保持原定的两个独立对照：CFG 常量传播对比数值与 React 分派次数，静态属性键对比属性负载的分派、槽数和稳态时间。静态键本身不应以减少属性探测次数为目标。另将 React 的解码和启动准备作为单独的加载实验，不与编译器 pass 混合归因。
+各轮优化的结果与未启用项见[优化轮次合并记录](optimization-history.md)。
