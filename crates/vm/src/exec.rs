@@ -1227,22 +1227,6 @@ impl Vm {
                 )?;
                 store_invocation(frame, dst, invocation)
             }
-            Instr::GetMemberLength { dst, object } => {
-                let object = frame.read_ref(object)?;
-                let direct = match object.view() {
-                    ValueRef::Object(id) => match self.heap.get(id)? {
-                        Object::Array(array) => Some(array.length),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                let invocation = if let Some(length) = direct {
-                    Invocation::Value(Value::number(length as f64))
-                } else {
-                    self.read_property(host, frame_roots, object, PropertyKeyRef::String("length"))?
-                };
-                store_invocation(frame, dst, invocation)
-            }
             Instr::GetDestructuredMember { dst, object, key } => {
                 let key = converted_property_key(frame.read_ref(key)?)?;
                 let invocation =
