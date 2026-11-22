@@ -121,7 +121,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/compiler/src/lib.rs` — 流水线与 `compile`
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
-- `crates/vm/src/bytecode/instr.rs` — 指令表：`define_instructions!` 同时生成 `Instr` 与槽位校验；变体顺序与字段顺序即产物编码
+- `crates/vm/src/bytecode/instr.rs` — `instruction_table!` 是唯一的指令表，由同一份表生成 `Instr` 和穷尽的验证分派；变体顺序与字段顺序即产物编码
 - `crates/vm/src/bytecode.rs` — `Instr`（再导出）、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::to_bytes` / `Build::from_bytes`
 - `crates/vm/src/bytecode/validate.rs` — `Build::validate`，检查模块、函数、指令与续体表
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
@@ -134,7 +134,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 ## 6. 代码约定细节
 
-- 新增 opcode：先在 `vm/src/bytecode/instr.rs` 的指令表加一项（变体、字段与顺序即产物编码，只能在末尾追加），`slots[...]` 只列槽位范围检查、`custom` 表示还有别的语义并在 `Build::validate_function` 里保留手写臂；再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
+- 新增 opcode：先在 `vm/src/bytecode/instr.rs` 的指令表末尾追加一项（变体、字段与顺序即产物编码）。`slots[...]` 按列出顺序检查槽位范围；`custom` 需要在 `Build::validate_function` 的 `validate_custom!` 中提供规则，按表中字段顺序接收绑定，缺规则时无法编译。再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
 - 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）；产物容器、magic 或 bincode 编码选项改动升 `BUILD_FORMAT_VERSION`（`crates/vm/src/bytecode.rs`）。三个契约各自独立，只有对应契约变化才升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
 - 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。

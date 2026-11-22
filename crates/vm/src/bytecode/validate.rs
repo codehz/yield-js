@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::time::Duration;
 
+use super::instr::{self, validate_instruction};
 use super::{
     BUILTINS, BYTECODE_VERSION, BinaryOp, Build, Constant, DisposeBuiltin, Function, Instr,
     ModuleExport, ModuleTarget, ParamTarget, PrivateDefinition, Slot, SlotKind,
@@ -444,315 +445,254 @@ impl Build {
                     ))
                 }
             };
-            // Slot-range-only instructions are checked from the instruction
-            // table; everything else keeps a handwritten arm below.
-            if instr.validate_slots_only(&check_slot)? {
-                continue;
-            }
-            match instr {
-                Instr::Const { dst, constant } => {
-                    check_slot(*dst, "Const.dst")?;
-                    if *constant as usize >= self.constants.len() {
+            // Each `custom` entry in the table must match one of these rules.
+            macro_rules! validate_custom {
+                (Const { $dst:ident, $constant:ident }) => {{
+                    check_slot(*$dst, "Const.dst")?;
+                    if *$constant as usize >= self.constants.len() {
                         return Err(format!(
-                            "{location}: Const at pc {pc} references constant {constant}"
+                            "{location}: Const at pc {pc} references constant {constant}",
+                            constant = $constant
                         ));
                     }
-                }
-                Instr::BinaryConst {
-                    dst, lhs, constant, ..
-                } => {
-                    check_slot(*dst, "BinaryConst.dst")?;
-                    check_slot(*lhs, "BinaryConst.lhs")?;
-                    if *constant as usize >= self.constants.len() {
+                }};
+                (BinaryConst { $dst:ident, $_op:ident, $lhs:ident, $constant:ident }) => {{
+                    check_slot(*$dst, "BinaryConst.dst")?;
+                    check_slot(*$lhs, "BinaryConst.lhs")?;
+                    if *$constant as usize >= self.constants.len() {
                         return Err(format!(
-                            "{location}: BinaryConst at pc {pc} references constant {constant}"
+                            "{location}: BinaryConst at pc {pc} references constant {constant}",
+                            constant = $constant
                         ));
                     }
-                }
-                Instr::GetImport { dst, import } => {
-                    check_slot(*dst, "GetImport.dst")?;
-                    self.check_module_target(ModuleTarget::Host(*import), binding_owners)
+                }};
+                (GetImport { $dst:ident, $import:ident }) => {{
+                    check_slot(*$dst, "GetImport.dst")?;
+                    self.check_module_target(ModuleTarget::Host(*$import), binding_owners)
                         .map_err(|err| format!("{location}: GetImport at pc {pc}: {err}"))?;
-                }
-                Instr::GetModuleBinding {
-                    dst,
-                    module,
-                    binding,
-                } => {
-                    check_slot(*dst, "GetModuleBinding.dst")?;
+                }};
+                (GetModuleBinding { $dst:ident, $module:ident, $binding:ident }) => {{
+                    check_slot(*$dst, "GetModuleBinding.dst")?;
                     self.check_module_target(
                         ModuleTarget::Binding {
-                            module: *module,
-                            binding: *binding,
+                            module: *$module,
+                            binding: *$binding,
                         },
                         binding_owners,
                     )
                     .map_err(|err| format!("{location}: GetModuleBinding at pc {pc}: {err}"))?;
-                }
-                Instr::GetModuleNamespace { dst, module } => {
-                    check_slot(*dst, "GetModuleNamespace.dst")?;
-                    self.check_module(*module).map_err(|err| {
+                }};
+                (GetModuleNamespace { $dst:ident, $module:ident }) => {{
+                    check_slot(*$dst, "GetModuleNamespace.dst")?;
+                    self.check_module(*$module).map_err(|err| {
                         format!("{location}: GetModuleNamespace at pc {pc}: {err}")
                     })?;
-                }
-                Instr::SuperConstruct {
-                    dst,
-                    context,
-                    callee,
-                    args,
-                } => {
-                    check_slot(*dst, "derived constructor result")?;
-                    check_slot(*context, "derived constructor context")?;
-                    check_slot(*callee, "SuperConstruct.callee")?;
-                    for arg in args.slots() {
+                }};
+                (SuperConstruct { $dst:ident, $context:ident, $callee:ident, $args:ident }) => {{
+                    check_slot(*$dst, "derived constructor result")?;
+                    check_slot(*$context, "derived constructor context")?;
+                    check_slot(*$callee, "SuperConstruct.callee")?;
+                    for arg in $args.slots() {
                         check_slot(*arg, "SuperConstruct.arg")?;
                     }
-                }
-                Instr::Closure {
-                    dst,
-                    function: callee,
-                } => {
-                    check_slot(*dst, "Closure.dst")?;
-                    if self.is_initializer(*callee) || getters.contains(callee) {
+                }};
+                (Closure { $dst:ident, $callee:ident }) => {{
+                    check_slot(*$dst, "Closure.dst")?;
+                    if self.is_initializer(*$callee) || getters.contains($callee) {
                         return Err(format!(
-                            "{location}: Closure at pc {pc} references reserved function {callee}"
+                            "{location}: Closure at pc {pc} references reserved function {callee}",
+                            callee = $callee
                         ));
                     }
-                    if self.function(*callee).is_none() {
+                    if self.function(*$callee).is_none() {
                         return Err(format!(
-                            "{location}: Closure at pc {pc} references function {callee}"
+                            "{location}: Closure at pc {pc} references function {callee}",
+                            callee = $callee
                         ));
                     }
-                }
-                Instr::LoadClassBinding {
-                    dst,
-                    scope,
-                    binding,
-                } => {
-                    check_binding(*binding)?;
-                    check_slot(*dst, "class scope result")?;
-                    if let Some(scope) = scope {
-                        check_slot(*scope, "class scope")?;
+                }};
+                (LoadClassBinding { $dst:ident, $scope:ident, $binding:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$dst, "class scope result")?;
+                    if let Some(slot) = $scope {
+                        check_slot(*slot, "class scope")?;
                     }
-                }
-                Instr::InitClassBinding {
-                    scope,
-                    src,
-                    binding,
-                } => {
-                    check_binding(*binding)?;
-                    check_slot(*scope, "InitClassBinding.scope")?;
-                    check_slot(*src, "InitClassBinding.src")?;
-                }
-                Instr::CreateClass {
-                    dst,
-                    scope,
-                    heritage,
-                    name_key,
-                    constructor,
-                    ..
-                } => {
-                    check_slot(*dst, "CreateClass.dst")?;
-                    if let Some(scope) = scope {
-                        check_slot(*scope, "CreateClass.scope")?;
+                }};
+                (InitClassBinding { $scope:ident, $binding:ident, $src:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$scope, "InitClassBinding.scope")?;
+                    check_slot(*$src, "InitClassBinding.src")?;
+                }};
+                (CreateClass {
+                    $dst:ident, $scope:ident, $heritage:ident, $name_key:ident, $constructor:ident,
+                    $_default_constructor:ident, $_private_count:ident, $_private_binding:ident
+                }) => {{
+                    check_slot(*$dst, "CreateClass.dst")?;
+                    if let Some(slot) = $scope {
+                        check_slot(*slot, "CreateClass.scope")?;
                     }
-                    if let Some(heritage) = heritage {
-                        check_slot(*heritage, "CreateClass.heritage")?;
+                    if let Some(slot) = $heritage {
+                        check_slot(*slot, "CreateClass.heritage")?;
                     }
-                    if let Some(key) = name_key {
+                    if let Some(key) = $name_key {
                         check_slot(*key, "CreateClass.name_key")?;
                     }
-                    if self.is_initializer(*constructor)
+                    if self.is_initializer(*$constructor)
                         || !self
-                            .function(*constructor)
+                            .function(*$constructor)
                             .is_some_and(Function::is_constructable)
                     {
                         return Err(format!(
-                            "{location}: invalid class constructor {constructor} at pc {pc}"
+                            "{location}: invalid class constructor {constructor} at pc {pc}",
+                            constructor = $constructor
                         ));
                     }
-                }
-                Instr::ScopedClosure {
-                    dst,
-                    scope,
-                    function,
-                } => {
-                    check_slot(*dst, "ScopedClosure.dst")?;
-                    check_slot(*scope, "ScopedClosure.scope")?;
-                    if self.is_initializer(*function)
-                        || getters.contains(function)
-                        || self.function(*function).is_none()
+                }};
+                (ScopedClosure { $dst:ident, $scope:ident, $function:ident }) => {{
+                    check_slot(*$dst, "ScopedClosure.dst")?;
+                    check_slot(*$scope, "ScopedClosure.scope")?;
+                    if self.is_initializer(*$function)
+                        || getters.contains($function)
+                        || self.function(*$function).is_none()
                     {
                         return Err(format!(
-                            "{location}: invalid scoped closure function {function} at pc {pc}"
+                            "{location}: invalid scoped closure function {function} at pc {pc}",
+                            function = $function
                         ));
                     }
-                }
-                Instr::AddClassPrivate {
-                    class,
-                    index,
-                    lexical,
-                    src,
-                    kind,
-                    ..
-                } => {
-                    check_slot(*class, "AddClassPrivate.class")?;
-                    if let Some(src) = src {
-                        check_slot(*src, "AddClassPrivate.src")?;
-                    } else if *kind != PrivateDefinition::Field {
+                }};
+                (AddClassPrivate {
+                    $class:ident, $index:ident, $lexical:ident, $src:ident, $_is_static:ident, $kind:ident
+                }) => {{
+                    check_slot(*$class, "AddClassPrivate.class")?;
+                    if let Some(slot) = $src {
+                        check_slot(*slot, "AddClassPrivate.src")?;
+                    } else if *$kind != PrivateDefinition::Field {
                         return Err(format!(
                             "{location}: private method definition is missing its closure at pc {pc}"
                         ));
                     }
-                    check_private(*lexical, *index)?;
-                }
-                Instr::GetPrivate {
-                    dst: value,
-                    object,
-                    brand,
-                    index,
-                    lexical,
-                }
-                | Instr::SetPrivate {
-                    src: value,
-                    object,
-                    brand,
-                    index,
-                    lexical,
-                }
-                | Instr::HasPrivate {
-                    dst: value,
-                    object,
-                    brand,
-                    index,
-                    lexical,
-                } => {
-                    check_slot(*value, "private element value")?;
-                    check_slot(*object, "private element receiver")?;
-                    check_slot(*brand, "private element brand")?;
-                    check_private(*lexical, *index)?;
-                }
-                Instr::NewRegExp { dst, source, flags } => {
-                    check_slot(*dst, "NewRegExp.dst")?;
-                    crate::regexp::validate_regexp_string(source, flags).map_err(|message| {
+                    check_private(*$lexical, *$index)?;
+                }};
+                (GetPrivate { $value:ident, $object:ident, $brand:ident, $index:ident, $lexical:ident }) => {{
+                    validate_custom!(@private_element { $value, $object, $brand, $index, $lexical });
+                }};
+                (SetPrivate { $object:ident, $brand:ident, $value:ident, $index:ident, $lexical:ident }) => {{
+                    validate_custom!(@private_element { $value, $object, $brand, $index, $lexical });
+                }};
+                (HasPrivate { $value:ident, $object:ident, $brand:ident, $index:ident, $lexical:ident }) => {{
+                    validate_custom!(@private_element { $value, $object, $brand, $index, $lexical });
+                }};
+                (@private_element { $value:ident, $object:ident, $brand:ident, $index:ident, $lexical:ident }) => {{
+                    check_slot(*$value, "private element value")?;
+                    check_slot(*$object, "private element receiver")?;
+                    check_slot(*$brand, "private element brand")?;
+                    check_private(*$lexical, *$index)?;
+                }};
+                (NewRegExp { $dst:ident, $source:ident, $flags:ident }) => {{
+                    check_slot(*$dst, "NewRegExp.dst")?;
+                    crate::regexp::validate_regexp_string($source, $flags).map_err(|message| {
                         format!("{location}: invalid NewRegExp at pc {pc}: {message}")
                     })?;
-                }
-                Instr::GetMemberConstKey { dst, object, key } => {
-                    check_slot(*dst, "GetMemberConstKey.dst")?;
-                    check_slot(*object, "GetMemberConstKey.object")?;
-                    if !matches!(self.constants.get(*key as usize), Some(Constant::String(_))) {
+                }};
+                (GetMemberConstKey { $dst:ident, $object:ident, $key:ident }) => {{
+                    check_slot(*$dst, "GetMemberConstKey.dst")?;
+                    check_slot(*$object, "GetMemberConstKey.object")?;
+                    if !matches!(self.constants.get(*$key as usize), Some(Constant::String(_))) {
                         return Err(format!(
-                            "{location}: GetMemberConstKey at pc {pc} requires a string constant, got index {key}"
+                            "{location}: GetMemberConstKey at pc {pc} requires a string constant, got index {key}",
+                            key = $key
                         ));
                     }
-                }
-                Instr::GetIterator {
-                    iterator,
-                    next,
-                    iterable,
-                } => {
-                    check_slot(*iterator, "GetIterator.iterator")?;
-                    check_slot(*next, "GetIterator.next")?;
-                    if iterator == next {
+                }};
+                (GetIterator { $iterator:ident, $next:ident, $iterable:ident }) => {{
+                    check_slot(*$iterator, "GetIterator.iterator")?;
+                    check_slot(*$next, "GetIterator.next")?;
+                    if $iterator == $next {
                         return Err(format!(
                             "{location}: GetIterator destinations overlap at pc {pc}"
                         ));
                     }
-                    check_slot(*iterable, "GetIterator.iterable")?;
-                }
-                Instr::IteratorNext {
-                    done,
-                    value,
-                    iterator,
-                    next,
-                } => {
-                    check_slot(*done, "IteratorNext.done")?;
-                    check_slot(*value, "IteratorNext.value")?;
-                    if done == value {
+                    check_slot(*$iterable, "GetIterator.iterable")?;
+                }};
+                (IteratorNext { $done:ident, $value:ident, $iterator:ident, $next:ident }) => {{
+                    check_slot(*$done, "IteratorNext.done")?;
+                    check_slot(*$value, "IteratorNext.value")?;
+                    if $done == $value {
                         return Err(format!(
                             "{location}: IteratorNext destinations overlap at pc {pc}"
                         ));
                     }
-                    check_slot(*iterator, "IteratorNext.iterator")?;
-                    check_slot(*next, "IteratorNext.next")?;
-                }
-                Instr::ForInNext {
-                    done,
-                    value,
-                    iterator,
-                } => {
-                    check_slot(*done, "ForInNext.done")?;
-                    check_slot(*value, "ForInNext.value")?;
-                    if done == value {
+                    check_slot(*$iterator, "IteratorNext.iterator")?;
+                    check_slot(*$next, "IteratorNext.next")?;
+                }};
+                (ForInNext { $done:ident, $value:ident, $iterator:ident }) => {{
+                    check_slot(*$done, "ForInNext.done")?;
+                    check_slot(*$value, "ForInNext.value")?;
+                    if $done == $value {
                         return Err(format!(
                             "{location}: ForInNext destinations overlap at pc {pc}"
                         ));
                     }
-                    check_slot(*iterator, "ForInNext.iterator")?;
-                }
-                Instr::GetBinding { dst, binding } => {
-                    check_binding(*binding)?;
-                    check_slot(*dst, "GetBinding.dst")?;
-                }
-                Instr::SetBinding { src, binding } => {
-                    check_binding(*binding)?;
-                    check_slot(*src, "SetBinding.src")?;
-                }
-                Instr::GetBindingDirect { dst, binding, .. } => {
-                    check_binding(*binding)?;
-                    check_slot(*dst, "GetBindingDirect.dst")?;
-                }
-                Instr::SetBindingDirect { src, binding, .. } => {
-                    check_binding(*binding)?;
-                    check_slot(*src, "SetBindingDirect.src")?;
-                }
-                Instr::GetModuleBindingDirect {
-                    dst,
-                    module,
-                    binding,
-                } => {
-                    check_slot(*dst, "GetModuleBindingDirect.dst")?;
+                    check_slot(*$iterator, "ForInNext.iterator")?;
+                }};
+                (GetBinding { $dst:ident, $binding:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$dst, "GetBinding.dst")?;
+                }};
+                (SetBinding { $binding:ident, $src:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$src, "SetBinding.src")?;
+                }};
+                (GetBindingDirect { $dst:ident, $_depth:ident, $binding:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$dst, "GetBindingDirect.dst")?;
+                }};
+                (SetBindingDirect { $_depth:ident, $binding:ident, $src:ident }) => {{
+                    check_binding(*$binding)?;
+                    check_slot(*$src, "SetBindingDirect.src")?;
+                }};
+                (GetModuleBindingDirect { $dst:ident, $module:ident, $binding:ident }) => {{
+                    check_slot(*$dst, "GetModuleBindingDirect.dst")?;
                     self.check_module_target(
                         ModuleTarget::Binding {
-                            module: *module,
-                            binding: *binding,
+                            module: *$module,
+                            binding: *$binding,
                         },
                         binding_owners,
                     )
                     .map_err(|err| {
                         format!("{location}: GetModuleBindingDirect at pc {pc}: {err}")
                     })?;
-                }
-                Instr::SetModuleBindingDirect {
-                    module,
-                    binding,
-                    src,
-                } => {
-                    check_slot(*src, "SetModuleBindingDirect.src")?;
+                }};
+                (SetModuleBindingDirect { $module:ident, $binding:ident, $src:ident }) => {{
+                    check_slot(*$src, "SetModuleBindingDirect.src")?;
                     self.check_module_target(
                         ModuleTarget::Binding {
-                            module: *module,
-                            binding: *binding,
+                            module: *$module,
+                            binding: *$binding,
                         },
                         binding_owners,
                     )
                     .map_err(|err| {
                         format!("{location}: SetModuleBindingDirect at pc {pc}: {err}")
                     })?;
-                }
-                Instr::DeclareBinding { binding } => {
-                    check_binding(*binding)?;
-                    if let Some(&module) = binding_owners.get(binding)
+                }};
+                (DeclareBinding { $binding:ident }) => {{
+                    check_binding(*$binding)?;
+                    if let Some(&module) = binding_owners.get($binding)
                         && self.modules[module as usize].declaration != function.func_id
                     {
-                        return Err(format!("{location}: redeclares module binding {binding}"));
+                        return Err(format!(
+                            "{location}: redeclares module binding {binding}",
+                            binding = $binding
+                        ));
                     }
-                }
-                Instr::NewIterationEnv { parent, bindings } => {
-                    check_slot(*parent, "NewIterationEnv.parent")?;
+                }};
+                (NewIterationEnv { $parent:ident, $bindings:ident }) => {{
+                    check_slot(*$parent, "NewIterationEnv.parent")?;
                     let mut seen = BTreeSet::new();
-                    for binding in bindings {
+                    for binding in $bindings {
                         check_binding(*binding)?;
                         if !seen.insert(*binding) {
                             return Err(format!(
@@ -760,151 +700,124 @@ impl Build {
                             ));
                         }
                     }
-                }
-                Instr::Await { dst, input, resume } => {
+                }};
+                (Await { $dst:ident, $input:ident, $resume:ident }) => {{
                     if !function.is_async {
                         return Err(format!("{location}: Await in a synchronous function"));
                     }
-                    check_slot(*dst, "Await.dst")?;
-                    check_slot(*input, "Await.input")?;
-                    if *resume as usize >= function.resumes.len() {
+                    check_slot(*$dst, "Await.dst")?;
+                    check_slot(*$input, "Await.input")?;
+                    if *$resume as usize >= function.resumes.len() {
                         return Err(format!(
-                            "{location}: Await at pc {pc} references resume {resume}"
+                            "{location}: Await at pc {pc} references resume {resume}",
+                            resume = $resume
                         ));
                     }
-                }
-                Instr::Yield {
-                    input,
-                    generator,
-                    delegate,
-                } => {
+                }};
+                (Yield { $input:ident, $generator:ident, $delegate:ident }) => {{
                     if !function.is_generator {
                         return Err(format!("{location}: Yield in a non-generator function"));
                     }
-                    if *delegate && function.is_async {
+                    if *$delegate && function.is_async {
                         return Err(format!(
                             "{location}: async generator cannot hand back a delegate result object"
                         ));
                     }
-                    check_slot(*input, "Yield.input")?;
-                    if *generator as usize >= function.generator_resumes.len() {
+                    check_slot(*$input, "Yield.input")?;
+                    if *$generator as usize >= function.generator_resumes.len() {
                         return Err(format!(
-                            "{location}: Yield at pc {pc} references generator {generator}"
+                            "{location}: Yield at pc {pc} references generator {generator}",
+                            generator = $generator
                         ));
                     }
-                }
-                Instr::GeneratorStart => {
+                }};
+                (GeneratorStart) => {{
                     if !function.is_generator {
                         return Err(format!(
                             "{location}: GeneratorStart in a non-generator function"
                         ));
                     }
-                }
-                Instr::Jump { target } => check_target(*target, "Jump")?,
-                Instr::BranchFalse { cond, target } => {
-                    check_slot(*cond, "BranchFalse.cond")?;
-                    check_target(*target, "BranchFalse")?;
-                }
-                Instr::BranchTrue { cond, target } => {
-                    check_slot(*cond, "BranchTrue.cond")?;
-                    check_target(*target, "BranchTrue")?;
-                }
-                Instr::BranchCompareFalse {
-                    lhs,
-                    op,
-                    rhs,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchCompareFalse.lhs")?;
-                    check_slot(*rhs, "BranchCompareFalse.rhs")?;
-                    check_comparison(*op)?;
-                    check_target(*target, "BranchCompareFalse")?;
-                }
-                Instr::BranchCompareConstFalse {
-                    lhs,
-                    op,
-                    constant,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchCompareConstFalse.lhs")?;
-                    check_comparison(*op)?;
-                    if *constant as usize >= self.constants.len() {
+                }};
+                (Jump { $target:ident }) => {{
+                    check_target(*$target, "Jump")?;
+                }};
+                (BranchFalse { $cond:ident, $target:ident }) => {{
+                    check_slot(*$cond, "BranchFalse.cond")?;
+                    check_target(*$target, "BranchFalse")?;
+                }};
+                (BranchTrue { $cond:ident, $target:ident }) => {{
+                    check_slot(*$cond, "BranchTrue.cond")?;
+                    check_target(*$target, "BranchTrue")?;
+                }};
+                (BranchCompareFalse { $lhs:ident, $op:ident, $rhs:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchCompareFalse.lhs")?;
+                    check_slot(*$rhs, "BranchCompareFalse.rhs")?;
+                    check_comparison(*$op)?;
+                    check_target(*$target, "BranchCompareFalse")?;
+                }};
+                (BranchCompareConstFalse { $lhs:ident, $op:ident, $constant:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchCompareConstFalse.lhs")?;
+                    check_comparison(*$op)?;
+                    if *$constant as usize >= self.constants.len() {
                         return Err(format!(
-                            "{location}: BranchCompareConstFalse at pc {pc} references constant {constant}"
+                            "{location}: BranchCompareConstFalse at pc {pc} references constant {constant}",
+                            constant = $constant
                         ));
                     }
-                    check_target(*target, "BranchCompareConstFalse")?;
-                }
-                Instr::BranchCompareTrue {
-                    lhs,
-                    op,
-                    rhs,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchCompareTrue.lhs")?;
-                    check_slot(*rhs, "BranchCompareTrue.rhs")?;
-                    check_comparison(*op)?;
-                    check_target(*target, "BranchCompareTrue")?;
-                }
-                Instr::BranchCompareConstTrue {
-                    lhs,
-                    op,
-                    constant,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchCompareConstTrue.lhs")?;
-                    check_comparison(*op)?;
-                    if *constant as usize >= self.constants.len() {
+                    check_target(*$target, "BranchCompareConstFalse")?;
+                }};
+                (BranchCompareTrue { $lhs:ident, $op:ident, $rhs:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchCompareTrue.lhs")?;
+                    check_slot(*$rhs, "BranchCompareTrue.rhs")?;
+                    check_comparison(*$op)?;
+                    check_target(*$target, "BranchCompareTrue")?;
+                }};
+                (BranchCompareConstTrue { $lhs:ident, $op:ident, $constant:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchCompareConstTrue.lhs")?;
+                    check_comparison(*$op)?;
+                    if *$constant as usize >= self.constants.len() {
                         return Err(format!(
-                            "{location}: BranchCompareConstTrue at pc {pc} references constant {constant}"
+                            "{location}: BranchCompareConstTrue at pc {pc} references constant {constant}",
+                            constant = $constant
                         ));
                     }
-                    check_target(*target, "BranchCompareConstTrue")?;
-                }
-                Instr::BranchBinary {
-                    op: _,
-                    lhs,
-                    rhs,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchBinary.lhs")?;
-                    check_slot(*rhs, "BranchBinary.rhs")?;
-                    check_target(*target, "BranchBinary")?;
-                }
-                Instr::BranchBinaryConst {
-                    op: _,
-                    lhs,
-                    constant,
-                    target,
-                } => {
-                    check_slot(*lhs, "BranchBinaryConst.lhs")?;
-                    if *constant as usize >= self.constants.len() {
+                    check_target(*$target, "BranchCompareConstTrue")?;
+                }};
+                (BranchBinary { $_op:ident, $lhs:ident, $rhs:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchBinary.lhs")?;
+                    check_slot(*$rhs, "BranchBinary.rhs")?;
+                    check_target(*$target, "BranchBinary")?;
+                }};
+                (BranchBinaryConst { $_op:ident, $lhs:ident, $constant:ident, $target:ident }) => {{
+                    check_slot(*$lhs, "BranchBinaryConst.lhs")?;
+                    if *$constant as usize >= self.constants.len() {
                         return Err(format!(
-                            "{location}: BranchBinaryConst at pc {pc} references constant {constant}"
+                            "{location}: BranchBinaryConst at pc {pc} references constant {constant}",
+                            constant = $constant
                         ));
                     }
-                    check_target(*target, "BranchBinaryConst")?;
-                }
-                Instr::BranchUnary { op: _, src, target } => {
-                    check_slot(*src, "BranchUnary.src")?;
-                    check_target(*target, "BranchUnary")?;
-                }
-                Instr::GetBuiltin { dst, builtin } => {
-                    check_slot(*dst, "GetBuiltin.dst")?;
-                    self.check_builtin(*builtin, &location, pc, "GetBuiltin")?;
-                }
-                Instr::GetTemplate { dst, template } => {
-                    check_slot(*dst, "GetTemplate.dst")?;
-                    if *template as usize >= self.templates.len() {
+                    check_target(*$target, "BranchBinaryConst")?;
+                }};
+                (BranchUnary { $_op:ident, $src:ident, $target:ident }) => {{
+                    check_slot(*$src, "BranchUnary.src")?;
+                    check_target(*$target, "BranchUnary")?;
+                }};
+                (GetBuiltin { $dst:ident, $builtin:ident }) => {{
+                    check_slot(*$dst, "GetBuiltin.dst")?;
+                    self.check_builtin(*$builtin, &location, pc, "GetBuiltin")?;
+                }};
+                (GetTemplate { $dst:ident, $template:ident }) => {{
+                    check_slot(*$dst, "GetTemplate.dst")?;
+                    if *$template as usize >= self.templates.len() {
                         return Err(format!(
-                            "{location}: GetTemplate at pc {pc} references template {template}"
+                            "{location}: GetTemplate at pc {pc} references template {template}",
+                            template = $template
                         ));
                     }
-                }
-                // Everything else was fully checked from the instruction table
-                // before the match, so no arm here may be reachable.
-                _ => unreachable!("slot-only instruction already validated"),
+                }};
             }
+
+            instr::instruction_table!(validate_instruction; instr, check_slot, validate_custom;);
         }
         validate_continuations(function, &location, check_slot)
     }
