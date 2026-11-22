@@ -72,6 +72,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
+| 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `SetMember` 预热与布局守卫 |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
@@ -88,7 +89,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。VM 在 `new` / `restore` 校验 `Build` 后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。
-- 通用属性读取每层复用已取出的堆对象，只对 TypedArray 分类数值索引。普通自有属性缺失才继续查原型；TypedArray 的规范数值索引未命中直接返回 `undefined`。自有属性描述符查询则把两种未命中都视为无描述符。
+- 通用属性读取每层复用已取出的堆对象，只对 TypedArray 分类数值索引。普通自有属性缺失才继续查原型；TypedArray 的规范数值索引未命中直接返回 `undefined`。自有属性描述符查询则把两种未命中都视为无描述符。普通对象的属性表在 8 个键以内用按 key 排序的密集向量，超过后退回 `BTreeMap`；`SetMember` 站点预热 32 次后缓存接收者、键、布局和槽，只用于普通对象的可写数据属性，值仍实时读取，布局变化或写失败回退通用 `Set`。读路径与恢复后的缓存都为空；缓存不进快照，也不改变快照 JSON 形状。
 
 ## 5. 关键文件
 

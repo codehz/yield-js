@@ -20,7 +20,7 @@ use crate::runtime::{
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::DeliveryTarget;
-use crate::value::{ContinuationId, ObjectId, PropertyKey, Value, ValueRef};
+use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -171,6 +171,47 @@ struct CallMetadata {
     is_initializer: bool,
 }
 
+/// A monomorphic property-site cache. It records the receiver identity, key,
+/// table layout and slot; the value and attributes are always read fresh.
+#[derive(Clone, Debug)]
+pub(crate) struct PropertyCacheEntry {
+    pub(crate) receiver: ObjectId,
+    pub(crate) key: PropertyKey,
+    pub(crate) layout: u64,
+    pub(crate) slot: u32,
+    /// The previous access at this site named a different receiver or key.
+    /// A stable hit clears it; two consecutive mismatches disable the site.
+    pub(crate) unstable: bool,
+}
+
+impl PropertyCacheEntry {
+    pub(crate) fn matches(&self, receiver: ObjectId, key: PropertyKeyRef<'_>) -> bool {
+        self.receiver == receiver && self.key.borrowed() == key
+    }
+
+    pub(crate) fn symbol(&self) -> bool {
+        matches!(self.key, PropertyKey::Symbol(_))
+    }
+}
+
+/// A site starts empty. One distinct receiver/key fills it; seeing a second
+/// one disables the site for the rest of the VM generation so a megamorphic
+/// site does not pay a failed lookup on every access.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum PropertyCache {
+    #[default]
+    Empty,
+    /// The site ran a few times. Repeated accesses may fill a monomorphic
+    /// entry; one-shot sites never pay for a slot lookup.
+    Seen(u8),
+    Entry(PropertyCacheEntry),
+    Disabled,
+}
+
+fn property_caches(build: &Build) -> Vec<Vec<PropertyCache>> {
+    vec![Vec::new(); build.functions.len()]
+}
+
 impl FunctionTable {
     fn from_validated(build: &Build) -> Self {
         let indices: BTreeMap<_, _> = build
@@ -242,6 +283,8 @@ pub struct Vm {
     pub(crate) random_state: u64,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
+    /// Per-function, per-PC monomorphic property cache. Never serialized.
+    pub(crate) property_caches: Vec<Vec<PropertyCache>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -338,8 +381,10 @@ impl Vm {
 
     fn empty(build: Build, bindings: Arc<Bindings>) -> Self {
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
+        let caches = property_caches(&build);
         Self {
             functions: FunctionTable::from_validated(&build),
+            property_caches: caches,
             build: Arc::new(build),
             bindings,
             heap: Heap::new(),
@@ -1879,8 +1924,10 @@ impl Vm {
             })
             .map(|(id, _)| *id)
             .collect();
+        let caches = property_caches(&build);
         Self {
             functions: FunctionTable::from_validated(&build),
+            property_caches: caches,
             build: Arc::new(build),
             bindings,
             heap,

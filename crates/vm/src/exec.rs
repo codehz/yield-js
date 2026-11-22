@@ -31,6 +31,24 @@ use crate::runtime::{
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
+type PropertySite = (usize, usize);
+
+#[derive(Clone, Copy)]
+enum CacheStatus {
+    Empty,
+    Seen(u8),
+    Hit {
+        symbol: bool,
+        layout: u64,
+        slot: u32,
+        unstable: bool,
+    },
+    Mismatch {
+        unstable: bool,
+    },
+    Disabled,
+}
+
 const FUNCTION_CALL: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call"),
     1,
@@ -310,7 +328,7 @@ impl Vm {
             if crate::perf::ENABLED {
                 crate::perf::record(|counters| counters.dispatches += 1);
             }
-            match self.step(host, roots, &mut frame, instr, &build.constants)? {
+            match self.step(host, roots, &mut frame, instr, &build.constants, pc)? {
                 Step::Next => {}
                 Step::Suspend => return Ok(ExecOutcome::Suspended),
                 Step::Yield { value, delegate } => {
@@ -405,6 +423,7 @@ impl Vm {
         frame: &mut Frame,
         instr: &Instr,
         constants: &[Constant],
+        pc: usize,
     ) -> Result<Step, VmError> {
         // Reentrant calls borrow the initialized slots; destination writes
         // happen after the last use of this view in each instruction.
@@ -1228,12 +1247,14 @@ impl Vm {
                 Ok(Step::Next)
             }
             Instr::SetMember { object, key, src } => {
+                let site = (frame.function, pc);
                 match self.write_member(
                     host,
                     frame_roots,
                     &frame.read(object)?,
                     &frame.read(key)?,
                     frame.read(src)?,
+                    Some(site),
                 )? {
                     Invocation::Value(_) => Ok(Step::Next),
                     Invocation::Thrown(value) => Ok(Step::Throw(value)),
@@ -1870,6 +1891,54 @@ impl Vm {
         self.read_property_from_chain(host, roots, target, key, |_| Cow::Borrowed(receiver))
     }
 
+    fn cache_status(
+        &self,
+        site: PropertySite,
+        receiver: ObjectId,
+        key: PropertyKeyRef<'_>,
+    ) -> CacheStatus {
+        let Some(entry) = self
+            .property_caches
+            .get(site.0)
+            .and_then(|caches| caches.get(site.1))
+        else {
+            return CacheStatus::Empty;
+        };
+        match entry {
+            crate::vm::PropertyCache::Empty => CacheStatus::Empty,
+            crate::vm::PropertyCache::Seen(count) => CacheStatus::Seen(*count),
+            crate::vm::PropertyCache::Disabled => CacheStatus::Disabled,
+            crate::vm::PropertyCache::Entry(entry) if entry.matches(receiver, key) => {
+                CacheStatus::Hit {
+                    symbol: entry.symbol(),
+                    layout: entry.layout,
+                    slot: entry.slot,
+                    unstable: entry.unstable,
+                }
+            }
+            crate::vm::PropertyCache::Entry(entry) => CacheStatus::Mismatch {
+                unstable: entry.unstable,
+            },
+        }
+    }
+
+    fn mark_cache_stable(&mut self, site: PropertySite) {
+        if let Some(caches) = self.property_caches.get_mut(site.0)
+            && let Some(crate::vm::PropertyCache::Entry(entry)) = caches.get_mut(site.1)
+        {
+            entry.unstable = false;
+        }
+    }
+
+    fn set_cache(&mut self, site: PropertySite, entry: crate::vm::PropertyCache) {
+        if let Some(caches) = self.property_caches.get_mut(site.0) {
+            if caches.len() <= site.1 {
+                caches.resize_with(site.1 + 1, Default::default);
+            }
+            caches[site.1] = entry;
+        }
+    }
+
     /// Get on a ToObject result. Keep the same wrapper across accesses, but
     /// defer creating it until an accessor or proxy can observe the receiver.
     pub(crate) fn read_to_object_property(
@@ -2229,6 +2298,7 @@ impl Vm {
         object: &Value,
         key: &Value,
         value: Value,
+        site: Option<PropertySite>,
     ) -> Result<Invocation, VmError> {
         if matches!(object.view(), ValueRef::Null | ValueRef::Undefined) {
             return self.throw_type_error("property write on a non-object");
@@ -2253,7 +2323,82 @@ impl Vm {
                     .expect("non-nullish primitive")
             }
         };
-        self.set_property(host, roots, id, object, key, value, true)
+        let mut populate = false;
+        let mut unstable = false;
+        if let Some(site) = site
+            && let ValueRef::Object(receiver) = object.view()
+            && receiver == id
+        {
+            match self.cache_status(site, id, key.borrowed()) {
+                CacheStatus::Hit {
+                    symbol,
+                    layout,
+                    slot,
+                    unstable: was_unstable,
+                } => {
+                    if self
+                        .heap
+                        .set_plain_slot(id, symbol, layout, slot, value.clone())?
+                    {
+                        if was_unstable {
+                            self.mark_cache_stable(site);
+                        }
+                        return Ok(Invocation::Value(Value::boolean(true)));
+                    }
+                    self.set_cache(site, crate::vm::PropertyCache::Empty);
+                    populate = true;
+                }
+                CacheStatus::Mismatch {
+                    unstable: was_unstable,
+                } => {
+                    if was_unstable {
+                        self.set_cache(site, crate::vm::PropertyCache::Disabled);
+                    } else {
+                        unstable = true;
+                        populate = true;
+                    }
+                }
+                CacheStatus::Disabled => {}
+                CacheStatus::Empty => {
+                    self.set_cache(site, crate::vm::PropertyCache::Seen(1));
+                }
+                CacheStatus::Seen(count) => {
+                    if count >= 32 {
+                        populate = true;
+                    } else {
+                        self.set_cache(site, crate::vm::PropertyCache::Seen(count + 1));
+                    }
+                }
+            }
+        }
+        let cache_key = populate.then(|| key.clone());
+        let result = self.set_property(host, roots, id, object, key, value, true)?;
+        if populate
+            && let Some(site) = site
+            && let Invocation::Value(returned) = &result
+            && matches!(returned.view(), ValueRef::Bool(true))
+            && let ValueRef::Object(receiver) = object.view()
+            && receiver == id
+            && let Some(cache_key) = cache_key
+        {
+            if let Some((layout, slot)) =
+                self.heap.plain_data_slot(id, cache_key.borrowed(), true)?
+            {
+                self.set_cache(
+                    site,
+                    crate::vm::PropertyCache::Entry(crate::vm::PropertyCacheEntry {
+                        receiver: id,
+                        key: cache_key,
+                        layout,
+                        slot,
+                        unstable,
+                    }),
+                );
+            } else {
+                self.set_cache(site, crate::vm::PropertyCache::Disabled);
+            }
+        }
+        Ok(result)
     }
 
     #[allow(

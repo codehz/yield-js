@@ -192,8 +192,31 @@ impl NativeObject {
 }
 
 /// Lookup stays keyed; the ordinal records creation order, not write order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PropertyTable<K: Ord, V>(BTreeMap<K, OrderedProperty<V>>);
+/// Small tables keep a sorted vector and skip the tree; large tables use a
+/// `BTreeMap`. `layout` changes only when a key is inserted or removed, so a
+/// property site can cache a small-table slot and still observe value updates.
+#[derive(Debug, Clone)]
+pub struct PropertyTable<K: Ord, V> {
+    storage: PropertyStorage<K, V>,
+    layout: u64,
+}
+
+#[derive(Debug, Clone)]
+enum PropertyStorage<K, V> {
+    Small(Vec<(K, OrderedProperty<V>)>),
+    Large(BTreeMap<K, OrderedProperty<V>>),
+}
+
+const SMALL_TABLE_LIMIT: usize = 8;
+
+impl<K: Ord, V: PartialEq> PartialEq for PropertyTable<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self.ordered_iter().zip(other.ordered_iter()).all(
+                |((left_key, left), (right_key, right))| left_key == right_key && left == right,
+            )
+    }
+}
 
 pub(super) type PropertyTables<'a> = (
     &'a PropertyTable<JsString, Property>,
@@ -209,24 +232,6 @@ pub(super) struct OrderedProperty<V> {
     ordinal: usize,
     pub(super) value: V,
     pub(super) attributes: Attributes,
-}
-
-mod property_pairs {
-    use super::{Property, PropertyTable};
-    use crate::value::JsString;
-
-    pub(super) fn serialize<S: serde::Serializer>(
-        table: &PropertyTable<JsString, Property>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        crate::snapshot::ordered_pairs::serialize(&table.0, serializer)
-    }
-
-    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<PropertyTable<JsString, Property>, D::Error> {
-        crate::snapshot::ordered_pairs::deserialize(deserializer).map(PropertyTable)
-    }
 }
 
 pub(super) fn array_index(key: PropertyKeyRef<'_>) -> Option<usize> {
@@ -269,35 +274,165 @@ impl Attributes {
     };
 }
 
+pub(super) enum PropertyIter<'a, K: Ord, V> {
+    Small(std::slice::Iter<'a, (K, OrderedProperty<V>)>),
+    Large(std::collections::btree_map::Iter<'a, K, OrderedProperty<V>>),
+}
+
+impl<'a, K: Ord, V> Iterator for PropertyIter<'a, K, V> {
+    type Item = (&'a K, &'a OrderedProperty<V>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(iter) => iter.next().map(|(key, property)| (key, property)),
+            Self::Large(iter) => iter.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Small(iter) => iter.size_hint(),
+            Self::Large(iter) => iter.size_hint(),
+        }
+    }
+}
+
+mod property_pairs {
+    use super::{Property, PropertyTable};
+    use crate::value::JsString;
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        table: &PropertyTable<JsString, Property>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(table.ordered_iter())
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PropertyTable<JsString, Property>, D::Error> {
+        crate::snapshot::ordered_pairs::deserialize(deserializer)
+            .map(PropertyTable::from_ordered_pairs)
+    }
+}
+
+impl<K: Ord + Serialize, V: Serialize> Serialize for PropertyTable<K, V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.ordered_iter())
+    }
+}
+
+impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for PropertyTable<K, V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        BTreeMap::deserialize(deserializer).map(Self::from_ordered_pairs)
+    }
+}
+
 impl<K: Ord, V> PropertyTable<K, V> {
     pub(super) fn new() -> Self {
-        Self(BTreeMap::new())
+        Self {
+            storage: PropertyStorage::Small(Vec::new()),
+            layout: 0,
+        }
+    }
+
+    fn from_ordered_pairs(pairs: BTreeMap<K, OrderedProperty<V>>) -> Self {
+        if pairs.len() <= SMALL_TABLE_LIMIT {
+            Self {
+                storage: PropertyStorage::Small(pairs.into_iter().collect()),
+                layout: 0,
+            }
+        } else {
+            Self {
+                storage: PropertyStorage::Large(pairs),
+                layout: 0,
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match &self.storage {
+            PropertyStorage::Small(entries) => entries.len(),
+            PropertyStorage::Large(index) => index.len(),
+        }
     }
 
     pub fn get<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
     {
-        self.0.get(key).map(|property| &property.value)
+        self.entry(key).map(|property| &property.value)
     }
 
     pub(super) fn entry<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&OrderedProperty<V>>
     where
         K: Borrow<Q>,
     {
-        self.0.get(key)
+        match &self.storage {
+            PropertyStorage::Small(entries) => entries
+                .binary_search_by(|(stored, _)| stored.borrow().cmp(key))
+                .ok()
+                .map(|index| &entries[index].1),
+            PropertyStorage::Large(index) => index.get(key),
+        }
     }
 
     pub fn get_mut<Q: Ord + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
     {
-        self.0.get_mut(key).map(|property| &mut property.value)
+        match &mut self.storage {
+            PropertyStorage::Small(entries) => entries
+                .binary_search_by(|(stored, _)| stored.borrow().cmp(key))
+                .ok()
+                .map(move |index| &mut entries[index].1.value),
+            PropertyStorage::Large(index) => index.get_mut(key).map(|property| &mut property.value),
+        }
     }
 
     /// Storage order, for internal traversal rather than script enumeration.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.0.iter().map(|(key, property)| (key, &property.value))
+        self.ordered_iter()
+            .map(|(key, property)| (key, &property.value))
+    }
+
+    pub(super) fn ordered_iter(&self) -> PropertyIter<'_, K, V> {
+        match &self.storage {
+            PropertyStorage::Small(entries) => PropertyIter::Small(entries.iter()),
+            PropertyStorage::Large(index) => PropertyIter::Large(index.iter()),
+        }
+    }
+
+    /// Changes only when a key is inserted or removed, never when a value or
+    /// attribute is updated. A cache hit still reads the current entry.
+    pub(super) fn layout(&self) -> u64 {
+        self.layout
+    }
+
+    pub(super) fn slot<Q: Ord + ?Sized>(&self, key: &Q) -> Option<usize>
+    where
+        K: Borrow<Q>,
+    {
+        match &self.storage {
+            PropertyStorage::Small(entries) => entries
+                .binary_search_by(|(stored, _)| stored.borrow().cmp(key))
+                .ok(),
+            PropertyStorage::Large(_) => None,
+        }
+    }
+
+    pub(super) fn entry_at(&self, slot: usize) -> Option<&OrderedProperty<V>> {
+        match &self.storage {
+            PropertyStorage::Small(entries) => entries.get(slot).map(|(_, property)| property),
+            PropertyStorage::Large(_) => None,
+        }
+    }
+
+    pub(super) fn entry_at_mut(&mut self, slot: usize) -> Option<&mut OrderedProperty<V>> {
+        match &mut self.storage {
+            PropertyStorage::Small(entries) => entries.get_mut(slot).map(|(_, property)| property),
+            PropertyStorage::Large(_) => None,
+        }
     }
 
     pub(super) fn update(
@@ -306,22 +441,64 @@ impl<K: Ord, V> PropertyTable<K, V> {
         attributes: Option<Attributes>,
         value: impl FnOnce(Option<&V>) -> V,
     ) {
-        let ordinal = self.0.len();
-        match self.0.entry(key) {
-            Entry::Occupied(mut entry) => {
-                let property = entry.get_mut();
-                property.value = value(Some(&property.value));
-                if let Some(attributes) = attributes {
-                    property.attributes = attributes;
+        match &mut self.storage {
+            PropertyStorage::Small(entries) => {
+                let position = entries.binary_search_by(|(stored, _)| stored.cmp(&key));
+                match position {
+                    Ok(index) => {
+                        let property = &mut entries[index].1;
+                        property.value = value(Some(&property.value));
+                        if let Some(attributes) = attributes {
+                            property.attributes = attributes;
+                        }
+                    }
+                    Err(index) => {
+                        let ordinal = entries.len();
+                        entries.insert(
+                            index,
+                            (
+                                key,
+                                OrderedProperty {
+                                    ordinal,
+                                    value: value(None),
+                                    attributes: attributes.unwrap_or(Attributes::ORDINARY),
+                                },
+                            ),
+                        );
+                        self.layout = self.layout.wrapping_add(1);
+                        if entries.len() > SMALL_TABLE_LIMIT {
+                            self.promote();
+                        }
+                    }
                 }
             }
-            Entry::Vacant(entry) => {
-                entry.insert(OrderedProperty {
-                    ordinal,
-                    value: value(None),
-                    attributes: attributes.unwrap_or(Attributes::ORDINARY),
-                });
+            PropertyStorage::Large(index) => {
+                let ordinal = index.len();
+                match index.entry(key) {
+                    Entry::Occupied(mut entry) => {
+                        let property = entry.get_mut();
+                        property.value = value(Some(&property.value));
+                        if let Some(attributes) = attributes {
+                            property.attributes = attributes;
+                        }
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(OrderedProperty {
+                            ordinal,
+                            value: value(None),
+                            attributes: attributes.unwrap_or(Attributes::ORDINARY),
+                        });
+                        self.layout = self.layout.wrapping_add(1);
+                    }
+                }
             }
+        }
+    }
+
+    fn promote(&mut self) {
+        let storage = std::mem::replace(&mut self.storage, PropertyStorage::Small(Vec::new()));
+        if let PropertyStorage::Small(entries) = storage {
+            self.storage = PropertyStorage::Large(entries.into_iter().collect());
         }
     }
 
@@ -329,29 +506,50 @@ impl<K: Ord, V> PropertyTable<K, V> {
     where
         K: Borrow<Q>,
     {
-        let Some(property) = self.0.get(key) else {
-            return true;
-        };
-        if !property.attributes.configurable {
-            return false;
-        }
-        let ordinal = property.ordinal;
-        self.0.remove(key);
-        // Keep ordinals dense so reinsertion appends and snapshots keep the
-        // same validation rules, without adding an ordering counter.
-        if ordinal < self.0.len() {
-            for property in self.0.values_mut() {
-                if property.ordinal > ordinal {
-                    property.ordinal -= 1;
+        match &mut self.storage {
+            PropertyStorage::Small(entries) => {
+                let Ok(index) = entries.binary_search_by(|(stored, _)| stored.borrow().cmp(key))
+                else {
+                    return true;
+                };
+                if !entries[index].1.attributes.configurable {
+                    return false;
+                }
+                let ordinal = entries[index].1.ordinal;
+                entries.remove(index);
+                if ordinal < entries.len() {
+                    for (_, property) in entries.iter_mut() {
+                        if property.ordinal > ordinal {
+                            property.ordinal -= 1;
+                        }
+                    }
+                }
+            }
+            PropertyStorage::Large(index) => {
+                let Some(property) = index.get(key) else {
+                    return true;
+                };
+                if !property.attributes.configurable {
+                    return false;
+                }
+                let ordinal = property.ordinal;
+                index.remove(key);
+                if ordinal < index.len() {
+                    for property in index.values_mut() {
+                        if property.ordinal > ordinal {
+                            property.ordinal -= 1;
+                        }
+                    }
                 }
             }
         }
+        self.layout = self.layout.wrapping_add(1);
         true
     }
 
     pub(super) fn valid_order(&self) -> bool {
-        let mut seen = vec![false; self.0.len()];
-        self.0.values().all(|property| {
+        let mut seen = vec![false; self.len()];
+        self.ordered_iter().all(|(_, property)| {
             seen.get_mut(property.ordinal)
                 .is_some_and(|seen| !std::mem::replace(seen, true))
         })
@@ -360,15 +558,23 @@ impl<K: Ord, V> PropertyTable<K, V> {
 
 impl<K: Ord> PropertyTable<K, Property> {
     pub(super) fn restrict(&mut self, level: IntegrityLevel) {
-        for entry in self.0.values_mut() {
-            level.restrict(&entry.value, &mut entry.attributes);
+        match &mut self.storage {
+            PropertyStorage::Small(entries) => {
+                for (_, entry) in entries {
+                    level.restrict(&entry.value, &mut entry.attributes);
+                }
+            }
+            PropertyStorage::Large(index) => {
+                for entry in index.values_mut() {
+                    level.restrict(&entry.value, &mut entry.attributes);
+                }
+            }
         }
     }
 
     pub(super) fn satisfies(&self, level: IntegrityLevel) -> bool {
-        self.0
-            .values()
-            .all(|entry| level.allows(&entry.value, entry.attributes))
+        self.ordered_iter()
+            .all(|(_, entry)| level.allows(&entry.value, entry.attributes))
     }
 }
 
@@ -379,12 +585,11 @@ pub(super) fn collect_own_keys<'a, V>(
     enumerable_strings_only: bool,
 ) {
     if !enumerable_strings_only {
-        keys.reserve(props.0.len() + symbols.0.len());
+        keys.reserve(props.len() + symbols.len());
     }
     keys.extend(
         props
-            .0
-            .iter()
+            .ordered_iter()
             .filter(|(_, property)| !enumerable_strings_only || property.attributes.enumerable)
             .map(|(key, property)| {
                 let key = PropertyKeyRef::JsString(key);
@@ -398,9 +603,8 @@ pub(super) fn collect_own_keys<'a, V>(
     if !enumerable_strings_only {
         keys.extend(
             symbols
-                .0
-                .iter()
-                .map(|(&id, property)| ((3, property.ordinal), PropertyKeyRef::Symbol(id))),
+                .ordered_iter()
+                .map(|(id, property)| ((3, property.ordinal), PropertyKeyRef::Symbol(*id))),
         );
     }
 }

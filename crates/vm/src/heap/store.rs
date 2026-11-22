@@ -929,6 +929,102 @@ impl Heap {
         Ok(())
     }
 
+    /// Locate an existing ordinary data slot on a plain object. The cache
+    /// stores the slot index, not the value, so later data writes do not
+    /// invalidate it.
+    pub(crate) fn plain_data_slot(
+        &self,
+        id: ObjectId,
+        key: PropertyKeyRef<'_>,
+        writable: bool,
+    ) -> Result<Option<(u64, u32)>, VmError> {
+        let Object::Plain(object) = self.get(id)? else {
+            return Ok(None);
+        };
+        let (layout, slot, entry) = match key {
+            PropertyKeyRef::String(text) => {
+                let table = &object.props;
+                let slot = table.slot(&JsString::from(text));
+                (
+                    table.layout(),
+                    slot,
+                    slot.and_then(|slot| table.entry_at(slot)),
+                )
+            }
+            PropertyKeyRef::JsString(text) => {
+                let table = &object.props;
+                let slot = table.slot(text);
+                (
+                    table.layout(),
+                    slot,
+                    slot.and_then(|slot| table.entry_at(slot)),
+                )
+            }
+            PropertyKeyRef::Symbol(id) => {
+                let table = &object.symbol_props;
+                let slot = table.slot(&id);
+                (
+                    table.layout(),
+                    slot,
+                    slot.and_then(|slot| table.entry_at(slot)),
+                )
+            }
+        };
+        let (Some(slot), Some(entry)) = (slot, entry) else {
+            return Ok(None);
+        };
+        let Property::Data(_) = entry.value else {
+            return Ok(None);
+        };
+        if writable && !entry.attributes.writable {
+            return Ok(None);
+        }
+        let Ok(u32_slot) = u32::try_from(slot) else {
+            return Ok(None);
+        };
+        Ok(Some((layout, u32_slot)))
+    }
+
+    /// Write a guarded plain data slot. A layout change or a data-to-accessor
+    /// transition returns `false` so the caller falls back to the full Set
+    /// semantics.
+    pub(crate) fn set_plain_slot(
+        &mut self,
+        id: ObjectId,
+        symbol: bool,
+        layout: u64,
+        slot: u32,
+        value: Value,
+    ) -> Result<bool, VmError> {
+        let Object::Plain(object) = self.get_mut(id)? else {
+            return Ok(false);
+        };
+        if symbol {
+            if object.symbol_props.layout() != layout {
+                return Ok(false);
+            }
+            let Some(entry) = object.symbol_props.entry_at_mut(slot as usize) else {
+                return Ok(false);
+            };
+            if !matches!(entry.value, Property::Data(_)) || !entry.attributes.writable {
+                return Ok(false);
+            }
+            entry.value = Property::Data(value);
+        } else {
+            if object.props.layout() != layout {
+                return Ok(false);
+            }
+            let Some(entry) = object.props.entry_at_mut(slot as usize) else {
+                return Ok(false);
+            };
+            if !matches!(entry.value, Property::Data(_)) || !entry.attributes.writable {
+                return Ok(false);
+            }
+            entry.value = Property::Data(value);
+        }
+        Ok(true)
+    }
+
     fn binding_owner(
         &self,
         env: ObjectId,

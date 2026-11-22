@@ -182,6 +182,9 @@ impl Vm {
         }
 
         let removed = self.heap.sweep(&live);
+        for function in &mut self.property_caches {
+            function.fill(crate::vm::PropertyCache::Empty);
+        }
         self.host_instances
             .retain(|id, _| live.objects.contains(id));
         self.continuations
