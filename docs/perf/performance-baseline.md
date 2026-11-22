@@ -17,6 +17,7 @@ YIELD_VM_BENCH_DIAGNOSTICS=1 cargo bench --locked -p yield-harness --bench basel
 - `startup_build_digest` 是 `startup_build_identity` 内的摘要耗时：二进制编码与 xxh3-128 哈希合计，不含版本检查或 ID 比较。历史 CSV 中该区间分为 `startup_build_digest_json` 和 `startup_build_digest_hash`（JSON 序列化与哈希）；更早的 SHA-256 基线使用 `startup_build_digest_sha256`。它不等同于产物的编码和解码。
 - 挂起负载另用新 VM 构造可恢复状态。单独计初次挂起、捕获、JSON 编解码、恢复、宿主 operation 重挂，以及恢复后的续跑校验；不把外部等待计入任何阶段。`restore` 包括重新校验构建，但不包含恢复输入的克隆或解码。
 - `--capture-profile` 单独测普通捕获、分项捕获和二进制编码，并验证两条路径产出相同的镜像。夹具和结果见[快照捕获分项实测](next-optimizations.md#快照捕获分项实测)。
+- `--gc <workload> <policy>` 在单个进程内测显式 GC 暂停；与 `/usr/bin/time -l` 配合取峰值 RSS。见 [GC 暂停与进程峰值内存](gc.md)。
 - `frame_allocations` 是帧构造次数（零槽帧不分配槽缓冲区）；`frame_slots` 是这些帧的总槽数。环境计数是查找 owner 时访问的环境数；属性计数是自有属性探测次数，`property_slow_paths` 是进入通用属性原型链读取的次数，不是缓存失效率。`saved_values / suspensions` 是捕获平均值，分母包含 `await`、`yield` 和生成器初始捕获。
 - 峰值 RSS 用未插桩的独立进程采集：先用 `cargo bench --locked -p yield-harness --bench baseline --no-run` 获取可执行文件路径，再对每个工作负载执行 `/usr/bin/time -l <可执行文件> --compile-only <负载名>`（macOS）。RSS 包括进程启动、编译、打印构建 ID，不包含 VM 执行和独立的产物编码。Linux 可用 `/usr/bin/time -v`，注意其 RSS 单位不同。
 

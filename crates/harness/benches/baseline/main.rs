@@ -1,5 +1,6 @@
 //! Reproducible release baseline. Timing and VM counters run in separate binaries.
 
+mod gc;
 mod workloads;
 
 use std::hint::black_box;
@@ -37,6 +38,13 @@ fn main() {
             "--capture-profile" => panic!("capture timings require a non-diagnostic build"),
             "--restore-profile" if !perf::ENABLED => restore_profile = true,
             "--restore-profile" => panic!("restore timings require a non-diagnostic build"),
+            "--gc" if !perf::ENABLED => {
+                let workload = args.next().expect("GC workload");
+                let policy = args.next().expect("GC policy");
+                gc::run(&workload, &policy);
+                return;
+            }
+            "--gc" => panic!("GC timings require a non-diagnostic build"),
             "--rematerialization" => rematerialization = true,
             _ => panic!("unknown baseline option: {arg}"),
         }
