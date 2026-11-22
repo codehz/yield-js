@@ -6,6 +6,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, CollectionIteration, CollectionKind, ITERATOR_SYMBOL, Object, PlainObject,
+    TO_STRING_TAG_SYMBOL,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -399,6 +400,24 @@ impl Vm {
                 SET_ITERATOR_NEXT
             }
         };
+        let tag = match kind {
+            CollectionKind::Map => "Map",
+            CollectionKind::Set => "Set",
+        };
+        define_builtin_data(
+            self,
+            prototype,
+            PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+            Value::string(tag.into()),
+            Attributes::FUNCTION_METADATA,
+        );
+        define_builtin_data(
+            self,
+            iterator,
+            PropertyKey::Symbol(TO_STRING_TAG_SYMBOL),
+            Value::string(format!("{tag} Iterator").into()),
+            Attributes::FUNCTION_METADATA,
+        );
         let next = self.alloc_intrinsic(next);
         self.heap
             .define_data(iterator, "next", Value::object(next), Attributes::METHOD)

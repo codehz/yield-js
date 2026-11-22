@@ -26,6 +26,9 @@ export async function run() {
   expect(map.size).toBe(2);
   expect(groups.get(key)).toEqual([2]);
   expect(groups.get('odd')).toEqual([1, 3]);
+  expect(Object.prototype.toString.call(groups)).toBe('[object Map]');
+  expect(Object.prototype.toString.call(union)).toBe('[object Set]');
+  expect(Object.prototype.toString.call(groups.keys())).toBe('[object Map Iterator]');
   const order = [];
   for (const group of groups.keys()) order.push(group);
   expect(order[0]).toBe('odd');

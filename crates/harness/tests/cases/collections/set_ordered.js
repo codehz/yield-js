@@ -19,8 +19,9 @@ export function run() {
   expect(Set.prototype.constructor).toBe(Set);
   expect(Object.getPrototypeOf(Set.prototype)).toBe(Object.prototype);
   const keys = Reflect.ownKeys(Set.prototype);
-  expect(keys.slice(0, -1).join(',')).toBe('constructor,add,has,delete,clear,size,forEach,values,keys,entries,union,intersection,difference,symmetricDifference,isSubsetOf,isSupersetOf,isDisjointFrom');
-  expect(keys[keys.length - 1]).toBe(Symbol.iterator);
+  expect(keys.slice(0, -2).join(',')).toBe('constructor,add,has,delete,clear,size,forEach,values,keys,entries,union,intersection,difference,symmetricDifference,isSubsetOf,isSupersetOf,isDisjointFrom');
+  expect(keys[keys.length - 2]).toBe(Symbol.iterator);
+  expect(keys[keys.length - 1]).toBe(Symbol.toStringTag);
   const e = s.entries();
   expect(e[Symbol.iterator]()).toBe(e);
   const zero = e.next().value;

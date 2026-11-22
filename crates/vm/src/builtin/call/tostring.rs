@@ -108,6 +108,8 @@ impl Vm {
             | Object::PromiseCallback { .. }
             | Object::Resolution(_) => "Function",
             Object::Promise(_) => "Promise",
+            Object::Map { .. } => "Map",
+            Object::Set { .. } => "Set",
             _ => "Object",
         })
     }

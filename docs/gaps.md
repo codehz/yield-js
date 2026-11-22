@@ -35,7 +35,7 @@
 | `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥），不保证覆盖全部 Annex B 兼容语法。字符串方法仍查找相应的 Symbol 协议，但内建 `[Symbol.matchAll]` / `[Symbol.split]` 克隆匹配器时不使用 species；直接调用内建 `[Symbol.matchAll]` 也要求全局标志 |
-| `Map` / `Set` | 不提供 `[Symbol.toStringTag]`；查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
+| `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
