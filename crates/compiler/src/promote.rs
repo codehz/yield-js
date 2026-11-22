@@ -141,7 +141,7 @@ fn elide_iteration_environments(
     if dead.is_empty() {
         return Ok(());
     }
-    compact_dead_instructions(function, &dead)
+    compact_dead_instructions(function, &mut dead)
 }
 
 /// `true` means the declaration already has a value and must self-move.

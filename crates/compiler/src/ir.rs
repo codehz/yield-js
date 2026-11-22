@@ -16,7 +16,7 @@ use crate::error::CompileError;
 
 /// A value location assigned during lowering, before persistent/transient split.
 pub(crate) type LogicalReg = Reg;
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct AwaitSite {
     /// Destination of a fulfilled settlement; also the fall-through register.
     pub(crate) result: LogicalReg,
@@ -100,11 +100,12 @@ pub(crate) struct GeneratorStartSite {
     pub(crate) body_pc: usize,
 }
 
-/// Delete instructions and remap every PC-bearing field. Targets on a
-/// deleted instruction land on the next surviving instruction.
+/// Compact code and all PC-bearing fields. A deleted target lands on the next
+/// surviving instruction, except at exclusive entries (which keep a bridge).
+/// `dead` is updated to contain exactly the PCs that were removed.
 pub(crate) fn compact_dead_instructions(
     function: &mut LoweredFunction,
-    dead: &BTreeSet<usize>,
+    dead: &mut BTreeSet<usize>,
 ) -> Result<(), CompileError> {
     let old_len = function.code.len();
     if dead.iter().any(|&pc| pc >= old_len) {
@@ -112,6 +113,32 @@ pub(crate) fn compact_dead_instructions(
             "internal compiler error: deleted instruction is out of range",
         ));
     }
+    let mut exclusive = BTreeSet::new();
+    for (pc, instruction) in function.code.iter().enumerate() {
+        if !dead.contains(&pc)
+            && let Instr::Yield { generator, .. } = instruction
+        {
+            let site = &function.yields[*generator as usize];
+            exclusive.extend([site.throw_pc, site.return_pc]);
+        }
+    }
+    if let Some(start) = function.generator_start
+        && dead.remove(&start.body_pc)
+    {
+        function.code[start.body_pc] = Instr::Jump {
+            target: start.body_pc as u32 + 1,
+        };
+    }
+    // A pure write at an exclusive entry may be dead, but remapping that
+    // entry onto the next instruction could make it an ordinary jump target.
+    for pc in exclusive {
+        if dead.remove(&pc) {
+            function.code[pc] = Instr::Jump {
+                target: pc as u32 + 1,
+            };
+        }
+    }
+
     let mut mapping = Vec::with_capacity(old_len + 1);
     let mut next = 0u32;
     for pc in 0..old_len {
@@ -131,6 +158,10 @@ pub(crate) fn compact_dead_instructions(
     };
 
     let mut code = Vec::with_capacity(next as usize);
+    let old_awaits = std::mem::take(&mut function.awaits);
+    let old_yields = std::mem::take(&mut function.yields);
+    let mut await_ids = vec![None; old_awaits.len()];
+    let mut yield_ids = vec![None; old_yields.len()];
     for (pc, instruction) in std::mem::take(&mut function.code).into_iter().enumerate() {
         if dead.contains(&pc) {
             continue;
@@ -143,6 +174,34 @@ pub(crate) fn compact_dead_instructions(
                 cond,
                 target: remap(target)?,
             },
+            Instr::Await { dst, input, resume } => {
+                let id = await_ids[resume as usize].get_or_insert_with(|| {
+                    let id = function.awaits.len() as u32;
+                    function.awaits.push(old_awaits[resume as usize]);
+                    id
+                });
+                Instr::Await {
+                    dst,
+                    input,
+                    resume: *id,
+                }
+            }
+            Instr::Yield {
+                input,
+                generator,
+                delegate,
+            } => {
+                let id = yield_ids[generator as usize].get_or_insert_with(|| {
+                    let id = function.yields.len() as u32;
+                    function.yields.push(old_yields[generator as usize]);
+                    id
+                });
+                Instr::Yield {
+                    input,
+                    generator: *id,
+                    delegate,
+                }
+            }
             other => other,
         });
     }

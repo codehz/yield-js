@@ -61,6 +61,10 @@ impl Session {
         index
     }
 
+    pub(crate) fn constants(&self) -> &[Constant] {
+        &self.constants
+    }
+
     pub(crate) fn add_template(
         &mut self,
         cooked: Vec<Option<JsString>>,

@@ -20,7 +20,7 @@ yield-harness  →  yield-compiler  →  yield-vm
   → lower        绑定、异常、await  →  LoweredFunction
   → bindings     确定哪些 id 跨函数共享
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
-  → propagate   在直线路径内转发槽复制，遇控制流入口或相关槽改写时失效
+  → propagate    CFG 跨块传播字面量和复制，折叠分支并移除不可达指令
   → analyze      CFG live-in（含恢复边与异常边），移除无副作用的死写入
   → allocate     跨挂起的值分配固定持久槽，其余按活性区间复用瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
@@ -67,7 +67,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup` |
-| 局部复制 / 死写入 | `propagate.rs` 转发读操作数；`analyze.rs` 在活性不动点中只删除 `Move`、`Const`、`Undefined`；`ir.rs` 统一压缩并重映射 PC |
+| 值传播 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`analyze.rs` 重算活性并删除无用的 `Move`、`Const`、`Undefined`；`ir.rs` 统一压缩并重映射 PC 和挂起表索引 |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |

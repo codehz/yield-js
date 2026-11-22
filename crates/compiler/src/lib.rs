@@ -13,7 +13,7 @@
 //!   → bindings   owner table; cross-function reads and writes stay shared
 //!   → promote    unshared bindings become logical registers; non-escaping
 //!                loop bindings leave the per-iteration environment
-//!   → propagate  local copies stop at control-flow entries and operand writes
+//!   → propagate  cross-block literal and copy facts, branch folding, unreachable code
 //!   → analyze    CFG live-in and dead pure writes, including resume and handler edges
 //!   → allocate   persistent slots for cross-await values, transient otherwise
 //!   → Build

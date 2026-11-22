@@ -7,8 +7,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use yield_vm::bytecode::{
-    ExceptionHandler, Function as BytecodeFunction, GeneratorEntry, GeneratorStart, ParamTarget,
-    ResumeEntry, Slot, SlotKind,
+    Constant, ExceptionHandler, Function as BytecodeFunction, GeneratorEntry, GeneratorStart,
+    ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 
 use crate::analyze;
@@ -16,13 +16,13 @@ use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::{map_slots, uses_defs};
 use crate::ir::{LoweredFunction, compact_dead_instructions, generator_stubs, resume_stubs};
-use crate::propagate::propagate_copies;
 
 pub(crate) fn allocate(
     source: &str,
     mut lowered: LoweredFunction,
+    constants: &[Constant],
 ) -> Result<BytecodeFunction, CompileError> {
-    propagate_copies(&mut lowered);
+    crate::propagate::optimize(&mut lowered, constants)?;
     let mut resumes = resume_stubs(&lowered);
     let mut generators = generator_stubs(&lowered);
     let suspensions = analyze::Suspensions {
@@ -31,10 +31,10 @@ pub(crate) fn allocate(
     };
     let analyze::Liveness {
         mut live_in,
-        dead_writes: dead,
+        dead_writes: mut dead,
     } = analyze::live_in_and_dead_writes(&lowered.code, suspensions, &lowered.handlers)?;
     if !dead.is_empty() {
-        compact_dead_instructions(&mut lowered, &dead)?;
+        compact_dead_instructions(&mut lowered, &mut dead)?;
         // A deleted instruction has exactly its successor's live-in set.
         // Keeping the surviving entries preserves it even at remapped targets.
         let mut pc = 0;

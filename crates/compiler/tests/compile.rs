@@ -2083,7 +2083,7 @@ fn generator_entry_of_one_yield_keeps_a_slot_another_yield_injects() {
 export function* run(a) {
   const x = yield a;
   try {
-    return x;
+    return 1;
   } finally {
     yield 0;
     a(x);
@@ -2096,7 +2096,7 @@ export function* run(a) {
 export function* run(a) {
   const x = yield a;
   try {
-    return x;
+    return 1;
   } finally {
     yield 0;
     a(0);
@@ -2109,6 +2109,33 @@ export function* run(a) {
     let delta = subject.generator_resumes[1].saved_slots.len() as i64
         - baseline.generator_resumes[1].saved_slots.len() as i64;
     assert_eq!(delta, 1, "the finalizer reads a value declared before it");
+}
+
+#[test]
+fn pruned_suspensions_do_not_leave_resume_entries() {
+    let build = compile(
+        r#"export async function* run(flag) {
+            let enabled;
+            if (flag) enabled = false;
+            else enabled = false;
+            if (enabled) yield await 1;
+            yield await 2;
+        }"#,
+        &CompileOptions::default(),
+    )
+    .expect("async generator compiles");
+    build
+        .validate()
+        .expect("remaining entries and targets are valid");
+    let generator = build.functions.iter().find(|f| f.is_generator).unwrap();
+    let reference = compile(
+        "export async function* run() { yield await 2; }",
+        &CompileOptions::default(),
+    )
+    .expect("reference generator compiles");
+    let reference = reference.functions.iter().find(|f| f.is_generator).unwrap();
+    assert_eq!(generator.resumes.len(), reference.resumes.len());
+    assert_eq!(generator.generator_resumes.len(), 1);
 }
 
 #[test]

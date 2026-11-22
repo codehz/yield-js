@@ -225,7 +225,8 @@ fn lower_module<'ast>(
     facts.shared.extend(public);
     for mut function in lowered {
         promote::promote(scope.source, &mut function, &facts)?;
-        session.push_function(allocate::allocate(scope.source, function)?);
+        let allocated = allocate::allocate(scope.source, function, session.constants())?;
+        session.push_function(allocated);
     }
     Ok(())
 }

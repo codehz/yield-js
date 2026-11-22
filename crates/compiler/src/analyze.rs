@@ -29,11 +29,10 @@ pub(crate) struct Suspensions<'a> {
     pub(crate) generators: &'a [GeneratorEntry],
 }
 
-/// One normal control edge. `written` is the register the suspension entry
-/// injects before the target runs, so the incoming value is not live there.
-struct Edge {
-    pc: usize,
-    written: Option<Reg>,
+/// A normal or resumption edge and its optional injected register.
+pub(crate) struct Edge {
+    pub(crate) pc: usize,
+    pub(crate) written: Option<Reg>,
 }
 
 pub(crate) struct Liveness {
@@ -62,8 +61,10 @@ pub(crate) fn live_in_and_dead_writes(
             let mut next = BTreeSet::new();
             for edge in edges(code, suspensions, pc)? {
                 let mut incoming = live_in[edge.pc].clone();
-                for definition in &defs {
-                    incoming.remove(definition);
+                if !is_suspend(&code[pc]) {
+                    for definition in &defs {
+                        incoming.remove(definition);
+                    }
                 }
                 if let Some(written) = edge.written {
                     incoming.remove(&written);
@@ -71,9 +72,7 @@ pub(crate) fn live_in_and_dead_writes(
                 next.extend(incoming);
             }
             if may_throw(&code[pc]) {
-                for handler in handlers.iter().filter(|handler| {
-                    handler.start_pc as usize <= pc && pc < handler.end_pc as usize
-                }) {
+                for handler in covering_handlers(handlers, pc) {
                     let mut target = live_in[handler.target_pc as usize].clone();
                     target.remove(&handler.dst.index);
                     next.extend(target);
@@ -115,6 +114,33 @@ fn removable_write(instruction: &Instr, after: Option<&BTreeSet<Reg>>) -> bool {
     }
 }
 
+pub(crate) fn covering_handlers(
+    handlers: &[ExceptionHandler],
+    pc: usize,
+) -> impl Iterator<Item = &ExceptionHandler> {
+    handlers
+        .iter()
+        .filter(move |handler| handler.start_pc as usize <= pc && pc < handler.end_pc as usize)
+}
+
+pub(crate) fn is_suspend(instruction: &Instr) -> bool {
+    matches!(instruction, Instr::Await { .. } | Instr::Yield { .. })
+}
+
+pub(crate) fn ends_block(instruction: &Instr) -> bool {
+    is_suspend(instruction)
+        || matches!(
+            instruction,
+            Instr::Jump { .. }
+                | Instr::BranchFalse { .. }
+                | Instr::GeneratorStart
+                | Instr::Return { .. }
+                | Instr::Throw { .. }
+                | Instr::ThrowAssignmentToConst
+                | Instr::ThrowDeleteSuper
+        )
+}
+
 /// Successors without the per-edge destinations, for passes that only need
 /// reachability.
 pub(crate) fn normal_successors(
@@ -128,7 +154,7 @@ pub(crate) fn normal_successors(
         .collect())
 }
 
-fn edges(
+pub(crate) fn edges(
     code: &[Instr],
     suspensions: Suspensions<'_>,
     pc: usize,
@@ -189,6 +215,11 @@ fn edges(
         | Instr::Throw { .. }
         | Instr::ThrowAssignmentToConst
         | Instr::ThrowDeleteSuper => Vec::new(),
+        // Physically adjacent, but only the generator dispatcher can enter it.
+        Instr::GeneratorStart => vec![Edge {
+            pc: pc + 1,
+            written: None,
+        }],
         _ => vec![Edge {
             pc: pc + 1,
             written: None,
