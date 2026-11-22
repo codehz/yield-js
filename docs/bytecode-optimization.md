@@ -23,7 +23,9 @@
 
 ## 2. 第一批优化：少执行指令
 
-当前 [`LoweredFunction`](../crates/compiler/src/ir.rs) 用 VM `Instr` 表示逻辑寄存器代码；[`propagate.rs`](../crates/compiler/src/propagate.rs) 只在直线路径传播复制，[`analyze.rs`](../crates/compiler/src/analyze.rs) 只删无用的纯槽写入。把优化层放在绑定提升之后、物理槽分配之前；最终布局负责生成指令、跳转目标、异常和恢复表。
+已实现下列两项，独立基准与启用依据见[第一批优化对照](bytecode-optimization-round1.md)。
+
+优化前，[`LoweredFunction`](../crates/compiler/src/ir.rs) 用 VM `Instr` 表示逻辑寄存器代码；复制传播仅限直线路径，活性分析只删无用的纯槽写入。本批优化层位于绑定提升之后、物理槽分配之前，最终布局负责生成指令、跳转目标、异常和恢复表。
 
 1. **显式 CFG + 跨块常量/复制传播。** 从常量分支折叠、不可达块删除和纯写入 DCE 做起。统一重映射跳转、保护区、异常落点、`await`、`yield` 和生成器首次入口。优化完成后重新计算活性与保存集合。暂不引入全量 SSA；只有后续类型分析、值编号或内联确实受可变逻辑寄存器限制时，再迁移到带块参数的 SSA。
 2. **静态属性键指令。** 为编译器已知的字符串键选择 `GetMemberConstKey` 一类指令，复用通用属性读取语义，只省键的帧槽与通用键分派，不承诺消除属性查表。与 CFG 优化独立比较。若两项都完成并有独立收益，再试仅对已证明为 Number 的操作选择专用指令，以及融合无其他用途的比较结果与分支。
