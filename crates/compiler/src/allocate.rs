@@ -1,10 +1,11 @@
 //! Frame-slot allocation.
 //!
 //! A logical register live at any suspension entry becomes a fixed persistent
-//! slot. Every other register is transient and is dropped on suspend.
-//! Persistent slots are not reused across different live values.
+//! slot. Other registers use transient slots, reused across disjoint live
+//! intervals and dropped on suspend. Persistent slots are never reused.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use yield_vm::bytecode::{
     ExceptionHandler, Function as BytecodeFunction, GeneratorEntry, GeneratorStart, ParamTarget,
     ResumeEntry, Slot, SlotKind,
@@ -13,7 +14,7 @@ use yield_vm::bytecode::{
 use crate::analyze;
 use crate::emit::Reg;
 use crate::error::CompileError;
-use crate::instr::map_slots;
+use crate::instr::{map_slots, uses_defs};
 use crate::ir::LoweredFunction;
 
 pub(crate) fn allocate(
@@ -66,7 +67,7 @@ pub(crate) fn allocate(
         saved_regs.extend(&live_in[start.body_pc]);
     }
 
-    let layout = FrameLayout::new(lowered.reg_count, &saved_regs);
+    let layout = FrameLayout::new(&lowered, &saved_regs, &live_in);
     let code = lowered
         .code
         .iter()
@@ -147,7 +148,7 @@ fn logical(reg: Reg) -> Slot {
     }
 }
 
-/// Fixed persistent slots for cross-suspension values; the rest are transient.
+/// Fixed persistent slots and reusable transient slots.
 struct FrameLayout {
     persistent: BTreeMap<Reg, u16>,
     transient: BTreeMap<Reg, u16>,
@@ -156,21 +157,17 @@ struct FrameLayout {
 }
 
 impl FrameLayout {
-    fn new(reg_count: u16, saved: &BTreeSet<Reg>) -> Self {
+    fn new(lowered: &LoweredFunction, saved: &BTreeSet<Reg>, live_in: &[BTreeSet<Reg>]) -> Self {
         let persistent = saved
             .iter()
             .copied()
             .enumerate()
             .map(|(index, reg)| (reg, index as u16))
             .collect::<BTreeMap<_, _>>();
-        let transient = (0..reg_count)
-            .filter(|reg| !persistent.contains_key(reg))
-            .enumerate()
-            .map(|(index, reg)| (reg, index as u16))
-            .collect::<BTreeMap<_, _>>();
+        let (transient, transient_count) = allocate_transients(lowered, saved, live_in);
         Self {
             persistent_count: persistent.len() as u16,
-            transient_count: transient.len() as u16,
+            transient_count,
             persistent,
             transient,
         }
@@ -189,6 +186,85 @@ impl FrameLayout {
             }
         }
     }
+}
+
+/// Take a conservative linear interval over CFG live-ins and all writes.
+/// Keeping whole instruction PCs inclusive avoids aliasing operands or outputs
+/// of a single instruction, including definitions whose results are dead.
+fn allocate_transients(
+    lowered: &LoweredFunction,
+    saved: &BTreeSet<Reg>,
+    live_in: &[BTreeSet<Reg>],
+) -> (BTreeMap<Reg, u16>, u16) {
+    let mut bounds = vec![None::<(usize, usize)>; lowered.reg_count as usize];
+    let mut touch = |reg: Reg, pc: usize| {
+        if !saved.contains(&reg) {
+            let bound = &mut bounds[reg as usize];
+            let (first, last) = bound.unwrap_or((pc, pc));
+            *bound = Some((first.min(pc), last.max(pc)));
+        }
+    };
+    for (pc, (instruction, live)) in lowered.code.iter().zip(live_in).enumerate() {
+        let (_, defs) = uses_defs(instruction);
+        for reg in live.iter().copied().chain(defs) {
+            touch(reg, pc);
+        }
+    }
+
+    // The VM writes parameters before the first instruction, and injects
+    // exceptions and resume results before executing their target PCs.
+    for binding in lowered
+        .param_bindings
+        .iter()
+        .chain(&lowered.rest_binding)
+        .chain(&lowered.this_binding)
+        .chain(&lowered.home_binding)
+        .chain(&lowered.new_target_binding)
+        .chain(&lowered.arguments_binding)
+    {
+        if let Some(&reg) = lowered.promoted.get(binding) {
+            touch(reg, 0);
+        }
+    }
+    for handler in &lowered.handlers {
+        touch(handler.dst.index, handler.target_pc as usize);
+    }
+    for site in &lowered.awaits {
+        touch(site.result, site.fulfill_pc);
+        touch(site.reject, site.reject_pc);
+    }
+    for site in &lowered.yields {
+        touch(site.next, site.next_pc);
+        touch(site.thrown, site.throw_pc);
+    }
+
+    let mut intervals = bounds
+        .into_iter()
+        .enumerate()
+        .filter_map(|(reg, bound)| bound.map(|(first, last)| (first, last, reg as Reg)))
+        .collect::<Vec<_>>();
+    intervals.sort_unstable();
+    let mut active = BinaryHeap::new();
+    let mut free = Vec::new();
+    let mut slots = BTreeMap::new();
+    let mut count = 0;
+    for (first, last, reg) in intervals {
+        while let Some(&Reverse((end, slot))) = active.peek() {
+            if end >= first {
+                break;
+            }
+            active.pop();
+            free.push(slot);
+        }
+        let slot = free.pop().unwrap_or_else(|| {
+            let slot = count;
+            count += 1;
+            slot
+        });
+        slots.insert(reg, slot);
+        active.push(Reverse((last, slot)));
+    }
+    (slots, count)
 }
 
 fn remapped_saved(layout: &FrameLayout, saved: &BTreeSet<Reg>) -> Vec<u16> {

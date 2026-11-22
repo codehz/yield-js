@@ -21,7 +21,7 @@ yield-harness  →  yield-compiler  →  yield-vm
   → bindings     确定哪些 id 跨函数共享
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
   → analyze      CFG live-in，包含两条恢复边与处理器边
-  → allocate     跨 await 的值分配持久槽，其余分配瞬时槽
+  → allocate     跨挂起的值分配固定持久槽，其余按活性区间复用瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
   → Vm           校验、运行、宿主操作、快照 / 恢复
 ```
@@ -42,6 +42,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 操作数是显式槽。`Instr::Await` / `Instr::Yield` 不持久化任何隐式状态。
 - `ResumeEntry` 是 `{ fulfill_pc, fulfill_dst, reject_pc, reject_dst, saved_slots }`。续体按 `resume_id` 索引，不按运行期 PC。
 - `saved_slots` 是两个恢复入口各自 live-in 先减去该入口结果寄存器后的并集。结果槽在恢复时写入，不保存。持久槽不在不同活值之间复用。瞬时槽在挂起时丢弃。
+- 瞬时槽按逻辑寄存器的保守线性区间复用：区间覆盖 CFG live-in、指令定义（包括死写入）、调用入口的参数写入，以及异常和恢复入口的注入写入。区间包含端点，同一条指令同时读写的不同逻辑寄存器不共享槽。复用只重映射操作数与表项，不插入清槽指令。
 - 生成器经 `GeneratorEntry { next_pc, next_dst, throw_pc, throw_dst, return_pc, saved_slots }` 恢复，由 `Instr::Yield::generator` 索引。先分别减去每个入口自己的注入寄存器，再取三者 live-in 的并集；先取并集再减会丢掉另一入口需要的值。`return_pc` 没有结果槽：它以 `Instr::LoadGeneratorReturn` 开始，因此待完成的 payload 位于重建帧中，绝不进入 VM 全局状态。异步生成器自身的 `await` 使用普通 `ResumeEntry` 表和 `ContinuationTarget::Generator` 续体；两张表独立校验。
 - `Instr::GeneratorStart` 在形参初始化后结束生成器调用：把 `Function::generator_start.saved_slots` 与本次调用环境捕获进新生成器对象并返回，正文不执行。只有启动捕获与三个 yield 入口由外部注入；普通控制流不得进入 `throw_pc`、`return_pc` 或 `body_pc`。
 - 生成器对象是普通对象加一份暂停帧（`func_id`、状态、环境、按入口顺序排列的值）。异步生成器的记录另有 FIFO 请求队列；同步生成器的记录不含队列。`Executor` 状态从不进快照：捕获时写记录，恢复时拒绝。同步生成器重入恢复抛脚本 `TypeError`；异步生成器则改为追加请求。生成器只经 `Symbol.iterator` 消费，异步生成器只经 `Symbol.asyncIterator` 消费；不要在 `for...of` 中特判两者。

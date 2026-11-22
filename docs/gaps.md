@@ -46,6 +46,7 @@
 3. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
 4. **宿主续体不能等待任意 Rust Future。** `loop` / `while` / `while let` 的循环体可挂起；`while` / `while let` 的条件和 `for` 循环不能挂起。Guest 调用与 GC 同步恢复；只有正在等待外部 operation 的宿主任务可写入快照。Rust 栈和函数指针不序列化。
 5. **GC 不会自动触发。** 宿主可在调用之间排空微任务后调用 `Vm::collect_garbage`，或选择用 `CallCx::request_gc` 向脚本暴露同步收集；后者通过 `Host::gc_roots()` 提供宿主保留的本 VM 值。没有默认的脚本 `gc` 全局函数。
+6. **瞬时槽复用不是精确 GC。** 分配器使用覆盖所有活性位置与写入点的连续区间，不利用区间内部的空洞。活动帧的 GC 仍扫描所有非空槽，未被覆盖的死引用可能继续保留对象。
 
 ## 6. 首版范围之外（不是首版缺口）
 
