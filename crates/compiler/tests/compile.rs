@@ -1334,19 +1334,20 @@ fn preserves_oxc_resource_diagnostics() {
 }
 
 #[test]
-fn rejects_resource_loop_heads_even_in_a_resource_scope() {
+fn accepts_resource_loop_heads() {
     for head in [
         "for (using inner = null; false;) {}",
+        "for (await using inner = null; false;) {}",
         "for (using inner of []) {}",
+        "for (await using inner of []) {}",
+        "for await (using inner of []) {}",
         "for await (await using inner of []) {}",
     ] {
-        let source = format!("export async function run() {{\n  using outer = null;\n  {head}\n}}");
-        let error = compile(&source, &CompileOptions::default()).unwrap_err();
-        assert_eq!(error.line(), 3, "{error}");
-        assert_eq!(
-            error.message(),
-            "unsupported syntax: resource declaration in a loop head"
-        );
+        for outer in ["", "using outer = null;"] {
+            let source = format!("export async function run() {{\n  {outer}\n  {head}\n}}");
+            compile(&source, &CompileOptions::default())
+                .unwrap_or_else(|error| panic!("{head}: {error}"));
+        }
     }
 }
 

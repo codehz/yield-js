@@ -94,68 +94,16 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.patch_loop(loop_context, end)
             }
             Statement::ForStatement(statement) => {
-                self.env.enter_block();
-                if let Some(ForStatementInit::VariableDeclaration(declaration)) = &statement.init {
-                    self.reject_resource_loop_head(declaration)?;
-                    self.predeclare_variable_list(declaration)?;
-                }
-                if let Some(init) = &statement.init {
-                    match init {
-                        ForStatementInit::VariableDeclaration(declaration) => {
-                            self.compile_variable_declaration(declaration)?
-                        }
-                        other => {
-                            if let Some(expression) = other.as_expression() {
-                                self.compile_expression(expression)?;
-                            } else {
-                                return Err(unsupported(
-                                    self.source_text(),
-                                    other.span(),
-                                    "for-loop initializer",
-                                ));
-                            }
-                        }
+                let hint = match &statement.init {
+                    Some(ForStatementInit::VariableDeclaration(declaration))
+                        if declaration.kind.is_using() =>
+                    {
+                        Some(declaration.kind.is_await_using())
                     }
-                }
-                let bindings = self.for_init_bindings(&statement.init)?;
-                let saved = self.save_iteration_env(&bindings)?;
-                if let Some(saved) = saved {
-                    self.enter_iteration_env(saved);
-                }
-                let test_pc = self.emit.loop_header();
-                let exit_branches = if let Some(test) = &statement.test {
-                    Some(self.compile_condition(test)?)
-                } else {
-                    None
+                    _ => None,
                 };
-                self.control.push_loop(None);
-                self.compile_statement(&statement.body)?;
-                let update_pc = self.pc();
-                let mut loop_context = self.control.pop_loop();
-                for jump in loop_context.continue_jumps.drain(..) {
-                    self.patch_jump(jump, update_pc)?;
-                }
-                // The fresh iteration environment is created before the
-                // increment, so closures created in the body keep the value
-                // the body observed while the update mutates the next copy.
-                if let Some(saved) = saved {
-                    self.enter_iteration_env(saved);
-                }
-                if let Some(update) = &statement.update {
-                    self.compile_expression(update)?;
-                }
-                self.jump_to(test_pc);
-                let end = self.pc();
-                if let Some(exit_branches) = exit_branches {
-                    self.patch_condition(exit_branches, end)?;
-                }
-                loop_context.continue_target = Some(update_pc);
-                self.patch_loop(loop_context, end)?;
-                if let Some(saved) = saved {
-                    self.leave_iteration_env(saved);
-                }
-                self.env.exit_block();
-                Ok(())
+                // Keep the head scope outside the loop's continue target.
+                self.compile_disposal_scope(hint, |this| this.compile_for(statement))
             }
             Statement::BreakStatement(statement) => self.compile_break(statement),
             Statement::ContinueStatement(statement) => self.compile_continue(statement),
@@ -290,19 +238,67 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         Ok(())
     }
 
-    // Resource heads require their own lifetime, not the surrounding scope.
-    // Replace this guard when resource loop-head execution is implemented.
-    fn reject_resource_loop_head(
-        &self,
-        declaration: &VariableDeclaration<'_>,
-    ) -> Result<(), CompileError> {
-        if declaration.kind.is_using() {
-            return Err(unsupported(
-                self.source_text(),
-                declaration.span,
-                "resource declaration in a loop head",
-            ));
+    fn compile_for(&mut self, statement: &'ast ForStatement<'ast>) -> Result<(), CompileError> {
+        self.env.enter_block();
+        if let Some(ForStatementInit::VariableDeclaration(declaration)) = &statement.init {
+            self.predeclare_variable_list(declaration)?;
         }
+        if let Some(init) = &statement.init {
+            match init {
+                ForStatementInit::VariableDeclaration(declaration) => {
+                    self.compile_variable_declaration(declaration)?
+                }
+                other => {
+                    if let Some(expression) = other.as_expression() {
+                        self.compile_expression(expression)?;
+                    } else {
+                        return Err(unsupported(
+                            self.source_text(),
+                            other.span(),
+                            "for-loop initializer",
+                        ));
+                    }
+                }
+            }
+        }
+        let bindings = self.for_init_bindings(&statement.init)?;
+        let saved = self.save_iteration_env(&bindings)?;
+        if let Some(saved) = saved {
+            self.enter_iteration_env(saved);
+        }
+        let test_pc = self.emit.loop_header();
+        let exit_branches = if let Some(test) = &statement.test {
+            Some(self.compile_condition(test)?)
+        } else {
+            None
+        };
+        self.control.push_loop(None);
+        self.compile_statement(&statement.body)?;
+        let update_pc = self.pc();
+        let mut loop_context = self.control.pop_loop();
+        for jump in loop_context.continue_jumps.drain(..) {
+            self.patch_jump(jump, update_pc)?;
+        }
+        // The fresh iteration environment is created before the
+        // increment, so closures created in the body keep the value
+        // the body observed while the update mutates the next copy.
+        if let Some(saved) = saved {
+            self.enter_iteration_env(saved);
+        }
+        if let Some(update) = &statement.update {
+            self.compile_expression(update)?;
+        }
+        self.jump_to(test_pc);
+        let end = self.pc();
+        if let Some(exit_branches) = exit_branches {
+            self.patch_condition(exit_branches, end)?;
+        }
+        loop_context.continue_target = Some(update_pc);
+        self.patch_loop(loop_context, end)?;
+        if let Some(saved) = saved {
+            self.leave_iteration_env(saved);
+        }
+        self.env.exit_block();
         Ok(())
     }
 
@@ -311,7 +307,13 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         statement: &'ast ForInStatement<'ast>,
     ) -> Result<(), CompileError> {
         if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
-            self.reject_resource_loop_head(declaration)?;
+            if declaration.kind.is_using() {
+                return Err(unsupported(
+                    self.source_text(),
+                    declaration.span,
+                    "resource declaration in a loop head",
+                ));
+            }
         }
         self.env.enter_block();
         let bindings = self.declare_iteration_bindings(&statement.left, "for-in")?;
@@ -358,9 +360,6 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         &mut self,
         statement: &'ast ForOfStatement<'ast>,
     ) -> Result<(), CompileError> {
-        if let ForStatementLeft::VariableDeclaration(declaration) = &statement.left {
-            self.reject_resource_loop_head(declaration)?;
-        }
         if statement.r#await {
             return self.compile_for_await_of(statement);
         }
@@ -393,8 +392,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.patch_jump(has_value, self.pc())?;
         let loop_context =
             self.compile_iterator_body(iterator, step_pc, CloseMode::Sync, |this| {
-                this.assign_iteration_value(&statement.left, value)?;
-                this.compile_statement(&statement.body)
+                this.compile_for_of_value(statement, value)
             })?;
 
         let end = self.pc();
@@ -472,8 +470,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
 
         let loop_context =
             self.compile_iterator_body(iterator, step_pc, CloseMode::Async, |this| {
-                this.assign_iteration_value(&statement.left, value)?;
-                this.compile_statement(&statement.body)
+                this.compile_for_of_value(statement, value)
             })?;
 
         let end = self.pc();
@@ -484,6 +481,28 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
         self.env.exit_block();
         Ok(())
+    }
+
+    fn compile_for_of_value(
+        &mut self,
+        statement: &'ast ForOfStatement<'ast>,
+        value: Reg,
+    ) -> Result<(), CompileError> {
+        let hint = match &statement.left {
+            ForStatementLeft::VariableDeclaration(declaration) if declaration.kind.is_using() => {
+                Some(declaration.kind.is_await_using())
+            }
+            _ => None,
+        };
+        // The iterator's own continue target is outside this scope but inside
+        // iterator protection, so cleanup runs before the next step or close.
+        self.compile_disposal_scope(hint, |this| {
+            if let Some(async_) = hint {
+                this.emit_add_resource(value, async_)?;
+            }
+            this.assign_iteration_value(&statement.left, value)?;
+            this.compile_statement(&statement.body)
+        })
     }
 
     fn declare_iteration_bindings(
@@ -576,8 +595,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.iteration_envs[group].restore_pc = Some(restore_pc);
     }
 
-    /// Loop bindings declared by a C-style `for` initializer. `var` stays
-    /// function-scoped and is shared by every iteration, so it is excluded.
+    /// Loop bindings copied per iteration. `var` stays function-scoped and a
+    /// resource initializer binds once for the whole loop.
     fn for_init_bindings(
         &mut self,
         init: &Option<ForStatementInit<'ast>>,
@@ -585,7 +604,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         let Some(ForStatementInit::VariableDeclaration(declaration)) = init else {
             return Ok(Vec::new());
         };
-        if declaration.kind == VariableDeclarationKind::Var {
+        if declaration.kind == VariableDeclarationKind::Var || declaration.kind.is_using() {
             return Ok(Vec::new());
         }
         let mut bindings = Vec::new();
