@@ -173,6 +173,43 @@ fn build_round_trips_special_numbers() {
 }
 
 #[test]
+fn binary_artifact_round_trips_binary_only_values() {
+    use yield_vm::bytecode::Constant;
+    use yield_vm::{BUILD_FORMAT_VERSION, Build};
+
+    let mut build = yield_harness::build("export function run() { return \"\\uD800\"; }");
+    let start = build.constants.len();
+    let numbers = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0];
+    build.constants.extend(numbers.map(Constant::Number));
+    build.finalize();
+    assert!(build.constants.iter().any(|constant| matches!(
+        constant,
+        Constant::String(value) if value.to_utf8().is_err()
+    )));
+
+    let bytes = build.to_bytes();
+    let decoded = Build::from_bytes(&bytes).expect("decode binary artifact");
+    decoded.validate().expect("validate decoded artifact");
+    assert_eq!(decoded.build_id, build.build_id);
+    for (constant, expected) in decoded.constants[start..].iter().zip(numbers) {
+        let Constant::Number(value) = constant else {
+            panic!("expected a number constant");
+        };
+        if expected.is_nan() {
+            assert!(value.is_nan());
+        } else {
+            assert_eq!(value.to_bits(), expected.to_bits());
+        }
+    }
+
+    assert!(Build::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert!(Build::from_bytes(b"not a build artifact").is_err());
+    let mut wrong_version = bytes.clone();
+    wrong_version[8..12].copy_from_slice(&(BUILD_FORMAT_VERSION + 1).to_le_bytes());
+    assert!(Build::from_bytes(&wrong_version).is_err());
+}
+
+#[test]
 fn callable_initial_names_participate_in_build_identity() {
     let mut build = yield_harness::build("export function run() { return 0; }");
     let id = build.build_id.clone();

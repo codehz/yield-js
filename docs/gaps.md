@@ -60,6 +60,7 @@
 - 可撤销代理、代理函数/构造器，以及 design 未点名的其它 Proxy traps
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配。
+- 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取旧 JSON 产物。
 
 ## 7. 无效 JavaScript（拒绝不是实现缺口）
 

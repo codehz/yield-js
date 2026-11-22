@@ -107,7 +107,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/compiler/src/lib.rs` — 流水线与 `compile`
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
-- `crates/vm/src/bytecode.rs` — `Instr`、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`
+- `crates/vm/src/bytecode.rs` — `Instr`、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::validate`、`Build::to_bytes` / `Build::from_bytes`
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
 - `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec
 - `crates/vm/src/gc.rs` — tracing GC 的根与可达性遍历；堆边统一由 `Heap::write_edges` 提供
@@ -118,7 +118,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 ## 6. 代码约定细节
 
 - 新增 opcode：先加到 `yield_vm::bytecode::Instr`，再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。CFG 与槽分配不得按指令形状匹配。
-- 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）。两者都变才同时升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
+- 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）；产物容器、magic 或 bincode 编码选项改动升 `BUILD_FORMAT_VERSION`（`crates/vm/src/bytecode.rs`）。三个契约各自独立，只有对应契约变化才升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
 - 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。
 - `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ。`for` 的 `let` / `const` 头（C 风格、`for…in`、`for…of`、`for await…of`）每轮建立独立环境：`NewIterationEnv` 从当前环境复制仍逃逸的循环绑定到以保存的外层环境为父的新环境，`RestoreEnv` 在循环结束后恢复外层环境。未逃逸的循环头绑定由 `compiler/src/promote.rs` 提升为帧槽并从 `NewIterationEnv` 的绑定表移除；绑定表为空且循环体没有仍需独立单元格的被捕获声明时，整组环境指令被删除。循环体内的被捕获块级声明仍要求每轮新单元格，因此即使循环头绑定全部提升也要保留空绑定表的 `NewIterationEnv`。

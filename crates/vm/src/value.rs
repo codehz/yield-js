@@ -668,19 +668,46 @@ impl fmt::Display for JsString {
 }
 impl Serialize for JsString {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let Ok(text) = self.to_utf8() {
-            return serializer.serialize_str(&text);
+        if serializer.is_human_readable() {
+            if let Ok(text) = self.to_utf8() {
+                return serializer.serialize_str(&text);
+            }
+            #[derive(Serialize)]
+            struct Units<'a> {
+                utf16: &'a [u16],
+            }
+            let units = self.to_utf16();
+            return Units { utf16: &units }.serialize(serializer);
         }
+        // Binary formats cannot use the untagged JSON representation: bincode
+        // and similar encoders do not support `deserialize_any`. Keep the two
+        // variants explicit so the wire format is deterministic.
         #[derive(Serialize)]
-        struct Units<'a> {
-            utf16: &'a [u16],
+        enum Wire<'a> {
+            Utf8(&'a str),
+            Units { utf16: &'a [u16] },
         }
-        let units = self.to_utf16();
-        Units { utf16: &units }.serialize(serializer)
+        if let Ok(text) = self.to_utf8() {
+            Wire::Utf8(&text).serialize(serializer)
+        } else {
+            let units = self.to_utf16();
+            Wire::Units { utf16: &units }.serialize(serializer)
+        }
     }
 }
 impl<'de> Deserialize<'de> for JsString {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            enum Wire {
+                Utf8(String),
+                Units { utf16: Vec<u16> },
+            }
+            return Ok(match Wire::deserialize(deserializer)? {
+                Wire::Utf8(text) => text.into(),
+                Wire::Units { utf16 } => Self::from_units(utf16),
+            });
+        }
         #[derive(Deserialize)]
         #[serde(untagged, deny_unknown_fields)]
         enum Text {
@@ -794,6 +821,9 @@ pub(crate) mod number_serde {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
     pub(crate) fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if !serializer.is_human_readable() {
+            return serializer.serialize_f64(*value);
+        }
         if value.is_finite() {
             serializer.serialize_f64(*value)
         } else {
@@ -808,6 +838,9 @@ pub(crate) mod number_serde {
     }
 
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        if !deserializer.is_human_readable() {
+            return f64::deserialize(deserializer);
+        }
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Number {

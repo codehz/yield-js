@@ -44,7 +44,7 @@ fn main() {
 
 fn run(workload: &Workload, samples: usize) {
     let build = (workload.build)();
-    let artifact = serde_json::to_vec(&build).expect("encode build artifact");
+    let artifact = build.to_bytes();
     println!("{},build_id,0,{},text", workload.name, build.build_id);
     if !perf::ENABLED {
         let instructions: usize = build.functions.iter().map(|f| f.code.len()).sum();
@@ -64,13 +64,11 @@ fn run(workload: &Workload, samples: usize) {
         if !perf::ENABLED {
             let compiled = sample.time("compile", workload.build);
             assert_eq!(compiled.build_id, build.build_id, "non-deterministic build");
-            let encoded = sample.time("artifact_encode", || {
-                serde_json::to_vec(black_box(&compiled)).expect("encode build artifact")
-            });
+            let encoded = sample.time("artifact_encode", || black_box(&compiled).to_bytes());
             assert_eq!(encoded, artifact, "non-deterministic artifact");
         }
         let decoded: Build = sample.time("artifact_decode", || {
-            serde_json::from_slice(black_box(&artifact)).expect("decode build artifact")
+            Build::from_bytes(black_box(&artifact)).expect("decode build artifact")
         });
         let mut host = TestHost::default();
         let mut vm = if perf::ENABLED {

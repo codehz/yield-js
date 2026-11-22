@@ -89,7 +89,8 @@ pub use binding::{
     SuspendRequest, This, WellKnownSymbol,
 };
 pub use bytecode::{
-    Build, Constant, ExceptionHandler, Function, Instr, ParamTarget, ResumeEntry, Slot, SlotKind,
+    BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
+    ResumeEntry, Slot, SlotKind,
 };
 pub use error::VmError;
 pub use heap::{Object, PromiseState};

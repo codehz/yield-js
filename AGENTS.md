@@ -21,7 +21,7 @@ Keep this file an index plus binding rules. Mechanisms, invariants, and per-file
 
 - Do not implement or assume a design feature the code lacks.
 - Unsupported syntax must fail at compile time as `unsupported syntax: …` with source line and column.
-- Do not weaken the suspend/resume, snapshot, or host-binding invariants in `docs/internals.md`. Incompatible bytecode changes bump `BYTECODE_VERSION`; snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION`; bump both only when both contracts changed.
+- Do not weaken the suspend/resume, snapshot, or host-binding invariants in `docs/internals.md`. Incompatible bytecode changes bump `BYTECODE_VERSION`; snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION`; build artifact container or encoding changes bump `BUILD_FORMAT_VERSION`. Bump each contract only when it changed.
 - Observable JS behavior is a `.js` case, not a new Rust harness. Snapshot identity, heap identity, slot tables, and rejected restores belong in `crates/harness/tests/e2e.rs` / `e2e/`. Keep every fixture in a category directory of `crates/harness/tests/cases/`, never at its top level.
 - `README.md` stays overview-level: no slot/snapshot mechanics, format versions, opcodes, builtin lists, or per-feature behavior notes.
 - After a behavior change, refresh `docs/gaps.md` and `docs/implemented.md` in the same commit; update `README.md` / `docs/design.md` when the target design is affected.

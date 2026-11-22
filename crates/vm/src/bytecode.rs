@@ -17,6 +17,10 @@ use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
 pub const BYTECODE_VERSION: u32 = 47;
+pub const BUILD_FORMAT_VERSION: u32 = 1;
+
+const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
+const BUILD_HEADER_LEN: usize = 12;
 
 pub use crate::builtin::BUILTINS;
 
@@ -164,7 +168,7 @@ pub enum PrivateDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "instruction", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum Instr {
     Const {
         dst: Slot,
@@ -799,6 +803,13 @@ where
     deserializer.deserialize_map(UniqueMap(std::marker::PhantomData))
 }
 
+/// Shared binary configuration for digest inputs and build artifacts.
+fn build_codec() -> impl bincode::Options {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_little_endian()
+}
+
 /// Digest inputs use bincode's fixed-int little-endian encoding. The crate
 /// version and options are part of the build identity contract: changing either
 /// changes every `build_id`.
@@ -863,9 +874,7 @@ impl Build {
         };
         let digest_started = PROFILE.then(Instant::now);
         let mut sink = std::io::BufWriter::with_capacity(64 * 1024, Digest::new());
-        bincode::DefaultOptions::new()
-            .with_fixint_encoding()
-            .with_little_endian()
+        build_codec()
             .serialize_into(&mut sink, &input)
             .expect("bytecode digest serialization cannot fail");
         sink.flush().expect("bytecode digest flush cannot fail");
@@ -874,6 +883,46 @@ impl Build {
             .unwrap_or_else(|_| panic!("bytecode digest flush cannot fail"));
         let elapsed = digest_started.map(|started| started.elapsed());
         (digest.finish(), elapsed)
+    }
+
+    /// Encodes this build as a self-contained binary artifact.
+    ///
+    /// The header is the `YIELDBLD` magic, followed by a little-endian
+    /// [`BUILD_FORMAT_VERSION`], followed by a bincode fixed-int little-endian
+    /// payload. The result is not validated; pass it to `Vm::new` or call
+    /// [`Build::validate`] after decoding.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&BUILD_MAGIC);
+        out.extend_from_slice(&BUILD_FORMAT_VERSION.to_le_bytes());
+        build_codec()
+            .serialize_into(&mut out, self)
+            .expect("build artifact serialization cannot fail");
+        out
+    }
+
+    /// Decodes an artifact produced by [`Build::to_bytes`] without validating
+    /// it.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() < BUILD_HEADER_LEN {
+            return Err("build artifact is too short".to_owned());
+        }
+        if &bytes[..BUILD_MAGIC.len()] != BUILD_MAGIC.as_slice() {
+            return Err("invalid build artifact magic".to_owned());
+        }
+        let version = u32::from_le_bytes(
+            bytes[BUILD_MAGIC.len()..BUILD_HEADER_LEN]
+                .try_into()
+                .expect("build header length"),
+        );
+        if version != BUILD_FORMAT_VERSION {
+            return Err(format!(
+                "unsupported build artifact version {version}, expected {BUILD_FORMAT_VERSION}"
+            ));
+        }
+        build_codec()
+            .deserialize(&bytes[BUILD_HEADER_LEN..])
+            .map_err(|error| format!("invalid build artifact: {error}"))
     }
 
     pub fn function(&self, id: u32) -> Option<&Function> {
