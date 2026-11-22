@@ -7,10 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root")
+    // Cargo runs integration tests from the package root. Do not bake in a
+    // checkout path: a shared target directory can reuse this test binary.
+    Path::new("../..").canonicalize().expect("workspace root")
 }
 
 struct Fixture {
