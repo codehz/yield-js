@@ -9,7 +9,7 @@ use crate::heap::{Attributes, DescriptorUpdate, Object, OwnProperty, PlainObject
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -93,10 +93,12 @@ impl Vm {
             {
                 Ok(Ok(None))
             }
-            Invocation::Value(method) => match self.invoke(host, roots, &method, args, &handler)? {
-                Invocation::Value(value) => Ok(Ok(Some(value))),
-                Invocation::Thrown(error) => Ok(Err(error)),
-            },
+            Invocation::Value(method) => {
+                match self.invoke(host, roots, &method, Arguments::Values(&args), &handler)? {
+                    Invocation::Value(value) => Ok(Ok(Some(value))),
+                    Invocation::Thrown(error) => Ok(Err(error)),
+                }
+            }
             Invocation::Thrown(error) => Ok(Err(error)),
         }
     }

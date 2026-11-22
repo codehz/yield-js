@@ -9,7 +9,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{ElementKind, Object, TO_STRING_TAG_SYMBOL};
 use crate::host::Host;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -375,7 +375,7 @@ impl Vm {
             host,
             roots,
             &constructor,
-            vec![Value::number(bytes.len() as f64)],
+            Arguments::Values(&[Value::number(bytes.len() as f64)]),
             &constructor,
         )? {
             Invocation::Value(value) => value,

@@ -13,7 +13,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{CallableTarget, Construction};
 use crate::ops;
-use crate::runtime::{Invocation, Microtask, Settlement};
+use crate::runtime::{Arguments, Invocation, Microtask, Settlement};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -117,11 +117,12 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         callee: &Value,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
         let root_view = (callee, receiver);
         let roots = &roots.with(&root_view);
+        let roots = &roots.with(&args);
         match self.classify(callee)? {
             Some(Dispatch::Script { func_id, env }) => {
                 if matches!(callee.view(), ValueRef::Object(id) if self.heap.function(id).is_some_and(|f| f.class.is_some()))
@@ -144,12 +145,7 @@ impl Vm {
                 )
             }
             Some(Dispatch::Resolution(id)) => {
-                self.capability_call(
-                    host,
-                    roots,
-                    id,
-                    args.into_iter().next().unwrap_or(Value::UNDEFINED),
-                )?;
+                self.capability_call(host, roots, id, args.get(0)?.clone())?;
                 Ok(Invocation::Value(Value::UNDEFINED))
             }
             Some(Dispatch::PromiseCallback(id)) => {
@@ -158,15 +154,24 @@ impl Vm {
             Some(Dispatch::Bound(bound)) => {
                 let target = Value::object(bound.target);
                 let bound_this = bound.bound_this.clone();
-                let args = bound.args.iter().cloned().chain(args).collect();
-                self.invoke(host, roots, &target, args, &bound_this)
+                let mut joined = bound.args.clone();
+                joined.extend(args.tail(0)?);
+                let roots = &roots.with(&joined);
+                self.invoke(
+                    host,
+                    roots,
+                    &target,
+                    Arguments::Values(&joined),
+                    &bound_this,
+                )
             }
             Some(Dispatch::Native { target, .. }) => match target {
                 CallableTarget::Host(target) => {
                     self.call_host(host, roots, target, args, receiver, None)
                 }
                 CallableTarget::Intrinsic(id) => {
-                    (id.definition().call)(self, host, roots, args, receiver)
+                    let values = args.to_vec()?;
+                    (id.definition().call)(self, host, roots, values, receiver)
                 }
             },
             None => self.throw_type_error("value is not a function"),
@@ -204,7 +209,7 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         callee: &Value,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         new_target: &Value,
     ) -> Result<Invocation, VmError> {
         let root_view = (callee, new_target);
@@ -212,14 +217,22 @@ impl Vm {
         let dispatch = self.classify(callee)?;
         if let Some(Dispatch::Bound(bound)) = dispatch {
             let target = Value::object(bound.target);
-            let args = bound.args.iter().cloned().chain(args).collect();
+            let mut joined = bound.args.clone();
+            joined.extend(args.tail(0)?);
             // Direct construction uses the target's prototype, not the wrapper's.
             let new_target = if ops::strict_equal(callee, new_target) {
                 &target
             } else {
                 new_target
             };
-            return self.construct_with(host, roots, &target, args, new_target);
+            let roots = &roots.with(&joined);
+            return self.construct_with(
+                host,
+                roots,
+                &target,
+                Arguments::Values(&joined),
+                new_target,
+            );
         }
         let symbol = matches!(&dispatch, Some(Dispatch::Native { target: CallableTarget::Intrinsic(id), .. })
             if *id == symbol_family::CONSTRUCTOR.link());
@@ -344,13 +357,14 @@ impl Vm {
                 Some(crate::vm::HostConstruction { prototype }),
             ),
             Constructor::Native(CallableTarget::Intrinsic(id)) => {
+                let values = args.to_vec()?;
                 match id.definition().construct.expect("classified constructor") {
                     Construction::WithPrototype(construct) => {
                         let roots = &roots.with(&prototype);
-                        construct(self, host, roots, args, prototype)
+                        construct(self, host, roots, values, prototype)
                     }
                     Construction::WithNewTarget(construct) => {
-                        construct(self, host, roots, args, new_target)
+                        construct(self, host, roots, values, new_target)
                     }
                 }
             }
@@ -394,7 +408,7 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         context: ObjectId,
         callee: &Value,
-        args: Vec<Value>,
+        args: Arguments<'_>,
     ) -> Result<Invocation, VmError> {
         let bindings = &self.heap.environment(context)?.bindings;
         let (Some(ValueRef::Object(class)), Some(new_target)) = (
@@ -424,7 +438,7 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         class: ObjectId,
         new_target: &Value,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         (callee, context): (&Value, Option<ObjectId>),
     ) -> Result<Invocation, VmError> {
         let root_view = (class, new_target, callee, context);
@@ -486,13 +500,13 @@ impl Vm {
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
         if construct {
-            self.construct_with(host, roots, target, values, new_target)
+            self.construct_with(host, roots, target, Arguments::Values(&values), new_target)
         } else {
             self.invoke(
                 host,
                 roots,
                 target,
-                values,
+                Arguments::Values(&values),
                 args.get(1).unwrap_or(&UNDEFINED_VALUE),
             )
         }
@@ -579,7 +593,7 @@ impl Vm {
         };
         if self.is_callable(&join) {
             let receiver = Value::object(boxed.unwrap_or_else(|| self.coercible_object(receiver)));
-            self.invoke(host, roots, &join, Vec::new(), &receiver)
+            self.invoke(host, roots, &join, Arguments::EMPTY, &receiver)
         } else {
             match boxed {
                 Some(id) => self.object_to_string(host, roots, &Value::object(id)),
@@ -1916,11 +1930,12 @@ impl Vm {
         let (resolve_id, reject_id) = self.alloc_capability_pair(promise)?;
         let root_view = (promise, reject_id);
         let roots = &roots.with(&root_view);
+        let capability = [Value::object(resolve_id), Value::object(reject_id)];
         let invocation = self.invoke(
             host,
             roots,
             &executor,
-            vec![Value::object(resolve_id), Value::object(reject_id)],
+            Arguments::Values(&capability),
             &Value::UNDEFINED,
         )?;
         if let Invocation::Thrown(error) = invocation {
@@ -2156,7 +2171,9 @@ impl Vm {
             PropertyKeyRef::String("then"),
         )?;
         match result {
-            Invocation::Value(then) => self.invoke(host, roots, &then, args, receiver),
+            Invocation::Value(then) => {
+                self.invoke(host, roots, &then, Arguments::Values(&args), receiver)
+            }
             thrown => Ok(thrown),
         }
     }
@@ -2221,7 +2238,13 @@ impl Vm {
             unreachable!()
         };
         let roots = &roots.with(&id);
-        let result = match self.construct_with(host, roots, species, vec![executor], species)? {
+        let result = match self.construct_with(
+            host,
+            roots,
+            species,
+            Arguments::Values(&[executor]),
+            species,
+        )? {
             Invocation::Value(value) => value,
             Invocation::Thrown(error) => return Ok(Err(error)),
         };
@@ -2255,10 +2278,10 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
-        args: Vec<Value>,
+        args: Arguments<'_>,
     ) -> Result<Invocation, VmError> {
-        let mut args = args.into_iter();
-        let argument = args.next().unwrap_or(Value::UNDEFINED);
+        let argument = args.get(0)?.clone();
+        let second = args.get(1)?.clone();
         let Object::PromiseCallback { callback, .. } = self.heap.get_mut(id)? else {
             unreachable!()
         };
@@ -2270,7 +2293,7 @@ impl Vm {
                     return self
                         .throw_type_error("Promise capability executor already initialized");
                 }
-                *values = Some((argument, args.next().unwrap_or(Value::UNDEFINED)));
+                *values = Some((argument, second));
                 Ok(Invocation::Value(Value::UNDEFINED))
             }
             PromiseCallback::Restore { value, rejected } => Ok(if *rejected {
@@ -2295,11 +2318,16 @@ impl Vm {
                 let parent_roots = roots;
                 let root_view = (&species, &argument);
                 let roots = &roots.with(&root_view);
-                let value =
-                    match self.invoke(host, roots, &handler, Vec::new(), &Value::UNDEFINED)? {
-                        Invocation::Value(value) => value,
-                        thrown => return Ok(thrown),
-                    };
+                let value = match self.invoke(
+                    host,
+                    roots,
+                    &handler,
+                    Arguments::EMPTY,
+                    &Value::UNDEFINED,
+                )? {
+                    Invocation::Value(value) => value,
+                    thrown => return Ok(thrown),
+                };
                 let cleanup = match self.promise_resolve_with(host, roots, &species, value)? {
                     Invocation::Value(value) => value,
                     thrown => return Ok(thrown),
@@ -2350,7 +2378,7 @@ impl Vm {
             host,
             &roots.with(&result),
             callback,
-            vec![value],
+            Arguments::Values(&[value]),
             &Value::UNDEFINED,
         )? {
             Invocation::Value(_) => Ok(Invocation::Value(result)),
@@ -2425,14 +2453,19 @@ impl Vm {
                 Ok(None) => break,
                 Err(error) => return reject_result(self, host, roots, error),
             };
-            let resolved =
-                match self.invoke(host, roots, &input_resolve, vec![element], receiver)? {
-                    Invocation::Value(value) => value,
-                    Invocation::Thrown(error) => {
-                        let _ = self.close_iterator(host, &roots.with(&error), &iterator)?;
-                        return reject_result(self, host, roots, error);
-                    }
-                };
+            let resolved = match self.invoke(
+                host,
+                roots,
+                &input_resolve,
+                Arguments::Values(&[element]),
+                receiver,
+            )? {
+                Invocation::Value(value) => value,
+                Invocation::Thrown(error) => {
+                    let _ = self.close_iterator(host, &roots.with(&error), &iterator)?;
+                    return reject_result(self, host, roots, error);
+                }
+            };
             let (fulfill_element, reject_element) = if let Some(state) = state {
                 let data = self.combine_state_mut(state)?;
                 let index = data.results.len();
@@ -2606,7 +2639,7 @@ impl Vm {
                     host,
                     roots,
                     handler,
-                    vec![argument.clone()],
+                    Arguments::Values(std::slice::from_ref(argument)),
                     &Value::UNDEFINED,
                 )? {
                     Invocation::Value(value) => (resolve, value),
@@ -2616,7 +2649,13 @@ impl Vm {
             None if rejected => (reject, argument.clone()),
             None => (resolve, argument.clone()),
         };
-        let _ = self.invoke(host, roots, callback, vec![value], &Value::UNDEFINED)?;
+        let _ = self.invoke(
+            host,
+            roots,
+            callback,
+            Arguments::Values(&[value]),
+            &Value::UNDEFINED,
+        )?;
         Ok(())
     }
 
@@ -2627,9 +2666,13 @@ impl Vm {
         function: &Value,
         args: &[Value],
     ) -> Result<(), VmError> {
-        if let Invocation::Thrown(error) =
-            self.invoke(host, roots, function, args.to_vec(), &Value::UNDEFINED)?
-        {
+        if let Invocation::Thrown(error) = self.invoke(
+            host,
+            roots,
+            function,
+            Arguments::Values(args),
+            &Value::UNDEFINED,
+        )? {
             let error = self.host_value(error);
             host.report_error(error);
         }
@@ -2706,7 +2749,7 @@ impl Vm {
             host,
             &roots.with(&state),
             &capability,
-            vec![value],
+            Arguments::Values(&[value]),
             &Value::UNDEFINED,
         )
     }

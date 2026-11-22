@@ -458,7 +458,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit(Instr::CallValue {
             dst: self.slot(raw),
             callee: self.slot(method),
-            args: CallArgs::Slots(Vec::new()),
+            args: CallArgs::Slots(Vec::new().into()),
             receiver: Some(self.slot(iterable)),
         });
         let awaited = self.emit_await(raw)?;
@@ -757,8 +757,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             dst: self.slot(raw),
             callee: self.slot(method),
             args: match argument {
-                Some(argument) => CallArgs::Slots(vec![self.slot(argument)]),
-                None => CallArgs::Slots(Vec::new()),
+                Some(argument) => CallArgs::Slots(vec![self.slot(argument)].into()),
+                None => CallArgs::Slots(Vec::new().into()),
             },
             receiver: Some(self.slot(iterator)),
         });
@@ -837,7 +837,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit(Instr::CallValue {
             dst: self.slot(error),
             callee: self.slot(callee),
-            args: CallArgs::Slots(vec![self.slot(message)]),
+            args: CallArgs::Slots(vec![self.slot(message)].into()),
             receiver: None,
         });
         Ok(error)

@@ -4,7 +4,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, BoxedPrimitive, Object};
 use crate::host::Host;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -574,7 +574,7 @@ impl Vm {
                     host,
                     roots,
                     &method,
-                    vec![Value::string(key.clone())],
+                    Arguments::Values(&[Value::string(key.clone())]),
                     &receiver,
                 )? {
                     Invocation::Value(value) => value,
@@ -587,7 +587,7 @@ impl Vm {
                 host,
                 roots,
                 &replacer,
-                vec![Value::string(key.clone()), value],
+                Arguments::Values(&[Value::string(key.clone()), value]),
                 &Value::object(holder),
             )? {
                 Invocation::Value(value) => value,
@@ -785,7 +785,7 @@ impl Vm {
             host,
             roots,
             reviver,
-            vec![Value::string(key.clone()), value],
+            Arguments::Values(&[Value::string(key.clone()), value]),
             &Value::object(holder),
         )? {
             Invocation::Value(value) => value,

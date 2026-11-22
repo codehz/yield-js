@@ -79,6 +79,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
 - `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器；`slot.kind` 在 `FrameLayout` 重映射前没有意义。普通提升改写保证一条指令换一条指令；删除空迭代环境组是唯一的删除路径，`compact_dead_instructions` 必须同时重映射 `Jump` / `BranchFalse`、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`，漏掉任一张表都会让恢复入口或处理器指向错误指令。
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
+- 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，取指克隆指令不复制槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。只有宿主、内建（intrinsic）与 bound 函数边界才物化为 `Vec`。
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。VM 在 `new` / `restore` 校验 `Build` 后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。

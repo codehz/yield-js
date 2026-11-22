@@ -437,7 +437,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit(Instr::CallValue {
             dst: self.slot(dst),
             callee: self.slot(callee),
-            args: CallArgs::Slots(slots),
+            args: CallArgs::Slots(slots.into()),
             receiver: receiver.map(|receiver| self.slot(receiver)),
         });
         Ok(dst)
@@ -544,7 +544,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         self.emit(Instr::Construct {
             dst: self.slot(error),
             callee: self.slot(constructor),
-            args: CallArgs::Slots(vec![self.slot(message)]),
+            args: CallArgs::Slots(vec![self.slot(message)].into()),
         });
         self.emit(Instr::Throw {
             src: self.slot(error),
@@ -1287,7 +1287,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
         Ok(match spread_array {
             Some(array) => CallArgs::Spread(self.slot(array)),
-            None => CallArgs::Slots(slots),
+            None => CallArgs::Slots(slots.into()),
         })
     }
 

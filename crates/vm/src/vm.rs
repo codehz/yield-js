@@ -16,8 +16,8 @@ use crate::heap::{
 };
 use crate::host::{Completion, Host};
 use crate::runtime::{
-    ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState,
-    Invocation, Microtask, PendingOperation, Settlement,
+    Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
+    HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, PropertyKey, Value, ValueRef};
@@ -482,7 +482,7 @@ impl Vm {
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
         target: NativeTarget,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         receiver: &Value,
         construction: Option<HostConstruction>,
     ) -> Result<Invocation, VmError> {
@@ -551,7 +551,7 @@ impl Vm {
                 task: &mut task,
             },
             HostEntry::Call(call),
-            args,
+            args.to_vec()?,
         );
         if let Some(id) = task {
             return Ok(match self.finish_host_task(id, result)? {
@@ -695,7 +695,13 @@ impl Vm {
                     callee,
                     receiver,
                     args,
-                } => self.invoke(host, &roots.with(&saved), &callee, args, &receiver)?,
+                } => self.invoke(
+                    host,
+                    &roots.with(&saved),
+                    &callee,
+                    Arguments::Values(&args),
+                    &receiver,
+                )?,
                 Action::Gc => {
                     let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
                     Invocation::Value(Value::number(removed as f64))
@@ -1051,8 +1057,14 @@ impl Vm {
                     .map_err(|error| VmError::Host(error.0))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.invoke(host, &ActiveRoots::EMPTY, &callee, args, &Value::UNDEFINED)?
-            .into_result()
+        self.invoke(
+            host,
+            &ActiveRoots::EMPTY,
+            &callee,
+            Arguments::Values(&args),
+            &Value::UNDEFINED,
+        )?
+        .into_result()
     }
 
     pub(crate) fn read_host_import(&self, import: ImportDecl) -> Result<Value, VmError> {
@@ -1253,7 +1265,7 @@ impl Vm {
             function_index,
             None,
             prepared,
-            Vec::new(),
+            Arguments::EMPTY,
             (&Value::UNDEFINED, &Value::UNDEFINED, None),
             None,
         )?
@@ -1659,7 +1671,7 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         func_id: u32,
         parent_env: Option<ObjectId>,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         receiver: &Value,
         (new_target, home): (&Value, Option<ObjectId>),
         callee: Option<ObjectId>,
@@ -1693,7 +1705,7 @@ impl Vm {
         function_index: usize,
         parent_env: Option<ObjectId>,
         prepared_env: Option<ObjectId>,
-        args: Vec<Value>,
+        args: Arguments<'_>,
         (receiver, new_target, home): (&Value, &Value, Option<ObjectId>),
         callee: Option<ObjectId>,
     ) -> Result<Invocation, VmError> {
@@ -1733,18 +1745,18 @@ impl Vm {
             bind(param, Value::object(home))?;
         }
         if let Some(param) = &function.arguments_param {
+            let values = args.to_vec()?;
             let iterator = self.builtins.get("array.values");
             bind(
                 param,
-                Self::create_arguments_object(&mut self.heap, iterator, &args)?,
+                Self::create_arguments_object(&mut self.heap, iterator, &values)?,
             )?;
         }
-        let mut args = args.into_iter();
-        for param in &function.params {
-            bind(param, args.next().unwrap_or(Value::UNDEFINED))?;
+        for (index, param) in function.params.iter().enumerate() {
+            bind(param, args.get(index)?.clone())?;
         }
         if let Some(param) = &function.rest_param {
-            let rest = self.heap.alloc_array(args.collect());
+            let rest = self.heap.alloc_array(args.tail(function.params.len())?);
             bind(param, Value::object(rest))?;
         }
         frame.env = if let Some(env) = prepared_env {

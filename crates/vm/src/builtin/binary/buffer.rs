@@ -11,7 +11,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, TO_STRING_TAG_SYMBOL};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -233,7 +233,7 @@ impl Vm {
             host,
             roots,
             &constructor,
-            vec![Value::number(new_length as f64)],
+            Arguments::Values(&[Value::number(new_length as f64)]),
             &constructor,
         )? {
             Invocation::Value(value) => value,

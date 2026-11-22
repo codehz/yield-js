@@ -5,6 +5,7 @@
 //! persisted across an `Await` or a `Yield`.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::sync::Arc;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -51,7 +52,8 @@ impl Slot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallArgs {
-    Slots(Vec<Slot>),
+    /// Shared so fetching an instruction never copies the caller's slots.
+    Slots(Arc<[Slot]>),
     /// A private, dense argument list built with `NewArray` and `ArrayAppend`.
     Spread(Slot),
 }

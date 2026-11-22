@@ -18,7 +18,7 @@ use crate::heap::{
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -854,11 +854,11 @@ impl Vm {
                     host,
                     roots,
                     value,
-                    vec![
+                    Arguments::Values(&[
                         Value::string(matched),
                         Value::number(position as f64),
                         Value::string(text.to_owned()),
-                    ],
+                    ]),
                     &Value::UNDEFINED,
                 )? {
                     Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {
@@ -947,9 +947,13 @@ impl Vm {
                 StringMethod::Split => vec![this, args.get(1).cloned().unwrap_or(Value::UNDEFINED)],
                 _ => vec![this],
             };
-            return Ok(Some(
-                self.invoke(host, roots, &protocol, call_args, &search)?,
-            ));
+            return Ok(Some(self.invoke(
+                host,
+                roots,
+                &protocol,
+                Arguments::Values(&call_args),
+                &search,
+            )?));
         }
         let Some(builtin) = builtin else {
             return Ok(None);
@@ -1052,11 +1056,11 @@ impl Vm {
                     host,
                     roots,
                     &replacement_arg,
-                    vec![
+                    Arguments::Values(&[
                         Value::string(search.clone()),
                         Value::number(position as f64),
                         Value::string(text.clone()),
-                    ],
+                    ]),
                     &Value::UNDEFINED,
                 )? {
                     Invocation::Value(value) => match self.coerce_string(host, roots, &value)? {

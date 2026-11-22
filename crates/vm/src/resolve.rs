@@ -9,7 +9,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Object, PromiseState};
 use crate::host::Host;
-use crate::runtime::{Invocation, Microtask, Settlement};
+use crate::runtime::{Arguments, Invocation, Microtask, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -137,7 +137,7 @@ impl Vm {
             host,
             &roots.with(&reject_id),
             then,
-            vec![Value::object(resolve_id), Value::object(reject_id)],
+            Arguments::Values(&[Value::object(resolve_id), Value::object(reject_id)]),
             receiver,
         )?;
         if let Invocation::Thrown(error) = invocation {

@@ -9,7 +9,7 @@ pub(crate) mod members {
     use crate::host::Host;
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::ops;
-    use crate::runtime::Invocation;
+    use crate::runtime::{Arguments, Invocation};
     use crate::value::{Value, ValueRef};
     use crate::vm::Vm;
 
@@ -101,7 +101,7 @@ pub(crate) mod members {
                 Invocation::Value(method) => method,
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
-            vm.invoke(host, roots, &method, Vec::new(), receiver)
+            vm.invoke(host, roots, &method, Arguments::EMPTY, receiver)
         };
         valueOf: 0 => |vm, _, _, _, receiver| match receiver.view() {
             ValueRef::Null | ValueRef::Undefined => vm.throw_type_error("incompatible Object.prototype.valueOf receiver"),

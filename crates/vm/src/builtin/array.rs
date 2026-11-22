@@ -12,7 +12,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops::strict_equal;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -290,7 +290,7 @@ impl Vm {
             host,
             roots,
             constructor,
-            args,
+            Arguments::Values(&args),
             constructor
         )));
         let ValueRef::Object(id) = result.view() else {
@@ -465,7 +465,7 @@ impl Vm {
                     access.host,
                     access.roots,
                     mapper,
-                    vec![value, number(index)],
+                    Arguments::Values(&[value, number(index)]),
                     arg(args, 2)
                 )));
             }
@@ -1028,7 +1028,7 @@ impl ArrayAccess<'_> {
             self.host,
             self.roots,
             compare,
-            vec![left.clone(), right.clone()],
+            Arguments::Values(&[left.clone(), right.clone()]),
             &Value::UNDEFINED
         )));
         let order = script!(self.vm.coerce_number(self.host, self.roots, &order));
@@ -1118,7 +1118,7 @@ impl ArrayAccess<'_> {
                         self.host,
                         self.roots,
                         mapper,
-                        vec![acc, value, number(index), source.clone()],
+                        Arguments::Values(&[acc, value, number(index), source.clone()]),
                         &Value::UNDEFINED
                     ))),
                     None => value,
@@ -1132,7 +1132,7 @@ impl ArrayAccess<'_> {
                 self.host,
                 &self.roots.with(&callback_view),
                 mapper,
-                vec![value, number(index), source.clone()],
+                Arguments::Values(&[value, number(index), source.clone()]),
                 arg(args, 1)
             )));
             match name {

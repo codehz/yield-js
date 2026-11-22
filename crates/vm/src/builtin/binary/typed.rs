@@ -21,7 +21,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -794,7 +794,13 @@ impl Vm {
         };
         let rooted = args.clone();
         let roots = &roots.with(&rooted);
-        let created = match self.construct_with(host, roots, constructor, args, constructor)? {
+        let created = match self.construct_with(
+            host,
+            roots,
+            constructor,
+            Arguments::Values(&args),
+            constructor,
+        )? {
             Invocation::Value(value) => value,
             thrown @ Invocation::Thrown(_) => {
                 return Ok(Err(match thrown {
@@ -1148,11 +1154,11 @@ impl Vm {
                 host,
                 call_roots,
                 &callback,
-                vec![
+                Arguments::Values(&[
                     value.clone(),
                     Value::number(index as f64),
                     Value::object(id),
-                ],
+                ]),
                 &this_arg,
             )? {
                 Invocation::Value(result) => result,
@@ -1339,7 +1345,7 @@ impl Vm {
                 ));
             }
             let roots = &roots.with(&method);
-            let text = match self.invoke(host, roots, &method, Vec::new(), &value)? {
+            let text = match self.invoke(host, roots, &method, Arguments::EMPTY, &value)? {
                 Invocation::Value(value) => value,
                 Invocation::Thrown(error) => return Ok(Err(error)),
             };
@@ -1382,11 +1388,11 @@ impl Vm {
                 host,
                 call_roots,
                 &callback,
-                vec![
+                Arguments::Values(&[
                     value.clone(),
                     Value::number(index as f64),
                     Value::object(id),
-                ],
+                ]),
                 &this_arg,
             )? {
                 Invocation::Value(value) => value,
@@ -1426,11 +1432,11 @@ impl Vm {
                 host,
                 call_roots,
                 &callback,
-                vec![
+                Arguments::Values(&[
                     value.clone(),
                     Value::number(index as f64),
                     Value::object(id),
-                ],
+                ]),
                 &this_arg,
             )? {
                 Invocation::Value(value) => value,
@@ -1494,12 +1500,12 @@ impl Vm {
                 host,
                 call_roots,
                 &callback,
-                vec![
+                Arguments::Values(&[
                     accumulator.clone(),
                     value.clone(),
                     Value::number(index as f64),
                     Value::object(id),
-                ],
+                ]),
                 &Value::UNDEFINED,
             )? {
                 Invocation::Value(value) => value,
@@ -2064,7 +2070,7 @@ impl Vm {
                 host,
                 roots,
                 comparator,
-                vec![x.clone(), y.clone()],
+                Arguments::Values(&[x.clone(), y.clone()]),
                 &Value::UNDEFINED,
             )? {
                 Invocation::Value(value) => value,
@@ -2197,7 +2203,7 @@ impl Vm {
                         host,
                         call_roots,
                         map.function,
-                        vec![value.clone(), Value::number(index as f64)],
+                        Arguments::Values(&[value.clone(), Value::number(index as f64)]),
                         map.this_arg,
                     )? {
                         Invocation::Value(value) => value,
@@ -2248,7 +2254,7 @@ impl Vm {
                     host,
                     call_roots,
                     map.function,
-                    vec![value.clone(), Value::number(index as f64)],
+                    Arguments::Values(&[value.clone(), Value::number(index as f64)]),
                     map.this_arg,
                 )? {
                     Invocation::Value(value) => value,

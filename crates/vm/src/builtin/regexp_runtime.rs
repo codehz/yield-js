@@ -9,7 +9,7 @@ use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -961,14 +961,19 @@ impl Vm {
                 if !matches!(groups.view(), ValueRef::Undefined) {
                     argv.push(groups.clone());
                 }
-                let value =
-                    match self.invoke(host, roots, replace_value, argv, &Value::UNDEFINED)? {
-                        Invocation::Value(value) => value,
-                        thrown @ Invocation::Thrown(_) => match thrown {
-                            Invocation::Thrown(error) => return Ok(Err(error)),
-                            _ => unreachable!(),
-                        },
-                    };
+                let value = match self.invoke(
+                    host,
+                    roots,
+                    replace_value,
+                    Arguments::Values(&argv),
+                    &Value::UNDEFINED,
+                )? {
+                    Invocation::Value(value) => value,
+                    thrown @ Invocation::Thrown(_) => match thrown {
+                        Invocation::Thrown(error) => return Ok(Err(error)),
+                        _ => unreachable!(),
+                    },
+                };
                 match self.coerce_string(host, roots, &value)? {
                     Ok(value) => out.extend(value.units()),
                     Err(error) => return Ok(Err(error)),
@@ -1257,7 +1262,13 @@ impl Vm {
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
             };
         if self.is_callable(&exec) {
-            return match self.invoke(host, roots, &exec, vec![Value::string(input)], receiver)? {
+            return match self.invoke(
+                host,
+                roots,
+                &exec,
+                Arguments::Values(&[Value::string(input)]),
+                receiver,
+            )? {
                 Invocation::Value(value)
                     if matches!(value.view(), ValueRef::Null | ValueRef::Object(_)) =>
                 {

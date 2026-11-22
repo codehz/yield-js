@@ -7,7 +7,7 @@ use crate::exec::Hint;
 use crate::gc::ActiveRoots;
 use crate::heap::Object;
 use crate::host::Host;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -130,7 +130,7 @@ fn to_json(
         Err(error) => return Ok(Invocation::Thrown(error)),
     }
     match vm.read_property(host, roots, &object, PropertyKeyRef::String("toISOString"))? {
-        Invocation::Value(method) => vm.invoke(host, roots, &method, Vec::new(), &object),
+        Invocation::Value(method) => vm.invoke(host, roots, &method, Arguments::EMPTY, &object),
         thrown @ Invocation::Thrown(_) => Ok(thrown),
     }
 }

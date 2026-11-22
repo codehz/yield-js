@@ -9,7 +9,7 @@ use crate::heap::{
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -580,7 +580,7 @@ impl Vm {
         } else {
             vec![item]
         };
-        self.invoke(host, roots, adder, args, collection)
+        self.invoke(host, roots, adder, Arguments::Values(&args), collection)
     }
 
     fn collection_method(
@@ -629,8 +629,13 @@ impl Vm {
                 }
                 let mut index = 0;
                 while let Some((k, v)) = self.collection_pair(id, &mut index)? {
-                    let result =
-                        self.invoke(host, roots, key, vec![v, k, receiver.clone()], second)?;
+                    let result = self.invoke(
+                        host,
+                        roots,
+                        key,
+                        Arguments::Values(&[v, k, receiver.clone()]),
+                        second,
+                    )?;
                     if matches!(result, Invocation::Thrown(_)) {
                         return Ok(result);
                     }

@@ -857,7 +857,9 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
 
 fn remap_args(args: CallArgs, remap: &impl Fn(Slot) -> Slot) -> CallArgs {
     match args {
-        CallArgs::Slots(slots) => CallArgs::Slots(slots.into_iter().map(remap).collect()),
+        CallArgs::Slots(slots) => {
+            CallArgs::Slots(slots.iter().copied().map(remap).collect::<Vec<_>>().into())
+        }
         CallArgs::Spread(slot) => CallArgs::Spread(remap(slot)),
     }
 }

@@ -9,7 +9,7 @@ use crate::heap::{
     ClassElement, Object, PrivateElement, PrivateMember, PrivateMemberKind, ScriptClass,
 };
 use crate::host::Host;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -157,7 +157,7 @@ impl Vm {
         match class.source.private[&index].kind {
             PrivateMemberKind::Method(method) => Ok(Invocation::Value(Value::object(method))),
             PrivateMemberKind::Accessor { get: Some(get), .. } => {
-                self.invoke(host, roots, &Value::object(get), Vec::new(), receiver)
+                self.invoke(host, roots, &Value::object(get), Arguments::EMPTY, receiver)
             }
             _ => self.throw_type_error("private member has no getter"),
         }
@@ -194,9 +194,13 @@ impl Vm {
             return Ok(Invocation::Value(Value::UNDEFINED));
         }
         match kind {
-            Some(PrivateMemberKind::Accessor { set: Some(set), .. }) => {
-                self.invoke(host, roots, &Value::object(set), vec![value], receiver)
-            }
+            Some(PrivateMemberKind::Accessor { set: Some(set), .. }) => self.invoke(
+                host,
+                roots,
+                &Value::object(set),
+                Arguments::Values(&[value]),
+                receiver,
+            ),
             _ => self.throw_type_error("private member is not writable"),
         }
     }

@@ -24,7 +24,9 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
 use crate::ops::{self, BinaryError, unary_op};
 use crate::resolve::AwaitPrepared;
-use crate::runtime::{Continuation, ContinuationTarget, ExecOutcome, Invocation, Settlement};
+use crate::runtime::{
+    Arguments, Continuation, ContinuationTarget, ExecOutcome, Invocation, Settlement,
+};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -114,9 +116,9 @@ impl Vm {
         if !self.is_callable(receiver) {
             return self.throw_type_error("incompatible Function receiver");
         }
-        let mut args = args.into_iter();
-        let this_arg = args.next().unwrap_or(Value::UNDEFINED);
-        self.invoke(host, roots, receiver, args.collect(), &this_arg)
+        let this_arg = args.first().cloned().unwrap_or(Value::UNDEFINED);
+        let rest = args.get(1..).unwrap_or_default();
+        self.invoke(host, roots, receiver, Arguments::Values(rest), &this_arg)
     }
 
     fn function_apply(
@@ -129,20 +131,19 @@ impl Vm {
         if !self.is_callable(receiver) {
             return self.throw_type_error("incompatible Function receiver");
         }
-        let mut args = args.into_iter();
-        let this_arg = args.next().unwrap_or(Value::UNDEFINED);
-        let args = match args.next() {
+        let this_arg = args.first().cloned().unwrap_or(Value::UNDEFINED);
+        let args = match args.get(1) {
             None => Vec::new(),
             Some(list) if matches!(list.view(), ValueRef::Undefined | ValueRef::Null) => Vec::new(),
             Some(list) => {
-                let live = (receiver, &this_arg, &list);
-                match self.arguments_from_array_like(host, &roots.with(&live), &list)? {
+                let live = (receiver, &this_arg, list);
+                match self.arguments_from_array_like(host, &roots.with(&live), list)? {
                     Ok(values) => values,
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 }
             }
         };
-        self.invoke(host, roots, receiver, args, &this_arg)
+        self.invoke(host, roots, receiver, Arguments::Values(&args), &this_arg)
     }
 
     fn function_bind(
@@ -561,9 +562,26 @@ impl Vm {
                 receiver,
             } => self.call_value(host, roots, frame, dst, callee, args, receiver),
             Instr::Construct { dst, callee, args } => {
-                let args = self.read_call_args(frame, &args)?;
                 let callee = frame.read(callee)?;
-                let invocation = self.construct_with(host, frame_roots, &callee, args, &callee)?;
+                let invocation = match &args {
+                    CallArgs::Slots(slots) => self.construct_with(
+                        host,
+                        frame_roots,
+                        &callee,
+                        Arguments::Slots(frame, slots),
+                        &callee,
+                    )?,
+                    CallArgs::Spread(slot) => {
+                        let values = self.spread_arguments(frame, *slot)?;
+                        self.construct_with(
+                            host,
+                            frame_roots,
+                            &callee,
+                            Arguments::Values(&values),
+                            &callee,
+                        )?
+                    }
+                };
                 store_invocation(frame, dst, invocation)
             }
             Instr::SetFunctionName {
@@ -686,14 +704,25 @@ impl Vm {
                 args,
             } => {
                 let context = object_id(frame.read_ref(context)?, "super construction context")?;
-                let args = self.read_call_args(frame, &args)?;
-                let invocation = self.super_construct(
-                    host,
-                    frame_roots,
-                    context,
-                    frame.read_ref(callee)?,
-                    args,
-                )?;
+                let invocation = match &args {
+                    CallArgs::Slots(slots) => self.super_construct(
+                        host,
+                        frame_roots,
+                        context,
+                        frame.read_ref(callee)?,
+                        Arguments::Slots(frame, slots),
+                    )?,
+                    CallArgs::Spread(slot) => {
+                        let values = self.spread_arguments(frame, *slot)?;
+                        self.super_construct(
+                            host,
+                            frame_roots,
+                            context,
+                            frame.read_ref(callee)?,
+                            Arguments::Values(&values),
+                        )?
+                    }
+                };
                 store_invocation(frame, dst, invocation)
             }
             Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
@@ -1093,11 +1122,19 @@ impl Vm {
             } => {
                 let iterator = frame.read(iterator)?;
                 let method = frame.read(method)?;
-                let args = match argument {
-                    Some(argument) => vec![frame.read(argument)?],
-                    None => Vec::new(),
+                let invocation = match argument {
+                    Some(argument) => {
+                        let argument = frame.read(argument)?;
+                        self.invoke(
+                            host,
+                            frame_roots,
+                            &method,
+                            Arguments::Values(&[argument]),
+                            &iterator,
+                        )?
+                    }
+                    None => self.invoke(host, frame_roots, &method, Arguments::EMPTY, &iterator)?,
                 };
-                let invocation = self.invoke(host, frame_roots, &method, args, &iterator)?;
                 let result = match self
                     .require_iterator_object(invocation, "iterator method must return an object")?
                 {
@@ -1345,28 +1382,40 @@ impl Vm {
         args: CallArgs,
         receiver: Option<Slot>,
     ) -> Result<Step, VmError> {
-        let args = self.read_call_args(frame, &args)?;
         let callee = frame.read(callee)?;
         let receiver = match receiver {
             Some(slot) => frame.read(slot)?,
             None => Value::UNDEFINED,
         };
-        let invocation = self.invoke(host, &roots.with(frame), &callee, args, &receiver)?;
+        let invocation = match &args {
+            CallArgs::Slots(slots) => self.invoke(
+                host,
+                &roots.with(&*frame),
+                &callee,
+                Arguments::Slots(frame, slots),
+                &receiver,
+            )?,
+            CallArgs::Spread(slot) => {
+                let values = self.spread_arguments(frame, *slot)?;
+                self.invoke(
+                    host,
+                    &roots.with(&*frame),
+                    &callee,
+                    Arguments::Values(&values),
+                    &receiver,
+                )?
+            }
+        };
         store_invocation(frame, dst, invocation)
     }
 
-    fn read_call_args(&self, frame: &Frame, args: &CallArgs) -> Result<Vec<Value>, VmError> {
-        match args {
-            CallArgs::Slots(slots) => frame.read_list(slots),
-            CallArgs::Spread(slot) => {
-                let message = "spread arguments require a dense data array";
-                let id = object_id(frame.read_ref(*slot)?, message)?;
-                let Object::Array(array) = self.heap.get(id)? else {
-                    return Err(VmError::InvalidState(message.to_owned()));
-                };
-                array.dense_values()
-            }
-        }
+    fn spread_arguments(&self, frame: &Frame, slot: Slot) -> Result<Vec<Value>, VmError> {
+        let message = "spread arguments require a dense data array";
+        let id = object_id(frame.read_ref(slot)?, message)?;
+        let Object::Array(array) = self.heap.get(id)? else {
+            return Err(VmError::InvalidState(message.to_owned()));
+        };
+        array.dense_values()
     }
 
     pub(crate) fn get_iterator(
@@ -1399,7 +1448,7 @@ impl Vm {
         iterable: &Value,
         method: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
-        let result = self.invoke(host, roots, method, Vec::new(), iterable)?;
+        let result = self.invoke(host, roots, method, Arguments::EMPTY, iterable)?;
         let iterator =
             self.require_iterator_object(result, "Symbol.iterator must return an object")?;
         let iterator = match iterator {
@@ -1439,7 +1488,7 @@ impl Vm {
         iterator: &Value,
         next: &Value,
     ) -> Result<Result<Option<Value>, Value>, VmError> {
-        let result = self.invoke(host, roots, next, Vec::new(), iterator)?;
+        let result = self.invoke(host, roots, next, Arguments::EMPTY, iterator)?;
         let result =
             match self.require_iterator_object(result, "iterator next must return an object")? {
                 Invocation::Value(value) => value,
@@ -1484,7 +1533,7 @@ impl Vm {
                 Invocation::Value(method) => method,
                 thrown => return Ok(thrown),
             };
-        let invocation = self.invoke(host, roots, &method, Vec::new(), iterator)?;
+        let invocation = self.invoke(host, roots, &method, Arguments::EMPTY, iterator)?;
         self.require_iterator_object(invocation, "iterator return must return an object")
     }
 
@@ -1611,7 +1660,7 @@ impl Vm {
                     host,
                     roots,
                     &method,
-                    vec![Value::string(hint.as_str().into())],
+                    Arguments::Values(&[Value::string(hint.as_str().into())]),
                     value,
                 )?;
                 return match result {
@@ -1647,7 +1696,7 @@ impl Vm {
             if !self.is_callable(&method) {
                 continue;
             }
-            match self.invoke(host, roots, &method, Vec::new(), value)? {
+            match self.invoke(host, roots, &method, Arguments::EMPTY, value)? {
                 Invocation::Value(value) if matches!(value.view(), ValueRef::Object(_)) => {}
                 Invocation::Value(primitive) => return Ok(Invocation::Value(primitive)),
                 thrown @ Invocation::Thrown(_) => return Ok(thrown),
@@ -1814,7 +1863,13 @@ impl Vm {
                     Property::Data(value) => Ok(Invocation::Value(value)),
                     Property::Accessor { get: Some(get), .. } => {
                         let receiver = receiver(self);
-                        self.invoke(host, roots, &Value::object(get), Vec::new(), &receiver)
+                        self.invoke(
+                            host,
+                            roots,
+                            &Value::object(get),
+                            Arguments::EMPTY,
+                            &receiver,
+                        )
                     }
                     Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::UNDEFINED)),
                 };
@@ -1857,7 +1912,7 @@ impl Vm {
         match property {
             Property::Data(value) => Ok(Invocation::Value(value)),
             Property::Accessor { get: Some(get), .. } => {
-                self.invoke(host, roots, &Value::object(get), Vec::new(), receiver)
+                self.invoke(host, roots, &Value::object(get), Arguments::EMPTY, receiver)
             }
             Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::UNDEFINED)),
         }
@@ -1930,7 +1985,13 @@ impl Vm {
                     );
                     if !ordinary {
                         return Ok(
-                            match self.invoke(host, roots, &hook, vec![value.clone()], &receiver)? {
+                            match self.invoke(
+                                host,
+                                roots,
+                                &hook,
+                                Arguments::Values(std::slice::from_ref(value)),
+                                &receiver,
+                            )? {
                                 Invocation::Value(result) => {
                                     Invocation::Value(Value::boolean(result.truthy()))
                                 }
@@ -2189,7 +2250,13 @@ impl Vm {
         }
         match property.as_ref().and_then(OwnProperty::setter) {
             Some(Some(set)) => {
-                return match self.invoke(host, roots, &Value::object(set), vec![value], receiver)? {
+                return match self.invoke(
+                    host,
+                    roots,
+                    &Value::object(set),
+                    Arguments::Values(&[value]),
+                    receiver,
+                )? {
                     Invocation::Value(_) => Ok(success),
                     thrown @ Invocation::Thrown(_) => Ok(thrown),
                 };
@@ -2489,17 +2556,19 @@ impl Vm {
                         .function(closure)
                         .and_then(|function| self.build.function(function.func_id))
                         .is_some_and(|code| !code.params.is_empty());
+                let arguments: Vec<Value> = key
+                    .iter()
+                    .filter(|_| needs_key)
+                    .map(|key| match key {
+                        PropertyKey::String(key) => Value::string(key.clone()),
+                        PropertyKey::Symbol(key) => Value::symbol(*key),
+                    })
+                    .collect();
                 match self.invoke(
                     host,
                     &roots.with(&key),
                     &Value::object(closure),
-                    key.iter()
-                        .filter(|_| needs_key)
-                        .map(|key| match key {
-                            PropertyKey::String(key) => Value::string(key.clone()),
-                            PropertyKey::Symbol(key) => Value::symbol(*key),
-                        })
-                        .collect(),
+                    Arguments::Values(&arguments),
                     &Value::object(receiver),
                 )? {
                     Invocation::Value(value) => value,

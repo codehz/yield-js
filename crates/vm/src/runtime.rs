@@ -6,7 +6,9 @@ use std::any::Any;
 use serde::{Deserialize, Serialize};
 
 use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
+use crate::bytecode::Slot;
 use crate::error::VmError;
+use crate::frame::Frame;
 use crate::gc::{TraceRoots, Tracer};
 use crate::heap::PromiseState;
 use crate::snapshot::DeliveryTarget;
@@ -142,6 +144,62 @@ impl Continuation {
         [Some(self.target.object()), self.waiting_on, self.env]
             .into_iter()
             .flatten()
+    }
+}
+
+static UNDEFINED_ARGUMENT: Value = Value::UNDEFINED;
+
+/// Arguments of one call, read directly from the caller's slots when the call
+/// came from bytecode. Materialized lists exist only at host, intrinsic, and
+/// bound-function boundaries.
+#[derive(Clone, Copy)]
+pub(crate) enum Arguments<'a> {
+    Slots(&'a Frame, &'a [Slot]),
+    Values(&'a [Value]),
+}
+
+impl<'a> Arguments<'a> {
+    pub(crate) const EMPTY: Self = Self::Values(&[]);
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Slots(_, slots) => slots.len(),
+            Self::Values(values) => values.len(),
+        }
+    }
+
+    /// The argument at `index`, or `undefined` past the end.
+    pub(crate) fn get(&self, index: usize) -> Result<&'a Value, VmError> {
+        match self {
+            Self::Slots(frame, slots) => match slots.get(index) {
+                Some(slot) => frame.read_ref(*slot),
+                None => Ok(&UNDEFINED_ARGUMENT),
+            },
+            Self::Values(values) => Ok(values.get(index).unwrap_or(&UNDEFINED_ARGUMENT)),
+        }
+    }
+
+    pub(crate) fn to_vec(self) -> Result<Vec<Value>, VmError> {
+        self.tail(0)
+    }
+
+    /// Every argument from `start` on, materialized for rest parameters,
+    /// `arguments` objects, and host calls.
+    pub(crate) fn tail(self, start: usize) -> Result<Vec<Value>, VmError> {
+        (start..self.len())
+            .map(|index| self.get(index).cloned())
+            .collect()
+    }
+}
+
+impl TraceRoots for Arguments<'_> {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), VmError> {
+        match self {
+            // The caller already roots its frame; tracing repeats nothing the
+            // collector has not seen and keeps this view self-sufficient.
+            Self::Slots(frame, _) => frame.trace(tracer),
+            Self::Values(values) => values.trace(tracer),
+        }
     }
 }
 
