@@ -29,7 +29,7 @@
 | 内建 | 限制与缺项 |
 | --- | --- |
 | `Array` | 不提供 `Array.prototype.toLocaleString`；`flat` 在无法减少深度的循环数组上抛 `TypeError`，而不是无限展开 |
-| 错误构造器 | 缺少专用的 `Error.prototype.toString`；`stack` 只包含创建时仍在执行的同步脚本帧，不包含 Rust 宿主帧，也不追踪 `await`、`yield` 或微任务之前的调用历史 |
+| 错误构造器 | `stack` 只包含创建时仍在执行的同步脚本帧，不包含 Rust 宿主帧，也不追踪 `await`、`yield` 或微任务之前的调用历史 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
 | `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |
