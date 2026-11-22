@@ -6,7 +6,8 @@ use yield_vm::bytecode::{Instr, ModuleTarget, Slot};
 use yield_vm::heap::EnvironmentObject;
 use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{
-    Completion, JsString, JsValue, Object, PromiseState, Value, VerifiedBuild, Vm, VmError,
+    Completion, JsString, JsValue, Object, PromiseState, Snapshot, Value, VerifiedBuild, Vm,
+    VmError,
 };
 
 #[test]
@@ -113,6 +114,82 @@ fn verified_build_checks_identity_and_structure() {
         VerifiedBuild::new(corrupt),
         Err(VmError::InvalidBuild(_))
     ));
+}
+
+#[test]
+fn binary_snapshot_restores_suspended_values_and_object_identity() {
+    let mut run = Suspended::start(
+        r#"
+import { wait } from "test";
+const pattern = /ab/g;
+export async function run() {
+    const key = Symbol.for("\uD800");
+    const object = { [key]: -0 };
+    const weak = new WeakMap();
+    weak.set(object, 4294967297n);
+    const bytes = new Uint8Array([7, 255]);
+    const resumed = await wait("binary");
+    return resumed === 42 && pattern.test("ab") && pattern.lastIndex === 2 &&
+        weak.get(object) === 4294967297n && 1 / object[key] === -Infinity &&
+        key === Symbol.for("\uD800") && bytes[1] === 255;
+}
+"#,
+        vec![],
+    );
+    let snapshot = run.snapshot();
+    let encoded = snapshot.to_bytes().unwrap();
+    let decoded = Snapshot::from_bytes(&encoded).unwrap();
+    assert_eq!(decoded.to_json().unwrap(), snapshot.to_json().unwrap());
+    let mut mismatched = decoded.clone();
+    mismatched.build_id.push('x');
+    assert!(matches!(
+        run.restore(Snapshot::from_bytes(&mismatched.to_bytes().unwrap()).unwrap()),
+        Err(VmError::InvalidSnapshot(detail)) if detail.contains("build id mismatch")
+    ));
+    run.restore(decoded).unwrap();
+    run.complete("wait:binary", Completion::Fulfilled(JsValue::number(42.0)));
+    assert_eq!(run.state(), PromiseState::Fulfilled(Value::boolean(true)));
+}
+
+#[test]
+fn binary_snapshot_rejects_invalid_envelopes() {
+    let encoded = Snapshot::new("test".into()).to_bytes().unwrap();
+    assert!(
+        Snapshot::from_bytes(&encoded[..8])
+            .unwrap_err()
+            .contains("too short")
+    );
+    let mut corrupted = encoded.clone();
+    corrupted[0] ^= 1;
+    assert!(
+        Snapshot::from_bytes(&corrupted)
+            .unwrap_err()
+            .contains("magic")
+    );
+    corrupted = encoded.clone();
+    corrupted[8] ^= 128;
+    assert!(
+        Snapshot::from_bytes(&corrupted)
+            .unwrap_err()
+            .contains("binary snapshot version")
+    );
+    corrupted = encoded.clone();
+    corrupted[12] ^= 128;
+    assert!(
+        Snapshot::from_bytes(&corrupted)
+            .unwrap_err()
+            .contains("snapshot format")
+    );
+    corrupted = encoded.clone();
+    corrupted[16] ^= 1;
+    assert!(
+        Snapshot::from_bytes(&corrupted)
+            .unwrap_err()
+            .contains("header does not match")
+    );
+    corrupted = encoded;
+    corrupted.push(0);
+    assert!(Snapshot::from_bytes(&corrupted).is_err());
 }
 
 #[test]

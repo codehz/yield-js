@@ -17,6 +17,7 @@ fn main() {
     let mut samples = 9;
     let mut compile_only = None;
     let mut reuse = false;
+    let mut snapshot_codecs = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => {}
@@ -27,6 +28,8 @@ fn main() {
             "--compile-only" => compile_only = Some(args.next().expect("workload name")),
             "--verified-reuse" if !perf::ENABLED => reuse = true,
             "--verified-reuse" => panic!("reuse timings require a non-diagnostic build"),
+            "--snapshot-codecs" if !perf::ENABLED => snapshot_codecs = true,
+            "--snapshot-codecs" => panic!("snapshot timings require a non-diagnostic build"),
             _ => panic!("unknown baseline option: {arg}"),
         }
     }
@@ -40,6 +43,14 @@ fn main() {
     }
 
     println!("workload,metric,sample,value,unit");
+    if snapshot_codecs {
+        for workload in [&REACT_REUSE].into_iter().chain(WORKLOADS) {
+            if workload.suspend.is_some() {
+                run_snapshot_codecs(workload, samples);
+            }
+        }
+        return;
+    }
     if reuse {
         let await_success = WORKLOADS
             .iter()
@@ -134,6 +145,52 @@ fn run_reuse(workload: &Workload, samples: usize) {
             .into_iter()
             .zip(totals),
         );
+        if i >= WARMUP_SAMPLES {
+            sample.print(name, i - WARMUP_SAMPLES);
+        }
+    }
+}
+
+fn run_snapshot_codecs(workload: &Workload, samples: usize) {
+    let program = VerifiedBuild::new((workload.build)()).expect("verify build");
+    let mut host = TestHost::default();
+    let mut source = Vm::new_verified(program.clone(), &mut host).expect("start snapshot source");
+    let roots = workload.suspend.unwrap()(&mut source, &mut host);
+    let snapshot = source.snapshot(&roots).expect("capture source");
+    drop(source);
+    drop(host);
+
+    let name = workload.name;
+    println!("{name},build_id,0,{},text", snapshot.build_id);
+    println!(
+        "{name},json_size,0,{},bytes",
+        snapshot.to_json().unwrap().len()
+    );
+    println!(
+        "{name},binary_size,0,{},bytes",
+        snapshot.to_bytes().unwrap().len()
+    );
+    for i in 0..WARMUP_SAMPLES + samples {
+        let mut sample = Sample::default();
+        let binary_first = i % 2 == 1;
+        for binary in [binary_first, !binary_first] {
+            let (image, metric) = if binary {
+                let bytes = sample.time("binary_encode", || snapshot.to_bytes().unwrap());
+                let image = sample.time("binary_decode", || Snapshot::from_bytes(&bytes).unwrap());
+                (image, "binary_restore")
+            } else {
+                let json = sample.time("json_encode", || snapshot.to_json().unwrap());
+                let image = sample.time("json_decode", || Snapshot::from_json(&json).unwrap());
+                (image, "json_restore")
+            };
+            let mut host = TestHost::default();
+            let program = program.clone();
+            let mut vm = sample.time(metric, || {
+                Vm::restore_verified(image, program, &mut host).unwrap()
+            });
+            vm.start_recovered_operations().unwrap();
+            workload.resume.unwrap()(&mut vm, &mut host, &roots);
+        }
         if i >= WARMUP_SAMPLES {
             sample.print(name, i - WARMUP_SAMPLES);
         }

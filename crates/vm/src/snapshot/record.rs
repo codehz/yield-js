@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 use crate::JsString;
@@ -10,6 +11,18 @@ use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Binary arrays persist one byte sequence per buffer and a buffer reference per view.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 61;
+
+/// Version for the binary envelope and bincode options, not the snapshot schema.
+pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
+const SNAPSHOT_MAGIC: &[u8; 8] = b"YIELDSNP";
+const SNAPSHOT_HEADER_LEN: usize = SNAPSHOT_MAGIC.len() + 2 * size_of::<u32>();
+
+fn snapshot_codec() -> impl Options {
+    bincode::DefaultOptions::new()
+        .with_varint_encoding()
+        .with_little_endian()
+        .reject_trailing_bytes()
+}
 
 pub(crate) mod ordered_pairs {
     use std::collections::BTreeMap;
@@ -252,5 +265,44 @@ impl Snapshot {
 
     pub fn from_json(source: &str) -> Result<Self, String> {
         serde_json::from_str(source).map_err(|error| error.to_string())
+    }
+
+    /// Encode a snapshot in the versioned binary container. This does not
+    /// verify that the snapshot can be restored against a particular build.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SNAPSHOT_MAGIC);
+        bytes.extend_from_slice(&SNAPSHOT_BINARY_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.format_version.to_le_bytes());
+        snapshot_codec()
+            .serialize_into(&mut bytes, self)
+            .map_err(|error| error.to_string())?;
+        Ok(bytes)
+    }
+
+    /// Decode the binary container. The result still requires normal VM
+    /// restore validation, including exact build and host matching.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let Some((header, payload)) = bytes.split_at_checked(SNAPSHOT_HEADER_LEN) else {
+            return Err("binary snapshot is too short".to_owned());
+        };
+        if !header.starts_with(SNAPSHOT_MAGIC) {
+            return Err("invalid binary snapshot magic".to_owned());
+        }
+        let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        if version != SNAPSHOT_BINARY_VERSION {
+            return Err(format!("unsupported binary snapshot version {version}"));
+        }
+        let format = u32::from_le_bytes(header[12..16].try_into().unwrap());
+        if format != SNAPSHOT_FORMAT_VERSION {
+            return Err(format!("unsupported snapshot format {format}"));
+        }
+        let snapshot: Self = snapshot_codec()
+            .deserialize(payload)
+            .map_err(|error| format!("invalid binary snapshot: {error}"))?;
+        if snapshot.format_version != format {
+            return Err("binary snapshot header does not match payload format".to_owned());
+        }
+        Ok(snapshot)
     }
 }

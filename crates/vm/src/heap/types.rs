@@ -3,6 +3,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use super::object::ReactionJob;
@@ -792,7 +793,7 @@ impl OwnProperty<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PlainObject {
     #[serde(with = "property_pairs")]
     pub props: PropertyTable<JsString, Property>,
@@ -801,8 +802,34 @@ pub struct PlainObject {
     pub prototype: Option<ObjectId>,
     pub(super) extensible: bool,
     pub(crate) is_error: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub(crate) module_namespace: Option<u32>,
+}
+
+impl Serialize for PlainObject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // JSON omits None; positional formats always need the option tag.
+        let has_namespace = !serializer.is_human_readable() || self.module_namespace.is_some();
+        let mut record =
+            serializer.serialize_struct("PlainObject", 5 + usize::from(has_namespace))?;
+        record.serialize_field("props", &PropertyPairs(&self.props))?;
+        record.serialize_field("symbol_props", &self.symbol_props)?;
+        record.serialize_field("prototype", &self.prototype)?;
+        record.serialize_field("extensible", &self.extensible)?;
+        record.serialize_field("is_error", &self.is_error)?;
+        if has_namespace {
+            record.serialize_field("module_namespace", &self.module_namespace)?;
+        }
+        record.end()
+    }
+}
+
+struct PropertyPairs<'a>(&'a PropertyTable<JsString, Property>);
+
+impl Serialize for PropertyPairs<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        property_pairs::serialize(self.0, serializer)
+    }
 }
 
 impl PlainObject {
@@ -1180,16 +1207,31 @@ impl ClassElement {
 /// One invocation environment. Bindings are addressed by compile-time IDs, so
 /// shadowed names and closures share mutable cells without name lookup.
 /// Environments are not script objects and cannot be prototypes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct EnvironmentObject {
     pub parent: Option<ObjectId>,
     pub bindings: BTreeMap<BindingId, Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub module: Option<u32>,
     #[serde(skip)]
     pub(crate) uninitialized: BTreeSet<BindingId>,
     #[serde(default)]
     pub(crate) module_getter_sentinel: bool,
+}
+
+impl Serialize for EnvironmentObject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let has_module = !serializer.is_human_readable() || self.module.is_some();
+        let mut record =
+            serializer.serialize_struct("EnvironmentObject", 3 + usize::from(has_module))?;
+        record.serialize_field("parent", &self.parent)?;
+        record.serialize_field("bindings", &self.bindings)?;
+        if has_module {
+            record.serialize_field("module", &self.module)?;
+        }
+        record.serialize_field("module_getter_sentinel", &self.module_getter_sentinel)?;
+        record.end()
+    }
 }
 
 impl EnvironmentObject {
