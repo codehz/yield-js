@@ -253,6 +253,28 @@ enum ModuleEvaluation {
 
 impl Vm {
     pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
+        Self::startup::<false>(build, host).map(|(vm, _)| vm)
+    }
+
+    /// Construct a VM using the regular startup pipeline and time its two phases.
+    #[doc(hidden)]
+    pub fn new_profiled(
+        build: Build,
+        host: &mut dyn Host,
+    ) -> Result<(Self, crate::perf::Startup), VmError> {
+        let (vm, profile) = Self::startup::<true>(build, host)?;
+        Ok((vm, profile.expect("profiled startup records durations")))
+    }
+
+    fn startup<const PROFILE: bool>(
+        build: Build,
+        host: &mut dyn Host,
+    ) -> Result<(Self, Option<crate::perf::Startup>), VmError> {
+        let started = if PROFILE {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         build.validate().map_err(VmError::InvalidBuild)?;
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, &bindings)?;
@@ -262,6 +284,11 @@ impl Vm {
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);
         vm.install_imports(&bindings, resolved)?;
+        let initializing = if PROFILE {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         vm.instantiate_modules(host)?;
         let mut states = vec![ModuleEvaluation::Pending; vm.build.modules.len()];
         if let Some(preload) = vm.build.preload {
@@ -277,7 +304,17 @@ impl Vm {
             }
         }
         vm.run_until_idle(host)?;
-        Ok(vm)
+        let profile = if PROFILE {
+            let finished = std::time::Instant::now();
+            let initializing = initializing.expect("initialization start time");
+            Some(crate::perf::Startup {
+                prepare: initializing.duration_since(started.expect("startup start time")),
+                initialize: finished.duration_since(initializing),
+            })
+        } else {
+            None
+        };
+        Ok((vm, profile))
     }
 
     fn empty(build: Build, bindings: Arc<Bindings>) -> Self {

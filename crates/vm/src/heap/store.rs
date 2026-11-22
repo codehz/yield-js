@@ -848,6 +848,9 @@ impl Heap {
         let mut current = Some(env);
         while let Some(id) = current {
             let environment = self.environment(id)?;
+            if crate::perf::ENABLED {
+                crate::perf::record(|counters| counters.binding_lookups += 1);
+            }
             if environment.bindings.contains_key(&binding) {
                 return Ok(Some(id));
             }

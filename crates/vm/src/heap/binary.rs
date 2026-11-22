@@ -162,6 +162,9 @@ impl Heap {
         if let Object::TypedArray(view) = object
             && let Some(number) = numeric_index(key)
         {
+            if crate::perf::ENABLED {
+                crate::perf::record(|counters| counters.property_lookups += 1);
+            }
             let Some(index) = integer_index(number) else {
                 return Ok(OwnPropertyLookup::InvalidTypedIndex);
             };

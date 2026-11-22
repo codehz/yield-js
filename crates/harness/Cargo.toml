@@ -9,3 +9,8 @@ yield-compiler = { path = "../compiler" }
 yield-vm = { path = "../vm" }
 serde_json.workspace = true
 iana-time-zone = "0.1"
+
+[[bench]]
+name = "baseline"
+path = "benches/baseline/main.rs"
+harness = false

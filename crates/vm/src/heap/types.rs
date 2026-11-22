@@ -809,6 +809,9 @@ pub struct ArrayObject {
 
 impl ArrayObject {
     pub(crate) fn own_index(&self, index: usize) -> Option<OwnProperty<'_>> {
+        if crate::perf::ENABLED {
+            crate::perf::record(|counters| counters.property_lookups += 1);
+        }
         self.elements
             .get(&index)
             .map(|(property, attributes)| OwnProperty::Stored(property, *attributes))

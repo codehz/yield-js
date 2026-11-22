@@ -35,6 +35,12 @@ impl Frame {
     ) -> Self {
         let transient_count = usize::from(function.transient_slots);
         let slot_count = transient_count + usize::from(function.persistent_slots);
+        if crate::perf::ENABLED {
+            crate::perf::record(|counters| {
+                counters.frame_allocations += 1;
+                counters.frame_slots += slot_count as u64;
+            });
+        }
         Self {
             function: function_index,
             pc: 0,

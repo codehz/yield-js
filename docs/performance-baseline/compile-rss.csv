@@ -1,0 +1,11 @@
+workload,metric,sample,value,unit
+react-first-commit,compile_peak_rss,1,50200576,bytes
+react-updates,compile_peak_rss,1,50446336,bytes
+numeric-branch,compile_peak_rss,1,5226496,bytes
+short-call,compile_peak_rss,1,5242880,bytes
+closure,compile_peak_rss,1,5292032,bytes
+static-property,compile_peak_rss,1,5292032,bytes
+await-success,compile_peak_rss,1,5455872,bytes
+await-reject-finally,compile_peak_rss,1,5439488,bytes
+sync-generator,compile_peak_rss,1,5701632,bytes
+async-generator,compile_peak_rss,1,5734400,bytes

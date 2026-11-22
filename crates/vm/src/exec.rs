@@ -307,6 +307,9 @@ impl Vm {
                 return Ok(ExecOutcome::Return(Value::UNDEFINED));
             };
             frame.pc += 1;
+            if crate::perf::ENABLED {
+                crate::perf::record(|counters| counters.dispatches += 1);
+            }
             match self.step(host, roots, &mut frame, instr)? {
                 Step::Next => {}
                 Step::Suspend => return Ok(ExecOutcome::Suspended),
@@ -1848,6 +1851,9 @@ impl Vm {
         key: PropertyKeyRef<'_>,
         receiver: impl FnOnce(&mut Self) -> Cow<'a, Value>,
     ) -> Result<Invocation, VmError> {
+        if crate::perf::ENABLED {
+            crate::perf::record(|counters| counters.property_slow_paths += 1);
+        }
         let mut current = Some(target);
         while let Some(id) = current {
             let object = self.heap.get(id)?;
@@ -2758,6 +2764,9 @@ impl Vm {
             record.values.clear();
         }
         self.schedule_resume(continuation_id, waiting_on, plain)?;
+        if crate::perf::ENABLED {
+            crate::perf::capture(resume_entry.saved_slots.len());
+        }
         Ok(Step::Suspend)
     }
 
@@ -2792,6 +2801,9 @@ impl Vm {
         record.status = crate::heap::GeneratorStatus::Suspended(generator);
         record.env = frame.env;
         record.values = values;
+        if crate::perf::ENABLED {
+            crate::perf::capture(record.values.len());
+        }
         Ok(Step::Yield { value, delegate })
     }
 
@@ -2842,6 +2854,9 @@ impl Vm {
                 requests: std::collections::VecDeque::new(),
             },
         );
+        if crate::perf::ENABLED {
+            crate::perf::capture(start.saved_slots.len());
+        }
         Ok(Step::Return(Value::object(id)))
     }
 

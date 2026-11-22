@@ -68,6 +68,8 @@ pub mod heap;
 pub mod host;
 mod intrinsic;
 mod ops;
+#[doc(hidden)]
+pub mod perf;
 mod private;
 mod regexp;
 mod resolve;

@@ -33,6 +33,16 @@ pub(crate) fn string_own_property(
     text: &JsString,
     key: PropertyKeyRef<'_>,
 ) -> Option<OwnProperty<'static>> {
+    if crate::perf::ENABLED {
+        crate::perf::record(|counters| counters.property_lookups += 1);
+    }
+    lookup_string_property(text, key)
+}
+
+fn lookup_string_property(
+    text: &JsString,
+    key: PropertyKeyRef<'_>,
+) -> Option<OwnProperty<'static>> {
     if key.is_str("length") {
         return Some(OwnProperty::StringLength(text.unit_len()));
     }
@@ -212,12 +222,15 @@ impl Object {
         &self,
         key: PropertyKeyRef<'_>,
     ) -> Option<OwnProperty<'static>> {
-        string_own_property(self.boxed_string()?, key)
+        lookup_string_property(self.boxed_string()?, key)
     }
 
     pub(crate) fn own_property(&self, key: PropertyKeyRef<'_>) -> Option<OwnProperty<'_>> {
         if let Self::Array(array) = self {
             if key.is_str("length") {
+                if crate::perf::ENABLED {
+                    crate::perf::record(|counters| counters.property_lookups += 1);
+                }
                 return Some(OwnProperty::ArrayLength(
                     array.length,
                     array.length_writable,
@@ -226,6 +239,9 @@ impl Object {
             if let Some(index) = array_index(key) {
                 return array.own_index(index);
             }
+        }
+        if crate::perf::ENABLED {
+            crate::perf::record(|counters| counters.property_lookups += 1);
         }
         if let Some(property) = self.string_own_property(key) {
             return Some(property);
