@@ -2,7 +2,7 @@
 //! Handlers run in one place; call sites do not each reimplement catch.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::builtin::is_callable_object;
 use crate::builtin::roots::{RootKind, RootSpec};
@@ -17,8 +17,8 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     AsyncCompletion, AsyncRequest, Attributes, BoundObject, ClassElement, DescriptorUpdate,
     GeneratorStatus, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty,
-    OwnPropertyLookup, PlainObject, PrivateElement, Property, ScriptClass, ScriptClassSource,
-    TO_PRIMITIVE_SYMBOL, TypedIndex, object_id, string_own_property,
+    OwnPropertyLookup, PlainObject, PrivateElement, Property, TO_PRIMITIVE_SYMBOL, TypedIndex,
+    object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -29,6 +29,13 @@ use crate::runtime::{
 };
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
+mod branch;
+mod call;
+mod class;
+mod env;
+mod iterator;
+mod object;
+mod value;
 
 type PropertySite = (usize, usize);
 /// A Number that can address an array element without building a property key.
@@ -636,1134 +643,104 @@ impl Vm {
         constants: &[Constant],
         pc: usize,
     ) -> Result<Step, VmError> {
-        // Reentrant calls borrow the initialized slots; destination writes
-        // happen after the last use of this view in each instruction.
-        let frame_roots = &roots.with(&*frame);
         match *instr {
-            Instr::Const { dst, constant } => {
-                frame.write(dst, Self::constant(constants, constant)?)?;
-                Ok(Step::Next)
+            Instr::Const { .. }
+            | Instr::Undefined { .. }
+            | Instr::Move { .. }
+            | Instr::Binary { .. }
+            | Instr::BinaryConst { .. }
+            | Instr::Unary { .. }
+            | Instr::ToString { .. }
+            | Instr::ToPropertyKey { .. }
+            | Instr::Return { .. }
+            | Instr::Throw { .. }
+            | Instr::ThrowDeleteSuper
+            | Instr::ThrowAssignmentToConst => {
+                self.step_value(host, roots, frame, instr, constants)
+            }
+            Instr::Jump { .. }
+            | Instr::BranchFalse { .. }
+            | Instr::BranchTrue { .. }
+            | Instr::BranchCompareFalse { .. }
+            | Instr::BranchCompareConstFalse { .. }
+            | Instr::BranchCompareTrue { .. }
+            | Instr::BranchCompareConstTrue { .. }
+            | Instr::BranchBinary { .. }
+            | Instr::BranchBinaryConst { .. }
+            | Instr::BranchUnary { .. } => self.step_branch(host, roots, frame, instr, constants),
+            Instr::GetImport { .. }
+            | Instr::GetModuleBinding { .. }
+            | Instr::GetModuleNamespace { .. }
+            | Instr::GetBuiltin { .. }
+            | Instr::GetTemplate { .. }
+            | Instr::GetBinding { .. }
+            | Instr::SetBinding { .. }
+            | Instr::GetBindingDirect { .. }
+            | Instr::SetBindingDirect { .. }
+            | Instr::GetModuleBindingDirect { .. }
+            | Instr::SetModuleBindingDirect { .. }
+            | Instr::DeclareBinding { .. }
+            | Instr::SaveEnv { .. }
+            | Instr::NewIterationEnv { .. }
+            | Instr::RestoreEnv { .. } => self.step_env(host, roots, frame, instr, constants),
+            Instr::CallValue { .. }
+            | Instr::Construct { .. }
+            | Instr::SetFunctionName { .. }
+            | Instr::SetHome { .. }
+            | Instr::GetSuperBase { .. }
+            | Instr::GetSuper { .. }
+            | Instr::SetSuper { .. }
+            | Instr::GetDerivedThis { .. }
+            | Instr::GetSuperConstructor { .. }
+            | Instr::SuperConstruct { .. }
+            | Instr::Await { .. }
+            | Instr::Yield { .. }
+            | Instr::GeneratorStart
+            | Instr::LoadGeneratorReturn { .. } => {
+                self.step_call(host, roots, frame, instr, constants)
+            }
+            Instr::Closure { .. }
+            | Instr::NewClassScope { .. }
+            | Instr::LoadClassBinding { .. }
+            | Instr::InitClassBinding { .. }
+            | Instr::CreateClass { .. }
+            | Instr::ScopedClosure { .. }
+            | Instr::DefineClassMethod { .. }
+            | Instr::AddClassField { .. }
+            | Instr::AddClassBlock { .. }
+            | Instr::RunClassStatic { .. }
+            | Instr::AddClassPrivate { .. }
+            | Instr::GetPrivate { .. }
+            | Instr::SetPrivate { .. }
+            | Instr::HasPrivate { .. } => self.step_class(host, roots, frame, instr, constants),
+            Instr::NewObject { .. }
+            | Instr::NewRegExp { .. }
+            | Instr::NewArray { .. }
+            | Instr::ArrayAppend { .. }
+            | Instr::ArrayHole { .. }
+            | Instr::GetMember { .. }
+            | Instr::GetMemberConstKey { .. }
+            | Instr::GetDestructuredMember { .. }
+            | Instr::HasProperty { .. }
+            | Instr::InstanceOf { .. }
+            | Instr::DeleteMember { .. }
+            | Instr::SetMember { .. }
+            | Instr::DefineProperty { .. }
+            | Instr::CopyDataProperties { .. }
+            | Instr::AssertObjectCoercible { .. }
+            | Instr::RequireObject { .. }
+            | Instr::ObjectRest { .. } => {
+                self.step_object(host, roots, frame, instr, constants, pc)
+            }
+            Instr::GetForInIterator { .. }
+            | Instr::ForInNext { .. }
+            | Instr::GetIterator { .. }
+            | Instr::IteratorCall { .. }
+            | Instr::IteratorNext { .. }
+            | Instr::IteratorSkip { .. }
+            | Instr::IteratorClose { .. } => {
+                self.step_iterator(host, roots, frame, instr, constants)
             }
-            Instr::Undefined { dst } => {
-                frame.write(dst, Value::UNDEFINED)?;
-                Ok(Step::Next)
-            }
-            Instr::Move { dst, src } => {
-                frame.write(dst, frame.read(src)?)?;
-                Ok(Step::Next)
-            }
-            Instr::Binary { dst, op, lhs, rhs } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = frame.read(rhs)?;
-                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
-                    Ok(value) => {
-                        frame.write(dst, value)?;
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::BinaryConst {
-                dst,
-                op,
-                lhs,
-                constant,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = Self::constant(constants, constant)?;
-                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
-                    Ok(value) => {
-                        frame.write(dst, value)?;
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::Unary { dst, op, src } => {
-                let value = frame.read(src)?;
-                match self.unary_value(host, frame_roots, op, value)? {
-                    Ok(value) => {
-                        frame.write(dst, value)?;
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::ToString { dst, src } => {
-                let invocation = self.string_value(host, frame_roots, frame.read_ref(src)?)?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::ToPropertyKey { dst, src, object } => {
-                if let Some(object) = object
-                    && !matches!(frame.read_ref(object)?.view(), ValueRef::Object(_))
-                {
-                    return Ok(Step::Throw(
-                        self.type_error(frame_roots, "property access on a non-object")?,
-                    ));
-                }
-                let value =
-                    match self.coerce_property_key(host, frame_roots, frame.read_ref(src)?)? {
-                        Ok(PropertyKey::String(key)) => Value::string(key),
-                        Ok(PropertyKey::Symbol(id)) => Value::symbol(id),
-                        Err(error) => return Ok(Step::Throw(error)),
-                    };
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::GetImport { dst, import } => {
-                let value = self.read_host_import(import)?;
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::GetModuleBinding {
-                dst,
-                module,
-                binding,
-            } => {
-                let env = self.module_environment(module)?;
-                let Some(value) = self.heap.get_module_binding(env, binding)? else {
-                    return Ok(Step::Throw(self.reference_error(
-                        frame_roots,
-                        &format!("module binding {binding} is not initialized"),
-                    )?));
-                };
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::GetModuleNamespace { dst, module } => {
-                frame.write(dst, self.module_namespace(module)?)?;
-                Ok(Step::Next)
-            }
-            Instr::CallValue {
-                dst,
-                callee,
-                ref args,
-                receiver,
-            } => self.call_value(host, roots, frame, dst, callee, args, receiver),
-            Instr::Construct {
-                dst,
-                callee,
-                ref args,
-            } => {
-                let callee = frame.read(callee)?;
-                let invocation = match args {
-                    CallArgs::Slots(slots) => self.construct_with(
-                        host,
-                        frame_roots,
-                        &callee,
-                        Arguments::Slots(frame, slots),
-                        &callee,
-                    )?,
-                    CallArgs::Spread(slot) => {
-                        let values = self.spread_arguments(frame, *slot)?;
-                        self.construct_with(
-                            host,
-                            frame_roots,
-                            &callee,
-                            Arguments::Values(&values),
-                            &callee,
-                        )?
-                    }
-                };
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::SetFunctionName {
-                function,
-                key,
-                prefix,
-            } => {
-                let id = object_id(frame.read_ref(function)?, "named function")?;
-                let name = self
-                    .property_function_name(converted_property_key(frame.read_ref(key)?)?, prefix);
-                let Object::Function(function) = self.heap.get_mut(id)? else {
-                    return Err(VmError::InvalidState(
-                        "name requires a script function".into(),
-                    ));
-                };
-                function.dynamic_name = Some(name.clone());
-                self.heap.define_data(
-                    id,
-                    "name",
-                    Value::string(name),
-                    Attributes::FUNCTION_METADATA,
-                )?;
-                Ok(Step::Next)
-            }
-            Instr::SetHome { function, home } => {
-                let function = object_id(frame.read_ref(function)?, "method function")?;
-                let home = object_id(frame.read_ref(home)?, "method home")?;
-                if !matches!(self.heap.get(home)?, Object::Plain(_)) {
-                    return Err(VmError::InvalidState(
-                        "invalid object literal method home".into(),
-                    ));
-                }
-                let Object::Function(function) = self.heap.get_mut(function)? else {
-                    return Err(VmError::InvalidState("home requires a method".into()));
-                };
-                if function.home.is_some()
-                    || !self
-                        .build
-                        .function(function.func_id)
-                        .is_some_and(|f| f.is_method)
-                {
-                    return Err(VmError::InvalidState("home requires a new method".into()));
-                }
-                function.home = Some(home);
-                Ok(Step::Next)
-            }
-            Instr::GetSuperBase { dst, home } => {
-                let home = object_id(frame.read_ref(home)?, "super home")?;
-                let base = self
-                    .heap
-                    .prototype_of(home)?
-                    .map_or(Value::NULL, Value::object);
-                frame.write(dst, base)?;
-                Ok(Step::Next)
-            }
-            Instr::GetSuper {
-                dst,
-                base,
-                key,
-                receiver,
-            } => {
-                let ValueRef::Object(base) = frame.read_ref(base)?.view() else {
-                    return Ok(Step::Throw(
-                        self.type_error(frame_roots, "super base is null")?,
-                    ));
-                };
-                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
-                    Ok(key) => key,
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                let receiver = frame.read_ref(receiver)?;
-                let result = self.read_property_with_receiver(
-                    host,
-                    frame_roots,
-                    base,
-                    receiver,
-                    key.borrowed(),
-                )?;
-                store_invocation(frame, dst, result)
-            }
-            Instr::SetSuper {
-                base,
-                key,
-                receiver,
-                src,
-            } => {
-                let ValueRef::Object(base) = frame.read_ref(base)?.view() else {
-                    return Ok(Step::Throw(
-                        self.type_error(frame_roots, "super base is null")?,
-                    ));
-                };
-                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
-                    Ok(key) => key,
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                let result = self.set_property(
-                    host,
-                    frame_roots,
-                    base,
-                    frame.read_ref(receiver)?,
-                    key,
-                    frame.read(src)?,
-                    true,
-                )?;
-                match result {
-                    Invocation::Value(_) => Ok(Step::Next),
-                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::GetDerivedThis { dst, context } => {
-                let context = object_id(frame.read_ref(context)?, "derived this context")?;
-                let invocation = self.derived_this(frame_roots, context)?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::GetSuperConstructor { dst, context } => {
-                let context = object_id(frame.read_ref(context)?, "super construction context")?;
-                frame.write(dst, self.super_constructor(context)?)?;
-                Ok(Step::Next)
-            }
-            Instr::SuperConstruct {
-                dst,
-                context,
-                callee,
-                ref args,
-            } => {
-                let context = object_id(frame.read_ref(context)?, "super construction context")?;
-                let invocation = match args {
-                    CallArgs::Slots(slots) => self.super_construct(
-                        host,
-                        frame_roots,
-                        context,
-                        frame.read_ref(callee)?,
-                        Arguments::Slots(frame, slots),
-                    )?,
-                    CallArgs::Spread(slot) => {
-                        let values = self.spread_arguments(frame, *slot)?;
-                        self.super_construct(
-                            host,
-                            frame_roots,
-                            context,
-                            frame.read_ref(callee)?,
-                            Arguments::Values(&values),
-                        )?
-                    }
-                };
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::Closure { dst, function } => self.make_closure(frame, dst, function),
-            Instr::NewClassScope { dst, parent } => {
-                let parent = self.class_scope(frame, parent)?;
-                let env = self
-                    .heap
-                    .alloc_environment(Some(parent), Default::default());
-                frame.write(dst, Value::object(env))?;
-                Ok(Step::Next)
-            }
-            Instr::LoadClassBinding {
-                dst,
-                scope,
-                binding,
-            } => {
-                let scope = self.class_scope(frame, scope)?;
-                let Some(value) = self.heap.find_binding(scope, binding)? else {
-                    return Ok(Step::Throw(
-                        self.reference_error(frame_roots, "class name is not initialized")?,
-                    ));
-                };
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::InitClassBinding {
-                scope,
-                binding,
-                src,
-            } => {
-                let scope = self.class_scope(frame, Some(scope))?;
-                let value = frame.read(src)?;
-                let bindings = &mut self.heap.environment_mut(scope)?.bindings;
-                let std::collections::btree_map::Entry::Vacant(entry) = bindings.entry(binding)
-                else {
-                    return Err(VmError::InvalidState(
-                        "class binding initialized twice".into(),
-                    ));
-                };
-                entry.insert(value);
-                Ok(Step::Next)
-            }
-            Instr::CreateClass {
-                dst,
-                scope,
-                constructor,
-                heritage,
-                name_key,
-                default_constructor,
-                private_count,
-                private_binding,
-            } => {
-                let env = self.class_scope(frame, scope)?;
-                let derived = heritage.is_some();
-                let function_root = self.builtins.get("function.prototype");
-                let (static_parent, instance_parent) =
-                    match heritage.map(|slot| frame.read(slot)).transpose()? {
-                        None => (function_root, Some(self.builtins.get("object.prototype"))),
-                        Some(parent) if matches!(parent.view(), ValueRef::Null) => {
-                            (function_root, None)
-                        }
-                        Some(parent) => {
-                            if !self.is_constructor(&parent)? {
-                                return Ok(Step::Throw(self.type_error(
-                                    frame_roots,
-                                    "class heritage is not a constructor",
-                                )?));
-                            }
-                            let parent_id = object_id(&parent, "class heritage")?;
-                            match self.read_property(
-                                host,
-                                frame_roots,
-                                &parent,
-                                PropertyKeyRef::String("prototype"),
-                            )? {
-                                Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                                Invocation::Value(value) => {
-                                    match value.view() {
-                                        ValueRef::Object(id) => (parent_id, Some(id)),
-                                        ValueRef::Null => (parent_id, None),
-                                        _ => return Ok(Step::Throw(self.type_error(
-                                            frame_roots,
-                                            "class heritage prototype must be an object or null",
-                                        )?)),
-                                    }
-                                }
-                            }
-                        }
-                    };
-                let dynamic_name = name_key
-                    .map(|slot| {
-                        Ok::<_, VmError>(self.property_function_name(
-                            converted_property_key(frame.read_ref(slot)?)?,
-                            None,
-                        ))
-                    })
-                    .transpose()?;
-                let class = self.heap.alloc_function(constructor, env);
-                let prototype = self.heap.alloc_plain_with(instance_parent);
-                let Object::Function(function) = self.heap.get_mut(class)? else {
-                    unreachable!()
-                };
-                function.prototype = Some(static_parent);
-                function.dynamic_name = dynamic_name;
-                function.class = Some(ScriptClass {
-                    prototype,
-                    source: ScriptClassSource {
-                        derived,
-                        default_constructor,
-                        elements: Vec::new(),
-                        private_count,
-                        private_binding,
-                        private: Default::default(),
-                    },
-                });
-                function.home = Some(prototype);
-                self.install_script_metadata(class, constructor)?;
-                self.heap.define_data(
-                    class,
-                    "prototype",
-                    Value::object(prototype),
-                    Attributes::FIXED,
-                )?;
-                self.heap.define_data(
-                    prototype,
-                    "constructor",
-                    Value::object(class),
-                    Attributes::METHOD,
-                )?;
-                frame.write(dst, Value::object(class))?;
-                Ok(Step::Next)
-            }
-            Instr::ScopedClosure {
-                dst,
-                scope,
-                function,
-            } => {
-                let env = self.class_scope(frame, Some(scope))?;
-                let closure = self.materialize_function(function, env)?;
-                frame.write(dst, Value::object(closure))?;
-                Ok(Step::Next)
-            }
-            Instr::DefineClassMethod {
-                class,
-                key,
-                src,
-                is_static,
-                kind,
-            } => {
-                let class = object_id(&frame.read(class)?, "class method target")?;
-                let key = frame.read(key)?;
-                let key = converted_property_key(&key)?.to_owned();
-                let src = object_id(&frame.read(src)?, "class method closure")?;
-                if is_static && key.borrowed().is_str("prototype") {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "static class element cannot be named prototype",
-                    )?));
-                }
-                self.define_class_method(class, key, src, is_static, kind)?;
-                Ok(Step::Next)
-            }
-            Instr::AddClassField {
-                class,
-                key,
-                initializer,
-                is_static,
-            } => {
-                let class = object_id(&frame.read(class)?, "class field target")?;
-                let key = converted_property_key(frame.read_ref(key)?)?.to_owned();
-                if is_static && key.borrowed().is_str("prototype") {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "static class element cannot be named prototype",
-                    )?));
-                }
-                let initializer = initializer
-                    .map(|slot| object_id(frame.read_ref(slot)?, "field initializer"))
-                    .transpose()?;
-                self.add_class_element(
-                    class,
-                    ClassElement::Field {
-                        key,
-                        initializer,
-                        is_static,
-                    },
-                )?;
-                Ok(Step::Next)
-            }
-            Instr::AddClassBlock { class, body } => {
-                let class = object_id(frame.read_ref(class)?, "static block target")?;
-                let body = object_id(frame.read_ref(body)?, "static block body")?;
-                self.add_class_element(class, ClassElement::Block { body })?;
-                Ok(Step::Next)
-            }
-            Instr::RunClassStatic { class } => {
-                let class = object_id(frame.read_ref(class)?, "static initialization target")?;
-                match self.initialize_class_elements(host, frame_roots, class, class, true)? {
-                    Some(error) => Ok(Step::Throw(error)),
-                    None => Ok(Step::Next),
-                }
-            }
-            Instr::AddClassPrivate {
-                class,
-                index,
-                lexical,
-                src,
-                is_static,
-                kind,
-            } => {
-                let class = object_id(frame.read_ref(class)?, "private element class")?;
-                self.check_private_lexical(class, lexical, index)?;
-                let closure = src
-                    .map(|slot| object_id(frame.read_ref(slot)?, "private element closure"))
-                    .transpose()?;
-                self.add_class_private(class, index, closure, is_static, kind)?;
-                Ok(Step::Next)
-            }
-            Instr::GetPrivate {
-                dst,
-                object,
-                brand,
-                index,
-                lexical,
-            } => {
-                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
-                self.check_private_lexical(brand, lexical, index)?;
-                let value =
-                    self.get_private(host, frame_roots, frame.read_ref(object)?, brand, index)?;
-                store_invocation(frame, dst, value)
-            }
-            Instr::SetPrivate {
-                object,
-                brand,
-                src,
-                index,
-                lexical,
-            } => {
-                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
-                self.check_private_lexical(brand, lexical, index)?;
-                match self.set_private(
-                    host,
-                    frame_roots,
-                    frame.read_ref(object)?,
-                    brand,
-                    index,
-                    frame.read(src)?,
-                )? {
-                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
-                    Invocation::Value(_) => Ok(Step::Next),
-                }
-            }
-            Instr::HasPrivate {
-                dst,
-                object,
-                brand,
-                index,
-                lexical,
-            } => {
-                let brand = object_id(frame.read_ref(brand)?, "private brand")?;
-                self.check_private_lexical(brand, lexical, index)?;
-                let ValueRef::Object(object) = frame.read_ref(object)?.view() else {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "private brand check requires an object",
-                    )?));
-                };
-                let present = self
-                    .heap
-                    .private
-                    .get(&object)
-                    .is_some_and(|elements| elements.contains_key(&(brand, index)));
-                frame.write(dst, Value::boolean(present))?;
-                Ok(Step::Next)
-            }
-            Instr::NewObject { dst } => {
-                let id = self.heap.alloc_plain();
-                frame.write(dst, Value::object(id))?;
-                Ok(Step::Next)
-            }
-            Instr::NewRegExp {
-                dst,
-                ref source,
-                ref flags,
-            } => {
-                let id = self.alloc_regexp(source, flags)?;
-                frame.write(dst, Value::object(id))?;
-                Ok(Step::Next)
-            }
-            Instr::NewArray { dst, ref elements } => {
-                let elements = frame.read_list(elements)?;
-                let id = self.heap.alloc_array(elements);
-                frame.write(dst, Value::object(id))?;
-                Ok(Step::Next)
-            }
-            Instr::ArrayAppend { array, src } => {
-                self.append_array(frame.read_ref(array)?, frame.read_ref(src)?)?;
-                Ok(Step::Next)
-            }
-            Instr::ArrayHole { array } => {
-                let id = object_id(
-                    frame.read_ref(array)?,
-                    "array append target must be an object",
-                )?;
-                let Object::Array(array) = self.heap.get_mut(id)? else {
-                    return Err(VmError::InvalidState(
-                        "array append target must be an array".to_owned(),
-                    ));
-                };
-                array.append_hole()?;
-                Ok(Step::Next)
-            }
-            Instr::GetMember { dst, object, key } => {
-                let invocation = self.read_member(
-                    host,
-                    frame_roots,
-                    frame.read_ref(object)?,
-                    frame.read_ref(key)?,
-                )?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::GetMemberConstKey { dst, object, key } => {
-                let Some(Constant::String(key)) = constants.get(key as usize) else {
-                    return Err(VmError::InvalidState(format!(
-                        "GetMemberConstKey requires a string constant at index {key}"
-                    )));
-                };
-                let invocation = self.read_property(
-                    host,
-                    frame_roots,
-                    frame.read_ref(object)?,
-                    PropertyKeyRef::JsString(key),
-                )?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::GetDestructuredMember { dst, object, key } => {
-                let key = converted_property_key(frame.read_ref(key)?)?;
-                let invocation =
-                    self.read_destructured_member(host, frame_roots, frame.read_ref(object)?, key)?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::HasProperty { dst, object, key } => {
-                let invocation = self.has_property(
-                    host,
-                    frame_roots,
-                    frame.read_ref(object)?,
-                    frame.read_ref(key)?,
-                )?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::InstanceOf {
-                dst,
-                value,
-                constructor,
-            } => {
-                let invocation = self.instance_of(
-                    host,
-                    frame_roots,
-                    frame.read_ref(value)?,
-                    frame.read_ref(constructor)?,
-                )?;
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::DeleteMember { dst, object, key } => {
-                let invocation = self.delete_property(
-                    host,
-                    frame_roots,
-                    frame.read_ref(object)?,
-                    frame.read_ref(key)?,
-                )?;
-                if matches!(&invocation, Invocation::Value(value)
-                    if matches!(value.view(), ValueRef::Bool(false)))
-                {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "cannot delete a non-configurable property",
-                    )?));
-                }
-                store_invocation(frame, dst, invocation)
-            }
-            Instr::GetForInIterator { dst, source } => {
-                let source = frame.read_ref(source)?;
-                let prototype = self.primitive_prototype(source);
-                let iterator = self.heap.alloc_for_in_iterator(source, prototype);
-                frame.write(dst, Value::object(iterator))?;
-                Ok(Step::Next)
-            }
-            Instr::ForInNext {
-                done,
-                value,
-                iterator,
-            } => {
-                let iterator = object_id(frame.read_ref(iterator)?, "for-in cursor")?;
-                let key = match self.for_in_next(host, frame_roots, iterator)? {
-                    Ok(key) => key,
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                frame.write(done, Value::boolean(key.is_none()))?;
-                frame.write(value, key.map_or(Value::UNDEFINED, Value::string))?;
-                Ok(Step::Next)
-            }
-            Instr::GetIterator {
-                iterator,
-                next,
-                iterable,
-            } => {
-                let (value, next_method) =
-                    match self.get_iterator(host, frame_roots, frame.read_ref(iterable)?)? {
-                        Ok(record) => record,
-                        Err(error) => return Ok(Step::Throw(error)),
-                    };
-                frame.write(iterator, value)?;
-                frame.write(next, next_method)?;
-                Ok(Step::Next)
-            }
-            Instr::IteratorCall {
-                dst,
-                iterator,
-                method,
-                argument,
-            } => {
-                let iterator = frame.read(iterator)?;
-                let method = frame.read(method)?;
-                let invocation = match argument {
-                    Some(argument) => {
-                        let argument = frame.read(argument)?;
-                        self.invoke(
-                            host,
-                            frame_roots,
-                            &method,
-                            Arguments::Values(&[argument]),
-                            &iterator,
-                        )?
-                    }
-                    None => self.invoke(host, frame_roots, &method, Arguments::EMPTY, &iterator)?,
-                };
-                let result = match self.require_iterator_object(
-                    frame_roots,
-                    invocation,
-                    "iterator method must return an object",
-                )? {
-                    Invocation::Value(value) => value,
-                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                };
-                frame.write(dst, result)?;
-                Ok(Step::Next)
-            }
-            Instr::IteratorNext {
-                done,
-                value,
-                iterator,
-                next,
-            } => {
-                let item = match self.iterator_step(
-                    host,
-                    frame_roots,
-                    frame.read_ref(iterator)?,
-                    frame.read_ref(next)?,
-                )? {
-                    Ok(item) => item,
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                frame.write(done, Value::boolean(item.is_none()))?;
-                frame.write(value, item.unwrap_or(Value::UNDEFINED))?;
-                Ok(Step::Next)
-            }
-            Instr::IteratorSkip {
-                done,
-                iterator,
-                next,
-            } => {
-                let done_value = match self.iterator_step_result(
-                    host,
-                    frame_roots,
-                    frame.read_ref(iterator)?,
-                    frame.read_ref(next)?,
-                )? {
-                    Ok(result) => result.is_none(),
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                frame.write(done, Value::boolean(done_value))?;
-                Ok(Step::Next)
-            }
-            Instr::IteratorClose {
-                iterator,
-                preserve_throw,
-            } => {
-                let invocation = self.close_iterator(host, frame_roots, &frame.read(iterator)?)?;
-                match invocation {
-                    Invocation::Thrown(value) if !preserve_throw => Ok(Step::Throw(value)),
-                    _ => Ok(Step::Next),
-                }
-            }
-            Instr::GetBuiltin { dst, builtin } => {
-                let value = self.builtin_value(builtin)?;
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::GetTemplate { dst, template } => {
-                let value = self.template_object(template)?;
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::SetMember { object, key, src } => {
-                let site = (frame.function, pc);
-                match self.write_member(
-                    host,
-                    frame_roots,
-                    &frame.read(object)?,
-                    &frame.read(key)?,
-                    frame.read(src)?,
-                    Some(site),
-                )? {
-                    Invocation::Value(_) => Ok(Step::Next),
-                    Invocation::Thrown(value) => Ok(Step::Throw(value)),
-                }
-            }
-            Instr::DefineProperty {
-                object,
-                key,
-                src,
-                kind,
-            } => {
-                let key = match self.coerce_property_key(host, frame_roots, frame.read_ref(key)?)? {
-                    Ok(key) => key,
-                    Err(error) => return Ok(Step::Throw(error)),
-                };
-                self.define_property(frame.read_ref(object)?, key, frame.read(src)?, kind)?;
-                Ok(Step::Next)
-            }
-            Instr::CopyDataProperties { target, source } => {
-                let target = object_id(frame.read_ref(target)?, "spread target must be an object")?;
-                match self.copy_data_properties(
-                    host,
-                    frame_roots,
-                    target,
-                    frame.read_ref(source)?,
-                    &BTreeSet::new(),
-                )? {
-                    Invocation::Value(_) => Ok(Step::Next),
-                    Invocation::Thrown(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::AssertObjectCoercible { src } => {
-                if matches!(
-                    frame.read_ref(src)?.view(),
-                    ValueRef::Null | ValueRef::Undefined
-                ) {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "Cannot destructure null or undefined",
-                    )?));
-                }
-                Ok(Step::Next)
-            }
-            Instr::RequireObject { src } => {
-                if matches!(frame.read_ref(src)?.view(), ValueRef::Object(_)) {
-                    Ok(Step::Next)
-                } else {
-                    Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "async iterator must be an object",
-                    )?))
-                }
-            }
-            Instr::ObjectRest {
-                dst,
-                src,
-                ref excluded,
-            } => {
-                let source = frame.read_ref(src)?;
-                if matches!(source.view(), ValueRef::Null | ValueRef::Undefined) {
-                    return Ok(Step::Throw(self.type_error(
-                        frame_roots,
-                        "Cannot destructure null or undefined",
-                    )?));
-                }
-                let excluded = excluded
-                    .iter()
-                    .copied()
-                    .map(|slot| converted_property_key(frame.read_ref(slot)?))
-                    .collect::<Result<BTreeSet<_>, _>>()?;
-                let target = self.heap.alloc_plain();
-                match self.copy_data_properties(host, frame_roots, target, source, &excluded)? {
-                    Invocation::Value(_) => frame.write(dst, Value::object(target))?,
-                    Invocation::Thrown(error) => return Ok(Step::Throw(error)),
-                }
-                Ok(Step::Next)
-            }
-            Instr::GetBinding { dst, binding } => {
-                let env = frame
-                    .env
-                    .ok_or_else(|| VmError::InvalidState("binding read without env".to_owned()))?;
-                frame.write(dst, self.heap.get_binding(env, binding)?)?;
-                Ok(Step::Next)
-            }
-            Instr::SetBinding { binding, src } => {
-                let env = frame
-                    .env
-                    .ok_or_else(|| VmError::InvalidState("binding write without env".to_owned()))?;
-                self.heap.set_binding(env, binding, frame.read(src)?)?;
-                Ok(Step::Next)
-            }
-            Instr::GetBindingDirect {
-                dst,
-                depth,
-                binding,
-            } => {
-                let env = frame
-                    .env
-                    .ok_or_else(|| VmError::InvalidState("binding read without env".to_owned()))?;
-                frame.write(dst, self.heap.get_binding_direct(env, depth, binding)?)?;
-                Ok(Step::Next)
-            }
-            Instr::SetBindingDirect {
-                depth,
-                binding,
-                src,
-            } => {
-                let env = frame
-                    .env
-                    .ok_or_else(|| VmError::InvalidState("binding write without env".to_owned()))?;
-                self.heap
-                    .set_binding_direct(env, depth, binding, frame.read(src)?)?;
-                Ok(Step::Next)
-            }
-            Instr::GetModuleBindingDirect {
-                dst,
-                module,
-                binding,
-            } => {
-                let env = self.module_environment(module)?;
-                frame.write(dst, self.heap.get_module_binding_direct(env, binding)?)?;
-                Ok(Step::Next)
-            }
-            Instr::SetModuleBindingDirect {
-                module,
-                binding,
-                src,
-            } => {
-                let env = self.module_environment(module)?;
-                let initialize = frame.env == Some(env);
-                self.heap
-                    .set_module_binding_direct(env, binding, frame.read(src)?, initialize)?;
-                Ok(Step::Next)
-            }
-            Instr::DeclareBinding { binding } => {
-                let env = frame.env.ok_or_else(|| {
-                    VmError::InvalidState("binding declaration without env".to_owned())
-                })?;
-                self.heap.declare_binding(env, binding)?;
-                Ok(Step::Next)
-            }
-            Instr::SaveEnv { dst } => {
-                let env = frame.env.ok_or_else(|| {
-                    VmError::InvalidState("loop without an invocation environment".to_owned())
-                })?;
-                frame.write(dst, Value::object(env))?;
-                Ok(Step::Next)
-            }
-            Instr::NewIterationEnv {
-                parent,
-                ref bindings,
-            } => {
-                let parent = object_id(&frame.read(parent)?, "iteration environment parent")?;
-                if !matches!(self.heap.get(parent)?, Object::Environment(_)) {
-                    return Err(VmError::InvalidState(
-                        "iteration environment parent is not an environment".to_owned(),
-                    ));
-                }
-                let current = frame.env.ok_or_else(|| {
-                    VmError::InvalidState("iteration environment without a current env".to_owned())
-                })?;
-                let mut values = BTreeMap::new();
-                for &binding in bindings {
-                    values.insert(binding, self.heap.get_binding(current, binding)?);
-                }
-                frame.env = Some(self.heap.alloc_environment(Some(parent), values));
-                Ok(Step::Next)
-            }
-            Instr::RestoreEnv { src } => {
-                let env = object_id(&frame.read(src)?, "restored environment")?;
-                if !matches!(self.heap.get(env)?, Object::Environment(_)) {
-                    return Err(VmError::InvalidState(
-                        "restored loop environment is not an environment".to_owned(),
-                    ));
-                }
-                frame.env = Some(env);
-                Ok(Step::Next)
-            }
-            Instr::Await { input, resume, .. } => self.suspend(host, roots, frame, input, resume),
-            Instr::Yield {
-                input,
-                generator,
-                delegate,
-            } => self.suspend_generator(frame, input, generator, delegate),
-            Instr::GeneratorStart => self.start_generator(host, roots, frame),
-            Instr::LoadGeneratorReturn { dst } => {
-                let value = frame.generator_return.take().ok_or_else(|| {
-                    VmError::InvalidState(
-                        "generator return payload is missing for this resume".to_owned(),
-                    )
-                })?;
-                frame.write(dst, value)?;
-                Ok(Step::Next)
-            }
-            Instr::Jump { target } => {
-                frame.pc = target as usize;
-                Ok(Step::Next)
-            }
-            Instr::BranchFalse { cond, target } => {
-                if !frame.read(cond)?.truthy() {
-                    frame.pc = target as usize;
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchTrue { cond, target } => {
-                if frame.read(cond)?.truthy() {
-                    frame.pc = target as usize;
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchCompareFalse {
-                lhs,
-                op,
-                rhs,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = frame.read(rhs)?;
-                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                    Ok(true) => {}
-                    Ok(false) => frame.pc = target as usize,
-                    Err(error) => return Ok(Step::Throw(error)),
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchCompareConstFalse {
-                lhs,
-                op,
-                constant,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = Self::constant(constants, constant)?;
-                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                    Ok(true) => {}
-                    Ok(false) => frame.pc = target as usize,
-                    Err(error) => return Ok(Step::Throw(error)),
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchCompareTrue {
-                lhs,
-                op,
-                rhs,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = frame.read(rhs)?;
-                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                    Ok(true) => frame.pc = target as usize,
-                    Ok(false) => {}
-                    Err(error) => return Ok(Step::Throw(error)),
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchCompareConstTrue {
-                lhs,
-                op,
-                constant,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = Self::constant(constants, constant)?;
-                match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                    Ok(true) => frame.pc = target as usize,
-                    Ok(false) => {}
-                    Err(error) => return Ok(Step::Throw(error)),
-                }
-                Ok(Step::Next)
-            }
-            Instr::BranchBinary {
-                op,
-                lhs,
-                rhs,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = frame.read(rhs)?;
-                if Self::is_comparison(op) {
-                    match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                        Ok(true) => {}
-                        Ok(false) => frame.pc = target as usize,
-                        Err(error) => return Ok(Step::Throw(error)),
-                    }
-                    return Ok(Step::Next);
-                }
-                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
-                    Ok(value) => {
-                        if !value.truthy() {
-                            frame.pc = target as usize;
-                        }
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::BranchBinaryConst {
-                op,
-                lhs,
-                constant,
-                target,
-            } => {
-                let lhs = frame.read(lhs)?;
-                let rhs = Self::constant(constants, constant)?;
-                if Self::is_comparison(op) {
-                    match self.branch_compare(host, frame_roots, op, lhs, rhs)? {
-                        Ok(true) => {}
-                        Ok(false) => frame.pc = target as usize,
-                        Err(error) => return Ok(Step::Throw(error)),
-                    }
-                    return Ok(Step::Next);
-                }
-                match self.binary_value(host, frame_roots, op, lhs, rhs)? {
-                    Ok(value) => {
-                        if !value.truthy() {
-                            frame.pc = target as usize;
-                        }
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::BranchUnary { op, src, target } => {
-                let value = frame.read(src)?;
-                match self.unary_value(host, frame_roots, op, value)? {
-                    Ok(value) => {
-                        if !value.truthy() {
-                            frame.pc = target as usize;
-                        }
-                        Ok(Step::Next)
-                    }
-                    Err(error) => Ok(Step::Throw(error)),
-                }
-            }
-            Instr::Return { src } => Ok(Step::Return(frame.read(src)?)),
-            Instr::Throw { src } => Ok(Step::Throw(frame.read(src)?)),
-            Instr::ThrowDeleteSuper => Ok(Step::Throw(
-                self.reference_error(frame_roots, "cannot delete a super property")?,
-            )),
-            Instr::ThrowAssignmentToConst => Ok(Step::Throw(
-                self.type_error(frame_roots, "Assignment to constant variable.")?,
-            )),
         }
     }
 
