@@ -37,3 +37,16 @@ Apple M2 / macOS 27.0.1 / Rust 1.99.1。两批独立 release 进程，每批预�
 - **对象图多、二进制内容少：** React 捕获约四分之三在追踪，小挂起负载约三分之二；若以这些负载为主，先验证减少标签与边遍历中的重复堆查询，而不是先做借用式编码。
 - **后备存储大：** 夹具让一个 8 MiB buffer 跨 `await` 存活，`Uint8Array` 和尾部 `DataView` 共享该 buffer。续跑检查身份、首尾字节，并通过一个 view 写、另一个读；最终镜像 8,435,155 B、518 个对象。VM 记录构造超过追踪，但二进制编码约占捕获加编码的九成；若目标是延迟，先检查大字节块的编码吞吐。若目标是峰值内存，再验证绕过中间镜像的收益；本轮没有测峰值 RSS。大 buffer 的配对差异受顺序和样本波动影响，不用来推断计时探针成本。
 - 宿主记录在这些夹具中都不足 1 µs，不外推到自定义 checkpoint 或大 payload。捕获与快照格式均未优化或改版，本轮只建立分项基线。
+
+### 大 buffer 批量编码复测
+
+`ArrayBuffer` 的非文本编码改用 Serde `serialize_bytes`。Bincode 仍写相同的 `Option` 标记、变长长度和原始字节，改为一次批量写入，而非逐 `u8` 写入；JSON、解码与快照版本不变。用优化前后两个编码器互相解码并重编码，对 8 MiB 挂起镜像以及包含已分离、空、251 字节 buffer 的镜像逐字节比对，结果一致。
+
+对照为 `eaa1f52`，候选只改 buffer 序列化。复用上面的命令和环境，两批分别按「对照 → 候选」「候选 → 对照」顺序各跑 15 对样本。数据：[对照 A](snapshot-capture/bulk-control-a.csv)、[候选 A](snapshot-capture/bulk-candidate-a.csv)、[对照 B](snapshot-capture/bulk-control-b.csv)、[候选 B](snapshot-capture/bulk-candidate-b.csv)。
+
+| 8 MiB `ArrayBuffer`，中位数 | A：对照 → 候选 | B：对照 → 候选 |
+| --- | ---: | ---: |
+| 二进制编码 | 4.135 → 0.762 ms | 4.172 → 0.780 ms |
+| 捕获 + 二进制编码 | 4.528 → 1.146 ms | 4.560 → 1.223 ms |
+
+大 buffer 编码时间下降 81–82%，捕获加编码下降 73–75%，镜像仍为 8,435,155 B。React 与小挂起负载跨批波动明显，不据此宣称提速。未改捕获复制或解码，也未测峰值 RSS。

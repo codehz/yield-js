@@ -62,6 +62,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
 - 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
 - `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
+- `ArrayBuffer` 的二进制编码批量写入后备字节；在当前 bincode 配置下，`serialize_bytes` 与 `Vec<u8>` 序列具有相同的长度前缀和原始字节，解码仍读 `Option<Vec<u8>>`。JSON 仍是字节数组（已分离时为 `null`）。
 
 宿主绑定函数是同步的，不得重入 VM。声明不可变且共享；VM 拥有原型、实例、槽、payload、模块状态与 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
 

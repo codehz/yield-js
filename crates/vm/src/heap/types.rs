@@ -917,9 +917,30 @@ impl ElementKind {
 pub struct ArrayBufferObject {
     pub object: PlainObject,
     /// `None` means detached. A detached buffer keeps its resizable flag.
+    #[serde(serialize_with = "serialize_buffer_bytes")]
     pub bytes: Option<Vec<u8>>,
     /// `Some` for a resizable buffer; the byte length may grow up to it.
     pub max_byte_length: Option<usize>,
+}
+
+fn serialize_buffer_bytes<S: serde::Serializer>(
+    bytes: &Option<Vec<u8>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if serializer.is_human_readable() {
+        return bytes.serialize(serializer);
+    }
+
+    // Bincode encodes both a byte slice and a sequence of u8 as the same
+    // length prefix and raw bytes. Only the byte slice uses one bulk write.
+    struct ByteSlice<'a>(&'a [u8]);
+    impl Serialize for ByteSlice<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    bytes.as_deref().map(ByteSlice).serialize(serializer)
 }
 
 impl ArrayBufferObject {
