@@ -7,52 +7,30 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use yield_vm::bytecode::{
-    Constant, ExceptionHandler, Function as BytecodeFunction, GeneratorEntry, GeneratorStart,
-    ParamTarget, ResumeEntry, Slot, SlotKind,
+    Function as BytecodeFunction, GeneratorEntry, ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 
 use crate::analyze;
+use crate::cfg::{FunctionCfg, LaidOutFunction};
 use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::{map_slots, uses_defs};
-use crate::ir::{LoweredFunction, compact_dead_instructions, generator_stubs, resume_stubs};
+use crate::ir::FunctionAttrs;
 
 pub(crate) fn allocate(
     source: &str,
-    mut lowered: LoweredFunction,
-    constants: &[Constant],
+    mut function: FunctionCfg,
 ) -> Result<BytecodeFunction, CompileError> {
-    crate::propagate::optimize(&mut lowered, constants)?;
-    let mut resumes = resume_stubs(&lowered);
-    let mut generators = generator_stubs(&lowered);
-    let suspensions = analyze::Suspensions {
-        awaits: &resumes,
-        generators: &generators,
-    };
-    let analyze::Liveness {
-        mut live_in,
-        dead_writes: mut dead,
-    } = analyze::live_in_and_dead_writes(&lowered.code, suspensions, &lowered.handlers)?;
-    if !dead.is_empty() {
-        compact_dead_instructions(&mut lowered, &mut dead)?;
-        // A deleted instruction has exactly its successor's live-in set.
-        // Keeping the surviving entries preserves it even at remapped targets.
-        let mut pc = 0;
-        live_in.retain(|_| {
-            let keep = !dead.contains(&pc);
-            pc += 1;
-            keep
-        });
-        resumes = resume_stubs(&lowered);
-        generators = generator_stubs(&lowered);
+    let live = analyze::eliminate_dead_writes(&mut function);
+    let mut lowered = function.into_lowered(&live)?;
+    let live_in = &lowered.live_in;
+    let mut saved_sets = Vec::with_capacity(lowered.resumes.len());
+    for resume in &lowered.resumes {
+        saved_sets.push(saved_set(source, &lowered.attrs, live_in, resume)?);
     }
-    let mut saved_sets = Vec::with_capacity(resumes.len());
-    for resume in &resumes {
-        saved_sets.push(saved_set(source, &lowered, &live_in, resume)?);
-    }
-    let mut generator_saved = Vec::with_capacity(generators.len());
-    for entry in &generators {
-        generator_saved.push(generator_saved_set(source, &lowered, &live_in, entry)?);
+    let mut generator_saved = Vec::with_capacity(lowered.yields.len());
+    for entry in &lowered.yields {
+        generator_saved.push(generator_saved_set(source, &lowered.attrs, live_in, entry)?);
     }
     let mut saved_regs = BTreeSet::new();
     for saved in saved_sets.iter().chain(&generator_saved) {
@@ -60,81 +38,69 @@ pub(crate) fn allocate(
     }
     // A generator body starts with every parameter-initialization value that is
     // still live, so the whole live-in set must survive the call.
-    if let Some(start) = lowered.generator_start {
-        saved_regs.extend(&live_in[start.body_pc]);
+    if let Some(start) = &lowered.generator_start {
+        saved_regs.extend(&live_in[start.body_pc as usize]);
     }
 
-    let layout = FrameLayout::new(&lowered, &saved_regs, &live_in);
-    let code = lowered
-        .code
-        .iter()
-        .map(|instruction| map_slots(instruction, &|slot| layout.remap(slot)))
-        .collect::<Vec<_>>();
-    let mut remapped_resumes = resumes;
-    for (resume, saved) in remapped_resumes.iter_mut().zip(&saved_sets) {
+    let layout = FrameLayout::new(&lowered, &saved_regs);
+    for instruction in &mut lowered.code {
+        *instruction = map_slots(instruction, &|slot| layout.remap(slot));
+    }
+    for (resume, saved) in lowered.resumes.iter_mut().zip(&saved_sets) {
         resume.saved_slots = remapped_saved(&layout, saved);
         resume.fulfill_dst = layout.remap(resume.fulfill_dst);
         resume.reject_dst = layout.remap(resume.reject_dst);
     }
-    let mut remapped_generators = generators;
-    for (entry, saved) in remapped_generators.iter_mut().zip(&generator_saved) {
+    for (entry, saved) in lowered.yields.iter_mut().zip(&generator_saved) {
         entry.saved_slots = remapped_saved(&layout, saved);
         entry.next_dst = layout.remap(entry.next_dst);
         entry.throw_dst = layout.remap(entry.throw_dst);
     }
-    let generator_start = lowered.generator_start.map(|start| GeneratorStart {
-        body_pc: start.body_pc as u32,
-        saved_slots: remapped_saved(&layout, &live_in[start.body_pc]),
-    });
-    let handlers = lowered
-        .handlers
-        .iter()
-        .map(|handler| ExceptionHandler {
-            start_pc: handler.start_pc,
-            end_pc: handler.end_pc,
-            target_pc: handler.target_pc,
-            dst: layout.remap(handler.dst),
-        })
-        .collect::<Vec<_>>();
+    if let Some(start) = &mut lowered.generator_start {
+        start.saved_slots = remapped_saved(&layout, &live_in[start.body_pc as usize]);
+    }
+    for handler in &mut lowered.handlers {
+        handler.dst = layout.remap(handler.dst);
+    }
 
-    let param_target = |binding| match lowered.promoted.get(&binding) {
+    let attrs = lowered.attrs;
+    let param_target = |binding| match attrs.promoted.get(&binding) {
         Some(reg) => ParamTarget::Slot(layout.remap(Slot {
             kind: SlotKind::Transient,
             index: *reg,
         })),
         None => ParamTarget::Binding(binding),
     };
-    let params = lowered
+    let params = attrs
         .param_bindings
         .iter()
         .copied()
         .map(param_target)
         .collect();
-    let rest_param = lowered.rest_binding.map(param_target);
-    let this_param = lowered.this_binding.map(param_target);
-
+    let rest_param = attrs.rest_binding.map(param_target);
+    let this_param = attrs.this_binding.map(param_target);
     Ok(BytecodeFunction {
-        func_id: lowered.func_id,
-        name: lowered.name,
-        initial_name: lowered.initial_name,
-        is_async: lowered.is_async,
-        is_arrow: lowered.is_arrow,
-        is_method: lowered.is_method,
-        is_generator: lowered.is_generator,
-        length: lowered.length,
+        func_id: attrs.func_id,
+        name: attrs.name,
+        initial_name: attrs.initial_name,
+        is_async: attrs.is_async,
+        is_arrow: attrs.is_arrow,
+        is_method: attrs.is_method,
+        is_generator: attrs.is_generator,
+        length: attrs.length,
         params,
         rest_param,
         this_param,
-        home_param: lowered.home_binding.map(param_target),
-        new_target_param: lowered.new_target_binding.map(param_target),
-        arguments_param: lowered.arguments_binding.map(param_target),
+        home_param: attrs.home_binding.map(param_target),
+        new_target_param: attrs.new_target_binding.map(param_target),
+        arguments_param: attrs.arguments_binding.map(param_target),
         transient_slots: layout.transient_count,
         persistent_slots: layout.persistent_count,
-        code,
-        resumes: remapped_resumes,
-        generator_start,
-        generator_resumes: remapped_generators,
-        handlers,
+        code: lowered.code,
+        resumes: lowered.resumes,
+        generator_start: lowered.generator_start,
+        generator_resumes: lowered.yields,
+        handlers: lowered.handlers,
     })
 }
 
@@ -147,14 +113,14 @@ struct FrameLayout {
 }
 
 impl FrameLayout {
-    fn new(lowered: &LoweredFunction, saved: &BTreeSet<Reg>, live_in: &[BTreeSet<Reg>]) -> Self {
+    fn new(lowered: &LaidOutFunction, saved: &BTreeSet<Reg>) -> Self {
         let persistent = saved
             .iter()
             .copied()
             .enumerate()
             .map(|(index, reg)| (reg, index as u16))
             .collect::<BTreeMap<_, _>>();
-        let (transient, transient_count) = allocate_transients(lowered, saved, live_in);
+        let (transient, transient_count) = allocate_transients(lowered, saved);
         Self {
             persistent_count: persistent.len() as u16,
             transient_count,
@@ -182,11 +148,11 @@ impl FrameLayout {
 /// Keeping whole instruction PCs inclusive avoids aliasing operands or outputs
 /// of a single instruction, including definitions whose results are dead.
 fn allocate_transients(
-    lowered: &LoweredFunction,
+    lowered: &LaidOutFunction,
     saved: &BTreeSet<Reg>,
-    live_in: &[BTreeSet<Reg>],
 ) -> (BTreeMap<Reg, u16>, u16) {
-    let mut bounds = vec![None::<(usize, usize)>; lowered.reg_count as usize];
+    let attrs = &lowered.attrs;
+    let mut bounds = vec![None::<(usize, usize)>; attrs.reg_count as usize];
     let mut touch = |reg: Reg, pc: usize| {
         if !saved.contains(&reg) {
             let bound = &mut bounds[reg as usize];
@@ -194,7 +160,7 @@ fn allocate_transients(
             *bound = Some((first.min(pc), last.max(pc)));
         }
     };
-    for (pc, (instruction, live)) in lowered.code.iter().zip(live_in).enumerate() {
+    for (pc, (instruction, live)) in lowered.code.iter().zip(&lowered.live_in).enumerate() {
         let (_, defs) = uses_defs(instruction);
         for reg in live.iter().copied().chain(defs) {
             touch(reg, pc);
@@ -203,29 +169,29 @@ fn allocate_transients(
 
     // The VM writes parameters before the first instruction, and injects
     // exceptions and resume results before executing their target PCs.
-    for binding in lowered
+    for binding in attrs
         .param_bindings
         .iter()
-        .chain(&lowered.rest_binding)
-        .chain(&lowered.this_binding)
-        .chain(&lowered.home_binding)
-        .chain(&lowered.new_target_binding)
-        .chain(&lowered.arguments_binding)
+        .chain(&attrs.rest_binding)
+        .chain(&attrs.this_binding)
+        .chain(&attrs.home_binding)
+        .chain(&attrs.new_target_binding)
+        .chain(&attrs.arguments_binding)
     {
-        if let Some(&reg) = lowered.promoted.get(binding) {
+        if let Some(&reg) = attrs.promoted.get(binding) {
             touch(reg, 0);
         }
     }
     for handler in &lowered.handlers {
         touch(handler.dst.index, handler.target_pc as usize);
     }
-    for site in &lowered.awaits {
-        touch(site.result, site.fulfill_pc);
-        touch(site.reject, site.reject_pc);
+    for entry in &lowered.resumes {
+        touch(entry.fulfill_dst.index, entry.fulfill_pc as usize);
+        touch(entry.reject_dst.index, entry.reject_pc as usize);
     }
-    for site in &lowered.yields {
-        touch(site.next, site.next_pc);
-        touch(site.thrown, site.throw_pc);
+    for entry in &lowered.yields {
+        touch(entry.next_dst.index, entry.next_pc as usize);
+        touch(entry.throw_dst.index, entry.throw_pc as usize);
     }
 
     let mut intervals = bounds
@@ -268,7 +234,7 @@ fn remapped_saved(layout: &FrameLayout, saved: &BTreeSet<Reg>) -> Vec<u16> {
 
 fn saved_set(
     source: &str,
-    lowered: &LoweredFunction,
+    attrs: &FunctionAttrs,
     live_in: &[BTreeSet<Reg>],
     resume: &ResumeEntry,
 ) -> Result<BTreeSet<Reg>, CompileError> {
@@ -277,7 +243,7 @@ fn saved_set(
     let mut reject = live_in[resume.reject_pc as usize].clone();
     reject.remove(&resume.reject_dst.index);
     saved.extend(reject);
-    check_saved(source, lowered, &saved)?;
+    check_saved(source, attrs, &saved)?;
     Ok(saved)
 }
 
@@ -285,7 +251,7 @@ fn saved_set(
 /// joined. Subtracting after the union would drop a value live on another entry.
 fn generator_saved_set(
     source: &str,
-    lowered: &LoweredFunction,
+    attrs: &FunctionAttrs,
     live_in: &[BTreeSet<Reg>],
     entry: &GeneratorEntry,
 ) -> Result<BTreeSet<Reg>, CompileError> {
@@ -295,19 +261,19 @@ fn generator_saved_set(
     thrown.remove(&entry.throw_dst.index);
     saved.extend(thrown);
     saved.extend(&live_in[entry.return_pc as usize]);
-    check_saved(source, lowered, &saved)?;
+    check_saved(source, attrs, &saved)?;
     Ok(saved)
 }
 
 fn check_saved(
     source: &str,
-    lowered: &LoweredFunction,
+    attrs: &FunctionAttrs,
     saved: &BTreeSet<Reg>,
 ) -> Result<(), CompileError> {
-    if saved.iter().any(|reg| *reg >= lowered.reg_count) {
+    if saved.iter().any(|reg| *reg >= attrs.reg_count) {
         return Err(CompileError::new(
             source,
-            lowered.span,
+            attrs.span,
             "internal liveness error: unknown register",
         ));
     }

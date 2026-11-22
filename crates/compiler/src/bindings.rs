@@ -23,20 +23,21 @@ pub(crate) struct BindingFacts {
 pub(crate) fn classify(functions: &[LoweredFunction]) -> Result<BindingFacts, CompileError> {
     let mut owners = BTreeMap::new();
     for function in functions {
-        for binding in function
+        let attrs = &function.attrs;
+        for binding in attrs
             .param_bindings
             .iter()
-            .chain(&function.rest_binding)
-            .chain(&function.this_binding)
-            .chain(&function.home_binding)
-            .chain(&function.new_target_binding)
-            .chain(&function.arguments_binding)
+            .chain(&attrs.rest_binding)
+            .chain(&attrs.this_binding)
+            .chain(&attrs.home_binding)
+            .chain(&attrs.new_target_binding)
+            .chain(&attrs.arguments_binding)
         {
-            record_owner(&mut owners, *binding, function.func_id)?;
+            record_owner(&mut owners, *binding, attrs.func_id)?;
         }
         for instruction in &function.code {
             if let Instr::DeclareBinding { binding } = instruction {
-                record_owner(&mut owners, *binding, function.func_id)?;
+                record_owner(&mut owners, *binding, attrs.func_id)?;
             }
         }
     }
@@ -53,7 +54,7 @@ pub(crate) fn classify(functions: &[LoweredFunction]) -> Result<BindingFacts, Co
                     "internal compiler error: binding {binding} has no owner"
                 )));
             };
-            if owner != function.func_id {
+            if owner != function.attrs.func_id {
                 shared.insert(binding);
             }
         }

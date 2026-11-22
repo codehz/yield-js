@@ -1,27 +1,29 @@
 //! Strict-mode JavaScript subset compiler for the resumable VM.
 //!
-//! Oxc parses the source. This crate then lowers the supported subset to its
-//! own IR — logical-register bytecode plus await and exception side tables —
-//! analyzes liveness, and allocates frame slots. The VM bytecode contract is
-//! produced only by that last pass. Oxc types do not escape this crate except
-//! as the byte [`oxc::span::Span`] on [`CompileError`].
+//! Oxc parses the source, which is lowered to logical-register code and then
+//! decoded into a control-flow IR. Optimizations operate on blocks; only final
+//! layout assigns bytecode PCs and slot allocation produces the VM function.
+//! Oxc types do not escape this crate except as the byte [`oxc::span::Span`] on
+//! [`CompileError`].
 //!
 //! ```text
 //! source roots and resolver
 //!   → frontend   parse and link reachable modules
 //!   → lower      module declaration and evaluation phases, then nested functions
 //!   → bindings   owner table; cross-function reads and writes stay shared
+//!   → cfg        block IR with explicit resumption and exception edges
 //!   → promote    unshared bindings become logical registers; non-escaping
 //!                loop bindings leave the per-iteration environment
 //!   → propagate  cross-block literal and copy facts, branch folding, unreachable code
 //!   → analyze    CFG live-in and dead pure writes, including resume and handler edges
-//!   → allocate   persistent slots for cross-await values, transient otherwise
+//!   → allocate   final bytecode layout, then persistent and transient frame slots
 //!   → Build
 //! ```
 
 mod allocate;
 mod analyze;
 mod bindings;
+mod cfg;
 mod emit;
 mod env;
 mod error;

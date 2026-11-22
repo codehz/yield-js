@@ -1,27 +1,15 @@
 //! Move bindings that are not shared across functions into logical registers.
-//!
-//! Ordinary replacements are one instruction for one instruction, so jump,
-//! resume, and handler PCs stay put. Expression temps are left alone; a later
-//! store cannot overwrite an operand that a compound expression still needs.
-//!
-//! After rewriting, loop-head bindings that no nested function reads or writes
-//! are removed from their per-iteration environment. A group that keeps no
-//! binding and has no captured body declaration is deleted by a compacting
-//! pass that also remaps every PC-bearing table.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use yield_vm::BindingId;
-use yield_vm::bytecode::{ExceptionHandler, Instr};
-
-use crate::analyze;
 use crate::bindings::BindingFacts;
+use crate::cfg::{BlockId, ENTRY, FunctionCfg, InstrId};
 use crate::emit::Reg;
 use crate::error::CompileError;
 use crate::instr::may_throw;
-use crate::ir::{
-    LoweredFunction, compact_dead_instructions, generator_stubs, logical, resume_stubs,
-};
+use crate::ir::logical;
+use yield_vm::BindingId;
+use yield_vm::bytecode::Instr;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Declared {
@@ -42,43 +30,41 @@ impl Declared {
 
 pub(crate) fn promote(
     source: &str,
-    function: &mut LoweredFunction,
+    function: &mut FunctionCfg,
     facts: &BindingFacts,
 ) -> Result<(), CompileError> {
-    let resumes = resume_stubs(function);
-    let generators = generator_stubs(function);
-    let suspensions = analyze::Suspensions {
-        awaits: &resumes,
-        generators: &generators,
-    };
-    let mut accepted: Vec<(BindingId, BTreeMap<usize, bool>)> = Vec::new();
+    let mut accepted = BTreeMap::new();
     for (binding, owner) in &facts.owners {
-        if *owner != function.func_id || facts.shared.contains(binding) {
+        if *owner != function.attrs.func_id || facts.shared.contains(binding) {
             continue;
         }
-        if let Some(inits) = promotion_inits(function, suspensions, *binding)? {
-            accepted.push((*binding, inits));
+        if let Some(inits) = promotion_inits(function, *binding) {
+            accepted.insert(*binding, inits);
         }
     }
 
     let mut locals = BTreeMap::new();
-    let mut next = function.reg_count;
-    for (binding, _) in &accepted {
+    let mut next = function.attrs.reg_count;
+    for &binding in accepted.keys() {
         let reg = next;
         next = next
             .checked_add(1)
-            .ok_or_else(|| CompileError::new(source, function.span, "too many slots"))?;
-        locals.insert(*binding, reg);
+            .ok_or_else(|| CompileError::new(source, function.attrs.span, "too many slots"))?;
+        locals.insert(binding, reg);
     }
-    function.reg_count = next;
-    function.promoted = locals;
+    function.attrs.reg_count = next;
+    function.attrs.promoted = locals;
 
-    let mut code = Vec::with_capacity(function.code.len());
-    for (pc, instruction) in function.code.iter().enumerate() {
-        code.push(rewrite(instruction, pc, &function.promoted, &accepted));
+    for block in function.blocks.iter_mut().flatten() {
+        for stmt in &mut block.statements {
+            if let Some(replacement) =
+                rewrite(&stmt.instr, stmt.id, &function.attrs.promoted, &accepted)
+            {
+                stmt.instr = replacement;
+            }
+        }
     }
-    function.code = code;
-    elide_iteration_environments(function, facts)?;
+    elide_iteration_environments(function, facts);
     Ok(())
 }
 
@@ -92,152 +78,125 @@ pub(crate) fn promote(
 /// environment without copying the promoted loop-head bindings. A body binding
 /// that merely failed promotion but is not captured does not need a fresh cell;
 /// the function environment is enough because no closure can observe it.
-fn elide_iteration_environments(
-    function: &mut LoweredFunction,
-    facts: &BindingFacts,
-) -> Result<(), CompileError> {
+fn elide_iteration_environments(function: &mut FunctionCfg, facts: &BindingFacts) {
     if function.iteration_envs.is_empty() {
-        return Ok(());
+        return;
     }
-    for instruction in &mut function.code {
-        if let Instr::NewIterationEnv { bindings, .. } = instruction {
-            bindings.retain(|binding| !function.promoted.contains_key(binding));
-        }
-    }
-
-    let groups = std::mem::take(&mut function.iteration_envs);
+    let captured_decls: BTreeSet<_> = function
+        .blocks
+        .iter()
+        .flatten()
+        .flat_map(|block| &block.statements)
+        .filter_map(|stmt| match stmt.instr {
+            Instr::DeclareBinding { binding } if facts.shared.contains(&binding) => Some(stmt.id),
+            _ => None,
+        })
+        .collect();
     let mut dead = BTreeSet::new();
-    for group in &groups {
-        let escaping_head = group
+    for group in std::mem::take(&mut function.iteration_envs) {
+        // Keep groups lacking a restore: that state may still be referenced.
+        let Some(restore) = group.restore else {
+            continue;
+        };
+        if group
             .bindings
             .iter()
-            .any(|binding| facts.shared.contains(binding));
-        let body_declares_environment_binding = match group.restore_pc {
-            Some(restore_pc) => {
-                function.code[group.save_pc..restore_pc]
-                    .iter()
-                    .any(|instruction| match instruction {
-                        Instr::DeclareBinding { binding } => {
-                            !function.promoted.contains_key(binding)
-                                && facts.shared.contains(binding)
-                        }
-                        _ => false,
-                    })
-            }
-            // A missing restore is malformed lowering; keep the group rather
-            // than deleting state that is still referenced.
-            None => true,
-        };
-        if escaping_head || body_declares_environment_binding {
+            .any(|binding| facts.shared.contains(binding))
+            || captured_decls.range(group.save..restore).next().is_some()
+        {
             continue;
         }
-        dead.insert(group.save_pc);
-        dead.extend(group.enter_pcs.iter().copied());
-        let restore_pc = group.restore_pc.ok_or_else(|| {
-            CompileError::internal("internal compiler error: iteration environment has no restore")
-        })?;
-        dead.insert(restore_pc);
+        dead.extend([group.save, restore]);
+        dead.extend(group.enters);
     }
-    if dead.is_empty() {
-        return Ok(());
+    for block in function.blocks.iter_mut().flatten() {
+        block.statements.retain_mut(|stmt| {
+            if dead.contains(&stmt.id) {
+                return false;
+            }
+            if let Instr::NewIterationEnv { bindings, .. } = &mut stmt.instr {
+                bindings.retain(|binding| !function.attrs.promoted.contains_key(binding));
+            }
+            true
+        });
     }
-    compact_dead_instructions(function, &mut dead)
 }
 
 /// `true` means the declaration already has a value and must self-move.
-fn promotion_inits(
-    function: &LoweredFunction,
-    suspensions: analyze::Suspensions<'_>,
-    binding: BindingId,
-) -> Result<Option<BTreeMap<usize, bool>>, CompileError> {
-    let is_param = function.param_bindings.contains(&binding)
-        || function.rest_binding == Some(binding)
-        || function.this_binding == Some(binding)
-        || function.home_binding == Some(binding)
-        || function.new_target_binding == Some(binding)
-        || function.arguments_binding == Some(binding);
-    let incoming = declared_in(function, suspensions, binding, is_param)?;
+fn promotion_inits(function: &FunctionCfg, binding: BindingId) -> Option<BTreeMap<InstrId, bool>> {
+    let attrs = &function.attrs;
+    let is_param = attrs.param_bindings.contains(&binding)
+        || attrs.rest_binding == Some(binding)
+        || attrs.this_binding == Some(binding)
+        || attrs.home_binding == Some(binding)
+        || attrs.new_target_binding == Some(binding)
+        || attrs.arguments_binding == Some(binding);
+    let incoming = declared_in(function, binding, is_param);
     let mut inits = BTreeMap::new();
-    for (pc, instruction) in function.code.iter().enumerate() {
-        let Some(state) = incoming[pc] else {
-            if let Instr::DeclareBinding { binding: id } = instruction
-                && *id == binding
-            {
-                inits.insert(pc, is_param);
-            }
-            continue;
-        };
-        match instruction {
-            Instr::GetBinding { binding: id, .. } | Instr::SetBinding { binding: id, .. }
-                if *id == binding && state != Declared::Yes =>
-            {
-                return Ok(None);
-            }
-            Instr::DeclareBinding { binding: id } if *id == binding => {
-                if is_param {
-                    inits.insert(pc, true);
-                } else if state == Declared::Maybe {
-                    return Ok(None);
-                } else {
-                    inits.insert(pc, state == Declared::Yes);
+    for (block, mut state) in function.blocks.iter().zip(incoming) {
+        for stmt in &block.as_ref().unwrap().statements {
+            match stmt.instr {
+                Instr::GetBinding { binding: id, .. } | Instr::SetBinding { binding: id, .. }
+                    if id == binding && state.is_some_and(|state| state != Declared::Yes) =>
+                {
+                    return None;
                 }
+                Instr::DeclareBinding { binding: id } if id == binding => {
+                    if !is_param && state == Some(Declared::Maybe) {
+                        return None;
+                    }
+                    inits.insert(stmt.id, is_param || state == Some(Declared::Yes));
+                    state = state.map(|_| Declared::Yes);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
-    Ok(Some(inits))
+    Some(inits)
 }
 
 fn declared_in(
-    function: &LoweredFunction,
-    suspensions: analyze::Suspensions<'_>,
+    function: &FunctionCfg,
     binding: BindingId,
     entry_declared: bool,
-) -> Result<Vec<Option<Declared>>, CompileError> {
-    let mut incoming = vec![None; function.code.len()];
-    if function.code.is_empty() {
-        return Ok(incoming);
-    }
-    incoming[0] = Some(if entry_declared {
+) -> Vec<Option<Declared>> {
+    let mut incoming = vec![None; function.blocks.len()];
+    incoming[ENTRY.0] = Some(if entry_declared {
         Declared::Yes
     } else {
         Declared::No
     });
-    let mut work = VecDeque::from([0]);
-    while let Some(pc) = work.pop_front() {
-        let before = incoming[pc].expect("queued instruction is reachable");
-        let after = if matches!(function.code[pc], Instr::DeclareBinding { binding: id } if id == binding)
-        {
-            Declared::Yes
-        } else {
-            before
+    let mut work = VecDeque::from([ENTRY]);
+    while let Some(id) = work.pop_front() {
+        let block = function.blocks[id.0].as_ref().unwrap();
+        let mut state = incoming[id.0].unwrap();
+        let mut propagate = |target, state| {
+            if note(&mut incoming, target, state) {
+                work.push_back(target);
+            }
         };
-        for successor in analyze::normal_successors(&function.code, suspensions, pc)? {
-            if note(&mut incoming, successor, after) {
-                work.push_back(successor);
+        for stmt in &block.statements {
+            for edge in block.exception_edges(&function.handlers, may_throw(&stmt.instr)) {
+                propagate(edge.target, state);
+            }
+            if matches!(stmt.instr, Instr::DeclareBinding { binding: id } if id == binding) {
+                state = Declared::Yes;
             }
         }
-        if may_throw(&function.code[pc]) {
-            for handler in covering(&function.handlers, pc) {
-                let target = handler.target_pc as usize;
-                if target >= function.code.len() {
-                    return Err(CompileError::internal(
-                        "internal compiler error: exception edge is out of range",
-                    ));
-                }
-                if note(&mut incoming, target, before) {
-                    work.push_back(target);
-                }
-            }
+        for edge in block
+            .exception_edges(&function.handlers, block.end.may_throw())
+            .chain(block.end.successors())
+        {
+            propagate(edge.target, state);
         }
     }
-    Ok(incoming)
+    incoming
 }
 
-fn note(incoming: &mut [Option<Declared>], pc: usize, state: Declared) -> bool {
-    match incoming[pc] {
+fn note(incoming: &mut [Option<Declared>], block: BlockId, state: Declared) -> bool {
+    match incoming[block.0] {
         None => {
-            incoming[pc] = Some(state);
+            incoming[block.0] = Some(state);
             true
         }
         Some(existing) => {
@@ -245,26 +204,20 @@ fn note(incoming: &mut [Option<Declared>], pc: usize, state: Declared) -> bool {
             if joined == existing {
                 false
             } else {
-                incoming[pc] = Some(joined);
+                incoming[block.0] = Some(joined);
                 true
             }
         }
     }
 }
 
-fn covering(handlers: &[ExceptionHandler], pc: usize) -> impl Iterator<Item = &ExceptionHandler> {
-    handlers
-        .iter()
-        .filter(move |handler| handler.start_pc as usize <= pc && pc < handler.end_pc as usize)
-}
-
 fn rewrite(
     instruction: &Instr,
-    pc: usize,
+    id: InstrId,
     locals: &BTreeMap<BindingId, Reg>,
-    accepted: &[(BindingId, BTreeMap<usize, bool>)],
-) -> Instr {
-    match instruction {
+    accepted: &BTreeMap<BindingId, BTreeMap<InstrId, bool>>,
+) -> Option<Instr> {
+    Some(match instruction {
         Instr::GetBinding { dst, binding } if locals.contains_key(binding) => Instr::Move {
             dst: *dst,
             src: logical(locals[binding]),
@@ -275,11 +228,7 @@ fn rewrite(
         },
         Instr::DeclareBinding { binding } if locals.contains_key(binding) => {
             let local = logical(locals[binding]);
-            let keep = accepted
-                .iter()
-                .find(|(id, _)| id == binding)
-                .and_then(|(_, inits)| inits.get(&pc).copied())
-                .unwrap_or(false);
+            let keep = accepted[binding][&id];
             if keep {
                 Instr::Move {
                     dst: local,
@@ -289,6 +238,6 @@ fn rewrite(
                 Instr::Undefined { dst: local }
             }
         }
-        other => other.clone(),
-    }
+        _ => return None,
+    })
 }

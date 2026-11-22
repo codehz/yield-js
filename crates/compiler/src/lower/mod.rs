@@ -24,6 +24,7 @@ use yield_vm::bytecode::{
 
 use crate::allocate;
 use crate::bindings;
+use crate::cfg::FunctionCfg;
 use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
@@ -218,7 +219,7 @@ fn lower_module<'ast>(
             LoweringMode::Probe(&mut missing),
         )?;
     }
-    let mut lowered = lower_module_functions(
+    let lowered = lower_module_functions(
         session,
         scope,
         statements,
@@ -229,6 +230,10 @@ fn lower_module<'ast>(
     )?;
     let mut facts = bindings::classify(&lowered)?;
     facts.shared.extend(public);
+    let mut lowered = lowered
+        .into_iter()
+        .map(FunctionCfg::from_lowered)
+        .collect::<Result<Vec<_>, _>>()?;
     for function in &mut lowered {
         promote::promote(scope.source, function, &facts)?;
     }
@@ -236,7 +241,7 @@ fn lower_module<'ast>(
     let loop_free: BTreeSet<u32> = lowered
         .iter()
         .filter(|function| !has_iteration_environment(function))
-        .map(|function| function.func_id)
+        .map(|function| function.attrs.func_id)
         .collect();
     for mut function in lowered {
         direct_bindings(
@@ -247,16 +252,17 @@ fn lower_module<'ast>(
             &depths,
             &loop_free,
         );
-        let allocated = allocate::allocate(scope.source, function, session.constants())?;
+        crate::propagate::optimize(&mut function, session.constants());
+        let allocated = allocate::allocate(scope.source, function)?;
         session.push_function(allocated);
     }
     Ok(())
 }
 
 // `iteration_envs` is consumed by promotion's elision pass, so inspect the
-// final instruction stream instead of relying on the group metadata.
-fn has_iteration_environment(function: &LoweredFunction) -> bool {
-    function.code.iter().any(|instruction| {
+// surviving block instructions instead of relying on the group metadata.
+fn has_iteration_environment(function: &FunctionCfg) -> bool {
+    function.instructions().any(|instruction| {
         matches!(
             instruction,
             Instr::SaveEnv { .. } | Instr::NewIterationEnv { .. } | Instr::RestoreEnv { .. }
@@ -267,17 +273,17 @@ fn has_iteration_environment(function: &LoweredFunction) -> bool {
 /// Compiler-known environment depth for a function's own invocation
 /// environment, relative to its module environment. Only functions with no
 /// per-iteration environments and a consistent closure-creation depth qualify.
-fn function_depths(functions: &[LoweredFunction], initializers: &[u32]) -> BTreeMap<u32, u16> {
+fn function_depths(functions: &[FunctionCfg], initializers: &[u32]) -> BTreeMap<u32, u16> {
     let initializers: BTreeSet<u32> = initializers.iter().copied().collect();
-    let by_id: BTreeMap<u32, &LoweredFunction> = functions
+    let by_id: BTreeMap<u32, &FunctionCfg> = functions
         .iter()
-        .map(|function| (function.func_id, function))
+        .map(|function| (function.attrs.func_id, function))
         .collect();
     let mut sites: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut scoped = BTreeSet::new();
     for function in functions {
-        let creator = function.func_id;
-        for instruction in &function.code {
+        let creator = function.attrs.func_id;
+        for instruction in function.instructions() {
             match instruction {
                 Instr::Closure { function, .. } => {
                     sites.entry(*function).or_default().push(creator);
@@ -293,7 +299,7 @@ fn function_depths(functions: &[LoweredFunction], initializers: &[u32]) -> BTree
     fn depth(
         id: u32,
         initializers: &BTreeSet<u32>,
-        by_id: &BTreeMap<u32, &LoweredFunction>,
+        by_id: &BTreeMap<u32, &FunctionCfg>,
         sites: &BTreeMap<u32, Vec<u32>>,
         scoped: &BTreeSet<u32>,
         cache: &mut BTreeMap<u32, Option<u16>>,
@@ -321,7 +327,7 @@ fn function_depths(functions: &[LoweredFunction], initializers: &[u32]) -> BTree
                     break;
                 }
                 let Some(base) = depth(
-                    function.func_id,
+                    function.attrs.func_id,
                     initializers,
                     by_id,
                     sites,
@@ -376,17 +382,17 @@ fn function_depths(functions: &[LoweredFunction], initializers: &[u32]) -> BTree
 /// fixed. The direct forms deliberately skip the linked-read TDZ check so a
 /// nested closure still observes `undefined` for an uninitialized module slot.
 fn direct_bindings(
-    function: &mut LoweredFunction,
+    function: &mut FunctionCfg,
     module: u32,
     module_bindings: &BTreeSet<BindingId>,
     facts: &bindings::BindingFacts,
     depths: &BTreeMap<u32, u16>,
     loop_free: &BTreeSet<u32>,
 ) {
-    let current = function.func_id;
+    let current = function.attrs.func_id;
     let loop_free_here = loop_free.contains(&current);
     let base = depths.get(&current).copied();
-    for instruction in &mut function.code {
+    for instruction in function.instructions_mut() {
         *instruction = match instruction {
             Instr::GetBinding { dst, binding } => {
                 if module_bindings.contains(binding) {
@@ -799,29 +805,31 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
         }
 
         Ok(LoweredFunction {
-            func_id: self.func_id,
-            name: self.name.clone(),
-            initial_name: std::mem::take(&mut self.initial_name),
-            is_async: self.is_async,
-            is_arrow: self.is_arrow,
-            is_method: self.is_method,
-            is_generator: self.is_generator,
-            length,
-            param_bindings: self.param_bindings.clone(),
-            rest_binding: self.rest_binding,
-            this_binding: self.this_binding,
-            home_binding: self.home_binding,
-            new_target_binding: self.new_target_binding,
-            arguments_binding: self.arguments_binding,
-            promoted: BTreeMap::new(),
-            reg_count: self.emit.reg_count(),
+            attrs: crate::ir::FunctionAttrs {
+                func_id: self.func_id,
+                name: self.name.clone(),
+                initial_name: std::mem::take(&mut self.initial_name),
+                is_async: self.is_async,
+                is_arrow: self.is_arrow,
+                is_method: self.is_method,
+                is_generator: self.is_generator,
+                length,
+                param_bindings: self.param_bindings.clone(),
+                rest_binding: self.rest_binding,
+                this_binding: self.this_binding,
+                home_binding: self.home_binding,
+                new_target_binding: self.new_target_binding,
+                arguments_binding: self.arguments_binding,
+                promoted: BTreeMap::new(),
+                reg_count: self.emit.reg_count(),
+                span: self.span,
+            },
             code: self.emit.take_code(),
             awaits: self.control.take_awaits(),
             generator_start,
             yields: self.control.take_yields(),
             handlers: self.control.take_handlers(),
             iteration_envs: std::mem::take(&mut self.iteration_envs),
-            span: self.span,
         })
     }
     fn install_this_binding(&mut self, source: FunctionSource<'ast>) {

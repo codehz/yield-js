@@ -1,18 +1,15 @@
-//! Compiler IR after syntax lowering and before frame-slot allocation.
+//! Linear logical-register input from the syntax lowerer.
 //!
-//! Instructions still use the VM [`Instr`] enum, but every [`Slot`] is a
-//! logical register: `kind` is meaningless and `index` is a [`Reg`]. Oxc is
-//! gone. Promotion, optimization, liveness, and allocation operate on this IR.
+//! Each [`Slot`] is logical: `kind` is meaningless and `index` is a [`Reg`].
+//! Binding classification reads this input before CFG construction consumes it.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use oxc::span::Span;
 use yield_vm::BindingId;
-use yield_vm::bytecode::{ExceptionHandler, GeneratorEntry, Instr, ResumeEntry, Slot, SlotKind};
+use yield_vm::bytecode::{ExceptionHandler, Instr, Slot, SlotKind};
 
 use crate::emit::Reg;
-use crate::error::CompileError;
 
 /// A value location assigned during lowering, before persistent/transient split.
 pub(crate) type LogicalReg = Reg;
@@ -44,12 +41,9 @@ pub(crate) struct IterationEnvGroup {
     pub(crate) restore_pc: Option<usize>,
 }
 
-/// One function lowered to logical-register bytecode.
-///
-/// `resumes` are not filled in yet: each [`AwaitSite`] becomes a
-/// [`yield_vm::bytecode::ResumeEntry`] once liveness decides `saved_slots`.
+/// Function attributes independent of code layout.
 #[derive(Debug)]
-pub(crate) struct LoweredFunction {
+pub(crate) struct FunctionAttrs {
     pub(crate) func_id: u32,
     pub(crate) name: String,
     pub(crate) initial_name: String,
@@ -68,6 +62,13 @@ pub(crate) struct LoweredFunction {
     /// Non-shared bindings assigned a fresh logical register, in `BindingId` order.
     pub(crate) promoted: BTreeMap<BindingId, LogicalReg>,
     pub(crate) reg_count: u16,
+    pub(crate) span: Span,
+}
+
+/// Linear code and side tables emitted by syntax lowering.
+#[derive(Debug)]
+pub(crate) struct LoweredFunction {
+    pub(crate) attrs: FunctionAttrs,
     pub(crate) code: Vec<Instr>,
     pub(crate) awaits: Vec<AwaitSite>,
     /// Where parameter initialization hands over to the generator body.
@@ -75,7 +76,6 @@ pub(crate) struct LoweredFunction {
     pub(crate) yields: Vec<YieldSite>,
     pub(crate) handlers: Vec<ExceptionHandler>,
     pub(crate) iteration_envs: Vec<IterationEnvGroup>,
-    pub(crate) span: Span,
 }
 
 /// One lowered `yield`, before liveness decides `saved_slots`.
@@ -100,249 +100,9 @@ pub(crate) struct GeneratorStartSite {
     pub(crate) body_pc: usize,
 }
 
-/// Compact code and all PC-bearing fields. A deleted target lands on the next
-/// surviving instruction, except at exclusive entries (which keep a bridge).
-/// `dead` is updated to contain exactly the PCs that were removed.
-pub(crate) fn compact_dead_instructions(
-    function: &mut LoweredFunction,
-    dead: &mut BTreeSet<usize>,
-) -> Result<(), CompileError> {
-    let old_len = function.code.len();
-    if dead.iter().any(|&pc| pc >= old_len) {
-        return Err(CompileError::internal(
-            "internal compiler error: deleted instruction is out of range",
-        ));
-    }
-    let mut exclusive = BTreeSet::new();
-    for (pc, instruction) in function.code.iter().enumerate() {
-        if !dead.contains(&pc)
-            && let Instr::Yield { generator, .. } = instruction
-        {
-            let site = &function.yields[*generator as usize];
-            exclusive.extend([site.throw_pc, site.return_pc]);
-        }
-    }
-    if let Some(start) = function.generator_start
-        && dead.remove(&start.body_pc)
-    {
-        function.code[start.body_pc] = Instr::Jump {
-            target: start.body_pc as u32 + 1,
-        };
-    }
-    // A pure write at an exclusive entry may be dead, but remapping that
-    // entry onto the next instruction could make it an ordinary jump target.
-    for pc in exclusive {
-        if dead.remove(&pc) {
-            function.code[pc] = Instr::Jump {
-                target: pc as u32 + 1,
-            };
-        }
-    }
-
-    let mut mapping = Vec::with_capacity(old_len + 1);
-    let mut next = 0u32;
-    for pc in 0..old_len {
-        mapping.push(next);
-        if !dead.contains(&pc) {
-            next = next.checked_add(1).ok_or_else(|| {
-                CompileError::internal("internal compiler error: too many instructions")
-            })?;
-        }
-    }
-    mapping.push(next);
-    let remap = |pc: u32| -> Result<u32, CompileError> {
-        mapping
-            .get(pc as usize)
-            .copied()
-            .ok_or_else(|| CompileError::internal("internal compiler error: PC is out of range"))
-    };
-
-    let mut code = Vec::with_capacity(next as usize);
-    let old_awaits = std::mem::take(&mut function.awaits);
-    let old_yields = std::mem::take(&mut function.yields);
-    let mut await_ids = vec![None; old_awaits.len()];
-    let mut yield_ids = vec![None; old_yields.len()];
-    for (pc, instruction) in std::mem::take(&mut function.code).into_iter().enumerate() {
-        if dead.contains(&pc) {
-            continue;
-        }
-        code.push(match instruction {
-            Instr::Jump { target } => Instr::Jump {
-                target: remap(target)?,
-            },
-            Instr::BranchFalse { cond, target } => Instr::BranchFalse {
-                cond,
-                target: remap(target)?,
-            },
-            Instr::BranchTrue { cond, target } => Instr::BranchTrue {
-                cond,
-                target: remap(target)?,
-            },
-            Instr::BranchCompareFalse {
-                lhs,
-                op,
-                rhs,
-                target,
-            } => Instr::BranchCompareFalse {
-                lhs,
-                op,
-                rhs,
-                target: remap(target)?,
-            },
-            Instr::BranchCompareConstFalse {
-                lhs,
-                op,
-                constant,
-                target,
-            } => Instr::BranchCompareConstFalse {
-                lhs,
-                op,
-                constant,
-                target: remap(target)?,
-            },
-            Instr::BranchCompareTrue {
-                lhs,
-                op,
-                rhs,
-                target,
-            } => Instr::BranchCompareTrue {
-                lhs,
-                op,
-                rhs,
-                target: remap(target)?,
-            },
-            Instr::BranchCompareConstTrue {
-                lhs,
-                op,
-                constant,
-                target,
-            } => Instr::BranchCompareConstTrue {
-                lhs,
-                op,
-                constant,
-                target: remap(target)?,
-            },
-            Instr::BranchBinary {
-                op,
-                lhs,
-                rhs,
-                target,
-            } => Instr::BranchBinary {
-                op,
-                lhs,
-                rhs,
-                target: remap(target)?,
-            },
-            Instr::BranchBinaryConst {
-                op,
-                lhs,
-                constant,
-                target,
-            } => Instr::BranchBinaryConst {
-                op,
-                lhs,
-                constant,
-                target: remap(target)?,
-            },
-            Instr::BranchUnary { op, src, target } => Instr::BranchUnary {
-                op,
-                src,
-                target: remap(target)?,
-            },
-            Instr::Await { dst, input, resume } => {
-                let id = await_ids[resume as usize].get_or_insert_with(|| {
-                    let id = function.awaits.len() as u32;
-                    function.awaits.push(old_awaits[resume as usize]);
-                    id
-                });
-                Instr::Await {
-                    dst,
-                    input,
-                    resume: *id,
-                }
-            }
-            Instr::Yield {
-                input,
-                generator,
-                delegate,
-            } => {
-                let id = yield_ids[generator as usize].get_or_insert_with(|| {
-                    let id = function.yields.len() as u32;
-                    function.yields.push(old_yields[generator as usize]);
-                    id
-                });
-                Instr::Yield {
-                    input,
-                    generator: *id,
-                    delegate,
-                }
-            }
-            other => other,
-        });
-    }
-    function.code = code;
-
-    for site in &mut function.awaits {
-        site.fulfill_pc = remap(site.fulfill_pc as u32)? as usize;
-        site.reject_pc = remap(site.reject_pc as u32)? as usize;
-    }
-    for site in &mut function.yields {
-        site.next_pc = remap(site.next_pc as u32)? as usize;
-        site.throw_pc = remap(site.throw_pc as u32)? as usize;
-        site.return_pc = remap(site.return_pc as u32)? as usize;
-    }
-    if let Some(start) = &mut function.generator_start {
-        start.body_pc = remap(start.body_pc as u32)? as usize;
-    }
-    // Compaction can make distinct ranges equal. The VM prefers the latest
-    // start, then earliest end, then first table entry. Keep that tie order.
-    function
-        .handlers
-        .sort_by_key(|handler| (Reverse(handler.start_pc), handler.end_pc));
-    for handler in &mut function.handlers {
-        handler.start_pc = remap(handler.start_pc)?;
-        handler.end_pc = remap(handler.end_pc)?;
-        handler.target_pc = remap(handler.target_pc)?;
-    }
-    // An empty protected range has no throwing instructions left.
-    function
-        .handlers
-        .retain(|handler| handler.start_pc != handler.end_pc);
-    Ok(())
-}
-
 pub(crate) fn logical(reg: Reg) -> Slot {
     Slot {
         kind: SlotKind::Transient,
         index: reg,
     }
-}
-
-pub(crate) fn generator_stubs(function: &LoweredFunction) -> Vec<GeneratorEntry> {
-    function
-        .yields
-        .iter()
-        .map(|site| GeneratorEntry {
-            next_pc: site.next_pc as u32,
-            next_dst: logical(site.next),
-            throw_pc: site.throw_pc as u32,
-            throw_dst: logical(site.thrown),
-            return_pc: site.return_pc as u32,
-            saved_slots: Vec::new(),
-        })
-        .collect()
-}
-
-pub(crate) fn resume_stubs(function: &LoweredFunction) -> Vec<ResumeEntry> {
-    function
-        .awaits
-        .iter()
-        .map(|site| ResumeEntry {
-            fulfill_pc: site.fulfill_pc as u32,
-            fulfill_dst: logical(site.result),
-            reject_pc: site.reject_pc as u32,
-            reject_dst: logical(site.reject),
-            saved_slots: Vec::new(),
-        })
-        .collect()
 }

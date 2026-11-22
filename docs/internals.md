@@ -19,10 +19,11 @@ yield-harness  →  yield-compiler  →  yield-vm
   → frontend     解析可达模块，解析 import/export 目标
   → lower        绑定、异常、await  →  LoweredFunction
   → bindings     确定哪些 id 跨函数共享
+  → cfg          消费线性发射结果，建立带恢复边和异常边的基本块
   → promote      不共享的绑定变为逻辑寄存器；未逃逸循环绑定退出每轮环境
-  → propagate    CFG 跨块传播字面量和复制，折叠分支并移除不可达指令
+  → propagate    CFG 跨块传播字面量和复制，折叠分支并移除不可达块
   → analyze      CFG live-in（含恢复边与异常边），移除无副作用的死写入
-  → allocate     跨挂起的值分配固定持久槽，其余按活性区间复用瞬时槽
+  → allocate     按原块序布局字节码，再分配持久槽与可复用的瞬时槽
   → Build        版本化字节码；build_id = 执行相关字段的摘要
   → Vm           校验、运行、宿主操作、快照 / 恢复
 ```
@@ -70,7 +71,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
 | 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
-| 值传播 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`analyze.rs` 重算活性并删除无用的 `Move`、`Const`、`Undefined`；`ir.rs` 统一压缩并重映射 PC 和挂起表索引 |
+| 值传播 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`analyze.rs` 删除无用的 `Move`、`Const`、`Undefined` 并重算活性；`cfg/layout.rs` 最终生成跳转 PC、挂起表和逐 PC 的 live-in |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
@@ -85,7 +86,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 ## 4. 易错点
 
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
-- `allocate` 之前，每个 `Slot` 只是塞进 `SlotKind::Transient` 的逻辑寄存器。指令压缩由 `ir.rs::compact_dead_instructions` 统一重映射跳转、异常表、`AwaitSite` / `YieldSite` 和 `GeneratorStartSite`；压缩后为空的保护区不再登记。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
+- 分配物理槽之前，每个 `Slot` 都只是塞进 `SlotKind::Transient` 的逻辑寄存器。优化不改写 PC；最终布局才把块边编码成跳转、恢复表和异常表，保留生成器独占入口，不登记没有存活可抛指令的保护区。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
 - `instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
 - VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。
@@ -127,7 +128,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 ## 6. 代码约定细节
 
-- 新增 opcode：先加到 `yield_vm::bytecode::Instr`，再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。CFG 与槽分配不得按指令形状匹配。
+- 新增 opcode：先加到 `yield_vm::bytecode::Instr`，再改 `compiler/src/instr.rs`（uses/defs/throws/rewrite）与 lowerer。新增控制流指令还需更新 `cfg.rs` 和 `cfg/layout.rs`；优化不遍历字节码 PC。
 - 版本号：不兼容的字节码改动升 `BYTECODE_VERSION`（`crates/vm/src/bytecode.rs`）；快照记录形状改动升 `SNAPSHOT_FORMAT_VERSION`（`crates/vm/src/snapshot/record.rs`）；产物容器、magic 或 bincode 编码选项改动升 `BUILD_FORMAT_VERSION`（`crates/vm/src/bytecode.rs`）。三个契约各自独立，只有对应契约变化才升。`Build::finalize` 用 `compute_id` 设置 `build_id`；内容变化本身已使旧快照被拒绝，`build_id` 不是版本号的替代。`build_id` 与绑定指纹使用 xxh3-128 这一稳定的非加密摘要，只检测意外损坏和契约错配，不提供对抗篡改的安全性。构建摘要输入使用 bincode 固定整数、小端编码；编码选项与 crate 版本属于 `build_id` 契约，绑定指纹仍使用规范化文本。
 - 错误类型：`CompileError` 是带位置的结构体（`message`、`line`、`column`、`span`），不是 `thiserror` 枚举。`VmError` 是 `thiserror`（`InvalidBuild`、`InvalidSnapshot`、`MissingImport` / `MissingOperation`、`Host`、`HostFault`、`UnknownOperation`、`InvalidState`、`Thrown`）。脚本抛出是 `Value`（`ExecOutcome::Thrown`），不是 `VmError`，直到它拒绝某个异步结果。宿主绑定函数返回 `JsResult`（`JsError::Throw` / `JsError::Fault`）；宿主调度失败用 `HostFault`。`Host::report_error` 接收 `JsValue`。
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。

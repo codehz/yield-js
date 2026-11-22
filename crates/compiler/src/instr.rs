@@ -53,26 +53,15 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
             ..
         }
         | Instr::SetMember { .. } => true,
-        Instr::Binary { op, .. } | Instr::BinaryConst { op, .. } => {
-            !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
-        }
-        Instr::BranchCompareFalse { op, .. }
+        Instr::Binary { op, .. }
+        | Instr::BinaryConst { op, .. }
+        | Instr::BranchCompareFalse { op, .. }
         | Instr::BranchCompareConstFalse { op, .. }
         | Instr::BranchCompareTrue { op, .. }
         | Instr::BranchCompareConstTrue { op, .. }
         | Instr::BranchBinary { op, .. }
-        | Instr::BranchBinaryConst { op, .. } => {
-            !matches!(*op, BinaryOp::StrictEq | BinaryOp::StrictNe)
-        }
-        Instr::BranchUnary { op, .. } => matches!(
-            *op,
-            UnaryOp::Neg
-                | UnaryOp::Pos
-                | UnaryOp::BitNot
-                | UnaryOp::ToNumeric
-                | UnaryOp::Increment
-                | UnaryOp::Decrement
-        ),
+        | Instr::BranchBinaryConst { op, .. } => binary_may_throw(*op),
+        Instr::BranchUnary { op, .. } => branch_unary_may_throw(*op),
         Instr::Unary { op, .. } => {
             matches!(
                 *op,
@@ -131,6 +120,22 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::BranchTrue { .. }
         | Instr::Return { .. } => false,
     }
+}
+
+pub(crate) fn binary_may_throw(op: BinaryOp) -> bool {
+    !matches!(op, BinaryOp::StrictEq | BinaryOp::StrictNe)
+}
+
+pub(crate) fn branch_unary_may_throw(op: UnaryOp) -> bool {
+    matches!(
+        op,
+        UnaryOp::Neg
+            | UnaryOp::Pos
+            | UnaryOp::BitNot
+            | UnaryOp::ToNumeric
+            | UnaryOp::Increment
+            | UnaryOp::Decrement
+    )
 }
 
 pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
