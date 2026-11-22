@@ -51,6 +51,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `undefined` 是真实值。帧槽中的 `None` 表示未初始化，而不是 `undefined`。
 - 帧的瞬时槽和持久槽共用一块连续存储，但索引和边界各自独立。活动帧的两段槽都参与 GC；挂起时仍只按恢复表保存指定的持久槽。
 - 被其他函数读写的绑定、以及导出绑定，留在堆环境中。其余绑定是帧槽。既不共享绑定也不创建闭包的调用不分配环境。
+- 环境绑定访问有两层直接化。模块自身绑定改为 `GetModuleBindingDirect` / `SetModuleBindingDirect`，直接寻址模块环境而不走闭包链；这条路径不检查链接读取的 TDZ，嵌套闭包仍按普通读取看到未初始化的 `undefined`。其余绑定在提升后、函数及其所有者都没有 `SaveEnv` / `NewIterationEnv` / `RestoreEnv` 且闭包创建深度唯一时，改为带固定 `depth` 的 `GetBindingDirect` / `SetBindingDirect`；`depth` 从当前环境起算，模块环境为根，函数环境每层加一。带每轮环境的函数、类作用域闭包的外层绑定和创建深度不一致的函数保留 `GetBinding` / `SetBinding` 回退。两种 direct 写法都计入 `Function::needs_environment`（模块直接访问除外），槽分配与快照仍只知道普通环境/槽。
 - 循环头 `let` / `const` 只有被嵌套函数读写时才保留在每轮环境；未捕获的绑定提升为帧槽，循环各轮复用同一槽。循环体内若有被嵌套函数读写的块级声明，保留空绑定表的每轮环境以提供新单元格；否则删除整组 `SaveEnv` / `NewIterationEnv` / `RestoreEnv`。
 - `finally` 是显式完成状态（种类 + payload），不是原生异常栈。`finally` 内的嵌套 `await` 必须保留该待完成状态。
 - 准备成功后，`Await` 总是经微任务队列恢复，即使是已 settled 的 promise。抛错的 `constructor` getter 直接转入脚本异常处理器，不挂起。
@@ -66,7 +67,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | --- | --- |
 | 语法子集 | `compiler/src/lower`（worklist，不是递归借用）、`frontend.rs`；用 `unsupported()` 拒绝 |
 | 活性 / 哪些槽跨 await 或 yield 存活 | `analyze.rs`、`allocate.rs` |
-| 绑定逃逸 / 循环头环境省略 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup` |
+| 绑定逃逸 / 循环头环境省略 / 直接环境访问 | `bindings.rs`、`promote.rs` 与 lowerer 的 `IterationEnvGroup`、`direct_bindings` / `function_depths` |
 | 值传播 / 死写入 | `propagate.rs` 按 CFG 边求交并折叠常量条件；`analyze.rs` 重算活性并删除无用的 `Move`、`Const`、`Undefined`；`ir.rs` 统一压缩并重映射 PC 和挂起表索引 |
 | 新 opcode | `vm/src/bytecode.rs`、`vm/src/exec.rs`（值操作还需 `ops.rs`）、`compiler/src/instr.rs`、lowerer |
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |

@@ -96,7 +96,11 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::GetTemplate { .. }
         | Instr::GetBinding { .. }
         | Instr::SetBinding { .. }
+        | Instr::GetBindingDirect { .. }
+        | Instr::SetBindingDirect { .. }
         | Instr::DeclareBinding { .. }
+        | Instr::GetModuleBindingDirect { .. }
+        | Instr::SetModuleBindingDirect { .. }
         | Instr::SaveEnv { .. }
         | Instr::NewIterationEnv { .. }
         | Instr::RestoreEnv { .. }
@@ -279,6 +283,8 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         | Instr::NewObject { dst }
         | Instr::NewRegExp { dst, .. }
         | Instr::GetBinding { dst, .. }
+        | Instr::GetBindingDirect { dst, .. }
+        | Instr::GetModuleBindingDirect { dst, .. }
         | Instr::GetBuiltin { dst, .. }
         | Instr::GetTemplate { dst, .. } => {
             defs.insert(dst.index);
@@ -379,7 +385,9 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
             uses.insert(key.index);
             uses.insert(src.index);
         }
-        Instr::SetBinding { src, .. } => {
+        Instr::SetBinding { src, .. }
+        | Instr::SetBindingDirect { src, .. }
+        | Instr::SetModuleBindingDirect { src, .. } => {
             uses.insert(src.index);
         }
         Instr::DeclareBinding { .. } => {}
@@ -823,6 +831,42 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             src: remap(src),
         },
         Instr::DeclareBinding { binding } => Instr::DeclareBinding { binding },
+        Instr::GetBindingDirect {
+            dst,
+            depth,
+            binding,
+        } => Instr::GetBindingDirect {
+            dst: remap(dst),
+            depth,
+            binding,
+        },
+        Instr::SetBindingDirect {
+            depth,
+            binding,
+            src,
+        } => Instr::SetBindingDirect {
+            depth,
+            binding,
+            src: remap(src),
+        },
+        Instr::GetModuleBindingDirect {
+            dst,
+            module,
+            binding,
+        } => Instr::GetModuleBindingDirect {
+            dst: remap(dst),
+            module,
+            binding,
+        },
+        Instr::SetModuleBindingDirect {
+            module,
+            binding,
+            src,
+        } => Instr::SetModuleBindingDirect {
+            module,
+            binding,
+            src: remap(src),
+        },
         Instr::SaveEnv { dst } => Instr::SaveEnv { dst: remap(dst) },
         Instr::NewIterationEnv { parent, bindings } => Instr::NewIterationEnv {
             parent: remap(parent),

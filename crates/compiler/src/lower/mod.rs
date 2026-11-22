@@ -77,9 +77,11 @@ pub(crate) fn lower_graph<'ast>(
         let source = module.program.source_text;
         let result = (|| {
             let scope = ModuleScope {
+                index,
                 source,
                 entry: index == graph.entry,
                 slots: &reservations[index as usize],
+                module_bindings: reservations[index as usize].values().copied().collect(),
                 imports: module
                     .imports
                     .iter()
@@ -139,9 +141,11 @@ pub(crate) fn lower_graph<'ast>(
 }
 
 struct ModuleScope<'src> {
+    index: u32,
     source: &'src str,
     entry: bool,
     slots: &'src BTreeMap<&'src str, BindingId>,
+    module_bindings: BTreeSet<BindingId>,
     imports: BTreeMap<String, ModuleTarget>,
     preload: Option<&'src BTreeMap<String, Target>>,
 }
@@ -212,7 +216,7 @@ fn lower_module<'ast>(
             LoweringMode::Probe(&mut missing),
         )?;
     }
-    let lowered = lower_module_functions(
+    let mut lowered = lower_module_functions(
         session,
         scope,
         statements,
@@ -223,12 +227,227 @@ fn lower_module<'ast>(
     )?;
     let mut facts = bindings::classify(&lowered)?;
     facts.shared.extend(public);
+    for function in &mut lowered {
+        promote::promote(scope.source, function, &facts)?;
+    }
+    let depths = function_depths(&lowered, &[declaration, evaluation]);
+    let loop_free: BTreeSet<u32> = lowered
+        .iter()
+        .filter(|function| !has_iteration_environment(function))
+        .map(|function| function.func_id)
+        .collect();
     for mut function in lowered {
-        promote::promote(scope.source, &mut function, &facts)?;
+        direct_bindings(
+            &mut function,
+            scope.index,
+            &scope.module_bindings,
+            &facts,
+            &depths,
+            &loop_free,
+        );
         let allocated = allocate::allocate(scope.source, function, session.constants())?;
         session.push_function(allocated);
     }
     Ok(())
+}
+
+// `iteration_envs` is consumed by promotion's elision pass, so inspect the
+// final instruction stream instead of relying on the group metadata.
+fn has_iteration_environment(function: &LoweredFunction) -> bool {
+    function.code.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instr::SaveEnv { .. } | Instr::NewIterationEnv { .. } | Instr::RestoreEnv { .. }
+        )
+    })
+}
+
+/// Compiler-known environment depth for a function's own invocation
+/// environment, relative to its module environment. Only functions with no
+/// per-iteration environments and a consistent closure-creation depth qualify.
+fn function_depths(functions: &[LoweredFunction], initializers: &[u32]) -> BTreeMap<u32, u16> {
+    let initializers: BTreeSet<u32> = initializers.iter().copied().collect();
+    let by_id: BTreeMap<u32, &LoweredFunction> = functions
+        .iter()
+        .map(|function| (function.func_id, function))
+        .collect();
+    let mut sites: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut scoped = BTreeSet::new();
+    for function in functions {
+        let creator = function.func_id;
+        for instruction in &function.code {
+            match instruction {
+                Instr::Closure { function, .. } => {
+                    sites.entry(*function).or_default().push(creator);
+                }
+                Instr::ScopedClosure { function, .. } => {
+                    scoped.insert(*function);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn depth(
+        id: u32,
+        initializers: &BTreeSet<u32>,
+        by_id: &BTreeMap<u32, &LoweredFunction>,
+        sites: &BTreeMap<u32, Vec<u32>>,
+        scoped: &BTreeSet<u32>,
+        cache: &mut BTreeMap<u32, Option<u16>>,
+        visiting: &mut BTreeSet<u32>,
+    ) -> Option<u16> {
+        if initializers.contains(&id) {
+            return Some(0);
+        }
+        if let Some(cached) = cache.get(&id) {
+            return *cached;
+        }
+        if scoped.contains(&id) || !visiting.insert(id) {
+            cache.insert(id, None);
+            return None;
+        }
+        let mut result = None;
+        if let Some(creators) = sites.get(&id) {
+            for creator in creators {
+                let Some(function) = by_id.get(creator) else {
+                    result = None;
+                    break;
+                };
+                if has_iteration_environment(function) {
+                    result = None;
+                    break;
+                }
+                let Some(base) = depth(
+                    function.func_id,
+                    initializers,
+                    by_id,
+                    sites,
+                    scoped,
+                    cache,
+                    visiting,
+                ) else {
+                    result = None;
+                    break;
+                };
+                let Some(next) = base.checked_add(1) else {
+                    result = None;
+                    break;
+                };
+                match result {
+                    None => result = Some(next),
+                    Some(existing) if existing == next => {}
+                    Some(_) => {
+                        result = None;
+                        break;
+                    }
+                }
+            }
+        }
+        visiting.remove(&id);
+        cache.insert(id, result);
+        result
+    }
+
+    let mut cache = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    for &id in by_id.keys() {
+        depth(
+            id,
+            &initializers,
+            &by_id,
+            &sites,
+            &scoped,
+            &mut cache,
+            &mut visiting,
+        );
+    }
+    cache
+        .into_iter()
+        .filter_map(|(function, depth)| depth.map(|depth| (function, depth)))
+        .collect()
+}
+
+/// Replace environment-chain lookups with direct accesses. Module bindings
+/// address the module environment; other bindings use a compile-time depth
+/// when the function and owner are loop-free and the closure-creation chain is
+/// fixed. The direct forms deliberately skip the linked-read TDZ check so a
+/// nested closure still observes `undefined` for an uninitialized module slot.
+fn direct_bindings(
+    function: &mut LoweredFunction,
+    module: u32,
+    module_bindings: &BTreeSet<BindingId>,
+    facts: &bindings::BindingFacts,
+    depths: &BTreeMap<u32, u16>,
+    loop_free: &BTreeSet<u32>,
+) {
+    let current = function.func_id;
+    let loop_free_here = loop_free.contains(&current);
+    let base = depths.get(&current).copied();
+    for instruction in &mut function.code {
+        *instruction = match instruction {
+            Instr::GetBinding { dst, binding } => {
+                if module_bindings.contains(binding) {
+                    Instr::GetModuleBindingDirect {
+                        dst: *dst,
+                        module,
+                        binding: *binding,
+                    }
+                } else if loop_free_here
+                    && let Some(depth) =
+                        binding_depth(*binding, current, base, facts, depths, loop_free)
+                {
+                    Instr::GetBindingDirect {
+                        dst: *dst,
+                        depth,
+                        binding: *binding,
+                    }
+                } else {
+                    continue;
+                }
+            }
+            Instr::SetBinding { binding, src } => {
+                if module_bindings.contains(binding) {
+                    Instr::SetModuleBindingDirect {
+                        module,
+                        binding: *binding,
+                        src: *src,
+                    }
+                } else if loop_free_here
+                    && let Some(depth) =
+                        binding_depth(*binding, current, base, facts, depths, loop_free)
+                {
+                    Instr::SetBindingDirect {
+                        depth,
+                        binding: *binding,
+                        src: *src,
+                    }
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+    }
+}
+
+fn binding_depth(
+    binding: BindingId,
+    current: u32,
+    base: Option<u16>,
+    facts: &bindings::BindingFacts,
+    depths: &BTreeMap<u32, u16>,
+    loop_free: &BTreeSet<u32>,
+) -> Option<u16> {
+    let owner = *facts.owners.get(&binding)?;
+    if !loop_free.contains(&owner) {
+        return None;
+    }
+    if owner == current {
+        return Some(0);
+    }
+    let depth = base?.checked_sub(*depths.get(&owner)?)?;
+    (depth != 0).then_some(depth)
 }
 
 fn lower_module_functions<'ast>(

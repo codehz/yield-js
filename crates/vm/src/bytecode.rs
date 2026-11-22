@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::digest::Digest;
 use crate::value::{BindingId, JsBigInt, JsString};
 
-pub const BYTECODE_VERSION: u32 = 47;
+pub const BYTECODE_VERSION: u32 = 48;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
@@ -431,6 +431,36 @@ pub enum Instr {
     DeclareBinding {
         binding: BindingId,
     },
+    /// Reads a binding through a statically known number of environment
+    /// parents. `depth` is relative to the frame's current environment.
+    GetBindingDirect {
+        dst: Slot,
+        depth: u16,
+        binding: BindingId,
+    },
+    /// Writes a binding through a statically known environment depth.
+    SetBindingDirect {
+        depth: u16,
+        binding: BindingId,
+        src: Slot,
+    },
+    /// Reads a source module's own binding without walking the closure
+    /// environment chain. Unlike the linked `GetModuleBinding`, this keeps the
+    /// ordinary binding read rule that a present but uninitialized slot yields
+    /// `undefined`.
+    GetModuleBindingDirect {
+        dst: Slot,
+        module: u32,
+        binding: BindingId,
+    },
+    /// Writes a source module's own binding directly. It removes the module
+    /// TDZ marker only when the writing frame is the module environment itself,
+    /// matching `SetBinding` for a nested function.
+    SetModuleBindingDirect {
+        module: u32,
+        binding: BindingId,
+        src: Slot,
+    },
     /// Writes the frame's current environment to `dst`. Used by loops that
     /// need a fresh per-iteration environment and must restore the outer one.
     SaveEnv {
@@ -711,6 +741,8 @@ impl Function {
                 instruction,
                 Instr::GetBinding { .. }
                     | Instr::SetBinding { .. }
+                    | Instr::GetBindingDirect { .. }
+                    | Instr::SetBindingDirect { .. }
                     | Instr::DeclareBinding { .. }
                     | Instr::SaveEnv { .. }
                     | Instr::NewIterationEnv { .. }
@@ -1081,6 +1113,7 @@ impl Build {
                                     | Instr::Move { .. }
                                     | Instr::DeclareBinding { .. }
                                     | Instr::SetBinding { .. }
+                                    | Instr::SetModuleBindingDirect { .. }
                                     | Instr::Closure { .. }
                                     | Instr::Return { .. }
                             )
@@ -1809,6 +1842,48 @@ impl Build {
                 Instr::SetBinding { src, binding } => {
                     check_binding(*binding)?;
                     check_slot(*src, "SetBinding.src")?;
+                }
+                Instr::GetBindingDirect { dst, binding, .. } => {
+                    check_binding(*binding)?;
+                    check_slot(*dst, "GetBindingDirect.dst")?;
+                }
+                Instr::SetBindingDirect { src, binding, .. } => {
+                    check_binding(*binding)?;
+                    check_slot(*src, "SetBindingDirect.src")?;
+                }
+                Instr::GetModuleBindingDirect {
+                    dst,
+                    module,
+                    binding,
+                } => {
+                    check_slot(*dst, "GetModuleBindingDirect.dst")?;
+                    self.check_module_target(
+                        ModuleTarget::Binding {
+                            module: *module,
+                            binding: *binding,
+                        },
+                        binding_owners,
+                    )
+                    .map_err(|err| {
+                        format!("{location}: GetModuleBindingDirect at pc {pc}: {err}")
+                    })?;
+                }
+                Instr::SetModuleBindingDirect {
+                    module,
+                    binding,
+                    src,
+                } => {
+                    check_slot(*src, "SetModuleBindingDirect.src")?;
+                    self.check_module_target(
+                        ModuleTarget::Binding {
+                            module: *module,
+                            binding: *binding,
+                        },
+                        binding_owners,
+                    )
+                    .map_err(|err| {
+                        format!("{location}: SetModuleBindingDirect at pc {pc}: {err}")
+                    })?;
                 }
                 Instr::DeclareBinding { binding } => {
                     check_binding(*binding)?;

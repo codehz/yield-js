@@ -775,6 +775,72 @@ impl Heap {
             .ok_or_else(|| VmError::InvalidState(format!("binding {binding} is not initialized")))
     }
 
+    /// A read at a statically known parent depth. The compiler only emits this
+    /// when every path to the instruction has the same environment depth.
+    pub(crate) fn get_binding_direct(
+        &self,
+        env: ObjectId,
+        depth: u16,
+        binding: BindingId,
+    ) -> Result<Value, VmError> {
+        let owner = self.environment_at(env, depth)?;
+        self.environment(owner)?
+            .bindings
+            .get(&binding)
+            .cloned()
+            .ok_or_else(|| VmError::InvalidState(format!("binding {binding} is not declared")))
+    }
+
+    /// A write at a statically known parent depth. Only the current environment
+    /// clears an uninitialized marker, matching `SetBinding`.
+    pub(crate) fn set_binding_direct(
+        &mut self,
+        env: ObjectId,
+        depth: u16,
+        binding: BindingId,
+        value: Value,
+    ) -> Result<(), VmError> {
+        let owner = self.environment_at(env, depth)?;
+        let environment = self.environment_mut(owner)?;
+        let Some(slot) = environment.bindings.get_mut(&binding) else {
+            return Err(VmError::InvalidState(format!(
+                "binding {binding} is not declared"
+            )));
+        };
+        *slot = value;
+        if depth == 0 {
+            environment.uninitialized.remove(&binding);
+        }
+        Ok(())
+    }
+
+    fn environment_at(&self, env: ObjectId, depth: u16) -> Result<ObjectId, VmError> {
+        let mut current = env;
+        for _ in 0..depth {
+            current = self.environment(current)?.parent.ok_or_else(|| {
+                VmError::InvalidState("binding depth exceeds environment chain".into())
+            })?;
+        }
+        Ok(current)
+    }
+
+    /// A compiler-resolved read of a module's own binding. It deliberately
+    /// ignores the module TDZ marker so a nested closure keeps the ordinary
+    /// `GetBinding` behavior of seeing `undefined` before initialization.
+    pub(crate) fn get_module_binding_direct(
+        &self,
+        env: ObjectId,
+        binding: BindingId,
+    ) -> Result<Value, VmError> {
+        self.environment(env)?
+            .bindings
+            .get(&binding)
+            .cloned()
+            .ok_or_else(|| {
+                VmError::InvalidState(format!("module binding {binding} is not declared"))
+            })
+    }
+
     /// A linked read addresses the module itself, never a parent environment.
     /// `None` denotes the module's temporal dead zone, not a JS value.
     pub(crate) fn get_module_binding(
@@ -823,6 +889,29 @@ impl Heap {
         // A nested function retains ordinary assignment behavior but cannot
         // initialize the module's lexical slot for linked readers.
         if owner == env {
+            environment.uninitialized.remove(&binding);
+        }
+        Ok(())
+    }
+
+    /// Writes a module's own binding without searching parent environments.
+    /// `initialize` mirrors `SetBinding`'s `owner == env` rule: only the module
+    /// frame clears the linked-read TDZ marker.
+    pub(crate) fn set_module_binding_direct(
+        &mut self,
+        env: ObjectId,
+        binding: BindingId,
+        value: Value,
+        initialize: bool,
+    ) -> Result<(), VmError> {
+        let environment = self.environment_mut(env)?;
+        let Some(slot) = environment.bindings.get_mut(&binding) else {
+            return Err(VmError::InvalidState(format!(
+                "module binding {binding} is not declared"
+            )));
+        };
+        *slot = value;
+        if initialize {
             environment.uninitialized.remove(&binding);
         }
         Ok(())

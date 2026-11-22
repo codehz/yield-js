@@ -1322,6 +1322,49 @@ impl Vm {
                 self.heap.set_binding(env, binding, frame.read(src)?)?;
                 Ok(Step::Next)
             }
+            Instr::GetBindingDirect {
+                dst,
+                depth,
+                binding,
+            } => {
+                let env = frame
+                    .env
+                    .ok_or_else(|| VmError::InvalidState("binding read without env".to_owned()))?;
+                frame.write(dst, self.heap.get_binding_direct(env, depth, binding)?)?;
+                Ok(Step::Next)
+            }
+            Instr::SetBindingDirect {
+                depth,
+                binding,
+                src,
+            } => {
+                let env = frame
+                    .env
+                    .ok_or_else(|| VmError::InvalidState("binding write without env".to_owned()))?;
+                self.heap
+                    .set_binding_direct(env, depth, binding, frame.read(src)?)?;
+                Ok(Step::Next)
+            }
+            Instr::GetModuleBindingDirect {
+                dst,
+                module,
+                binding,
+            } => {
+                let env = self.module_environment(module)?;
+                frame.write(dst, self.heap.get_module_binding_direct(env, binding)?)?;
+                Ok(Step::Next)
+            }
+            Instr::SetModuleBindingDirect {
+                module,
+                binding,
+                src,
+            } => {
+                let env = self.module_environment(module)?;
+                let initialize = frame.env == Some(env);
+                self.heap
+                    .set_module_binding_direct(env, binding, frame.read(src)?, initialize)?;
+                Ok(Step::Next)
+            }
             Instr::DeclareBinding { binding } => {
                 let env = frame.env.ok_or_else(|| {
                     VmError::InvalidState("binding declaration without env".to_owned())
