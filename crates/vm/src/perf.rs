@@ -38,6 +38,12 @@ pub struct Startup {
     /// Validation, host linking, derived metadata, and VM setup, ending just
     /// before module instantiation.
     pub prepare: Duration,
+    /// Bytecode version and build identity checks, including JSON and SHA-256.
+    pub build_identity: Duration,
+    /// Structural checks on modules, functions, and instructions.
+    pub build_structure: Duration,
+    /// Host linking, derived metadata, and VM setup after validation.
+    pub link_and_setup: Duration,
     /// Module instantiation, evaluation, and draining initialization microtasks.
     pub initialize: Duration,
 }

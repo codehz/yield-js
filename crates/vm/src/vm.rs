@@ -256,7 +256,7 @@ impl Vm {
         Self::startup::<false>(build, host).map(|(vm, _)| vm)
     }
 
-    /// Construct a VM using the regular startup pipeline and time its two phases.
+    /// Construct a VM using the regular startup pipeline and time its phases.
     #[doc(hidden)]
     pub fn new_profiled(
         build: Build,
@@ -275,7 +275,19 @@ impl Vm {
         } else {
             None
         };
-        build.validate().map_err(VmError::InvalidBuild)?;
+        let mut digest_checked = None;
+        build
+            .validate_with_digest_checkpoint(|| {
+                if PROFILE {
+                    digest_checked = Some(std::time::Instant::now());
+                }
+            })
+            .map_err(VmError::InvalidBuild)?;
+        let validated = if PROFILE {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, &bindings)?;
         let mut vm = Self::empty(build, bindings.clone());
@@ -306,9 +318,15 @@ impl Vm {
         vm.run_until_idle(host)?;
         let profile = if PROFILE {
             let finished = std::time::Instant::now();
+            let started = started.expect("startup start time");
+            let digest_checked = digest_checked.expect("digest check end time");
+            let validated = validated.expect("validation end time");
             let initializing = initializing.expect("initialization start time");
             Some(crate::perf::Startup {
-                prepare: initializing.duration_since(started.expect("startup start time")),
+                prepare: initializing.duration_since(started),
+                build_identity: digest_checked.duration_since(started),
+                build_structure: validated.duration_since(digest_checked),
+                link_and_setup: initializing.duration_since(validated),
                 initialize: finished.duration_since(initializing),
             })
         } else {

@@ -874,6 +874,13 @@ impl Build {
 
     /// Structural validation performed before any script code runs.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_digest_checkpoint(|| {})
+    }
+
+    pub(crate) fn validate_with_digest_checkpoint(
+        &self,
+        after_digest: impl FnOnce(),
+    ) -> Result<(), String> {
         if self.bytecode_version != BYTECODE_VERSION {
             return Err(format!(
                 "unsupported bytecode version {}, expected {}",
@@ -883,6 +890,7 @@ impl Build {
         if self.build_id != self.compute_id() {
             return Err("build_id does not match the bytecode content".to_owned());
         }
+        after_digest();
         let mut func_ids = std::collections::BTreeSet::new();
         let mut func_names = std::collections::BTreeSet::new();
         for function in &self.functions {

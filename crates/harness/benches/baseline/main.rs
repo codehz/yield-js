@@ -78,6 +78,15 @@ fn run(workload: &Workload, samples: usize) {
         } else {
             let (vm, stages) = Vm::new_profiled(decoded, &mut host).expect("initialize VM");
             sample.times.push(("startup_prepare", stages.prepare));
+            sample
+                .times
+                .push(("startup_build_identity", stages.build_identity));
+            sample
+                .times
+                .push(("startup_build_structure", stages.build_structure));
+            sample
+                .times
+                .push(("startup_link_and_setup", stages.link_and_setup));
             sample.times.push(("startup_initialize", stages.initialize));
             vm
         };

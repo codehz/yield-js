@@ -1,0 +1,174 @@
+diff --git a/crates/vm/src/bytecode.rs b/crates/vm/src/bytecode.rs
+index b5e2cbf..3fee943 100644
+--- a/crates/vm/src/bytecode.rs
++++ b/crates/vm/src/bytecode.rs
+@@ -809,6 +809,12 @@ struct DigestInput<'a> {
+     preload: Option<u32>,
+ }
+ 
++struct ModuleValidation {
++    binding_owners: BTreeMap<BindingId, u32>,
++    initializers: BTreeSet<u32>,
++    getters: BTreeSet<u32>,
++}
++
+ impl Build {
+     pub fn new(
+         constants: Vec<Constant>,
+@@ -883,7 +889,7 @@ impl Build {
+         if self.build_id != self.compute_id() {
+             return Err("build_id does not match the bytecode content".to_owned());
+         }
+-        let mut func_ids = std::collections::BTreeSet::new();
++        let mut functions = BTreeMap::new();
+         let mut func_names = std::collections::BTreeSet::new();
+         for function in &self.functions {
+             if function.is_method && function.is_arrow {
+@@ -892,7 +898,7 @@ impl Build {
+                     function.func_id
+                 ));
+             }
+-            if !func_ids.insert(function.func_id) {
++            if functions.insert(function.func_id, function).is_some() {
+                 return Err(format!("duplicate func_id {}", function.func_id));
+             }
+             if function.name.is_empty() {
+@@ -931,9 +937,9 @@ impl Build {
+             }
+         }
+ 
+-        let (binding_owners, getters) = self.validate_modules()?;
++        let modules = self.validate_modules(&functions)?;
+         for function in &self.functions {
+-            self.validate_function(function, &private_limits, &binding_owners, &getters)?;
++            self.validate_function(function, &functions, &private_limits, &modules)?;
+         }
+         Ok(())
+     }
+@@ -950,7 +956,13 @@ impl Build {
+             .get(module as usize)
+             .and_then(|module| self.function(module.declaration))
+             .into_iter()
+-            .flat_map(|function| &function.code)
++            .flat_map(Self::declared_bindings)
++    }
++
++    fn declared_bindings(function: &Function) -> impl Iterator<Item = BindingId> + '_ {
++        function
++            .code
++            .iter()
+             .filter_map(|instruction| match instruction {
+                 Instr::DeclareBinding { binding } => Some(*binding),
+                 _ => None,
+@@ -966,7 +978,10 @@ impl Build {
+             .any(Function::needs_environment)
+     }
+ 
+-    fn validate_modules(&self) -> Result<(BTreeMap<BindingId, u32>, BTreeSet<u32>), String> {
++    fn validate_modules(
++        &self,
++        functions: &BTreeMap<u32, &Function>,
++    ) -> Result<ModuleValidation, String> {
+         let mut pending = vec![self.entry];
+         pending.extend(self.preload);
+         for &root in &pending {
+@@ -988,7 +1003,7 @@ impl Build {
+                 if !initializers.insert(initializer) {
+                     return Err(format!("module initializer {initializer} is not distinct"));
+                 }
+-                let function = self.function(initializer).ok_or_else(|| {
++                let function = functions.get(&initializer).ok_or_else(|| {
+                     format!(
+                         "module {:?} references missing initializer {initializer}",
+                         module.id
+@@ -1029,7 +1044,7 @@ impl Build {
+                     ));
+                 }
+             }
+-            for binding in self.module_bindings(index) {
++            for binding in Self::declared_bindings(functions[&module.declaration]) {
+                 if binding_owners.insert(binding, index).is_some() {
+                     return Err(format!("duplicate declaration of module binding {binding}"));
+                 }
+@@ -1059,7 +1074,7 @@ impl Build {
+                     Entry::Vacant(entry) => entry.insert(getter),
+                 };
+                 self.check_module_target(target, &binding_owners)?;
+-                let function = self.function(getter).ok_or_else(|| {
++                let function = functions.get(&getter).ok_or_else(|| {
+                     format!(
+                         "missing getter {getter} for module {:?} export {name:?}",
+                         module.id
+@@ -1080,7 +1095,11 @@ impl Build {
+                 }
+             }
+         }
+-        Ok((binding_owners, getters))
++        Ok(ModuleValidation {
++            binding_owners,
++            initializers,
++            getters,
++        })
+     }
+ 
+     fn has_no_invocation_inputs(function: &Function) -> bool {
+@@ -1169,10 +1188,15 @@ impl Build {
+     fn validate_function(
+         &self,
+         function: &Function,
++        functions: &BTreeMap<u32, &Function>,
+         private_limits: &BTreeMap<BindingId, u32>,
+-        binding_owners: &BTreeMap<BindingId, u32>,
+-        getters: &BTreeSet<u32>,
++        modules: &ModuleValidation,
+     ) -> Result<(), String> {
++        let ModuleValidation {
++            binding_owners,
++            initializers,
++            getters,
++        } = modules;
+         let check_private = |lexical, index| {
+             if private_limits
+                 .get(&lexical)
+@@ -1435,12 +1459,12 @@ impl Build {
+                     function: callee,
+                 } => {
+                     check_slot(*dst, "Closure.dst")?;
+-                    if self.is_initializer(*callee) || getters.contains(callee) {
++                    if initializers.contains(callee) || getters.contains(callee) {
+                         return Err(format!(
+                             "{location}: Closure at pc {pc} references reserved function {callee}"
+                         ));
+                     }
+-                    if self.function(*callee).is_none() {
++                    if !functions.contains_key(callee) {
+                         return Err(format!(
+                             "{location}: Closure at pc {pc} references function {callee}"
+                         ));
+@@ -1485,10 +1509,10 @@ impl Build {
+                     if let Some(key) = name_key {
+                         check_slot(*key, "CreateClass.name_key")?;
+                     }
+-                    if self.is_initializer(*constructor)
+-                        || !self
+-                            .function(*constructor)
+-                            .is_some_and(Function::is_constructable)
++                    if initializers.contains(constructor)
++                        || !functions
++                            .get(constructor)
++                            .is_some_and(|function| function.is_constructable())
+                     {
+                         return Err(format!(
+                             "{location}: invalid class constructor {constructor} at pc {pc}"
+@@ -1502,9 +1526,9 @@ impl Build {
+                 } => {
+                     check_slot(*dst, "ScopedClosure.dst")?;
+                     check_slot(*scope, "ScopedClosure.scope")?;
+-                    if self.is_initializer(*function)
++                    if initializers.contains(function)
+                         || getters.contains(function)
+-                        || self.function(*function).is_none()
++                        || !functions.contains_key(function)
+                     {
+                         return Err(format!(
+                             "{location}: invalid scoped closure function {function} at pc {pc}"
