@@ -48,6 +48,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 生成器对象是普通对象加一份暂停帧（`func_id`、状态、环境、按入口顺序排列的值）。异步生成器的记录另有 FIFO 请求队列；同步生成器的记录不含队列。`Executor` 状态从不进快照：捕获时写记录，恢复时拒绝。同步生成器重入恢复抛脚本 `TypeError`；异步生成器则改为追加请求。生成器只经 `Symbol.iterator` 消费，异步生成器只经 `Symbol.asyncIterator` 消费；不要在 `for...of` 中特判两者。
 - 异步生成器调用不分配结果 Promise：`GeneratorStart` 返回生成器对象。每次 `next` / `throw` / `return` 创建请求 Promise、入队，并一次一步驱动队列。队首是进行中的请求；`yield` 以 `done: false` 兑现它，正文返回或落底以 `done: true` 兑现，未捕获脚本异常使生成器完成并拒绝它。正文中的 `await` 记录唯一续体、把生成器标为 `Awaiting`、保留队首请求，并恢复同一正文——绝不新建请求。已完成的生成器以 `{value: undefined, done: true}` 结算 `next`，拒绝 `throw`，并通过持久化的 `ReactionJob::GeneratorClose` 同化 `return` 参数后报告 `done: true`；后续请求永不越过队首。
 - `undefined` 是真实值。帧槽中的 `None` 表示未初始化，而不是 `undefined`。
+- 帧的瞬时槽和持久槽共用一块连续存储，但索引和边界各自独立。活动帧的两段槽都参与 GC；挂起时仍只按恢复表保存指定的持久槽。
 - 被其他函数读写的绑定、以及导出绑定，留在堆环境中。其余绑定是帧槽。既不共享绑定也不创建闭包的调用不分配环境。
 - 循环头 `let` / `const` 只有被嵌套函数读写时才保留在每轮环境；未捕获的绑定提升为帧槽，循环各轮复用同一槽。循环体内若有被嵌套函数读写的块级声明，保留空绑定表的每轮环境以提供新单元格；否则删除整组 `SaveEnv` / `NewIterationEnv` / `RestoreEnv`。
 - `finally` 是显式完成状态（种类 + payload），不是原生异常栈。`finally` 内的嵌套 `await` 必须保留该待完成状态。

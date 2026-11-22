@@ -7,37 +7,6 @@ use crate::gc::{TraceRoots, Tracer};
 use crate::runtime::ContinuationTarget;
 use crate::value::{ObjectId, Value};
 
-struct SlotFile {
-    slots: Vec<Option<Value>>,
-}
-
-impl SlotFile {
-    fn new(count: u16) -> Self {
-        Self {
-            slots: vec![None; count as usize],
-        }
-    }
-
-    fn read(&self, index: u16, kind: SlotKind) -> Result<&Value, VmError> {
-        match self.slots.get(index as usize) {
-            Some(Some(value)) => Ok(value),
-            Some(None) | None => Err(VmError::InvalidState(format!(
-                "read of uninitialized {kind:?} slot {index}"
-            ))),
-        }
-    }
-
-    fn write(&mut self, index: u16, value: Value, kind: SlotKind) -> Result<(), VmError> {
-        let Some(slot) = self.slots.get_mut(index as usize) else {
-            return Err(VmError::InvalidState(format!(
-                "write to out-of-range {kind:?} slot {index}"
-            )));
-        };
-        *slot = Some(value);
-        Ok(())
-    }
-}
-
 pub(crate) struct Frame {
     pub(crate) function: usize,
     pub(crate) pc: usize,
@@ -49,8 +18,9 @@ pub(crate) struct Frame {
     pub(crate) generator: Option<ObjectId>,
     /// Callee function object. Only generators read it, for `.prototype`.
     pub(crate) callee: Option<ObjectId>,
-    transient: SlotFile,
-    persistent: SlotFile,
+    // The two slot kinds share storage, but each has its own index space.
+    slots: Vec<Option<Value>>,
+    transient_count: usize,
     /// Where this activation delivers its result. `None` for synchronous
     /// activations and for a generator body that must not await.
     pub(crate) target: Option<ContinuationTarget>,
@@ -63,6 +33,8 @@ impl Frame {
         env: Option<ObjectId>,
         target: Option<ContinuationTarget>,
     ) -> Self {
+        let transient_count = usize::from(function.transient_slots);
+        let slot_count = transient_count + usize::from(function.persistent_slots);
         Self {
             function: function_index,
             pc: 0,
@@ -70,8 +42,8 @@ impl Frame {
             generator_return: None,
             generator: None,
             callee: None,
-            transient: SlotFile::new(function.transient_slots),
-            persistent: SlotFile::new(function.persistent_slots),
+            slots: vec![None; slot_count],
+            transient_count,
             target,
         }
     }
@@ -81,11 +53,24 @@ impl Frame {
     }
 
     pub(crate) fn read_ref(&self, slot: Slot) -> Result<&Value, VmError> {
-        self.file(slot.kind).read(slot.index, slot.kind)
+        match self.file(slot.kind).get(usize::from(slot.index)) {
+            Some(Some(value)) => Ok(value),
+            _ => Err(VmError::InvalidState(format!(
+                "read of uninitialized {:?} slot {}",
+                slot.kind, slot.index
+            ))),
+        }
     }
 
     pub(crate) fn write(&mut self, slot: Slot, value: Value) -> Result<(), VmError> {
-        self.file_mut(slot.kind).write(slot.index, value, slot.kind)
+        let Some(dst) = self.file_mut(slot.kind).get_mut(usize::from(slot.index)) else {
+            return Err(VmError::InvalidState(format!(
+                "write to out-of-range {:?} slot {}",
+                slot.kind, slot.index
+            )));
+        };
+        *dst = Some(value);
+        Ok(())
     }
 
     pub(crate) fn read_list(&self, slots: &[Slot]) -> Result<Vec<Value>, VmError> {
@@ -95,21 +80,21 @@ impl Frame {
     pub(crate) fn read_saved(&self, slots: &[u16]) -> Result<Vec<Value>, VmError> {
         slots
             .iter()
-            .map(|index| self.persistent.read(*index, SlotKind::Persistent).cloned())
+            .map(|index| self.read(Slot::persistent(*index)))
             .collect()
     }
 
-    fn file(&self, kind: SlotKind) -> &SlotFile {
+    fn file(&self, kind: SlotKind) -> &[Option<Value>] {
         match kind {
-            SlotKind::Transient => &self.transient,
-            SlotKind::Persistent => &self.persistent,
+            SlotKind::Transient => &self.slots[..self.transient_count],
+            SlotKind::Persistent => &self.slots[self.transient_count..],
         }
     }
 
-    fn file_mut(&mut self, kind: SlotKind) -> &mut SlotFile {
+    fn file_mut(&mut self, kind: SlotKind) -> &mut [Option<Value>] {
         match kind {
-            SlotKind::Transient => &mut self.transient,
-            SlotKind::Persistent => &mut self.persistent,
+            SlotKind::Transient => &mut self.slots[..self.transient_count],
+            SlotKind::Persistent => &mut self.slots[self.transient_count..],
         }
     }
 }
@@ -121,13 +106,7 @@ impl TraceRoots for Frame {
         self.generator_return.trace(tracer)?;
         self.generator.trace(tracer)?;
         self.callee.trace(tracer)?;
-        for value in self
-            .transient
-            .slots
-            .iter()
-            .chain(&self.persistent.slots)
-            .flatten()
-        {
+        for value in self.slots.iter().flatten() {
             value.trace(tracer)?;
         }
         Ok(())
