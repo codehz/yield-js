@@ -24,6 +24,13 @@ pub(crate) enum TypedIndex {
     Valid(u64),
 }
 
+pub(crate) enum OwnPropertyLookup<'a> {
+    Found(OwnProperty<'a>),
+    Missing,
+    /// A canonical TypedArray index that must not walk the prototype chain.
+    InvalidTypedIndex,
+}
+
 /// CanonicalNumericIndexString: `-0` first, then an exact Number round-trip.
 pub(crate) fn canonical_numeric_index(text: &str) -> Option<f64> {
     if text == "-0" {
@@ -60,14 +67,6 @@ fn integer_index(number: f64) -> Option<u64> {
     Some(number as u64)
 }
 
-fn key_text(key: PropertyKeyRef<'_>) -> Option<String> {
-    match key {
-        PropertyKeyRef::String(text) => Some(text.to_owned()),
-        PropertyKeyRef::JsString(text) => text.to_utf8().ok(),
-        PropertyKeyRef::Symbol(_) => None,
-    }
-}
-
 impl Heap {
     pub(crate) fn buffer(&self, id: ObjectId) -> Result<Option<&ArrayBufferObject>, VmError> {
         Ok(match self.get(id)? {
@@ -99,13 +98,16 @@ impl Heap {
 
     /// Current extent of a TypedArray view, rounded down to whole elements.
     pub(crate) fn typed_range(&self, view: &TypedArrayObject) -> Result<ViewRange, VmError> {
+        Ok(self.typed_bytes_and_range(view)?.1)
+    }
+
+    fn typed_bytes_and_range(
+        &self,
+        view: &TypedArrayObject,
+    ) -> Result<(Option<&[u8]>, ViewRange), VmError> {
         let bytes = self.view_bytes(view.buffer)?;
-        Ok(view_range(
-            bytes,
-            view.byte_offset,
-            view.byte_length,
-            view.kind.bytes(),
-        ))
+        let range = view_range(bytes, view.byte_offset, view.byte_length, view.kind.bytes());
+        Ok((bytes, range))
     }
 
     pub(crate) fn data_view_range(&self, view: &DataViewObject) -> Result<ViewRange, VmError> {
@@ -127,10 +129,7 @@ impl Heap {
         let Some(view) = self.typed_array(id)? else {
             return Ok(TypedIndex::Ordinary);
         };
-        let Some(text) = key_text(key) else {
-            return Ok(TypedIndex::Ordinary);
-        };
-        let Some(number) = canonical_numeric_index(&text) else {
+        let Some(number) = numeric_index(key) else {
             return Ok(TypedIndex::Ordinary);
         };
         let Some(index) = integer_index(number) else {
@@ -149,13 +148,35 @@ impl Heap {
         id: ObjectId,
         key: PropertyKeyRef<'_>,
     ) -> Result<Option<OwnProperty<'_>>, VmError> {
-        match self.typed_index(id, key)? {
-            TypedIndex::Ordinary => Ok(self.get(id)?.own_property(key)),
-            TypedIndex::Invalid => Ok(None),
-            TypedIndex::Valid(index) => Ok(self.typed_element(id, index)?.map(|value| {
-                OwnProperty::Computed(Property::Data(value), crate::heap::Attributes::ORDINARY)
-            })),
+        Ok(match self.lookup_own_property(self.get(id)?, key)? {
+            OwnPropertyLookup::Found(property) => Some(property),
+            OwnPropertyLookup::Missing | OwnPropertyLookup::InvalidTypedIndex => None,
+        })
+    }
+
+    pub(crate) fn lookup_own_property<'a>(
+        &'a self,
+        object: &'a Object,
+        key: PropertyKeyRef<'_>,
+    ) -> Result<OwnPropertyLookup<'a>, VmError> {
+        if let Object::TypedArray(view) = object
+            && let Some(number) = numeric_index(key)
+        {
+            let Some(index) = integer_index(number) else {
+                return Ok(OwnPropertyLookup::InvalidTypedIndex);
+            };
+            return Ok(match self.typed_element_from_view(view, index)? {
+                Some(value) => OwnPropertyLookup::Found(OwnProperty::Computed(
+                    Property::Data(value),
+                    crate::heap::Attributes::ORDINARY,
+                )),
+                None => OwnPropertyLookup::InvalidTypedIndex,
+            });
         }
+        Ok(match object.own_property(key) {
+            Some(property) => OwnPropertyLookup::Found(property),
+            None => OwnPropertyLookup::Missing,
+        })
     }
 
     /// TypedArray [[OwnPropertyKeys]]: element indices, then every other own
@@ -194,20 +215,23 @@ impl Heap {
         let Some(view) = self.typed_array(id)? else {
             return Ok(None);
         };
+        self.typed_element_from_view(view, index)
+    }
+
+    fn typed_element_from_view(
+        &self,
+        view: &TypedArrayObject,
+        index: u64,
+    ) -> Result<Option<Value>, VmError> {
         let kind = view.kind;
-        let ViewRange::Bytes { start, len } = self.typed_range(view)? else {
-            return Ok(None);
-        };
-        let Some(position) = usize::try_from(index)
-            .ok()
-            .and_then(|index| index.checked_mul(kind.bytes()))
+        let (Some(bytes), ViewRange::Bytes { start, len }) = self.typed_bytes_and_range(view)?
         else {
             return Ok(None);
         };
-        if position + kind.bytes() > len {
+        if index >= (len / kind.bytes()) as u64 {
             return Ok(None);
         }
-        let bytes = self.view_bytes(view.buffer)?.unwrap_or_default();
+        let position = index as usize * kind.bytes();
         Ok(Some(decode(
             kind,
             load(&bytes[start + position..], kind, true),
@@ -252,5 +276,13 @@ impl Heap {
 /// Whether a key is a canonical numeric index string, which a TypedArray never
 /// stores as an ordinary property.
 pub(crate) fn is_canonical_index(key: PropertyKeyRef<'_>) -> bool {
-    key_text(key).is_some_and(|text| canonical_numeric_index(&text).is_some())
+    numeric_index(key).is_some()
+}
+
+fn numeric_index(key: PropertyKeyRef<'_>) -> Option<f64> {
+    match key {
+        PropertyKeyRef::String(text) => canonical_numeric_index(text),
+        PropertyKeyRef::JsString(text) => canonical_numeric_index(&text.to_utf8().ok()?),
+        PropertyKeyRef::Symbol(_) => None,
+    }
 }

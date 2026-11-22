@@ -10,7 +10,7 @@ mod object;
 mod store;
 mod types;
 
-pub(crate) use binary::TypedIndex;
+pub(crate) use binary::{OwnPropertyLookup, TypedIndex};
 pub use object::ReactionJob;
 pub(crate) use object::{EnvRole, OwnedEdge, push_value, string_own_property};
 pub(crate) use store::{Heap, object_id};

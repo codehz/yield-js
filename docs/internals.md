@@ -84,6 +84,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。VM 在 `new` / `restore` 校验 `Build` 后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。
 - 构建常量与宿主数字可能是非有限值。构建 JSON 与快照值使用同一套特殊数字标记；有限数字仍是 JSON number。
 - ID 是带溢出检查的计数器（`ObjectId`、`ContinuationId`）。快照 JSON 顺序遵循 `BTreeMap`。
+- 通用属性读取每层复用已取出的堆对象，只对 TypedArray 分类数值索引。普通自有属性缺失才继续查原型；TypedArray 的规范数值索引未命中直接返回 `undefined`。自有属性描述符查询则把两种未命中都视为无描述符。
 
 ## 5. 关键文件
 

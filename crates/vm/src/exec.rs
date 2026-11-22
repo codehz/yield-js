@@ -17,8 +17,8 @@ use crate::gc::ActiveRoots;
 use crate::heap::{
     AsyncCompletion, AsyncRequest, Attributes, BoundObject, ClassElement, DescriptorUpdate,
     GeneratorStatus, HAS_INSTANCE_SYMBOL, ITERATOR_SYMBOL, NativeObject, Object, OwnProperty,
-    PlainObject, PrivateElement, Property, ScriptClass, ScriptClassSource, TO_PRIMITIVE_SYMBOL,
-    TypedIndex, object_id, string_own_property,
+    OwnPropertyLookup, PlainObject, PrivateElement, Property, ScriptClass, ScriptClassSource,
+    TO_PRIMITIVE_SYMBOL, TypedIndex, object_id, string_own_property,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot as IntrinsicSlot};
@@ -1852,29 +1852,30 @@ impl Vm {
                 let receiver = receiver(self);
                 return self.proxy_get(host, roots, target, handler, key, &receiver);
             }
-            // Integer-indexed exotic [[Get]]: a canonical index never falls
-            // through to the prototype chain, even when it addresses nothing.
-            match self.heap.typed_index(id, key)? {
-                TypedIndex::Invalid => return Ok(Invocation::Value(Value::UNDEFINED)),
-                TypedIndex::Valid(_) | TypedIndex::Ordinary => {}
-            }
-            if let Some(property) = self.heap.own_property(id, key)? {
-                return match property.into_owned() {
-                    Property::Data(value) => Ok(Invocation::Value(value)),
-                    Property::Accessor { get: Some(get), .. } => {
-                        let receiver = receiver(self);
-                        self.invoke(
-                            host,
-                            roots,
-                            &Value::object(get),
-                            Arguments::EMPTY,
-                            &receiver,
-                        )
-                    }
-                    Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::UNDEFINED)),
-                };
-            }
-            current = object.prototype();
+            let property = match self.heap.lookup_own_property(object, key)? {
+                OwnPropertyLookup::Found(property) => property,
+                OwnPropertyLookup::Missing => {
+                    current = object.prototype();
+                    continue;
+                }
+                OwnPropertyLookup::InvalidTypedIndex => {
+                    return Ok(Invocation::Value(Value::UNDEFINED));
+                }
+            };
+            return match property.into_owned() {
+                Property::Data(value) => Ok(Invocation::Value(value)),
+                Property::Accessor { get: Some(get), .. } => {
+                    let receiver = receiver(self);
+                    self.invoke(
+                        host,
+                        roots,
+                        &Value::object(get),
+                        Arguments::EMPTY,
+                        &receiver,
+                    )
+                }
+                Property::Accessor { get: None, .. } => Ok(Invocation::Value(Value::UNDEFINED)),
+            };
         }
         Ok(Invocation::Value(Value::UNDEFINED))
     }

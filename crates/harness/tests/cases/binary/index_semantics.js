@@ -104,6 +104,27 @@ function body() {
     throw "an out-of-range write still reports success";
   }
 
+  at("prototypeAfterResizeAndDetach");
+  const buffer = new ArrayBuffer(4, { maxByteLength: 8 });
+  const fixed = new Uint16Array(buffer, 2, 1);
+  Object.setPrototypeOf(fixed, { "0": 42, "01": 24 });
+  fixed[0] = 11;
+  if (fixed[0] !== 11) {
+    throw "an in-range index must read the element at the view offset";
+  }
+  buffer.resize(2);
+  if (fixed[0] !== undefined || fixed["01"] !== 24) {
+    throw "an out-of-bounds view only stops lookup for canonical indices";
+  }
+  buffer.resize(4);
+  if (fixed[0] !== 0) {
+    throw "regrowth restores the element, not the prototype property";
+  }
+  buffer.transfer();
+  if (fixed[0] !== undefined || fixed["01"] !== 24) {
+    throw "a detached view only stops lookup for canonical indices";
+  }
+
   at("freeze");
   let frozen = false;
   try {
