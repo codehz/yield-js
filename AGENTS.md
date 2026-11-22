@@ -15,6 +15,8 @@ Keep this file an index plus binding rules. Mechanisms, invariants, and per-file
 | `docs/internals.md` | Crate pipeline, public entry points, suspend/resume and snapshot invariants, change-location table, easy-to-break areas, code conventions. |
 | `docs/testing.md` | Test layers, `// @` case contract, case categories, host declaration fixtures. |
 
+`docs/` 根目录只放持久文档（设计与当前契约）。临时性文档（性能基线、优化计划与对照数据）放在 `docs/perf/`，原始 CSV 数据留在其对应的子目录中。
+
 ## Rules
 
 - Do not implement or assume a design feature the code lacks.
