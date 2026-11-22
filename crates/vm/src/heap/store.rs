@@ -136,10 +136,11 @@ impl Heap {
             .checked_add(1)
             .expect("object id space exhausted");
         self.allocations += 1;
-        if let Object::ArrayBuffer(ArrayBufferObject { bytes, .. }) = &object {
-            if let Some(bytes) = bytes {
-                self.alloc_bytes += bytes.len() as u64;
-            }
+        if let Object::ArrayBuffer(ArrayBufferObject {
+            bytes: Some(bytes), ..
+        }) = &object
+        {
+            self.alloc_bytes += bytes.len() as u64;
         }
         self.objects.insert(id, object);
         id
