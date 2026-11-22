@@ -73,7 +73,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 标签模板 | `compiler/src/lower/expr.rs`（引用与调用顺序）、`compiler/src/session.rs`（`TemplateSite` 表）；对象创建与快照在 `vm/src/vm.rs`、`vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 新堆种类 | `vm/src/heap/object.rs` 的 `write_edges`（`ReactionJob` 的边同样在此）；GC 与快照捕获都经 `Heap::write_edges` 遍历，见 `vm/src/gc.rs`、`vm/src/snapshot/capture.rs` |
 | 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `SetMember` 预热与布局守卫 |
-| 函数 ID 索引 / 调用分派 | `vm/src/vm.rs` 的 `FunctionTable` / `FunctionIndices`；连续 ID 用密集表，稀疏 ID 用排序向量二分 |
+| 函数 ID 索引 / 调用分派 | `vm/src/vm.rs` 的 `FunctionTable` / `FunctionIndices`；连续 ID 用密集表，稀疏 ID 用排序向量二分。`vm/src/builtin/call.rs` 的 `Dispatch::Script` 携带 `callee` / `home` / `class`，避免 `invoke` 重复查堆 |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 恢复）；在 `harness/tests/e2e/` 补拒绝用例 |
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |

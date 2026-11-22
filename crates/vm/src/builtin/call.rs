@@ -26,6 +26,9 @@ pub(crate) enum Dispatch<'a> {
     Script {
         func_id: u32,
         env: ObjectId,
+        callee: ObjectId,
+        home: Option<ObjectId>,
+        class: bool,
     },
     Resolution(ObjectId),
     PromiseCallback(ObjectId),
@@ -124,15 +127,16 @@ impl Vm {
         let roots = &roots.with(&root_view);
         let roots = &roots.with(&args);
         match self.classify(callee)? {
-            Some(Dispatch::Script { func_id, env }) => {
-                if matches!(callee.view(), ValueRef::Object(id) if self.heap.function(id).is_some_and(|f| f.class.is_some()))
-                {
+            Some(Dispatch::Script {
+                func_id,
+                env,
+                callee,
+                home,
+                class,
+            }) => {
+                if class {
                     return self.throw_type_error("class constructor requires new");
                 }
-                let (callee_id, home) = match callee.view() {
-                    ValueRef::Object(id) => (Some(id), self.heap.function(id).and_then(|f| f.home)),
-                    _ => (None, None),
-                };
                 self.call_function(
                     host,
                     roots,
@@ -141,7 +145,7 @@ impl Vm {
                     args,
                     receiver,
                     (&Value::UNDEFINED, home),
-                    callee_id,
+                    Some(callee),
                 )
             }
             Some(Dispatch::Resolution(id)) => {
@@ -183,7 +187,7 @@ impl Vm {
         dispatch: Option<Dispatch<'_>>,
     ) -> Result<Option<Constructor>, VmError> {
         Ok(match dispatch {
-            Some(Dispatch::Script { func_id, env }) => {
+            Some(Dispatch::Script { func_id, env, .. }) => {
                 let index = self.function_index(func_id)?;
                 (!self.is_initializer(index) && self.build.functions[index].is_constructable())
                     .then_some(Constructor::Script { func_id, env })
@@ -556,6 +560,9 @@ impl Vm {
             return Ok(Some(Dispatch::Script {
                 func_id: function.func_id,
                 env: function.env,
+                callee: id,
+                home: function.home,
+                class: function.class.is_some(),
             }));
         }
         Ok(match self.heap.get(id)? {
