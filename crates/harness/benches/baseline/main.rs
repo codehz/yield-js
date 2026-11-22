@@ -18,6 +18,7 @@ fn main() {
     let mut compile_only = None;
     let mut reuse = false;
     let mut snapshot_codecs = false;
+    let mut restore_profile = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => {}
@@ -30,6 +31,8 @@ fn main() {
             "--verified-reuse" => panic!("reuse timings require a non-diagnostic build"),
             "--snapshot-codecs" if !perf::ENABLED => snapshot_codecs = true,
             "--snapshot-codecs" => panic!("snapshot timings require a non-diagnostic build"),
+            "--restore-profile" if !perf::ENABLED => restore_profile = true,
+            "--restore-profile" => panic!("restore timings require a non-diagnostic build"),
             _ => panic!("unknown baseline option: {arg}"),
         }
     }
@@ -43,6 +46,14 @@ fn main() {
     }
 
     println!("workload,metric,sample,value,unit");
+    if restore_profile {
+        for workload in [&REACT_REUSE].into_iter().chain(WORKLOADS) {
+            if workload.suspend.is_some() {
+                run_restore_profile(workload, samples);
+            }
+        }
+        return;
+    }
     if snapshot_codecs {
         for workload in [&REACT_REUSE].into_iter().chain(WORKLOADS) {
             if workload.suspend.is_some() {
@@ -145,6 +156,55 @@ fn run_reuse(workload: &Workload, samples: usize) {
             .into_iter()
             .zip(totals),
         );
+        if i >= WARMUP_SAMPLES {
+            sample.print(name, i - WARMUP_SAMPLES);
+        }
+    }
+}
+
+fn run_restore_profile(workload: &Workload, samples: usize) {
+    let program = VerifiedBuild::new((workload.build)()).expect("verify build");
+    let mut host = TestHost::default();
+    let mut source = Vm::new_verified(program.clone(), &mut host).expect("start snapshot source");
+    let roots = workload.suspend.unwrap()(&mut source, &mut host);
+    let snapshot = source.snapshot(&roots).expect("capture source");
+    drop(source);
+    drop(host);
+    let bytes = snapshot.to_bytes().unwrap();
+
+    let name = workload.name;
+    println!("{name},build_id,0,{},text", snapshot.build_id);
+    println!("{name},snapshot_objects,0,{},count", snapshot.objects.len());
+    for i in 0..WARMUP_SAMPLES + samples {
+        let mut sample = Sample::default();
+        let profiled_first = i % 2 == 1;
+        for profiled in [profiled_first, !profiled_first] {
+            let image = Snapshot::from_bytes(&bytes).expect("decode binary snapshot");
+            let mut host = TestHost::default();
+            let build = program.clone();
+            let mut vm = if profiled {
+                let (vm, profile) = Vm::restore_verified_profiled(image, build, &mut host)
+                    .expect("restore and profile");
+                sample.times.extend([
+                    ("profiled_restore", profile.total),
+                    ("compatibility", profile.compatibility),
+                    ("heap_insert", profile.heap_insert),
+                    ("heap_side_tables", profile.heap_side_tables),
+                    ("native_validation", profile.native_validation),
+                    ("state_load", profile.state_load),
+                    ("vm_assembly", profile.vm_assembly),
+                    ("graph_validation", profile.graph_validation),
+                    ("finalize", profile.finalize),
+                ]);
+                vm
+            } else {
+                sample.time("restore", || {
+                    Vm::restore_verified(image, build, &mut host).expect("restore")
+                })
+            };
+            vm.start_recovered_operations().unwrap();
+            workload.resume.unwrap()(&mut vm, &mut host, &roots);
+        }
         if i >= WARMUP_SAMPLES {
             sample.print(name, i - WARMUP_SAMPLES);
         }

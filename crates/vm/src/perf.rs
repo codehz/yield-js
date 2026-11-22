@@ -50,6 +50,29 @@ pub struct Startup {
     pub initialize: Duration,
 }
 
+/// Non-overlapping wall-clock phases of restoring a decoded snapshot with a
+/// verified build. Host operation rearming is not part of this profile.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Restore {
+    pub total: Duration,
+    /// Header, exact build and binding identity, and import resolution.
+    pub compatibility: Duration,
+    /// Move records into the heap, including local checks and RegExp rebuilds.
+    pub heap_insert: Duration,
+    /// Rebuild and validate generator, symbol, and private-element tables.
+    pub heap_side_tables: Duration,
+    /// Check native targets against current declarations.
+    pub native_validation: Duration,
+    /// Load and validate roots, module state, continuations and host work.
+    pub state_load: Duration,
+    /// Finalize heap allocation state, assemble the VM and install imports.
+    pub vm_assembly: Duration,
+    /// Validate native import objects, heap edges, promise jobs and combines.
+    pub graph_validation: Duration,
+    /// Settle pending operations and drop temporary restore data.
+    pub finalize: Duration,
+}
+
 std::thread_local! {
     static COUNTERS: Cell<Counters> = const { Cell::new(Counters {
         dispatches: 0,

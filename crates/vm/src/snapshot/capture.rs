@@ -341,7 +341,7 @@ impl Vm {
 
     pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_checked(snapshot, VerifiedBuild::new(build)?, host)
+        Self::restore_checked(snapshot, VerifiedBuild::new(build)?, host, |_| {})
     }
 
     /// Restore with an already validated program. The snapshot and current host
@@ -352,13 +352,38 @@ impl Vm {
         host: &mut dyn Host,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_checked(snapshot, build, host)
+        Self::restore_checked(snapshot, build, host, |_| {})
+    }
+
+    /// Restore through the regular verified path and time its phases.
+    #[doc(hidden)]
+    pub fn restore_verified_profiled(
+        snapshot: Snapshot,
+        build: VerifiedBuild,
+        host: &mut dyn Host,
+    ) -> Result<(Self, crate::perf::Restore), VmError> {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let mut last = start;
+        let mut profile = crate::perf::Restore::default();
+        check_snapshot_header(&snapshot)?;
+        let vm = Self::restore_checked(snapshot, build, host, |field| {
+            let now = Instant::now();
+            *field(&mut profile) = now.duration_since(last);
+            last = now;
+        })?;
+        let end = Instant::now();
+        profile.finalize = end.duration_since(last);
+        profile.total = end.duration_since(start);
+        Ok((vm, profile))
     }
 
     fn restore_checked(
         mut snapshot: Snapshot,
         build: VerifiedBuild,
         host: &mut dyn Host,
+        mut checkpoint: impl FnMut(fn(&mut crate::perf::Restore) -> &mut std::time::Duration),
     ) -> Result<Self, VmError> {
         if snapshot.build_id != build.build_id {
             return Err(VmError::InvalidSnapshot(format!(
@@ -375,6 +400,7 @@ impl Vm {
             )));
         }
         let resolved_imports = Self::resolve_imports(&build, &bindings)?;
+        checkpoint(|profile| &mut profile.compatibility);
 
         let mut heap = Heap::new();
         for ObjectRecord { id, mut object } in std::mem::take(&mut snapshot.objects) {
@@ -397,6 +423,7 @@ impl Vm {
             }
             heap.insert_restore(id, object)?;
         }
+        checkpoint(|profile| &mut profile.heap_insert);
         validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
         heap.combines = snapshot.combines.clone();
         heap.generators = load_generators(&build, &heap, snapshot.generators.clone())?;
@@ -414,7 +441,9 @@ impl Vm {
                 build.imports.len()
             )));
         }
+        checkpoint(|profile| &mut profile.heap_side_tables);
         validate_native_targets(&bindings, &heap)?;
+        checkpoint(|profile| &mut profile.native_validation);
         let host_classes = load_host_classes(&bindings, &heap, &snapshot.class_prototypes)?;
         let host_instances = load_host_instances(&bindings, &heap, &snapshot.host_instances)?;
         let module_states = load_module_states(&bindings, &heap, &snapshot.module_states)?;
@@ -441,6 +470,7 @@ impl Vm {
             snapshot.host_tasks,
             snapshot.next_host_task_id,
         )?;
+        checkpoint(|profile| &mut profile.state_load);
         let mut vm = Self::restored(
             build,
             bindings.clone(),
@@ -463,10 +493,12 @@ impl Vm {
         // Recovery can append new notifications; the captured ones must stay first.
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications.into();
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
+        checkpoint(|profile| &mut profile.vm_assembly);
         validate_native_import_objects(&vm.heap, &vm.imports)?;
         check_heap_edges(&vm.build, &vm.heap)?;
         validate_jobs(&vm.heap)?;
         validate_combines(&vm.heap)?;
+        checkpoint(|profile| &mut profile.graph_validation);
         vm.settle_restored_operations()?;
         vm.random_state = snapshot.random_state;
         Ok(vm)
