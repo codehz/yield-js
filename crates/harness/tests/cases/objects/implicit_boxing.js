@@ -28,17 +28,17 @@ export async function run() {
   expect(descriptor.enumerable).toBe(true);
   expect(descriptor.writable).toBe(false);
   expect(descriptor.configurable).toBe(false);
-  expect(descriptorTarget.hasOwnProperty("1")).toBe(true);
+  expect(Object.hasOwn(descriptorTarget, "1")).toBe(true);
   expect(descriptorTarget.propertyIsEnumerable("1")).toBe(true);
   expect(descriptorTarget.propertyIsEnumerable("length")).toBe(false);
-  expect(descriptorTarget.hasOwnProperty("length")).toBe(true);
+  expect(Object.hasOwn(descriptorTarget, "length")).toBe(true);
   expect(Object.getOwnPropertyDescriptor(descriptorTarget, "01")).toBe(undefined);
   const descriptors = Object.getOwnPropertyDescriptors("😀");
   expect(descriptors[0].value).toBe("\ud83d");
   expect(descriptors[1].value).toBe("\ude00");
   expect(descriptors.length.value).toBe(2);
   expect(descriptors.length.enumerable).toBe(false);
-  expect(Object.getOwnPropertyDescriptors(12).hasOwnProperty("length")).toBe(false);
+  expect(Object.hasOwn(Object.getOwnPropertyDescriptors(12), "length")).toBe(false);
 
   const inherited = Object.create({ inherited: 1 });
   inherited.own = 2;

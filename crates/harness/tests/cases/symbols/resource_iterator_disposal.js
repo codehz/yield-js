@@ -7,7 +7,7 @@ export async function run() {
     new Set().values(), "x".matchAll(/x/g), gen()];
   const dispose = iterators[0][Symbol.dispose];
   for (const it of iterators) {
-    if (it[Symbol.dispose] !== dispose || it.hasOwnProperty(Symbol.dispose)) return false;
+    if (it[Symbol.dispose] !== dispose || Object.hasOwn(it, Symbol.dispose)) return false;
     let called = false;
     it.return = function (...args) {
       called = this === it && args.length === 0;

@@ -30,8 +30,8 @@ export function run() {
     expect(Object.getPrototypeOf(box)).toBe(prototypes[i]);
     expect(Object.getPrototypeOf(value)).toBe(prototypes[i]);
     expect(Object.setPrototypeOf(value, null)).toBe(value);
-    expect(box.hasOwnProperty("valueOf")).toBe(false);
-    expect(box.hasOwnProperty("toString")).toBe(false);
+    expect(Object.hasOwn(box, "valueOf")).toBe(false);
+    expect(Object.hasOwn(box, "toString")).toBe(false);
   }
 
   const string = new String("A😀");

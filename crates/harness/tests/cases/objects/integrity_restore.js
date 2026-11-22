@@ -56,7 +56,7 @@ export async function run() {
   }
   expect(inheritedWriteError?.name).toBe("TypeError");
   expect(fixed.inherited).toBe(1);
-  expect(fixed.hasOwnProperty("inherited")).toBe(false);
+  expect(Object.hasOwn(fixed, "inherited")).toBe(false);
   expect(Reflect.defineProperty(fixed, "removable", {})).toBe(false);
   expect(Reflect.defineProperty(fixed, sym, {})).toBe(false);
   let definePropertiesError;

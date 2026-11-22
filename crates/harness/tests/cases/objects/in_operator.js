@@ -17,7 +17,7 @@ export async function run() {
   expect("own" in box).toBe(true);
   expect("inherited" in box).toBe(true);
   expect("missing" in box).toBe(false);
-  expect(box.hasOwnProperty("inherited")).toBe(false);
+  expect(Object.hasOwn(box, "inherited")).toBe(false);
   expect("call" in Box).toBe(true);
   expect("hasOwnProperty" in box).toBe(true);
   const array = [undefined];

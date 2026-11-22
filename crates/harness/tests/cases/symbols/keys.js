@@ -25,5 +25,5 @@ export async function run() {
   };
   holder[marker] = 5;
   expect(holder[marker]).toBe(5);
-  expect(holder.hasOwnProperty(marker)).toBe(true);
+  expect(Object.hasOwn(holder, marker)).toBe(true);
 }

@@ -14,9 +14,9 @@ export function run() {
     Array.prototype.pop = () => { throw "array"; };
     throw undefined;
   } catch (e) {
-    if (!(e instanceof ErrorType) || e.error !== "A" || e.hasOwnProperty("message") ||
+    if (!(e instanceof ErrorType) || e.error !== "A" || Object.hasOwn(e, "message") ||
         !(e.suppressed instanceof ErrorType) || e.suppressed.error !== "B" ||
-        !e.suppressed.hasOwnProperty("suppressed") || e.suppressed.suppressed !== undefined) return false;
+        !Object.hasOwn(e.suppressed, "suppressed") || e.suppressed.suppressed !== undefined) return false;
   }
   if (trace !== "BA") return false;
   const marker = {};

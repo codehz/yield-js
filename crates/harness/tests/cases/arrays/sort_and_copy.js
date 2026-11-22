@@ -7,11 +7,11 @@ export function run() {
   const copy = input.toSorted();
   expect(input[1]).toBe('b');
   expect(copy.join()).toBe('a,b,,');
-  expect(copy.hasOwnProperty(3)).toBe(true);
+  expect(Object.hasOwn(copy, 3)).toBe(true);
   expect(input.sort()).toBe(input);
   expect(input.join()).toBe('a,b,,');
-  expect(input.hasOwnProperty(2)).toBe(true);
-  expect(input.hasOwnProperty(3)).toBe(false);
+  expect(Object.hasOwn(input, 2)).toBe(true);
+  expect(Object.hasOwn(input, 3)).toBe(false);
   expect([{id:1,k:2},{id:2,k:1},{id:3,k:2}].toSorted((a,b) => a.k-b.k).map(x => x.id).join()).toBe('2,1,3');
 
   const unsorted = [3,1,2];
@@ -42,7 +42,7 @@ export function run() {
   Object.defineProperty(source,1,{get() { throw 'skip'; }});
   expect(source.with(-2,9).join()).toBe('1,9,3');
   expect(source.toSpliced(1,1,8,9).join()).toBe('1,8,9,3');
-  expect([1,,3].toSpliced().hasOwnProperty(1)).toBe(true);
+  expect(Object.hasOwn([1,,3].toSpliced(), 1)).toBe(true);
   expect([1,2,3].toSpliced(1).join()).toBe('1');
   expect([1,2,3].toSpliced(1,undefined).join()).toBe('1,2,3');
   try { source.with(3,9); } catch (e) { error = e.name; }

@@ -173,7 +173,7 @@ function body() {
 
   at("proxy");
   const proxy = new Proxy(new Uint8Array([6]), {});
-  if (proxy[0] !== 6 || Object.prototype.hasOwnProperty.call(proxy, "0") !== true) {
+  if (proxy[0] !== 6 || Object.hasOwn(proxy, "0") !== true) {
     throw "a proxy forwards element reads";
   }
   const shared = Object.getPrototypeOf(Uint8Array.prototype);

@@ -26,7 +26,7 @@ export async function run() {
   expect(delete (object?.[await wait("key")])).toBe(true);
   expect(getterCalls).toBe(0);
   expect(object.first).toBe(9);
-  expect(object.hasOwnProperty("first")).toBe(false);
+  expect(Object.hasOwn(object, "first")).toBe(false);
   expect(remove(object, "first")).toBe(true);
   expect("first" in object).toBe(true);
   expect(array.length).toBe(3);

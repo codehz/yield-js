@@ -3,7 +3,7 @@
 export async function run() {
   if (new Error(42).message !== "42") return "wrong numeric message";
   const empty = TypeError();
-  if (empty.name !== "TypeError" || empty.message !== "" || empty.hasOwnProperty("message")) {
+  if (empty.name !== "TypeError" || empty.message !== "" || Object.hasOwn(empty, "message")) {
     return "wrong default message";
   }
   if (Error("bare").stack.split("\n")[0] !== "Error: bare") return "wrong bare call";

@@ -10,14 +10,14 @@ export function run() {
   source.constructor = { [Symbol.species]:Species };
   const sliced = source.slice();
   expect(sliced.length).toBe(3);
-  expect(sliced.hasOwnProperty(1)).toBe(false);
+  expect(Object.hasOwn(sliced, 1)).toBe(false);
   expect(sliced[0]).toBe(1);
   const mapped = source.map(v => { gc(); return v*2; });
   expect(mapped[2]).toBe(6);
-  expect(mapped.hasOwnProperty('length')).toBe(false);
+  expect(Object.hasOwn(mapped, 'length')).toBe(false);
   const deleted = source.splice(0,2);
   expect(deleted.length).toBe(2);
-  expect(deleted.hasOwnProperty(1)).toBe(false);
+  expect(Object.hasOwn(deleted, 1)).toBe(false);
   expect(log.join()).toBe('3,3,2');
   expect(Array[Symbol.species]).toBe(Array);
   expect([new Proxy([,4],{})].flat().join()).toBe('4');
@@ -28,7 +28,7 @@ export function run() {
   expect(concat.length).toBe(5);
   expect(concat[1]).toBe(keep);
   expect(concat[2]).toBe(7);
-  expect(concat.hasOwnProperty(3)).toBe(false);
+  expect(Object.hasOwn(concat, 3)).toBe(false);
   expect(concat[4]).toBe(9);
   expect(Array.prototype.concat.call({get length() { throw 'not spread'; }}).length).toBe(1);
 
@@ -38,7 +38,7 @@ export function run() {
   expect(Array.of.call(Target,4,5).length).toBe(2);
   const like = Array.from.call(Target,{length:2,1:8});
   expect(like.length).toBe(2);
-  expect(like.hasOwnProperty(0)).toBe(true);
+  expect(Object.hasOwn(like, 0)).toBe(true);
   expect(like[1]).toBe(8);
   let closed = 0;
   let fail = false;

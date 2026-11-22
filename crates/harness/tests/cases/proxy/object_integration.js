@@ -14,8 +14,8 @@ export function run() {
     get(t, k, r) { return k === "a" ? 10 : Reflect.get(t, k, r); },
   });
   expect(Object.keys(source).join("|")).toBe("b|a");
-  expect(source.hasOwnProperty("hidden")).toBe(true);
-  expect(source.hasOwnProperty("missing")).toBe(false);
+  expect(Object.hasOwn(source, "hidden")).toBe(true);
+  expect(Object.hasOwn(source, "missing")).toBe(false);
   expect(JSON.stringify(source)).toBe('{"b":2,"a":10}');
   const descriptors = Object.getOwnPropertyDescriptors(source);
   expect(descriptors.a.value).toBe(1);

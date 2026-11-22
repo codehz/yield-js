@@ -41,7 +41,7 @@ export function run() {
   }
   expect(threw).toBe(true);
   expect(delete example.name).toBe(true);
-  expect(Object.prototype.hasOwnProperty.call(example, 'name')).toBe(false);
+  expect(Object.hasOwn(example, 'name')).toBe(false);
   expect(example.name).toBe('');
   expect(delete example.length).toBe(true);
   expect(example.length).toBe(0);

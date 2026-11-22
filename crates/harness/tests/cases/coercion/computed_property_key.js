@@ -27,7 +27,7 @@ export async function run() {
 
   order = "";
   Object.defineProperty(target, key, { value: 10 });
-  expect(target.hasOwnProperty(key)).toBe(true);
+  expect(Object.hasOwn(target, key)).toBe(true);
   expect(Object.getOwnPropertyDescriptor(target, key).value).toBe(10);
   expect(target[symbol]).toBe(10);
   expect(order).toBe("key;key;key;");

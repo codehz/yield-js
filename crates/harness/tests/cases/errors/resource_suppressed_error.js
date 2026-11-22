@@ -20,7 +20,7 @@ export function run() {
   expect(called.name).toBe("SuppressedError");
   expect(called.message).toBe("details");
   expect(conversions).toBe(1);
-  expect(called.hasOwnProperty("cause")).toBe(false);
+  expect(Object.hasOwn(called, "cause")).toBe(false);
   for (const [key, value] of [["error", error], ["suppressed", suppressed]]) {
     const descriptor = Object.getOwnPropertyDescriptor(called, key);
     expect(descriptor.value).toBe(value);
@@ -31,13 +31,13 @@ export function run() {
 
   const empty = new SuppressedError();
   expect(Object.getPrototypeOf(empty)).toBe(SuppressedError.prototype);
-  expect(empty.hasOwnProperty("message")).toBe(false);
+  expect(Object.hasOwn(empty, "message")).toBe(false);
   expect(empty.message).toBe("");
-  expect(empty.hasOwnProperty("error")).toBe(true);
-  expect(empty.hasOwnProperty("suppressed")).toBe(true);
+  expect(Object.hasOwn(empty, "error")).toBe(true);
+  expect(Object.hasOwn(empty, "suppressed")).toBe(true);
   expect(empty.error).toBe(undefined);
   expect(empty.suppressed).toBe(undefined);
-  expect(SuppressedError(error, suppressed, undefined, options).hasOwnProperty("message")).toBe(false);
+  expect(Object.hasOwn(SuppressedError(error, suppressed, undefined, options), "message")).toBe(false);
   expect(new SuppressedError(error, suppressed, null).message).toBe("null");
 
   class Derived extends SuppressedError {}

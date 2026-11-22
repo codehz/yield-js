@@ -35,7 +35,7 @@ export async function run() {
   const retained = new Retained();
   const retainedField = Reflect.ownKeys(retained)[0];
   const field = Reflect.ownKeys(instance)[0];
-  return fn === String.prototype.slice && !Object.prototype.hasOwnProperty.apply(fn, ['name'])
+  return fn === String.prototype.slice && !Object.hasOwn(fn, 'name')
     && fn.length === 7 && fn.apply('abc', [1]) === 'bc' && fn.call === undefined
     && bound.name === 'public bound' && bound() === 'bc'
     && Reflect.apply(stringify, bound, []) === 'function bound slice() { [native code] }'

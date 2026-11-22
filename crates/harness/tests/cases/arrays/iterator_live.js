@@ -5,7 +5,7 @@ import { expect } from 'test';
 export async function run() {
   const a = [1, 2];
   expect(a.values).toBe(a[Symbol.iterator]);
-  expect(a.hasOwnProperty(Symbol.iterator)).toBe(false);
+  expect(Object.hasOwn(a, Symbol.iterator)).toBe(false);
   const it = a.values();
   const other = a[Symbol.iterator]();
   expect(it[Symbol.iterator]()).toBe(it);
@@ -50,17 +50,17 @@ export async function run() {
   expect(again === after).toBe(false);
   expect(after.done).toBe(true);
   expect(again.done).toBe(true);
-  expect(after.hasOwnProperty("value")).toBe(true);
+  expect(Object.hasOwn(after, "value")).toBe(true);
   expect(after.value).toBe(undefined);
-  expect(again.hasOwnProperty("value")).toBe(true);
+  expect(Object.hasOwn(again, "value")).toBe(true);
   expect(again.value).toBe(undefined);
   expect(empty.done).toBe(true);
-  expect(empty.hasOwnProperty("value")).toBe(true);
+  expect(Object.hasOwn(empty, "value")).toBe(true);
   expect(empty.value).toBe(undefined);
   expect(borrowedValue.value).toBe(42);
   expect(borrowedValue.done).toBe(false);
-  expect(it.hasOwnProperty("next")).toBe(true);
+  expect(Object.hasOwn(it, "next")).toBe(true);
   expect(it.next).toBe(42);
-  expect(a.hasOwnProperty(Symbol.iterator)).toBe(true);
+  expect(Object.hasOwn(a, Symbol.iterator)).toBe(true);
   expect(a[Symbol.iterator]).toBe(43);
 }
