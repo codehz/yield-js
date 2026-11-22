@@ -142,6 +142,7 @@ builtin_globals! {
     "eval" => Global::Function(global_functions::EVAL),
     "Iterator" => Global::Function(super::iterator::OWNER),
     "DOMException" => Global::Owner(super::dom_exception::OWNER),
+    "structuredClone" => Global::Function(super::structured_clone::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

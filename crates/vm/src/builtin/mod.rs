@@ -99,6 +99,7 @@ mod reflect;
 pub(crate) mod regexp_runtime;
 pub(crate) mod roots;
 pub(crate) mod string;
+mod structured_clone;
 pub(super) mod symbol_family;
 
 pub(crate) use call::is_callable_object;

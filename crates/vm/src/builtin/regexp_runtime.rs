@@ -160,7 +160,7 @@ impl Vm {
         )
     }
 
-    fn alloc_compiled_regexp(
+    pub(super) fn alloc_compiled_regexp(
         &mut self,
         source: JsString,
         flags: crate::regexp::RegExpFlags,

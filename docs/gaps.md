@@ -40,6 +40,7 @@
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、DOMException、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | 只支持 UTF-8；不支持其它编码标签（`gbk` 等抛 `RangeError`），也不提供 `TextEncoderStream` / `TextDecoderStream`。`TextDecoder` 保留可变长流状态但不复用调用方的输入缓冲区；`decode` 的 `stream` 状态随快照保存 |
+| `structuredClone` | 只支持转移 `ArrayBuffer`；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
 
 未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
 

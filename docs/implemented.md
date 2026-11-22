@@ -135,6 +135,7 @@
 - Error 和原生错误构造器（包括 AggregateError）可从 `options` 读取继承或自有的 `cause`，作为不可枚举的自有属性安装；缺少该属性时不安装。原生错误构造器继承 `Error`，其原型各自拥有空的 `message` 数据属性。
 - `Error.isError(value)` 识别实际的 Error 内部标记（包括子类和 VM 自身创建的 Error），不依赖原型、`instanceof`、`Symbol.toStringTag` 或属性读取。
 - `DOMException` 必须用 `new` 构造；原型继承 `Error.prototype`。`name`、`message` 和旧式 `code` 由带品牌检查的只读 getter 提供，构造器和原型均定义历史常量。快照格式 **68** 保存内部名称和消息以及新增的内建根；字节码与二进制容器版本不变。
+- 同步全局 `structuredClone(value, { transfer })` 在同一 VM 内创建新对象图，保留循环与共享引用。普通对象复制可枚举自有字符串键，数组保留洞；Map、Set、日期、正则、错误、包装原始值和二进制视图按内部类型重建。转移列表转参和校验先于遍历，遍历成功后按顺序移动 `ArrayBuffer` 后备存储；后项失败不回滚前项。不可克隆值抛出 `DataCloneError`，用户 getter 或转参抛出的值原样传播。快照格式 **68** 同时登记该函数的固有根。
 - `SuppressedError(error, suppressed, message?)` 不读取 `cause` 选项，前两个值存为可写、可配置、不可枚举的自有属性。快照格式 **62** 保存新增的固有根并保留两个释放协议 Symbol。
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。
 - 快照格式 **64** 增加编译器私有清理函数根；这些函数不出现在全局名表或 `globalThis`。字节码仍使用现有的 `GetBuiltin`、调用和 `Await` 指令。
