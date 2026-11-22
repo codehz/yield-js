@@ -69,6 +69,8 @@ pub(crate) mod members {
         isSealed: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Sealed);
         freeze: 1 => |vm, host, roots, args, _| vm.set_integrity(host, roots, &args, IntegrityLevel::Frozen);
         isFrozen: 1 => |vm, host, roots, args, _| vm.test_integrity(host, roots, &args, IntegrityLevel::Frozen);
+        hasOwn: 2 => |vm, host, roots, args, _| vm.object_has_own(host, roots, &args);
+        groupBy: 2 => |vm, host, roots, args, _| vm.object_group_by(host, roots, &args);
     }
 
     prototype_calls! {

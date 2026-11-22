@@ -9,10 +9,40 @@ use crate::heap::{
 };
 use crate::host::Host;
 use crate::ops;
-use crate::runtime::Invocation;
+use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 impl Vm {
+    /// `Object.hasOwn(O, P)`.
+    ///
+    /// ToObject runs before ToPropertyKey, so a nullish target throws without
+    /// evaluating a key conversion. The lookup is [[GetOwnProperty]], which
+    /// gives proxy traps their invariants and exposes string indices.
+    pub(crate) fn object_has_own(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let target = args.first().unwrap_or(&UNDEFINED_VALUE);
+        if matches!(target.view(), ValueRef::Undefined | ValueRef::Null) {
+            return self.throw_type_error(roots, "Object.hasOwn requires a non-nullish value");
+        }
+        let object = self.coercible_object(target);
+        let roots = &roots.with(&object);
+        let key =
+            match self.coerce_property_key(host, roots, args.get(1).unwrap_or(&UNDEFINED_VALUE))? {
+                Ok(key) => key,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+        let roots = &roots.with(&key);
+        match self.own_descriptor(host, roots, object, key.borrowed())? {
+            Ok(descriptor) => Ok(Invocation::Value(Value::boolean(descriptor.is_some()))),
+            Err(error) => Ok(Invocation::Thrown(error)),
+        }
+    }
+
     pub(crate) fn object_keys(
         &mut self,
         host: &mut dyn Host,
@@ -214,6 +244,87 @@ impl Vm {
         };
         self.heap.set_own(result, key, value)?;
         Ok(Ok(()))
+    }
+
+    /// `Object.groupBy(items, callback)`.
+    ///
+    /// Groups keep the first occurrence order of their coerced property keys.
+    /// The result is a null-prototype object whose group arrays are ordinary
+    /// writable, enumerable, configurable data properties. Every abrupt exit
+    /// after GetIterator closes the iterator and keeps the original throw.
+    pub(crate) fn object_group_by(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        args: &[Value],
+    ) -> Result<Invocation, VmError> {
+        let roots = &roots.with(&args);
+        let items = args.first().unwrap_or(&UNDEFINED_VALUE);
+        if matches!(items.view(), ValueRef::Undefined | ValueRef::Null) {
+            return self.throw_type_error(roots, "Object.groupBy requires a non-nullish value");
+        }
+        let callback = args.get(1).unwrap_or(&UNDEFINED_VALUE);
+        if !self.is_callable(callback) {
+            return self.throw_type_error(roots, "Object.groupBy requires a callable callback");
+        }
+        let iterator_pair = match self.get_iterator(host, roots, items)? {
+            Ok(pair) => pair,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let roots = &roots.with(&iterator_pair);
+        let (iterator, next) = &iterator_pair;
+        let mut groups: Vec<(PropertyKey, Vec<Value>)> = Vec::new();
+        let mut index = 0u64;
+        loop {
+            let roots = &roots.with(&groups);
+            if index >= (1u64 << 53) - 1 {
+                let error =
+                    self.type_error(roots, "Object.groupBy exceeded the maximum group count")?;
+                self.close_iterator(host, &roots.with(&error), iterator)?;
+                return Ok(Invocation::Thrown(error));
+            }
+            let item = match self.iterator_step(host, roots, iterator, next)? {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            let roots = &roots.with(&item);
+            let call_args = [item.clone(), Value::number(index as f64)];
+            let roots = &roots.with(&call_args);
+            let key = match self.invoke(
+                host,
+                roots,
+                callback,
+                Arguments::Values(&call_args),
+                &UNDEFINED_VALUE,
+            )? {
+                Invocation::Value(key) => key,
+                Invocation::Thrown(error) => {
+                    self.close_iterator(host, &roots.with(&error), iterator)?;
+                    return Ok(Invocation::Thrown(error));
+                }
+            };
+            let roots = &roots.with(&key);
+            let key = match self.coerce_property_key(host, roots, &key)? {
+                Ok(key) => key,
+                Err(error) => {
+                    self.close_iterator(host, &roots.with(&error), iterator)?;
+                    return Ok(Invocation::Thrown(error));
+                }
+            };
+            match groups.iter_mut().find(|(existing, _)| *existing == key) {
+                Some((_, elements)) => elements.push(item),
+                None => groups.push((key, vec![item])),
+            }
+            index += 1;
+        }
+        let result = self.heap.alloc_plain_with(None);
+        for (key, elements) in groups {
+            let array = self.heap.alloc_array(elements);
+            self.heap
+                .define_data(result, key, Value::object(array), Attributes::ORDINARY)?;
+        }
+        Ok(Invocation::Value(Value::object(result)))
     }
 
     pub(crate) fn get_own_property_descriptor(
