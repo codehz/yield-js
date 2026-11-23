@@ -53,5 +53,9 @@ export async function run() {
     try { await result; } catch (error) { rejected = error instanceof TypeError; }
     eq(rejected, true, method + " brand rejection");
   }
+  const cloned = structuredClone(sliced);
+  eq(cloned instanceof Blob, true, "clone brand");
+  eq(await cloned.text(), "BC", "clone shares immutable bytes");
+  eq(await sliced.text(), "BC", "source still readable");
   return "ok";
 }

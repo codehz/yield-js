@@ -1,7 +1,6 @@
 //! Object URLs are capabilities rooted by a single VM, not a process registry.
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -19,6 +18,8 @@ const PREFIX: &str = "blob:null/";
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ObjectUrls {
     entries: BTreeMap<String, ObjectId>,
+    /// Monotonic name counter; restored names keep their embedded generation.
+    next: u64,
 }
 
 impl ObjectUrls {
@@ -36,16 +37,21 @@ impl ObjectUrls {
 
     pub(crate) fn validate(&self, heap: &Heap) -> Result<(), VmError> {
         for (key, id) in &self.entries {
-            if !key.strip_prefix(PREFIX).is_some_and(|suffix| {
-                suffix.len() == 36
-                    && suffix.bytes().enumerate().all(|(i, byte)| match i {
-                        8 | 13 | 18 | 23 => byte == b'-',
-                        14 => byte == b'4',
-                        19 => matches!(byte, b'8' | b'9' | b'a' | b'b'),
-                        _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
-                    })
-            }) || !matches!(heap.get(*id), Ok(Object::Blob { .. } | Object::File { .. }))
-            {
+            let valid =
+                key.strip_prefix(PREFIX).is_some_and(|suffix| {
+                    let Some((generation, name)) = suffix.split_once('/') else {
+                        return false;
+                    };
+                    !generation.is_empty()
+                        && !name.is_empty()
+                        && generation
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                }) && matches!(heap.get(*id), Ok(Object::Blob { .. } | Object::File { .. }));
+            if !valid {
                 return Err(VmError::InvalidSnapshot("invalid object URL entry".into()));
             }
         }
@@ -66,25 +72,18 @@ pub(crate) fn create(
     if !matches!(vm.heap.get(id)?, Object::Blob { .. } | Object::File { .. }) {
         return vm.throw_type_error(roots, "URL.createObjectURL requires a Blob");
     }
-    let mut random = [0u8; 16];
+    let generation = vm.epoch;
+    let mut next = vm.object_urls.next;
     loop {
-        if getrandom::fill(&mut random).is_err() {
-            return vm.throw_type_error(roots, "Unable to allocate an object URL");
-        }
-        random[6] = (random[6] & 0x0f) | 0x40;
-        random[8] = (random[8] & 0x3f) | 0x80;
-        let mut key = String::with_capacity(PREFIX.len() + 36);
-        key.push_str(PREFIX);
-        for (index, byte) in random.into_iter().enumerate() {
-            if matches!(index, 4 | 6 | 8 | 10) {
-                key.push('-');
-            }
-            write!(&mut key, "{byte:02x}").expect("write to String");
-        }
+        let key = format!("{PREFIX}{generation:x}/{next:x}");
+        next = next
+            .checked_add(1)
+            .ok_or_else(|| VmError::InvalidState("object URL name space exhausted".into()))?;
         if let std::collections::btree_map::Entry::Vacant(entry) = vm.object_urls.entries.entry(key)
         {
             let result = Value::string(entry.key().as_str().into());
             entry.insert(id);
+            vm.object_urls.next = next;
             return Ok(Invocation::Value(result));
         }
     }

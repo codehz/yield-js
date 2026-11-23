@@ -42,5 +42,12 @@ export async function run() {
   await rejects(() => fetch("file:///etc/passwd"), "file scheme");
   await rejects(() => fetch("ftp://example.test/x"), "ftp scheme");
   await rejects(() => fetch("http://example.test/"), "http without service");
+
+  const controller = new AbortController();
+  const marker = { reason: true };
+  controller.abort(marker);
+  let aborted = null;
+  try { await fetch("data:,x", { signal: controller.signal }); } catch (error) { aborted = error; }
+  eq(aborted, marker, "pre-aborted signal reason");
   return "ok";
 }
