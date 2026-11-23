@@ -12,7 +12,7 @@ use crate::error::VmError;
 use crate::exec::Hint;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject, TO_PRIMITIVE_SYMBOL};
-use crate::host::Host;
+use crate::host::{Host, TimeService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
@@ -23,11 +23,11 @@ mod members {
     use super::{Invocation, Value, numeric_time};
 
     static_calls! {
-        now: 0 => |_, host, _, _, _| Ok(Invocation::Value(Value::number(host.now_ms() as f64)));
+        now: 0 => |vm, _, _, _, _| Ok(Invocation::Value(Value::number(vm.time().now_ms() as f64)));
         parse: 1 => |vm, host, roots, args, _| {
             let roots = &roots.with(&args);
             let time = match vm.coerce_string(host, roots, args.first().unwrap_or(&Value::UNDEFINED))? {
-                Ok(string) => super::text::parse(&string, host)?,
+                Ok(string) => super::text::parse(&string, vm.time())?,
                 Err(error) => return Ok(Invocation::Thrown(error)),
             };
             Ok(numeric_time(time))
@@ -75,9 +75,10 @@ pub(crate) const OWNER: Owner = Owner::new(
         &[IntrinsicDef::constructor_with_target(
             CONSTRUCTOR,
             7,
-            |_, host, _, _, _| {
-                let now = host.now_ms();
-                let text = text::format_local(now, host, text::LocalPart::Full)?;
+            |vm, _, _, _, _| {
+                let clock = vm.time();
+                let now = clock.now_ms();
+                let text = text::format_local(now, clock, text::LocalPart::Full)?;
                 Ok(Invocation::Value(Value::string(text.into())))
             },
             construct_date,
@@ -132,7 +133,7 @@ fn construct_date(
 ) -> Result<Invocation, VmError> {
     let roots = &roots.with(&args);
     let time = match args.as_slice() {
-        [] => Some(host.now_ms()),
+        [] => Some(vm.time().now_ms()),
         [arg] => {
             if let ValueRef::Object(id) = arg.view()
                 && let Object::Date { time, .. } = vm.heap.get(id)?
@@ -144,7 +145,7 @@ fn construct_date(
                     Err(error) => return Ok(Invocation::Thrown(error)),
                 };
                 if let ValueRef::String(string) = primitive.view() {
-                    text::parse(string, host)?
+                    text::parse(string, vm.time())?
                 } else {
                     match vm.coerce_number(host, roots, &primitive)? {
                         Ok(number) => time_clip(number),
@@ -154,7 +155,7 @@ fn construct_date(
             }
         }
         _ => match calendar_arguments(vm, host, roots, &args)? {
-            Ok(time) => clip_local(time, host)?,
+            Ok(time) => clip_local(time, vm.time())?,
             Err(error) => return Ok(Invocation::Thrown(error)),
         },
     };
@@ -203,11 +204,11 @@ fn full_year(year: f64) -> f64 {
     }
 }
 
-fn clip_local(time: f64, host: &dyn Host) -> Result<Option<i64>, VmError> {
+fn clip_local(time: f64, clock: &dyn TimeService) -> Result<Option<i64>, VmError> {
     if !time.is_finite() {
         return Ok(None);
     }
-    Ok(time_clip(local_to_utc(time, host.time_zone())?))
+    Ok(time_clip(local_to_utc(time, &clock.time_zone())?))
 }
 
 fn numeric_time(time: Option<i64>) -> Invocation {

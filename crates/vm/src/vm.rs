@@ -170,6 +170,27 @@ pub(crate) struct RestoredState {
     pub(crate) module_namespaces: Vec<ObjectId>,
 }
 
+/// Picks the `wintertc.time` service from the linked bindings, falling back to
+/// the deterministic [`crate::host::DummyTimeService`].
+pub(crate) fn time_source(bindings: &crate::binding::Bindings) -> TimeSource {
+    TimeSource(
+        bindings
+            .service::<crate::host::TimeKey>()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(crate::host::DummyTimeService)),
+    )
+}
+
+/// Wall-clock source linked into a VM. Owns the `wintertc.time` service or the
+/// deterministic dummy fallback; `Debug` hides the trait object.
+pub(crate) struct TimeSource(Arc<dyn crate::host::TimeService>);
+
+impl std::fmt::Debug for TimeSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TimeSource")
+    }
+}
+
 /// Runtime-only metadata indexed by the original, validated function table.
 #[derive(Debug)]
 struct FunctionTable {
@@ -387,6 +408,8 @@ pub struct Vm {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) random_state: u64,
     pub(crate) clock: crate::runtime::VmClock,
+    /// Wall-clock source for `Date` and file timestamps.
+    pub(crate) time: TimeSource,
     pub(crate) base_url: Option<url::Url>,
     pub(crate) fetch_environment: crate::fetch::FetchEnvironment,
     pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
@@ -1631,6 +1654,11 @@ impl Vm {
         }
     }
 
+    /// The wall-clock source linked for this VM.
+    pub(crate) fn time(&self) -> &dyn crate::host::TimeService {
+        &*self.time.0
+    }
+
     pub(crate) fn restored(
         build: VerifiedBuild,
         bindings: Arc<Bindings>,
@@ -1689,6 +1717,7 @@ impl Vm {
             .map(|(id, _)| *id)
             .collect();
         let caches = property_caches(&build);
+        let time = time_source(&bindings);
         Self {
             property_caches: caches,
             build,
@@ -1725,6 +1754,7 @@ impl Vm {
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
+            time,
             base_url,
             fetch_environment,
             fetch_state,

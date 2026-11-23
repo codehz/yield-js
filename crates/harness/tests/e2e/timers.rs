@@ -198,17 +198,15 @@ fn timer_arm_failure_is_not_an_abort() {
 
 #[test]
 fn date_clock_rejects_out_of_range_changes_without_delivering_timers() {
-    use yield_vm::Host;
-
     const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
     let mut host = TestHost::new();
-    assert_eq!(host.now_ms(), 0);
-    assert_eq!(host.time_zone(), "Etc/UTC");
+    assert_eq!(host.time_service().now_ms(), 0);
+    assert_eq!(host.time_service().time_zone(), "Etc/UTC");
     host.set_time_zone("America/New_York");
-    assert_eq!(host.time_zone(), "America/New_York");
+    assert_eq!(host.time_service().time_zone(), "America/New_York");
 
     assert!(host.clock().set_time(MAX_DATE_MS + 1).is_err());
-    assert_eq!(host.now_ms(), 0);
+    assert_eq!(host.time_service().now_ms(), 0);
     host.clock().set_time(MAX_DATE_MS - 100).unwrap();
 
     let mut vm = Vm::new(build(SCHEDULE), &mut host, Default::default()).unwrap();
@@ -217,12 +215,12 @@ fn date_clock_rejects_out_of_range_changes_without_delivering_timers() {
     assert_eq!(registrations.len(), 3);
     for delta in [101, u64::MAX] {
         assert!(host.advance(&mut vm, delta).is_err());
-        assert_eq!(host.now_ms(), (MAX_DATE_MS - 100) as i64);
+        assert_eq!(host.time_service().now_ms(), (MAX_DATE_MS - 100) as i64);
         assert_eq!(host.clock().registrations(), registrations);
     }
 
     host.advance(&mut vm, 100).unwrap();
-    assert_eq!(host.now_ms(), MAX_DATE_MS as i64);
+    assert_eq!(host.time_service().now_ms(), MAX_DATE_MS as i64);
     assert!(host.clock().registrations().is_empty());
 }
 
@@ -416,22 +414,11 @@ mod chain {
     }
 }
 
-struct ChainHost(
-    std::sync::Arc<yield_vm::Bindings>,
-    std::sync::Arc<yield_harness::FakeClock>,
-);
+struct ChainHost(std::sync::Arc<yield_vm::Bindings>);
 
 impl yield_vm::Host for ChainHost {
     fn bindings(&self) -> std::sync::Arc<yield_vm::Bindings> {
         self.0.clone()
-    }
-
-    fn now_ms(&self) -> i64 {
-        self.1.now_ms()
-    }
-
-    fn time_zone(&self) -> &str {
-        "Etc/UTC"
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -457,7 +444,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
         services: services,
     }
     .unwrap();
-    let mut host = ChainHost(Arc::new(bindings), Arc::clone(&clock));
+    let mut host = ChainHost(Arc::new(bindings));
     let build = compile_main(
         r#"
         import { start, cancel } from 'chain';

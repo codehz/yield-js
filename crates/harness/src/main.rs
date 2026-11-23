@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use yield_compiler::{CompileOptions, MemoryResolver, compile};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
@@ -105,7 +104,6 @@ struct DemoHost {
     bindings: Arc<Bindings>,
     counters: Arc<DemoCounters>,
     labels: Arc<LabelService>,
-    time_zone: String,
 }
 
 impl DemoHost {
@@ -114,12 +112,11 @@ impl DemoHost {
             .map_err(|error| format!("failed to determine the system IANA time zone: {error}"))?;
         let counters = Arc::new(DemoCounters::default());
         let labels = Arc::new(LabelService::default());
-        let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels))?;
+        let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels), time_zone)?;
         Ok(Self {
             bindings: Arc::new(bindings),
             counters,
             labels,
-            time_zone,
         })
     }
 
@@ -145,27 +142,22 @@ impl Host for DemoHost {
         self.bindings.clone()
     }
 
-    fn now_ms(&self) -> i64 {
-        match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(elapsed) => elapsed.as_millis() as i64,
-            Err(error) => -(error.duration().as_nanos().div_ceil(1_000_000) as i64),
-        }
-    }
-
-    fn time_zone(&self) -> &str {
-        &self.time_zone
-    }
-
     fn report_error(&mut self, _error: JsValue) {}
 }
 
 fn demo_bindings(
     counters: Arc<DemoCounters>,
     labels: Arc<LabelService>,
+    time_zone: String,
 ) -> Result<Bindings, String> {
     let mut services = yield_vm::Services::default();
     services.insert::<DemoCountersKey>(counters)?;
     services.insert::<LabelServiceKey>(labels)?;
+    services
+        .insert::<yield_vm::host::TimeKey>(Arc::new(yield_vm::host::SystemTimeService::new(
+            time_zone,
+        )))
+        .map_err(|error| format!("failed to register the time service: {error}"))?;
     host_bindings! {
         dts: "demo.d.ts",
         modules: [demo],

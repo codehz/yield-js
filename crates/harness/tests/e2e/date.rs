@@ -1,6 +1,7 @@
 //! Date behavior with observable host clocks, IANA zones, and snapshot restore.
 
-use std::{cell::Cell, sync::Arc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use yield_harness::{TestHost, build};
 use yield_vm::{
@@ -8,26 +9,30 @@ use yield_vm::{
     VmError,
 };
 
+struct CountingTime {
+    clock_reads: AtomicUsize,
+    zone_reads: AtomicUsize,
+}
+
+impl yield_vm::host::TimeService for CountingTime {
+    fn now_ms(&self) -> i64 {
+        self.clock_reads.fetch_add(1, Ordering::Relaxed) as i64 * 1000
+    }
+
+    fn time_zone(&self) -> std::borrow::Cow<'_, str> {
+        self.zone_reads.fetch_add(1, Ordering::Relaxed);
+        std::borrow::Cow::Borrowed("Etc/UTC")
+    }
+}
+
 struct CountingHost {
     bindings: Arc<Bindings>,
-    clock_reads: Cell<usize>,
-    zone_reads: Cell<usize>,
+    time: Arc<CountingTime>,
 }
 
 impl Host for CountingHost {
     fn bindings(&self) -> Arc<Bindings> {
         self.bindings.clone()
-    }
-
-    fn now_ms(&self) -> i64 {
-        let reads = self.clock_reads.get();
-        self.clock_reads.set(reads + 1);
-        reads as i64 * 1000
-    }
-
-    fn time_zone(&self) -> &str {
-        self.zone_reads.set(self.zone_reads.get() + 1);
-        "Etc/UTC"
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -37,10 +42,16 @@ impl Host for CountingHost {
 
 #[test]
 fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
+    let time = Arc::new(CountingTime {
+        clock_reads: AtomicUsize::new(0),
+        zone_reads: AtomicUsize::new(0),
+    });
+    let bindings =
+        TestHost::with_time_service(Arc::clone(&time) as Arc<dyn yield_vm::host::TimeService>)
+            .bindings();
     let mut host = CountingHost {
-        bindings: TestHost::new().bindings(),
-        clock_reads: Cell::new(0),
-        zone_reads: Cell::new(0),
+        bindings,
+        time: Arc::clone(&time),
     };
     let mut vm = Vm::new(
         build(
@@ -68,8 +79,8 @@ fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
         Default::default(),
     )
     .unwrap();
-    assert_eq!(host.clock_reads.get(), 0);
-    assert_eq!(host.zone_reads.get(), 0);
+    assert_eq!(host.time.clock_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(host.time.zone_reads.load(Ordering::Relaxed), 0);
 
     for (entry, expected, clock_reads, uses_zone) in [
         ("now", Value::number(0.0), 1, false),
@@ -94,19 +105,23 @@ fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
             false,
         ),
     ] {
-        let before_clock = host.clock_reads.get();
-        let before_zone = host.zone_reads.get();
+        let before_clock = host.time.clock_reads.load(Ordering::Relaxed);
+        let before_zone = host.time.zone_reads.load(Ordering::Relaxed);
         assert_eq!(
             vm.start(&mut host, entry, vec![]).unwrap(),
             expected,
             "{entry}"
         );
         assert_eq!(
-            host.clock_reads.get() - before_clock,
+            host.time.clock_reads.load(Ordering::Relaxed) - before_clock,
             clock_reads,
             "{entry}"
         );
-        assert_eq!(host.zone_reads.get() > before_zone, uses_zone, "{entry}");
+        assert_eq!(
+            host.time.zone_reads.load(Ordering::Relaxed) > before_zone,
+            uses_zone,
+            "{entry}"
+        );
     }
 }
 

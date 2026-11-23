@@ -200,7 +200,7 @@ trait PayloadCodec<T> {
 
 服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。宿主先建立 `Services::default()`，用 `services.insert::<Key>(value)?` 注册，再将表作为 `host_bindings!` 的 `services:` 表达式传入；重复 ID 返回错误且不覆盖。链接后，`Bindings`、`CallCx` 和 `DecodeCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
-资源值不进入快照。默认只有契约的 ID 和版本进入绑定指纹，缺失或版本不匹配会拒绝恢复。五种可选内建适配器均不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；其余三种如下。
+资源值不进入快照。默认只有契约的 ID 和版本进入绑定指纹，缺失或版本不匹配会拒绝恢复。六种可选内建适配器均不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；`TimeKey`（`wintertc.time`，版本 `1`）注册 `Arc<dyn TimeService>`，为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区；未注册时 VM 回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）；其余三种如下。
 
 `FetchKey`（`wintertc.fetch`，协议版本 `1`）注册 `Arc<dyn FetchService>`。快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
 

@@ -35,14 +35,6 @@ impl Host for StrategyHost {
         self.bindings.clone()
     }
 
-    fn now_ms(&self) -> i64 {
-        0
-    }
-
-    fn time_zone(&self) -> &str {
-        "Etc/UTC"
-    }
-
     fn report_error(&mut self, _error: JsValue) {
         self.errors += 1;
     }

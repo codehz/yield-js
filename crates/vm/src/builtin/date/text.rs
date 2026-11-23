@@ -3,7 +3,7 @@ use std::fmt::Write;
 use crate::builtin::date_calendar::{
     Fields, fields, local_to_utc, make_date, make_day, make_time, offset_ms, time_clip,
 };
-use crate::host::Host;
+use crate::host::TimeService;
 use crate::{JsString, VmError};
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -18,7 +18,7 @@ pub(super) enum LocalPart {
     Time,
 }
 
-pub(super) fn parse(text: &JsString, host: &dyn Host) -> Result<Option<i64>, VmError> {
+pub(super) fn parse(text: &JsString, clock: &dyn TimeService) -> Result<Option<i64>, VmError> {
     // All supported spellings are ASCII; borrow the Latin-1 storage directly.
     let Some(text) = text
         .latin1_bytes()
@@ -30,7 +30,7 @@ pub(super) fn parse(text: &JsString, host: &dyn Host) -> Result<Option<i64>, VmE
     if let Some((wall, offset)) = parse_iso(text) {
         let utc = match offset {
             Some(offset) => wall - offset as f64,
-            None => local_to_utc(wall, host.time_zone())?,
+            None => local_to_utc(wall, &clock.time_zone())?,
         };
         Ok(time_clip(utc))
     } else if let Some((wall, offset)) = parse_canonical(text) {
@@ -41,17 +41,17 @@ pub(super) fn parse(text: &JsString, host: &dyn Host) -> Result<Option<i64>, VmE
         // A local TimeString prints only whole offset minutes. Recover a
         // matching subminute offset from the active IANA zone, if there is one.
         // Probe both ends because the rounded instant can straddle a transition.
-        let zone = host.time_zone();
+        let zone = clock.time_zone();
         let negative = printed < 0 || text.ends_with("GMT-0000");
         for nearby in [
             minute_instant,
             minute_instant - 59_000,
             minute_instant + 59_000,
         ] {
-            let actual = offset_ms(nearby, zone)?;
+            let actual = offset_ms(nearby, &zone)?;
             if (actual < 0) == negative && actual / MINUTE_MS * MINUTE_MS == printed {
                 let exact = wall as i64 - actual;
-                if (nearby == exact || actual == offset_ms(exact, zone)?)
+                if (nearby == exact || actual == offset_ms(exact, &zone)?)
                     && let Some(instant) = time_clip(exact as f64)
                 {
                     return Ok(Some(instant));
@@ -228,8 +228,12 @@ fn number(text: &mut &str, width: usize) -> Option<i64> {
     Some(value)
 }
 
-pub(super) fn format_local(time: i64, host: &dyn Host, part: LocalPart) -> Result<String, VmError> {
-    let offset = offset_ms(time, host.time_zone())?;
+pub(super) fn format_local(
+    time: i64,
+    clock: &dyn TimeService,
+    part: LocalPart,
+) -> Result<String, VmError> {
+    let offset = offset_ms(time, &clock.time_zone())?;
     let f = fields(time + offset);
     let mut text = String::with_capacity(match part {
         LocalPart::Full => 37,

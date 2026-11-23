@@ -37,7 +37,7 @@
 | Web Crypto | 支持随机方法及 `crypto.subtle` 的 SHA-256、raw 密钥导入/导出、PBKDF2-SHA-256 派生 AES-GCM、AES-GCM 加解密、HMAC-SHA-256 签名/校验子集。无全局 `Crypto` 接口对象，无不可导出密钥（因此 PBKDF2 只接受本实现的可导出 raw 密码），无其他格式、算法或用途；不提供 `generateKey`、`deriveBits`、`wrapKey`、`unwrapKey`。 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
-| `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |
+| `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数。未注册 `wintertc.time` 服务时使用固定 epoch 0 与 `Etc/UTC` 的 dummy 时间源 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥）。不实现 Annex B 的 `compile` 和旧式静态匹配属性，不保证覆盖全部 Annex B 兼容语法。 |
 | `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |

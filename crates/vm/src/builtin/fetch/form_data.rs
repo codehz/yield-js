@@ -228,7 +228,7 @@ impl Vm {
         let data = FileData {
             blob,
             name,
-            last_modified: last_modified.unwrap_or_else(|| blob_now(host)),
+            last_modified: last_modified.unwrap_or_else(|| blob_now(self.time())),
         };
         Ok(Ok(FormDataValue::File(alloc_file(self, data))))
     }

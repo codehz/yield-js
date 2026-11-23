@@ -71,8 +71,8 @@ pub(crate) fn alloc_file(vm: &mut Vm, data: FileData) -> ObjectId {
     })
 }
 
-pub(crate) fn blob_now(host: &dyn Host) -> i64 {
-    host.now_ms()
+pub(crate) fn blob_now(clock: &dyn crate::host::TimeService) -> i64 {
+    clock.now_ms()
 }
 
 macro_rules! converted {
@@ -469,7 +469,7 @@ fn construct(
             data: FileData {
                 blob,
                 name,
-                last_modified: last_modified.unwrap_or_else(|| blob_now(host)),
+                last_modified: last_modified.unwrap_or_else(|| blob_now(vm.time())),
             },
         }
     } else {

@@ -507,13 +507,43 @@ pub struct TestHost {
     labels: Arc<LabelService>,
     clock: Arc<FakeClock>,
     console: Option<Arc<CapturedConsole>>,
-    time_zone: String,
+    time: Arc<dyn yield_vm::TimeService>,
+    test_time: Option<Arc<TestTimeService>>,
     user_agent: Option<String>,
     errors: Vec<JsValue>,
     rejection_events: Vec<RejectionEvent>,
     gc_roots: Vec<yield_vm::Value>,
     pub reject_native: bool,
     fetch_environment: yield_vm::FetchEnvironment,
+}
+
+/// Clock-backed wall-clock time with a mutable local zone.
+pub struct TestTimeService {
+    clock: Arc<FakeClock>,
+    zone: std::sync::RwLock<String>,
+}
+
+impl TestTimeService {
+    fn new(clock: Arc<FakeClock>) -> Self {
+        Self {
+            clock,
+            zone: std::sync::RwLock::new("Etc/UTC".into()),
+        }
+    }
+
+    pub fn set_time_zone(&self, time_zone: impl Into<String>) {
+        *self.zone.write().expect("time zone lock") = time_zone.into();
+    }
+}
+
+impl yield_vm::host::TimeService for TestTimeService {
+    fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
+    fn time_zone(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Owned(self.zone.read().expect("time zone lock").clone())
+    }
 }
 
 impl Default for TestHost {
@@ -525,6 +555,19 @@ impl Default for TestHost {
 impl TestHost {
     pub fn new() -> Self {
         Self::with_services(
+            None,
+            true,
+            None,
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+            Self::default_subtle_service(),
+        )
+    }
+
+    /// A host whose `wintertc.time` service is the supplied adapter.
+    pub fn with_time_service(time: Arc<dyn yield_vm::TimeService>) -> Self {
+        Self::with_services(
+            Some(time),
             true,
             None,
             true,
@@ -535,6 +578,7 @@ impl TestHost {
 
     pub fn without_timer_service() -> Self {
         Self::with_services(
+            None,
             false,
             None,
             true,
@@ -545,6 +589,7 @@ impl TestHost {
 
     pub fn without_console_service() -> Self {
         Self::with_services(
+            None,
             true,
             None,
             false,
@@ -554,11 +599,12 @@ impl TestHost {
     }
 
     pub fn without_crypto_service() -> Self {
-        Self::with_services(true, None, true, None, Self::default_subtle_service())
+        Self::with_services(None, true, None, true, None, Self::default_subtle_service())
     }
 
     pub fn with_crypto_service(service: Arc<dyn CryptoService>) -> Self {
         Self::with_services(
+            None,
             true,
             None,
             true,
@@ -569,12 +615,20 @@ impl TestHost {
 
     /// Leaves the entropy service enabled but omits the SubtleCrypto adapter.
     pub fn without_subtle_service() -> Self {
-        Self::with_services(true, None, true, Some(Arc::new(DeterministicEntropy)), None)
+        Self::with_services(
+            None,
+            true,
+            None,
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+            None,
+        )
     }
 
     /// Replaces the default SubtleCrypto adapter without changing entropy.
     pub fn with_subtle_service(service: Arc<dyn SubtleCryptoService>) -> Self {
         Self::with_services(
+            None,
             true,
             None,
             true,
@@ -590,6 +644,7 @@ impl TestHost {
     /// A host that also registers an explicit Fetch adapter.
     pub fn with_fetch_service(service: Arc<dyn yield_vm::fetch::FetchService>) -> Self {
         Self::with_services(
+            None,
             true,
             Some(service),
             true,
@@ -599,6 +654,7 @@ impl TestHost {
     }
 
     fn with_services(
+        time: Option<Arc<dyn yield_vm::TimeService>>,
         timers: bool,
         fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
         capture_console: bool,
@@ -608,6 +664,14 @@ impl TestHost {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
+        let test_time = time
+            .is_none()
+            .then(|| Arc::new(TestTimeService::new(Arc::clone(&clock))));
+        let time = test_time
+            .clone()
+            .map(|time| time as Arc<dyn yield_vm::TimeService>)
+            .or(time)
+            .expect("a time service");
         let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
         let sink = console.clone().map(|sink| -> Arc<dyn ConsoleSink> { sink });
         let bindings = test_bindings(
@@ -618,6 +682,7 @@ impl TestHost {
             sink,
             crypto,
             subtle,
+            Arc::clone(&time),
         )
         .expect("test bindings");
         Self {
@@ -626,7 +691,8 @@ impl TestHost {
             labels,
             clock,
             console,
-            time_zone: "Etc/UTC".into(),
+            time,
+            test_time,
             user_agent: None,
             errors: Vec::new(),
             rejection_events: Vec::new(),
@@ -677,9 +743,17 @@ impl TestHost {
         &self.clock
     }
 
-    /// Sets the local time zone to the supplied IANA identifier.
+    /// The `wintertc.time` service linked into this host's bindings.
+    pub fn time_service(&self) -> &Arc<dyn yield_vm::TimeService> {
+        &self.time
+    }
+
+    /// Sets the local time zone to the supplied IANA identifier. Only the
+    /// default clock-backed time service accepts zone changes.
     pub fn set_time_zone(&mut self, time_zone: impl Into<String>) {
-        self.time_zone = time_zone.into();
+        if let Some(time) = &self.test_time {
+            time.set_time_zone(time_zone);
+        }
     }
 
     /// Overrides the value exposed as `navigator.userAgent` for new VMs.
@@ -737,14 +811,6 @@ impl Host for TestHost {
         self.bindings.clone()
     }
 
-    fn now_ms(&self) -> i64 {
-        self.clock.now_ms()
-    }
-
-    fn time_zone(&self) -> &str {
-        &self.time_zone
-    }
-
     fn user_agent(&self) -> Option<&str> {
         self.user_agent.as_deref()
     }
@@ -763,6 +829,7 @@ impl Host for TestHost {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn test_bindings(
     (counters, labels): (Arc<Counters>, Arc<LabelService>),
     clock: &Arc<FakeClock>,
@@ -771,12 +838,14 @@ fn test_bindings(
     console: Option<Arc<dyn ConsoleSink>>,
     crypto: Option<Arc<dyn CryptoService>>,
     subtle: Option<Arc<dyn SubtleCryptoService>>,
+    time: Arc<dyn yield_vm::TimeService>,
 ) -> Result<Bindings, String> {
     let mut services = Services::default();
     services.insert::<CountersKey>(counters)?;
     services.insert::<NodeFactoryKey>(NodeFactory)?;
     services.insert::<LabelServiceKey>(labels)?;
     services.insert::<timer::FakeClockKey>(Arc::clone(clock))?;
+    services.insert::<yield_vm::host::TimeKey>(time)?;
     if timers {
         services.insert::<TimerKey>(clock.clone())?;
     }

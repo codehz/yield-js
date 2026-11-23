@@ -113,12 +113,6 @@ impl Host for EventHost {
     fn bindings(&self) -> Arc<Bindings> {
         self.0.clone()
     }
-    fn now_ms(&self) -> i64 {
-        0
-    }
-    fn time_zone(&self) -> &str {
-        "Etc/UTC"
-    }
     fn report_error(&mut self, error: JsValue) {
         panic!("unexpected listener throw: {error:?}")
     }

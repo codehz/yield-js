@@ -459,7 +459,7 @@ fn package(
             value
         }
         BodyMode::FormData => {
-            let Some(entries) = parse_form(vm, host, mime, &bytes) else {
+            let Some(entries) = parse_form(vm, mime, &bytes) else {
                 return Ok(Settlement::Rejected(
                     vm.type_error(roots, "Invalid form body or Content-Type")?,
                 ));
@@ -591,12 +591,7 @@ fn parameters(mut text: &str) -> impl Iterator<Item = (&str, String)> {
     })
 }
 
-fn parse_form(
-    vm: &mut Vm,
-    host: &dyn Host,
-    mime: &str,
-    mut bytes: &[u8],
-) -> Option<Vec<(String, FormDataValue)>> {
+fn parse_form(vm: &mut Vm, mime: &str, mut bytes: &[u8]) -> Option<Vec<(String, FormDataValue)>> {
     let end = mime.find(';').unwrap_or(mime.len());
     let essence = mime[..end].trim();
     if essence.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
@@ -684,7 +679,7 @@ fn parse_form(
                         mime_type,
                     },
                     name: filename,
-                    last_modified: host.now_ms(),
+                    last_modified: vm.time().now_ms(),
                 },
             ))
         } else {

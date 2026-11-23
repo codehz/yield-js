@@ -104,7 +104,8 @@ pub use fetch::{
 pub use heap::{Object, PromiseState};
 pub use host::{
     CRYPTO_SUBTLE_PROTOCOL_VERSION, Completion, ConsoleKey, ConsoleSink, CryptoKey, CryptoService,
-    Host, SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService, TimerKey,
+    DummyTimeService, Host, SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService,
+    SystemTimeService, TimeKey, TimeService, TimerKey,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};

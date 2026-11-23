@@ -5,7 +5,7 @@
 use super::vm::{
     IMPORT_EXPORT_ATTRIBUTES, ImportModule, MODULE_EXPORT_ATTRIBUTES, PRELOAD_EXPORT_ATTRIBUTES,
     ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, host_function_metadata,
-    module_getter_capture, next_epoch, property_caches,
+    module_getter_capture, next_epoch, property_caches, time_source,
 };
 use crate::binding::{Bindings, ExportDecl, NativeTarget};
 use crate::bytecode::Build;
@@ -150,6 +150,7 @@ impl Vm {
     }
 
     fn empty(build: VerifiedBuild, bindings: Arc<Bindings>, clock: VmClock) -> Self {
+        let time = time_source(&bindings);
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
         let caches = property_caches(&build);
         Self {
@@ -188,6 +189,7 @@ impl Vm {
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
+            time,
             base_url: None,
             fetch_environment: Default::default(),
             fetch_state: Default::default(),
