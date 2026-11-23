@@ -87,10 +87,10 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 普通属性表 / 写侧站点缓存 | `vm/src/heap/types.rs` 的小表排序向量与大表 `BTreeMap`、`vm/src/heap/store.rs` 的 `plain_data_slot` / `set_plain_slot`、`vm/src/exec.rs` 的 `write_member` 预热与布局守卫（`SetMember` 指令分支在 `vm/src/exec/object.rs`） |
 | 函数 ID 索引 / 调用分派 | `vm/src/vm.rs` 的 `FunctionTable` / `FunctionIndices`；连续 ID 用密集表，稀疏 ID 用排序向量二分。`vm/src/builtin/call.rs` 的 `Dispatch::Script` 携带 `callee` / `home` / `class`，避免 `invoke` 重复查堆 |
 | 快照或恢复校验 | `vm/src/snapshot/`（`record.rs` 形状、`capture.rs` 入口与 `capture/` 下按校验、堆边、装载、续体、微任务分文件的恢复逻辑）；在 `harness/tests/e2e/` 补拒绝用例 |
-| 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
+| 宿主协议 | `vm/src/host/`（`mod.rs` 的 `Host` / `Completion`；`console.rs`、`crypto.rs`、`time.rs`、`timer.rs` 各自持有服务契约与 `ServiceKey`）、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
 | Fetch 对象与获取算法 | `vm/src/builtin/fetch/`（`blob`/`headers`/`form_data`/`body`/`request`/`response`/`controller`/`transaction`）；对象记录在 `vm/src/heap/types.rs` 与 `check_edges.rs`，控制器只在 VM 线程推进，适配器见 `vm/src/fetch.rs` |
-| 全局别名 / navigator | `vm/src/builtin/globals.rs`（`BUILTINS` 只能追加，旧索引保持不变）、`vm/src/builtin/navigator.rs`（宿主 `user_agent`、编译目标平台、只读属性）、`vm/src/host.rs` |
+| 全局别名 / navigator | `vm/src/builtin/globals.rs`（`BUILTINS` 只能追加，旧索引保持不变）、`vm/src/builtin/navigator.rs`（宿主 `user_agent`、编译目标平台、只读属性）、`vm/src/host/mod.rs` |
 | 可观察的 JS 行为 | 一个 `.js` 用例，不是新的 Rust harness |
 | ArrayBuffer / DataView / TypedArray / TextEncoder / TextDecoder 成员 | `vm/src/builtin/binary/`（`buffer.rs`、`view.rs`、`typed.rs`、`element.rs`、`codec.rs`、`text.rs`）；异形索引查找在 `vm/src/heap/binary.rs` |
 
