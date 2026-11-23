@@ -112,7 +112,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 | --- | --- |
 | 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`DOMException`、`AbortController`、`AbortSignal`。监听器、取消原因与信号关系由 VM 持有；`AbortSignal.timeout()` 复用宿主定时器能力。不引入 DOM 节点或事件树。 |
 | 全局错误与拒绝 | `reportError`、`ErrorEvent`、`PromiseRejectionEvent`、`onerror`、`onunhandledrejection`、`onrejectionhandled`。目标全局对象由 VM 实现 `EventTarget`，支持全局监听及上述处理器属性；遵循异常报告和 Promise 拒绝跟踪的通知时机及取消规则。宿主日志是报告出口，不替代脚本通知。 |
-| 消息与克隆 | `MessageChannel`、`MessagePort`、`MessageEvent`、`structuredClone`。VM 持有端口配对、任务队列、关闭和转移状态；补齐规范所需的克隆与转移类型（如 `Blob`、`File`、`MessagePort`），不要求 Worker。 |
+| 消息与克隆 | `structuredClone`。补齐规范所需的克隆与转移类型（如 `Blob`、`File`），不要求 Worker。`MessageChannel`、`MessagePort`、`MessageEvent` 暂不作为开发目标：端口配对与任务投递在可恢复 VM 的语义下不易实现（挂起任务与快照恢复边界难以定义），留待后续重新评估。 |
 | 定时器与时钟 | `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval` 由 VM 实现脚本语义，由可选宿主能力唤醒。`Performance`、`performance.now()`、`performance.timeOrigin` 完全由 VM 提供。禁止运行时编译，故字符串 timer handler 不支持。 |
 | 全局别名与标识 | `globalThis`、`self`、`navigator.userAgent`。`self` 初始值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
 | 编码与 Base64 | `atob`／`btoa` 按 HTML 字符串 API 实现。`TextEncoder` 和 `TextEncoderStream` 仅输出 UTF-8；`TextDecoder` 和 `TextDecoderStream` 仅支持 UTF-8、UTF-16LE、UTF-16BE 及其在 Encoding Standard 中定义的标签，其他标签抛 `RangeError`，不纳入实现目标。支持范围内遵循 Encoding Standard 的增量处理、BOM 和错误语义；两个流接口提供 `readable`／`writable`，增量编解码状态随 VM 快照恢复。 |
