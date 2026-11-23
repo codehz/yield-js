@@ -116,7 +116,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 | 定时器与时钟 | `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval` 由 VM 实现脚本语义，由可选宿主能力唤醒。`Performance`、`performance.now()`、`performance.timeOrigin` 完全由 VM 提供。禁止运行时编译，故字符串 timer handler 不支持。 |
 | 全局别名与标识 | `globalThis`、`self`、`navigator.userAgent`。`self` 初始值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
 | 编码与 Base64 | `atob`／`btoa` 按 HTML 字符串 API 实现；`TextEncoder`、`TextDecoder`、`TextEncoderStream`、`TextDecoderStream` 按 Encoding Standard 实现，含支持标签、增量状态、BOM 和错误处理。 |
-| URL | `URL`、`URLSearchParams`、`URLPattern`。覆盖 URL 解析与序列化、`URL.searchParams` 的双向联动及模式匹配，不依赖浏览器文档提供基准 URL。 |
+| URL | `URL`、`URLSearchParams`、`URLPattern`。覆盖 URL 解析与序列化、`URL.searchParams` 的双向联动及模式匹配。基准 URL 不来自浏览器文档：创建 VM 时由宿主显式提供一个 baseURL（可省略），它是 `new URL(相对URL)` 省略 `base` 实参时的默认基准，也用于 Fetch 相对 URL 解析；省略 baseURL 时无默认基准，相对 URL 按规范抛出 `TypeError`。 |
 | 微任务、流与压缩 | `queueMicrotask`；`ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 和增量编解码进度进入 VM 快照。 |
 | Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；VM 实现 Fetch 算法和 JS 对象，外部网络及环境服务通过可选宿主能力接入，见下文。 |
 | Console | 全局 `console` 的规范方法、参数处理、分组与计时状态由 VM 管理；输出交给可选宿主 sink，恢复不重放日志。 |
@@ -152,7 +152,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 
 - 实现 `Headers`、`Request`、`Response` 及 Body mixin 的完整公开契约：参数转换与验证、header list 的字节和重复项语义、guard 和不可变 header、`getSetCookie()`、请求默认值和方法规则、`Request` 的信号关联、`Response.error/redirect/json`、类型和 URL 元数据。VM 管理 body 的 null／字节流区分、locked／disturbed／`bodyUsed`、clone/tee、`arrayBuffer`、`blob`、`bytes`、`formData`、`json`、`text`，并实现规范的 MIME／编码、multipart 和 `BodyInit` 提取（包括流式上传与 `duplex`）。`Blob`、`File`、`FormData` 和脚本合成的 Request/Response 不依赖网络。
 - VM 驱动 Fetch 算法：解析有效 URL，处理 `about:blank`、`data:` 及规范可解析的 `blob:` 本地资源，缺少资源或不支持的 scheme 走网络错误（不把 `file:` 映射到宿主文件系统）；逐跳处理 `redirect`、URL 列表、重定向上限、方法／请求体变换、不可重放上传和跨 origin header 清理。按规范处理 `mode`、CORS（含预检）、`credentials`、HTTP cache mode、referrer/referrerPolicy、`integrity`、`keepalive` 限制，以及适用的 HTTP 子算法；产生 basic／CORS／opaque／opaqueredirect 过滤结果，不将内部响应泄漏给脚本。HTTP 4xx／5xx 是正常响应；网络、策略与完整性失败按 Fetch 算法映射为网络错误，不伪造 HTTP 状态。
-- Fetch 环境由宿主在创建 VM 时显式配置，包含可选基准 URL、origin、referrer 和网络权限；影响恢复语义的环境参数随 VM 保存并在恢复时核对，不从启动机器猜测。无基准 URL 时不接受相对字符串 URL；未配置 origin 则使用不透明 origin，按相应规范处理同源判断、CORS 和 `Origin` 序列化。按条件使用默认 User-Agent。无 `Window`／导航、Service Worker 或嵌入文档：不模拟这类环境的拦截、文档策略或页面卸载；记录浏览器上下文不适用的路径，不静默忽略本运行时适用的安全检查。`keepalive` 不承诺跨 VM 销毁或快照恢复继续传输。
+- Fetch 环境由宿主在创建 VM 时显式配置，包含可选基准 URL（即上文 WinterTC URL 的 baseURL，`URL` 构造器与 Fetch 共用同一值）、origin、referrer 和网络权限；影响恢复语义的环境参数随 VM 保存并在恢复时核对，不从启动机器猜测。无基准 URL 时不接受相对字符串 URL；未配置 origin 则使用不透明 origin，按相应规范处理同源判断、CORS 和 `Origin` 序列化。按条件使用默认 User-Agent。无 `Window`／导航、Service Worker 或嵌入文档：不模拟这类环境的拦截、文档策略或页面卸载；记录浏览器上下文不适用的路径，不静默忽略本运行时适用的安全检查。`keepalive` 不承诺跨 VM 销毁或快照恢复继续传输。
 
 #### Host：单跳 HTTP、背压与环境服务
 
