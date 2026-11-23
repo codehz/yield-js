@@ -44,7 +44,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
         .start(&mut host, "run", args)
         .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
     host.set_gc_roots(vec![result]);
-    vm.run_until_idle(&mut host)
+    host.drain_subtle(&mut vm)
         .map_err(|error| format!("{name}: drain: {error}"))?;
 
     for step in steps {
@@ -56,9 +56,12 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                 ));
             }
             Directive::Restore => restore(name, step.line, &mut vm, &build, &mut host)?,
-            Directive::Advance(ms) => host
-                .advance(&mut vm, ms)
-                .map_err(|error| located(name, step.line, "@advance", error))?,
+            Directive::Advance(ms) => {
+                host.advance(&mut vm, ms)
+                    .map_err(|error| located(name, step.line, "@advance", error))?;
+                host.drain_subtle(&mut vm)
+                    .map_err(|error| located(name, step.line, "@advance", error))?;
+            }
             Directive::Fulfill(id, value) => {
                 complete(
                     name,
@@ -492,9 +495,8 @@ fn restore(
     // object and symbol IDs, so the retained values now refer to that graph.
     vm.start_recovered_operations()
         .map_err(|error| located(name, line, "@restore", error))?;
-    vm.run_until_idle(host)
-        .map_err(|error| located(name, line, "@restore", error))?;
-    Ok(())
+    host.drain_subtle(vm)
+        .map_err(|error| located(name, line, "@restore", error))
 }
 
 fn complete(
@@ -508,9 +510,8 @@ fn complete(
 ) -> Result<(), String> {
     host.complete(vm, id, completion)
         .map_err(|error| located(name, line, directive, error))?;
-    vm.run_until_idle(host)
-        .map_err(|error| located(name, line, directive, error))?;
-    Ok(())
+    host.drain_subtle(vm)
+        .map_err(|error| located(name, line, directive, error))
 }
 
 fn assert_pending(

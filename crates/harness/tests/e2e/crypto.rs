@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use yield_harness::{TestHost, build};
 use yield_vm::binding::{HostFault, JsValue};
-use yield_vm::{CryptoService, SnapshotValidation, Value, Vm};
+use yield_vm::{
+    CryptoService, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm, VmError,
+};
 
 const CHECK_ERRORS: &str = r#"
 const saved = crypto;
@@ -78,4 +80,142 @@ fn crypto_faults_are_catchable_without_partial_mutation() {
         Value::boolean(true)
     );
     assert_eq!(*service.0.lock().unwrap(), [2, 16]);
+}
+
+#[test]
+fn subtle_without_service_rejects_without_disabling_entropy() {
+    let source = r#"
+export async function run() {
+    const api = crypto.subtle;
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    if (bytes.toHex() !== "00010203" || !api || api !== crypto.subtle) return false;
+    for (const call of [
+        () => api.digest("SHA-256", bytes),
+        () => api.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt"]),
+    ]) {
+        const result = call();
+        if (!(result instanceof Promise)) return false;
+        try { await result; } catch (error) {
+            if (error instanceof DOMException && error.name === "NotSupportedError") continue;
+            throw error;
+        }
+        return false;
+    }
+    return true;
+}
+"#;
+    let mut host = TestHost::without_subtle_service();
+    let mut vm = Vm::new(build(source), &mut host, Default::default()).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
+    host.drain_subtle(&mut vm).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::boolean(true))
+    );
+}
+
+#[test]
+fn subtle_key_and_ciphertext_survive_snapshot_with_identity() {
+    let source = r#"
+const subtle = crypto.subtle;
+const params = { name: "AES-GCM", iv: new Uint8Array(12), additionalData: new Uint8Array([4]) };
+let key, saved, sealed;
+export async function prepare() {
+    key = await subtle.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt", "decrypt"]);
+    saved = new Map([[key, key]]);
+    sealed = await subtle.encrypt(params, key, new Uint8Array([10, 20, 30]));
+    return true;
+}
+export async function open() {
+    if (subtle !== crypto.subtle || saved.get(key) !== key || !(key instanceof CryptoKey) ||
+        key.algorithm.name !== "AES-GCM" || key.usages.join(",") !== "encrypt,decrypt") return false;
+    return new Uint8Array(await subtle.decrypt(params, key, sealed)).toHex() === "0a141e";
+}
+"#;
+    let build = build(source);
+    let mut host = TestHost::new();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let prepared = vm.start(&mut host, "prepare", vec![]).unwrap();
+    host.drain_subtle(&mut vm).unwrap();
+    assert_eq!(
+        vm.promise_state(&prepared).unwrap(),
+        PromiseState::Fulfilled(Value::boolean(true))
+    );
+    let image = vm.snapshot(&[]).unwrap().to_bytes().unwrap();
+    drop(vm);
+    let mut restored_host = TestHost::new();
+    let mut restored = Vm::restore(
+        Snapshot::from_bytes(&image).unwrap(),
+        build,
+        &mut restored_host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let opened = restored.start(&mut restored_host, "open", vec![]).unwrap();
+    restored_host.drain_subtle(&mut restored).unwrap();
+    assert_eq!(
+        restored.promise_state(&opened).unwrap(),
+        PromiseState::Fulfilled(Value::boolean(true))
+    );
+}
+
+#[test]
+fn subtle_pending_worker_blocks_snapshot_even_without_guest_roots() {
+    let mut host = TestHost::new();
+    let mut vm = Vm::new(
+        build(
+            r#"
+export function run() {
+    return crypto.subtle.digest("SHA-256", new Uint8Array([97, 98, 99]));
+}
+"#,
+        ),
+        &mut host,
+        Default::default(),
+    )
+    .unwrap();
+    let promise = vm.start(&mut host, "run", vec![]).unwrap();
+    // Completion is applied only when the VM drains the worker result, so the snapshot
+    // check does not race the worker even if the digest has already been computed.
+    assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
+    assert!(matches!(
+        vm.snapshot(&[]),
+        Err(VmError::InvalidState(message)) if message.contains("pending SubtleCrypto operations")
+    ));
+    host.drain_subtle(&mut vm).unwrap();
+    assert!(matches!(
+        vm.promise_state(&promise).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
+    assert!(vm.snapshot(&[]).unwrap().operations.is_empty());
+}
+
+#[test]
+fn subtle_local_import_is_pending_before_the_microtask_checkpoint() {
+    let mut host = TestHost::new();
+    let mut vm = Vm::new(
+        build(
+            r#"
+export function run() {
+    return crypto.subtle.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt"]);
+}
+"#,
+        ),
+        &mut host,
+        Default::default(),
+    )
+    .unwrap();
+    let promise = vm.start(&mut host, "run", vec![]).unwrap();
+    assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
+    assert!(!vm.has_pending_subtle_operations());
+    host.drain_subtle(&mut vm).unwrap();
+    assert!(matches!(
+        vm.promise_state(&promise).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
 }

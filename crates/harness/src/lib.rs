@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_vm::binding::{
@@ -9,12 +10,14 @@ use yield_vm::binding::{
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
-    ConsoleEvent, ConsoleSink, CryptoService, GuestOutcome, Host, HostStep, JsString, Vm,
+    ConsoleEvent, ConsoleSink, CryptoService, GuestOutcome, Host, HostStep, JsString,
+    SubtleCryptoService, Vm, VmError,
 };
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
 pub mod fetch;
+mod subtle;
 pub mod timer;
 
 pub use case::run_case;
@@ -497,23 +500,67 @@ impl Default for TestHost {
 
 impl TestHost {
     pub fn new() -> Self {
-        Self::with_services(true, None, true, Some(Arc::new(DeterministicEntropy)))
+        Self::with_services(
+            true,
+            None,
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+            Self::default_subtle_service(),
+        )
     }
 
     pub fn without_timer_service() -> Self {
-        Self::with_services(false, None, true, Some(Arc::new(DeterministicEntropy)))
+        Self::with_services(
+            false,
+            None,
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+            Self::default_subtle_service(),
+        )
     }
 
     pub fn without_console_service() -> Self {
-        Self::with_services(true, None, false, Some(Arc::new(DeterministicEntropy)))
+        Self::with_services(
+            true,
+            None,
+            false,
+            Some(Arc::new(DeterministicEntropy)),
+            Self::default_subtle_service(),
+        )
     }
 
     pub fn without_crypto_service() -> Self {
-        Self::with_services(true, None, true, None)
+        Self::with_services(true, None, true, None, Self::default_subtle_service())
     }
 
     pub fn with_crypto_service(service: Arc<dyn CryptoService>) -> Self {
-        Self::with_services(true, None, true, Some(service))
+        Self::with_services(
+            true,
+            None,
+            true,
+            Some(service),
+            Self::default_subtle_service(),
+        )
+    }
+
+    /// Leaves the entropy service enabled but omits the SubtleCrypto adapter.
+    pub fn without_subtle_service() -> Self {
+        Self::with_services(true, None, true, Some(Arc::new(DeterministicEntropy)), None)
+    }
+
+    /// Replaces the default SubtleCrypto adapter without changing entropy.
+    pub fn with_subtle_service(service: Arc<dyn SubtleCryptoService>) -> Self {
+        Self::with_services(
+            true,
+            None,
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+            Some(service),
+        )
+    }
+
+    fn default_subtle_service() -> Option<Arc<dyn SubtleCryptoService>> {
+        Some(Arc::new(subtle::TestSubtleCrypto))
     }
 
     /// A host that also registers an explicit Fetch adapter.
@@ -523,6 +570,7 @@ impl TestHost {
             Some(service),
             true,
             Some(Arc::new(DeterministicEntropy)),
+            Self::default_subtle_service(),
         )
     }
 
@@ -531,6 +579,7 @@ impl TestHost {
         fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
         capture_console: bool,
         crypto: Option<Arc<dyn CryptoService>>,
+        subtle: Option<Arc<dyn SubtleCryptoService>>,
     ) -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
@@ -538,13 +587,13 @@ impl TestHost {
         let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
         let sink = console.clone().map(|sink| -> Arc<dyn ConsoleSink> { sink });
         let bindings = test_bindings(
-            Arc::clone(&counters),
-            Arc::clone(&labels),
+            (Arc::clone(&counters), Arc::clone(&labels)),
             &clock,
             timers,
             fetch,
             sink,
             crypto,
+            subtle,
         )
         .expect("test bindings");
         Self {
@@ -618,6 +667,25 @@ impl TestHost {
         Arc::clone(&self.clock).advance(vm, self, ms)
     }
 
+    /// Runs a VM turn and waits for accepted SubtleCrypto work to be delivered.
+    /// Other host operations remain pending until their normal delivery turns.
+    /// Returns a host error if SubtleCrypto work is still pending after five seconds.
+    pub fn drain_subtle(&mut self, vm: &mut Vm) -> Result<(), VmError> {
+        vm.run_until_idle(self)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while vm.has_pending_subtle_operations() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(VmError::Host(
+                    "timed out draining SubtleCrypto operations".into(),
+                ));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+            vm.run_until_idle(self)?;
+        }
+        Ok(())
+    }
+
     pub fn pending_labels(&self) -> Vec<String> {
         self.labels.pending_labels()
     }
@@ -672,13 +740,13 @@ impl Host for TestHost {
 }
 
 fn test_bindings(
-    counters: Arc<Counters>,
-    labels: Arc<LabelService>,
+    (counters, labels): (Arc<Counters>, Arc<LabelService>),
     clock: &Arc<FakeClock>,
     timers: bool,
     fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
     console: Option<Arc<dyn ConsoleSink>>,
     crypto: Option<Arc<dyn CryptoService>>,
+    subtle: Option<Arc<dyn SubtleCryptoService>>,
 ) -> Result<Bindings, String> {
     macro_rules! link {
         ($($service:tt)*) => {
@@ -698,11 +766,19 @@ fn test_bindings(
             }
         };
     }
+    macro_rules! link_subtle {
+        ($($service:tt)*) => {
+            match subtle {
+                Some(service) => link!(("wintertc.crypto.subtle", 1, service), $($service)*),
+                None => link!($($service)*),
+            }
+        };
+    }
     macro_rules! link_crypto {
         ($($service:tt)*) => {
             match crypto {
-                Some(entropy) => link!(("wintertc.crypto", 1, entropy), $($service)*),
-                None => link!($($service)*),
+                Some(entropy) => link_subtle!(("wintertc.crypto", 1, entropy), $($service)*),
+                None => link_subtle!($($service)*),
             }
         };
     }

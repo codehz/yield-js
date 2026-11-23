@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use super::store::lookup_tables;
 use super::types::{
-    AbortStep, ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, DisposableResource,
-    EnvironmentObject, EventTargetState, FunctionObject, IntegrityLevel, NativeObject, Object,
-    OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables,
-    PropertyTablesMut, Resolution, TextDecoderObject, TypedArrayObject, array_index,
-    collect_own_keys,
+    AbortStep, ArrayBufferObject, BoundObject, BoxedPrimitive, CryptoKey, DataViewObject,
+    DisposableResource, EnvironmentObject, EventTargetState, FunctionObject, IntegrityLevel,
+    NativeObject, Object, OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property,
+    PropertyTables, PropertyTablesMut, Resolution, TextDecoderObject, TypedArrayObject,
+    array_index, collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -114,6 +114,7 @@ macro_rules! map_object_storage {
             | Object::AbortController { object: $storage, .. }
             | Object::AbortSignal { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
+            | Object::CryptoKey(CryptoKey { object: $storage, .. })
             | Object::TypedArray(TypedArrayObject { object: $storage, .. })
             | Object::DataView(DataViewObject { object: $storage, .. })
             | Object::TextEncoder { object: $storage }
@@ -733,8 +734,8 @@ impl Object {
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}
-            // Byte content is not a heap edge; only the buffer object is.
-            Self::ArrayBuffer(_) => {}
+            // Raw bytes are not heap edges; ordinary object storage is visited above.
+            Self::ArrayBuffer(_) | Self::CryptoKey(_) => {}
             Self::RegExpStringIterator { regexp, .. } => out.push(OwnedEdge::Object(*regexp)),
             // Views name their buffer; the bytes themselves have no GC edges.
             Self::TypedArray(TypedArrayObject { buffer, .. })

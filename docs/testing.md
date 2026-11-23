@@ -45,6 +45,8 @@ export async function run() {
 
 Fetch 的网络与切点测试放在 `crates/harness/tests/e2e/`：`fetch_http.rs` 是脚本化 loopback HTTP/1.1 服务器，按序记录每个请求；`fetch_network.rs` 用真实连接覆盖 CORS/预检、跨源重定向、307 不可重放体、`only-if-cached`、SRI、gzip、keepalive、abort 与上传额度，并用 `ControllableFetchService` 精确推进 `UploadCredit`/`Head`/`Data`/`Eof`/`Failed` 以及上传、等 head、读体和 EOF 各阶段的快照恢复。离线可观察行为仍写在 `cases/fetch/`，不新增 Rust harness。
 
+SubtleCrypto 的算法向量与脚本 Promise 行为放在 `cases/crypto/`，密钥身份与切点放在 `tests/e2e/crypto.rs`。`TestHost` 默认安装仅供测试的原语实现；用例运行器在 VM 轮次之外等待完成，不会自动交付其他后台 operation。
+
 ## 宿主声明夹具
 
 - 真实宿主：`crates/harness/test.d.ts`、`crates/harness/demo.d.ts`。

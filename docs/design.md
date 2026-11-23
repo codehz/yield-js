@@ -120,7 +120,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 | 微任务、流与压缩 | `queueMicrotask`；`ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 和增量编解码进度进入 VM 快照。 |
 | Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；VM 实现 Fetch 算法和 JS 对象，外部网络及环境服务通过可选宿主能力接入，见下文。 |
 | Console | 全局 `console` 的规范方法、参数处理、分组与计时状态由 VM 管理；输出交给可选宿主 sink，恢复不重放日志。 |
-| Web Crypto | 目标接口为 `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`；当前仅提供 `crypto.getRandomValues()` 与 `crypto.randomUUID()`。VM 实现参数、类型、用法与可导出性约束，熵源及密码操作由可选宿主能力提供。可导出性与快照可恢复性独立；不可导出密钥不以明文或进程句柄落盘，无法安全恢复的可达密钥应使快照失败。 |
+| Web Crypto | 目标接口为 `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`。VM 实现参数、类型、用法与可导出性约束，熵源及密码操作由独立的可选宿主能力提供。可导出性与快照可恢复性独立；不可导出密钥不以明文或进程句柄落盘，无法安全恢复的可达密钥应使快照失败。 |
 | WebAssembly（范围外） | 缺少整个命名空间，包括 `Global`、`Instance`、`Memory`、`Module`、`Table`、`Tag`、`Exception`、`CompileError`、`LinkError`、`RuntimeError`，以及 `compile`、`compileStreaming`、`instantiate`、`instantiateStreaming`、`JSTag`、`validate`。仅记为标准差异，不纳入当前引擎设计范围。 |
 
 - **全局暴露。** 不引入 `Window`、`WorkerGlobalScope` 或 Worker。非 `[Exposed=*]` 接口在 VM 自有作用域暴露是相对 §6 的设计偏差。新增全局同步纳入 `globalThis` 和静态裸名解析，保留局部绑定遮蔽规则，不把宿主属性动态注入编译器名字表。

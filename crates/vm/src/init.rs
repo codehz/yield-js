@@ -192,6 +192,7 @@ impl Vm {
             fetch_environment: Default::default(),
             fetch_state: Default::default(),
             fetch_live: Default::default(),
+            subtle_state: Default::default(),
             object_urls: Default::default(),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),

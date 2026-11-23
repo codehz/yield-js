@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use super::define_builtin_data;
 use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
+use super::{define_builtin_data, install_getter};
 use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ElementKind, TO_STRING_TAG_SYMBOL, ViewRange};
@@ -14,19 +14,34 @@ use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value, ValueRef};
 use crate::vm::Vm;
 
+mod subtle;
+pub(crate) mod worker;
+pub(super) use subtle::{KEY_OWNER, SUBTLE_OWNER};
+
 const ROOT: &str = "crypto";
 const PROTOTYPE: &str = "crypto.prototype";
 const GET_RANDOM_VALUES: IntrinsicKey =
     IntrinsicKey::new("Crypto", Slot::Prototype, "getRandomValues");
 const RANDOM_UUID: IntrinsicKey = IntrinsicKey::new("Crypto", Slot::Prototype, "randomUUID");
+const SUBTLE: IntrinsicKey = IntrinsicKey::new("Crypto", Slot::PrototypeGetter, "subtle");
 const MAX_RANDOM_BYTES: usize = 65_536;
 
 const ROOTS: &[RootSpec] = &[
     RootSpec::new(ROOT, RootKind::Plain, Some(PROTOTYPE)),
     RootSpec::new(PROTOTYPE, RootKind::Plain, Some("object.prototype")),
+    RootSpec::new(subtle::INSTANCE, RootKind::Plain, Some(subtle::PROTOTYPE)),
+    RootSpec::new(subtle::PROTOTYPE, RootKind::Plain, Some("object.prototype")),
 ];
 
 const MEMBERS: &[IntrinsicDef] = &[
+    IntrinsicDef::call(SUBTLE, 0, |vm, _, roots, _, receiver| {
+        if !is_crypto(vm, receiver) {
+            return vm.throw_type_error(roots, "Incompatible Crypto receiver");
+        }
+        Ok(Invocation::Value(Value::object(
+            vm.builtins.get(subtle::INSTANCE),
+        )))
+    }),
     IntrinsicDef::call(GET_RANDOM_VALUES, 1, |vm, _, roots, args, receiver| {
         get_random_values(vm, roots, args.into_iter().next(), receiver)
     }),
@@ -35,7 +50,7 @@ const MEMBERS: &[IntrinsicDef] = &[
     }),
 ];
 
-pub(super) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[MEMBERS], Some(install));
+pub(super) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[MEMBERS, subtle::MEMBERS], Some(install));
 
 fn install(vm: &mut Vm, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
@@ -56,6 +71,8 @@ fn install(vm: &mut Vm, _: &Value) {
         Value::string("Crypto".into()),
         Attributes::FUNCTION_METADATA,
     );
+    install_getter(vm, prototype, "subtle".into(), SUBTLE);
+    subtle::install(vm);
 }
 
 fn is_crypto(vm: &Vm, receiver: &Value) -> bool {

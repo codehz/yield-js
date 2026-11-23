@@ -973,6 +973,69 @@ impl ElementKind {
     }
 }
 
+pub(crate) const MAX_CRYPTO_KEY_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CryptoKeyAlgorithm {
+    Pbkdf2,
+    AesGcm,
+    HmacSha256,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CryptoKeyUsage {
+    DeriveKey,
+    Encrypt,
+    Decrypt,
+    Sign,
+    Verify,
+}
+
+/// An extractable secret key. Snapshots contain its raw bytes; this record
+/// cannot represent an opaque handle or a non-extractable key.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct CryptoKey {
+    pub object: PlainObject,
+    pub algorithm: CryptoKeyAlgorithm,
+    pub usages: Vec<CryptoKeyUsage>,
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for CryptoKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CryptoKey")
+            .field("algorithm", &self.algorithm)
+            .field("usages", &self.usages)
+            .field("byte_length", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CryptoKey {
+    pub(crate) fn is_valid(&self) -> bool {
+        use CryptoKeyAlgorithm::*;
+        use CryptoKeyUsage::*;
+
+        let (valid_length, allowed): (bool, &[CryptoKeyUsage]) = match self.algorithm {
+            Pbkdf2 => (true, &[DeriveKey]),
+            AesGcm => (
+                matches!(self.bytes.len(), 16 | 24 | 32),
+                &[Encrypt, Decrypt],
+            ),
+            HmacSha256 => (!self.bytes.is_empty(), &[Sign, Verify]),
+        };
+        valid_length
+            && self.bytes.len() <= MAX_CRYPTO_KEY_BYTES
+            && !self.usages.is_empty()
+            && self.usages.len() <= allowed.len()
+            && self
+                .usages
+                .iter()
+                .enumerate()
+                .all(|(i, usage)| allowed.contains(usage) && !self.usages[..i].contains(usage))
+    }
+}
+
 /// A byte buffer. `bytes` is the single owner of the bytes: views name this
 /// object and never hold a copy, so aliasing survives restore unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2007,6 +2070,7 @@ pub enum Object {
         target: EventTargetState,
         signal: AbortSignalState,
     },
+    CryptoKey(CryptoKey),
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -2055,6 +2119,7 @@ impl PartialEq for Object {
         use Object::*;
         match (self, other) {
             (Promise(a), Promise(b)) => a == b,
+            (CryptoKey(a), CryptoKey(b)) => a == b,
             (ReadableStream(a), ReadableStream(b)) => a == b,
             (ReadableReader(a), ReadableReader(b)) => a == b,
             (WritableStream(a), WritableStream(b)) => a == b,

@@ -314,6 +314,14 @@ impl Settlement {
     }
 }
 
+impl crate::Vm {
+    /// Queue resolution of a native promise without running any script now.
+    pub(crate) fn queue_adopt(&mut self, result: ObjectId, settlement: Settlement) {
+        self.microtasks
+            .push_back(Microtask::Adopt { result, settlement });
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Microtask {
     Resume {

@@ -246,6 +246,9 @@ impl Vm {
         for id in self.fetch_state.ids() {
             tracer.mark_object(id)?;
         }
+        for id in self.subtle_state.ids() {
+            tracer.mark_object(id)?;
+        }
         for import in &self.imports {
             tracer.mark_object(import.namespace)?;
         }

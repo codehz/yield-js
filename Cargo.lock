@@ -1375,6 +1375,7 @@ dependencies = [
  "httparse",
  "iana-time-zone",
  "serde_json",
+ "sha2",
  "yield-compiler",
  "yield-vm",
 ]

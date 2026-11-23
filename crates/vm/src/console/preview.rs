@@ -169,6 +169,7 @@ pub(crate) fn kind(object: &Object) -> &'static str {
         Object::ArrayBuffer(_) => "ArrayBuffer",
         Object::TypedArray(array) => array.kind.name(),
         Object::DataView(_) => "DataView",
+        Object::CryptoKey(_) => "CryptoKey",
         Object::TextEncoder { .. } => "TextEncoder",
         Object::TextDecoder(_) => "TextDecoder",
         Object::TextStream {

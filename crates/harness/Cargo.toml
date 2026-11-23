@@ -10,6 +10,7 @@ yield-vm = { path = "../vm" }
 serde_json.workspace = true
 iana-time-zone = "0.1"
 httparse = "1.10.1"
+sha2 = "0.10.9"
 
 [[bench]]
 name = "baseline"

@@ -61,6 +61,11 @@ impl Vm {
         roots: &[Value],
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
     ) -> Result<Snapshot, VmError> {
+        if self.has_pending_subtle_operations() {
+            return Err(VmError::InvalidState(
+                "snapshot during pending SubtleCrypto operations".to_owned(),
+            ));
+        }
         if !self.microtasks.is_empty() {
             return Err(VmError::InvalidState(
                 "snapshot requires a drained microtask queue".to_owned(),
@@ -115,6 +120,11 @@ impl Vm {
                 object if !valid_date_time(object) => {
                     return Err(VmError::InvalidState(format!(
                         "Date {id} has a time outside the TimeClip range"
+                    )));
+                }
+                Object::CryptoKey(key) if !key.is_valid() => {
+                    return Err(VmError::InvalidState(format!(
+                        "CryptoKey {id} has invalid key material or usages"
                     )));
                 }
                 object
@@ -405,6 +415,11 @@ impl Vm {
             if !valid_date_time(&object) {
                 return Err(VmError::InvalidSnapshot(format!(
                     "Date {id} has a time outside the TimeClip range"
+                )));
+            }
+            if matches!(&object, Object::CryptoKey(key) if !key.is_valid()) {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "CryptoKey {id} has invalid key material or usages"
                 )));
             }
             if let Object::RegExp {

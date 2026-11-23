@@ -191,6 +191,8 @@ builtin_globals! {
     "self" => Global::Root(GLOBAL_THIS),
     "navigator" => Global::Owner(super::navigator::OWNER),
     "crypto" => Global::Owner(super::crypto::OWNER),
+    "SubtleCrypto" => Global::Owner(super::crypto::SUBTLE_OWNER),
+    "CryptoKey" => Global::Owner(super::crypto::KEY_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

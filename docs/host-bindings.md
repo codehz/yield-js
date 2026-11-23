@@ -204,6 +204,8 @@ Fetch 适配器 `wintertc.fetch`（协议版本 `1`）注册为 `Arc<dyn FetchSe
 
 Console 的 `wintertc.console` 是可选同步服务，链接时要求版本 `1` 和 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不参与绑定指纹，不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
 
+SubtleCrypto 的 `wintertc.crypto.subtle` 是独立的可选原语服务，链接时要求版本 `CRYPTO_SUBTLE_PROTOCOL_VERSION`（`1`）与 `Arc<dyn SubtleCryptoService>`，不计入通用绑定指纹。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行，只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
+
 ### 5.5 模块状态
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。

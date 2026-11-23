@@ -14,6 +14,7 @@ pub(crate) use binary::{OwnPropertyLookup, TypedIndex};
 pub use object::ReactionJob;
 pub(crate) use object::{EnvRole, OwnedEdge, push_value, string_own_property};
 pub(crate) use store::{Heap, object_id};
+pub(crate) use types::MAX_CRYPTO_KEY_BYTES;
 pub(crate) use types::ViewRange;
 pub(crate) use types::view_range;
 pub(crate) use types::{
@@ -39,6 +40,7 @@ pub use types::{
     ReadableState, ReadableStreamObject, RejectionStatus, Resolution, TextDecoderObject,
     TextEncoding, TypedArrayObject, WeakKey,
 };
+pub use types::{CryptoKey, CryptoKeyAlgorithm, CryptoKeyUsage};
 pub use types::{TextDecoderConfig, TransformAlgorithms, TransformStage, TransformStreamObject};
 pub use types::{
     WritableAbort, WritableFlight, WritableRequest, WritableSink, WritableState,

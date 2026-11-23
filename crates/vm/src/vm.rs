@@ -391,6 +391,7 @@ pub struct Vm {
     pub(crate) fetch_environment: crate::fetch::FetchEnvironment,
     pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
     pub(crate) fetch_live: BTreeMap<u64, Box<dyn crate::fetch::FetchRegistration>>,
+    pub(crate) subtle_state: crate::builtin::crypto::worker::SubtleState,
     pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
@@ -868,7 +869,15 @@ impl Vm {
     pub fn run_until_idle(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
         loop {
             self.run_microtask_checkpoint(host)?;
+            let delivered_subtle = self.pump_subtle_completion();
+            if delivered_subtle {
+                self.run_microtask_checkpoint(host)?;
+            }
             let Some(task) = self.ordinary_tasks.pop_front() else {
+                // A delivered completion can unblock other ready requests.
+                if delivered_subtle {
+                    continue;
+                }
                 return Ok(());
             };
             match task {
@@ -1720,6 +1729,7 @@ impl Vm {
             fetch_environment,
             fetch_state,
             fetch_live: Default::default(),
+            subtle_state: Default::default(),
             object_urls,
             module_envs,
             module_namespaces,
