@@ -154,6 +154,7 @@ pub(crate) struct RestoredState {
     pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
     pub(crate) next_timer_id: i32,
     pub(crate) clock: crate::runtime::VmClock,
+    pub(crate) base_url: Option<url::Url>,
     pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
@@ -371,6 +372,7 @@ pub struct Vm {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) random_state: u64,
     pub(crate) clock: crate::runtime::VmClock,
+    pub(crate) base_url: Option<url::Url>,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
     /// Per-function, per-PC monomorphic property cache. Never serialized.
@@ -1578,6 +1580,7 @@ impl Vm {
             script_timers,
             next_timer_id,
             clock,
+            base_url,
             host_tasks,
             next_host_task_id,
             host_classes,
@@ -1651,6 +1654,7 @@ impl Vm {
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
+            base_url,
             module_envs,
             module_namespaces,
         }

@@ -349,6 +349,43 @@ pub(super) fn check_heap_edges(
                 "string iterator {id} has an invalid UTF-16 position"
             )));
         }
+        use crate::builtin::url_api::{parse_query, pattern};
+        let invalid_url =
+            |detail: &str| VmError::InvalidSnapshot(format!("URL object {id}: {detail}"));
+        match heap.get(id)? {
+            Object::Url {
+                url,
+                params: Some(params),
+                ..
+            } => match heap.get(*params)? {
+                Object::UrlSearchParams {
+                    owner: Some(owner),
+                    pairs,
+                    ..
+                } if *owner == id && *pairs == parse_query(url.query().unwrap_or_default()) => {}
+                _ => return Err(invalid_url("inconsistent searchParams link or query")),
+            },
+            Object::UrlSearchParams {
+                owner: Some(owner), ..
+            } => {
+                if !matches!(heap.get(*owner)?, Object::Url { params: Some(params), .. } if *params == id)
+                {
+                    return Err(invalid_url("inconsistent owner link"));
+                }
+            }
+            Object::UrlSearchParamsIterator { params, kind, .. } => {
+                if *kind > 2 || !matches!(heap.get(*params)?, Object::UrlSearchParams { .. }) {
+                    return Err(invalid_url("invalid searchParams iterator state"));
+                }
+            }
+            Object::UrlPattern {
+                input, ignore_case, ..
+            } => {
+                pattern::validate(input, *ignore_case).map_err(|error| invalid_url(&error))?;
+            }
+            _ => {}
+        }
+
         if let Object::TextDecoder(decoder) = heap.get(id)? {
             let prefix_len = usize::from(decoder.prefix_len);
             // A saved prefix must be the beginning of one scalar, not a

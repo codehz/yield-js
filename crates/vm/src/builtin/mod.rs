@@ -106,6 +106,7 @@ pub(crate) mod string;
 mod structured_clone;
 pub(super) mod symbol_family;
 mod timers;
+pub(crate) mod url_api;
 
 pub(crate) use call::is_callable_object;
 pub use globals::BUILTINS;

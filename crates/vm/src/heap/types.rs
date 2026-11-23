@@ -1544,6 +1544,30 @@ pub enum Object {
         object: PlainObject,
     },
     TextDecoder(TextDecoderObject),
+    Url {
+        object: PlainObject,
+        url: url::Url,
+        params: Option<ObjectId>,
+    },
+    UrlSearchParams {
+        object: PlainObject,
+        pairs: Vec<(String, String)>,
+        owner: Option<ObjectId>,
+    },
+    UrlSearchParamsIterator {
+        object: PlainObject,
+        params: ObjectId,
+        index: usize,
+        kind: u8,
+    },
+    UrlPattern {
+        object: PlainObject,
+        #[serde(with = "crate::builtin::url_api::record::PatternInit")]
+        input: urlpattern::UrlPatternInit,
+        ignore_case: bool,
+        #[serde(skip)]
+        cache: crate::builtin::url_api::pattern::PatternCache,
+    },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {
         slots: Option<(ObjectId, ObjectId)>, // (target, handler); absent after revocation

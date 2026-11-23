@@ -4,6 +4,55 @@ mod suite;
 use yield_vm::ValueRef;
 
 #[test]
+fn url_base_and_query_links_survive_binary_restore() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Snapshot, Vm, VmError};
+
+    let build = build(
+        r#"
+const initial = new URL("../item?old=1");
+const params = initial.searchParams;
+const pattern = new URLPattern({ pathname: "/a/:name", baseURL: "https://example.org" });
+export function run() {
+    params.set("old", "a b");
+    return new URL("other").href + " " + initial.href + " " + (initial.searchParams === params)
+        + " " + pattern.exec(initial.href).pathname.groups.name;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    assert!(matches!(
+        Vm::new_with_base_url(build.clone(), &mut host, "relative"),
+        Err(VmError::InvalidState(_))
+    ));
+    let vm = Vm::new_with_base_url(build.clone(), &mut host, "https://example.org/a/b/").unwrap();
+    let snapshot = vm.snapshot(&[]).unwrap();
+    let bytes = snapshot.to_bytes().unwrap();
+    let snapshot = Snapshot::from_bytes(&bytes).unwrap();
+    let mut malformed = snapshot.clone();
+    for record in &mut malformed.objects {
+        if let yield_vm::Object::UrlSearchParams {
+            owner: Some(_),
+            pairs,
+            ..
+        } = &mut record.object
+        {
+            pairs.clear();
+        }
+    }
+    assert!(matches!(
+        Vm::restore_validated(malformed, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("inconsistent searchParams")
+    ));
+    let mut vm = Vm::restore_validated(snapshot, build, &mut host).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    assert_eq!(
+        result.into_string().unwrap().to_utf8().unwrap(),
+        "https://example.org/a/b/other https://example.org/a/item?old=a+b true item"
+    );
+}
+
+#[test]
 fn restore_rejects_the_previous_snapshot_format() {
     use yield_harness::{TestHost, build};
     use yield_vm::{SNAPSHOT_FORMAT_VERSION, Vm, VmError};

@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+url = { version = "2.5", features = ["serde"] }
+urlpattern = "0.6.0"
 bincode.workspace = true
 chrono = { version = "0.4", default-features = false }
 chrono-tz = "=0.10.4"

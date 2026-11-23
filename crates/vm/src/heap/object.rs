@@ -113,6 +113,10 @@ macro_rules! map_object_storage {
             | Object::DataView(DataViewObject { object: $storage, .. })
             | Object::TextEncoder { object: $storage }
             | Object::TextDecoder(TextDecoderObject { object: $storage, .. })
+            | Object::Url { object: $storage, .. }
+            | Object::UrlSearchParams { object: $storage, .. }
+            | Object::UrlSearchParamsIterator { object: $storage, .. }
+            | Object::UrlPattern { object: $storage, .. }
             | Object::Set { object: $storage, .. }
             | Object::WeakMap { object: $storage, .. }
             | Object::WeakSet { object: $storage, .. }
@@ -501,6 +505,12 @@ impl Object {
                 }
             }
             Self::AbortController { signal, .. } => out.push(OwnedEdge::Object(*signal)),
+            Self::Url { params, .. } | Self::UrlSearchParams { owner: params, .. } => {
+                if let Some(id) = params {
+                    out.push(OwnedEdge::Object(*id));
+                }
+            }
+            Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
             Self::Native(_)
             | Self::Plain(_)
             | Self::Proxy { slots: None, .. }
@@ -510,6 +520,7 @@ impl Object {
             | Self::DomException { .. }
             | Self::TextEncoder { .. }
             | Self::TextDecoder(_)
+            | Self::UrlPattern { .. }
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
             | Self::StringIterator { .. } => {}

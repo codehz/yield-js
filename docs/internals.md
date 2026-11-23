@@ -33,6 +33,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 - `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
 - `Vm::new(build, &mut host)` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
+- `Vm::new_with_base_url(build, host, base_url)` 在任何模块求值之前设置默认基准。快照是恢复时唯一的基准来源；活动的 `URL`、`URLSearchParams` 及迭代器由普通堆强边追踪。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
 - `Vm::start(host, "run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量，随后宿主自行调用 `Vm::run_until_idle(host)`。
 - `Vm::snapshot(&[roots])` 仅在微任务队列为空时可用。

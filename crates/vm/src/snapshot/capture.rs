@@ -82,6 +82,7 @@ impl Vm {
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.elapsed = self.clock.elapsed();
+        snapshot.base_url = self.base_url.clone();
         snapshot.script_timers = self.script_timers.clone();
         snapshot.next_timer_id = self.next_timer_id;
         snapshot.next_operation_id = self.next_operation_id;
@@ -539,6 +540,7 @@ impl Vm {
                 script_timers: snapshot.script_timers,
                 next_timer_id: snapshot.next_timer_id,
                 clock: crate::runtime::VmClock::new(clock, snapshot.elapsed),
+                base_url: snapshot.base_url,
                 host_tasks,
                 next_host_task_id: snapshot.next_host_task_id,
                 host_classes,

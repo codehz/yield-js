@@ -33,7 +33,18 @@ impl Vm {
 
     /// Start a fresh VM, linking this host and running module initialization.
     pub fn new_verified(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
-        Self::new_with_anchor(build, host, None)
+        Self::new_with_anchor(build, host, None, None)
+    }
+
+    /// Creates a VM with a default absolute URL for relative URL parsing.
+    pub fn new_with_base_url(
+        build: Build,
+        host: &mut dyn Host,
+        base_url: &str,
+    ) -> Result<Self, VmError> {
+        let base = url::Url::parse(base_url)
+            .map_err(|error| VmError::InvalidState(format!("invalid base URL: {error}")))?;
+        Self::new_with_anchor(VerifiedBuild::new(build)?, host, None, Some(base))
     }
 
     #[doc(hidden)]
@@ -42,15 +53,17 @@ impl Vm {
         host: &mut dyn Host,
         clock: Arc<dyn crate::TestClock>,
     ) -> Result<Self, VmError> {
-        Self::new_with_anchor(VerifiedBuild::new(build)?, host, Some(clock))
+        Self::new_with_anchor(VerifiedBuild::new(build)?, host, Some(clock), None)
     }
 
     fn new_with_anchor(
         build: VerifiedBuild,
         host: &mut dyn Host,
         clock: Option<Arc<dyn crate::TestClock>>,
+        base_url: Option<url::Url>,
     ) -> Result<Self, VmError> {
         let mut vm = Self::prepare(build, host, clock)?;
+        vm.base_url = base_url;
         vm.initialize_modules(host)?;
         Ok(vm)
     }
@@ -158,6 +171,7 @@ impl Vm {
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
+            base_url: None,
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
         }
