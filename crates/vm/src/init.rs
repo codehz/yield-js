@@ -114,6 +114,7 @@ impl Vm {
             imports: Vec::new(),
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
+            ready_timeouts: VecDeque::new(),
             microtasks: VecDeque::new(),
             stack_registrations: Vec::new(),
             pending_rejection_notifications: VecDeque::new(),

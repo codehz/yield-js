@@ -30,6 +30,55 @@ fn expect_unknown(vm: &mut Vm, token: yield_vm::OperationToken) {
 }
 
 #[test]
+fn timeout_rearms_early_tokens_and_restores_remaining_time() {
+    let build = build(
+        r#"
+        const signal = AbortSignal.timeout(10);
+        let events = 0;
+        signal.onabort = () => { ++events; };
+        export function run() { return signal.aborted ? signal.reason.code * 10 + events : events; }
+    "#,
+    );
+    let mut source_host = TestHost::new();
+    let mut vm = Vm::new(build.clone(), &mut source_host).unwrap();
+    source_host.advance(&mut vm, 4).unwrap();
+    let early = source_host.clock().registrations()[0].0;
+    vm.complete_operation(early, Completion::Fulfilled(JsValue::undefined()))
+        .unwrap();
+    expect_unknown(&mut vm, early);
+    let (old, deadline) = source_host.clock().registrations()[0];
+    assert_eq!(deadline, 10);
+    assert_ne!(old, early);
+    let image = vm.snapshot(&[]).unwrap();
+    assert_eq!(source_host.clock().registrations(), [(old, 10)]);
+
+    let mut host = TestHost::new();
+    host.clock().set_time(1_000).unwrap();
+    let mut vm = Vm::restore_validated(
+        Snapshot::from_bytes(&image.to_bytes().unwrap()).unwrap(),
+        build,
+        &mut host,
+    )
+    .unwrap();
+    assert!(host.clock().registrations().is_empty());
+    vm.start_recovered_operations().unwrap();
+    let (current, deadline) = host.clock().registrations()[0];
+    assert_eq!(deadline, 1_006);
+    expect_unknown(&mut vm, old);
+    host.advance(&mut vm, 5).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::number(0.0)
+    );
+    host.advance(&mut vm, 1).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::number(231.0)
+    );
+    expect_unknown(&mut vm, current);
+}
+
+#[test]
 fn date_clock_rejects_out_of_range_changes_without_delivering_timers() {
     use yield_vm::Host;
 

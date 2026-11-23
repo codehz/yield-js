@@ -107,6 +107,8 @@ impl Matcher {
 
 `cx.abort_reason(&signal)` 检查信号品牌并返回已有原因。`cx.promise_with_signal(op, &signal)` 对已取消信号直接拒绝原生 Promise，不启动 driver；否则将登记绑定到信号。取消先删除 pending 记录并释放登记，再以同一原因拒绝 Promise。完成和恢复失败也解除关联。
 
+可选服务 `wintertc.timer` 注册为 `Arc<dyn TimerService>`，接收 operation token 和 `u64` 相对延迟，返回可 drop 的一次性登记。平台只投递 token；在 VM 线程调用 `complete_operation` 后，用 `run_until_idle` 完成独立轮次。恢复发布后调用 `start_recovered_operations`；有活动 timeout 的镜像在缺少该服务时拒绝恢复。测试时钟与唤醒服务应使用同一计时域。
+
 ### 4.3 稳定标识与契约指纹
 
 绑定声明在链接期计算**指纹**，写入快照头部；恢复时用本进程的声明重新计算并比对。指纹只覆盖语义字段：

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::event::{TARGET_PROTOTYPE, TARGET_ROOT, install_accessor, new_target_prototype};
 use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
@@ -10,7 +11,7 @@ use crate::heap::{
     AbortSignalState, AbortStep, Attributes, EventListener, EventState, EventTargetState, Object,
     PlainObject, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::Host;
+use crate::host::{Host, TIMER_SERVICE, TimerService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -34,6 +35,7 @@ const THROW_IF_ABORTED: IntrinsicKey =
     IntrinsicKey::new(SIGNAL.owner, Slot::Prototype, "throwIfAborted");
 const STATIC_ABORT: IntrinsicKey = IntrinsicKey::new(SIGNAL.owner, Slot::Static, "abort");
 const ANY: IntrinsicKey = IntrinsicKey::new(SIGNAL.owner, Slot::Static, "any");
+const TIMEOUT: IntrinsicKey = IntrinsicKey::new(SIGNAL.owner, Slot::Static, "timeout");
 
 const CONTROLLER_ROOTS: &[RootSpec] = &[
     RootSpec::new(
@@ -91,6 +93,7 @@ const SIGNAL_MEMBERS: &[IntrinsicDef] = &[
         ))))
     }),
     IntrinsicDef::call(ANY, 1, signal_any),
+    IntrinsicDef::call(TIMEOUT, 1, signal_timeout),
     IntrinsicDef::call(ABORTED, 0, |vm, _, roots, _, receiver| {
         read_signal(vm, roots, receiver, |state| {
             Invocation::Value(Value::boolean(state.reason.is_some()))
@@ -303,6 +306,38 @@ fn set_onabort(
             .onabort = None;
     }
     Ok(Invocation::Value(Value::UNDEFINED))
+}
+
+fn signal_timeout(
+    vm: &mut Vm,
+    host: &mut dyn Host,
+    roots: &ActiveRoots<'_>,
+    args: Vec<Value>,
+    _: &Value,
+) -> Result<Invocation, VmError> {
+    // Web IDL limits [EnforceRange] unsigned long long to the JS safe integer range.
+    const MAX_DELAY: f64 = 9_007_199_254_740_991.0;
+    let delay = match vm.coerce_number(host, roots, &first_argument(args))? {
+        Ok(number) => number.trunc(),
+        Err(error) => return Ok(Invocation::Thrown(error)),
+    };
+    if !(0.0..=MAX_DELAY).contains(&delay) {
+        return vm.throw_type_error(roots, "AbortSignal.timeout delay is out of range");
+    }
+    if vm
+        .bindings
+        .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
+        .is_none()
+    {
+        return Ok(Invocation::Thrown(vm.alloc_dom_exception(
+            "NotSupportedError".into(),
+            "Timer service is not available".into(),
+        )));
+    }
+    let signal = vm.alloc_abort_signal(AbortSignalState::default());
+    vm.schedule_timeout(signal, delay as u64)
+        .map_err(|fault| VmError::HostFault(fault.0))?;
+    Ok(Invocation::Value(Value::object(signal)))
 }
 
 fn signal_any(

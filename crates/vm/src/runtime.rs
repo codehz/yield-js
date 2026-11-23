@@ -100,12 +100,17 @@ pub(crate) struct PendingOperation {
     pub(crate) target: DeliveryTarget,
     /// Paired with exactly one `AbortStep::Operation` on an active signal.
     pub(crate) signal: Option<ObjectId>,
-    pub(crate) declaration: usize,
+    /// No binding declaration for a VM-owned timeout wakeup.
+    pub(crate) declaration: Option<usize>,
     pub(crate) live: Option<Box<dyn LiveRegistration>>,
 }
 
 impl PendingOperation {
     pub(crate) fn checkpoint(&self) -> Result<Vec<u8>, HostFault> {
+        if self.declaration.is_none() {
+            // Only the VM deadline is durable; the timer registration is a wakeup.
+            return Ok(Vec::new());
+        }
         let Some(live) = &self.live else {
             return Ok(self.state.clone());
         };

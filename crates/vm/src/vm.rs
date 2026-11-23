@@ -11,12 +11,14 @@ use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
-use crate::host::{Completion, Host};
+use crate::host::{Completion, Host, TIMER_SERVICE, TimerService};
 use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
-use crate::snapshot::DeliveryTarget;
+use crate::snapshot::{
+    DeliveryTarget, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION, TIMEOUT_OPERATION_SCHEMA,
+};
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -328,6 +330,8 @@ pub struct Vm {
     /// Operations loaded by restore whose `Resume` / `Reissue` work has not
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
+    /// Fired timeout tasks whose abort dispatch still needs a host turn.
+    pub(crate) ready_timeouts: VecDeque<ObjectId>,
     pub(crate) microtasks: VecDeque<Microtask>,
     /// Destinations of stack `use` calls currently running a getter. A move
     /// transfers the list; disposal detaches it. These calls never suspend.
@@ -824,9 +828,21 @@ impl Vm {
             .ok_or_else(|| VmError::InvalidState(format!("module {module} has no namespace")))
     }
 
-    /// Runs queued VM microtasks. Host timer/event delivery belongs to the
-    /// host; it should call this after completing an operation.
+    /// Runs queued VM microtasks and any ready timeout tasks. Host timer/event
+    /// delivery belongs to the host; it should call this after completing an operation.
     pub fn run_until_idle(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+        loop {
+            self.run_microtask_checkpoint(host)?;
+            let Some(signal) = self.ready_timeouts.pop_front() else {
+                return Ok(());
+            };
+            let reason =
+                self.alloc_dom_exception("TimeoutError".into(), "The operation timed out".into());
+            self.abort_signal(host, &ActiveRoots::EMPTY, signal, reason)?;
+        }
+    }
+
+    fn run_microtask_checkpoint(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
         while let Some(task) = self.microtasks.pop_front() {
             let roots = &ActiveRoots::EMPTY.with(&task);
             match task {
@@ -926,8 +942,32 @@ impl Vm {
                 token.id()
             )));
         }
-        if !self.operations.contains_key(&token.id) {
-            return Err(VmError::UnknownOperation(token.id().to_string()));
+        let operation = self
+            .operations
+            .get(&token.id)
+            .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
+        if let DeliveryTarget::Timeout {
+            signal,
+            deadline_ms,
+        } = operation.target
+        {
+            if self.recovered_operations.contains(&token.id) {
+                return Err(VmError::UnknownOperation(token.id().to_string()));
+            }
+            // Release the one-shot wakeup before arming a replacement. A duplicate
+            // completion for this token cannot consume the replacement.
+            drop(self.remove_operation(token.id));
+            if matches!(completion, Completion::Rejected(_)) {
+                return Err(VmError::HostFault(TIMEOUT_OPERATION_REJECTION.into()));
+            }
+            let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
+            if remaining == 0 {
+                self.ready_timeouts.push_back(signal);
+            } else {
+                self.arm_new_timeout(signal, deadline_ms, remaining)
+                    .map_err(|fault| VmError::HostFault(fault.0))?;
+            }
+            return Ok(());
         }
         let (value, rejected) = match completion {
             Completion::Fulfilled(value) => (value, false),
@@ -996,6 +1036,9 @@ impl Vm {
                     .push_back(Microtask::ResumeHost { task, settlement });
                 Ok(())
             }
+            DeliveryTarget::Timeout { .. } => Err(VmError::InvalidState(
+                "timeout cannot receive a settlement".into(),
+            )),
         }
     }
 
@@ -1016,20 +1059,43 @@ impl Vm {
     }
 
     /// Rearms recovered `Resume` / `Reissue` operations after publication.
-    /// Each operation is registered at most once. A driver failure delivers
-    /// the declared rejection without discarding the restored VM.
+    /// Driver failures deliver their declared rejection; a timer service fault
+    /// is returned to the host without consuming other recovered operations.
     pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
         while let Some(id) = self.recovered_operations.pop_first() {
             let Some(operation) = self.operations.get_mut(&id) else {
                 continue;
             };
-            let token = crate::binding::OperationToken {
+            let token = OperationToken {
                 epoch: self.epoch,
                 id,
             };
-            if let Ok(live) =
-                self.bindings
-                    .resume_operation(operation.declaration, &operation.state, token)
+            if let DeliveryTarget::Timeout {
+                signal,
+                deadline_ms,
+            } = operation.target
+            {
+                let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
+                if remaining == 0 {
+                    self.remove_operation(id);
+                    self.ready_timeouts.push_back(signal);
+                } else {
+                    match Self::arm_timeout(&self.bindings, token, remaining) {
+                        Ok(live) => operation.live = Some(live),
+                        Err(fault) => {
+                            self.remove_operation(id);
+                            return Err(VmError::HostFault(fault.0));
+                        }
+                    }
+                }
+                continue;
+            }
+            let decl = operation
+                .declaration
+                .expect("driver operation has a declaration");
+            if let Ok(live) = self
+                .bindings
+                .resume_operation(decl, &operation.state, token)
             {
                 operation.live = Some(live);
             } else {
@@ -1045,6 +1111,71 @@ impl Vm {
         Ok(())
     }
 
+    pub(crate) fn schedule_timeout(
+        &mut self,
+        signal: ObjectId,
+        delay_ms: u64,
+    ) -> Result<(), HostFault> {
+        let deadline_ms = u128::from(self.clock.elapsed_ms()) + u128::from(delay_ms);
+        self.arm_new_timeout(signal, deadline_ms, delay_ms)
+    }
+
+    fn timeout_remaining(deadline_ms: u128, elapsed_ms: u64) -> u64 {
+        u64::try_from(deadline_ms.saturating_sub(u128::from(elapsed_ms)))
+            .expect("timeout remaining delay fits u64")
+    }
+
+    fn arm_timeout(
+        bindings: &Bindings,
+        token: OperationToken,
+        delay_ms: u64,
+    ) -> Result<Box<dyn LiveRegistration>, HostFault> {
+        bindings
+            .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
+            .ok_or_else(|| HostFault::new("timer service is unavailable"))?
+            .clone()
+            .arm(token, delay_ms)
+    }
+
+    fn arm_new_timeout(
+        &mut self,
+        signal: ObjectId,
+        deadline_ms: u128,
+        delay_ms: u64,
+    ) -> Result<(), HostFault> {
+        let token = self.allocate_operation_token()?;
+        let live = Self::arm_timeout(&self.bindings, token, delay_ms)?;
+        self.operations.insert(
+            token.id,
+            PendingOperation {
+                name: TIMEOUT_OPERATION_NAME.to_owned(),
+                schema: TIMEOUT_OPERATION_SCHEMA,
+                recovery: crate::binding::Recovery::Reissue,
+                rejection: TIMEOUT_OPERATION_REJECTION,
+                state: Vec::new(),
+                target: DeliveryTarget::Timeout {
+                    signal,
+                    deadline_ms,
+                },
+                signal: None,
+                declaration: None,
+                live: Some(live),
+            },
+        );
+        Ok(())
+    }
+
+    fn allocate_operation_token(&mut self) -> Result<OperationToken, HostFault> {
+        let id = self.next_operation_id;
+        self.next_operation_id = id
+            .checked_add(1)
+            .ok_or_else(|| HostFault::new("operation id space exhausted"))?;
+        Ok(OperationToken {
+            epoch: self.epoch,
+            id,
+        })
+    }
+
     pub(crate) fn register_operation(
         &mut self,
         decl: usize,
@@ -1057,15 +1188,8 @@ impl Vm {
             &[u8],
         ) -> Result<Box<dyn LiveRegistration>, HostFault>,
     ) -> Result<OperationToken, HostFault> {
-        let id = self.next_operation_id;
-        self.next_operation_id = self
-            .next_operation_id
-            .checked_add(1)
-            .ok_or_else(|| HostFault::new("operation id space exhausted"))?;
-        let token = OperationToken {
-            epoch: self.epoch,
-            id,
-        };
+        let token = self.allocate_operation_token()?;
+        let id = token.id;
         let (name, schema, recovery, rejection) = self.bindings.operation_metadata(decl);
         self.operations.insert(
             id,
@@ -1077,7 +1201,7 @@ impl Vm {
                 state,
                 target,
                 signal,
-                declaration: decl,
+                declaration: Some(decl),
                 live: None,
             },
         );
@@ -1446,6 +1570,7 @@ impl Vm {
             host_tasks,
             next_host_task_id,
             recovered_operations,
+            ready_timeouts: VecDeque::new(),
             microtasks: VecDeque::new(),
             stack_registrations: Vec::new(),
             pending_rejection_notifications: VecDeque::new(),

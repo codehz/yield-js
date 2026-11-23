@@ -1,11 +1,24 @@
 use std::sync::Arc;
 
-use crate::binding::{Bindings, JsValue};
+use crate::binding::{Bindings, HostFault, JsValue, LiveRegistration, OperationToken};
 use crate::value::Value;
 
 /// An optional monotonic clock shared with the VM, in an arbitrary time domain.
 pub trait MonotonicClock: std::fmt::Debug + Send + Sync {
     fn millis(&self) -> u64;
+}
+
+/// Optional one-shot wakeup service used by AbortSignal.timeout.
+pub const TIMER_SERVICE: &str = "wintertc.timer";
+
+/// Arms a platform wakeup without carrying any guest values into its callback.
+/// The scheduler delivers the token on the VM thread, then drains the turn.
+pub trait TimerService: Send + Sync {
+    fn arm(
+        self: Arc<Self>,
+        token: OperationToken,
+        delay_ms: u64,
+    ) -> Result<Box<dyn LiveRegistration>, HostFault>;
 }
 
 /// How a host operation completed. Values are produced outside a call, so

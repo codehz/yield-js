@@ -77,6 +77,29 @@ impl Host for EventHost {
 }
 
 #[test]
+fn missing_timer_service_only_disables_timeout() {
+    let source = r#"
+        export function run() {
+            const controller = new AbortController();
+            controller.abort(null);
+            try { AbortSignal.timeout(0); }
+            catch (error) {
+                return controller.signal.aborted && controller.signal.reason === null &&
+                    error instanceof DOMException && error.name === "NotSupportedError";
+            }
+            return false;
+        }
+    "#;
+    let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
+    let mut host = EventHost::new();
+    let mut vm = Vm::new(build, &mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::boolean(true)
+    );
+}
+
+#[test]
 fn host_events_keep_identity_and_freeze_parent_path_across_callbacks_and_restore() {
     let source = r#"
         import { node, dispatch } from "event-fixture";

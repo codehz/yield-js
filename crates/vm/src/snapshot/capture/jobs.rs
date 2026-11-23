@@ -1,14 +1,16 @@
 //! Microtask job, combine, operation, and host task validation and loading.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget};
+use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget, Recovery};
 use crate::builtin::is_callable_object;
 use crate::error::VmError;
 use crate::heap::GeneratorStatus;
 use crate::heap::{
     AbortStep, CombineKind, Heap, Object, PromiseCallback, PromiseState, ReactionJob,
 };
+use crate::host::{TIMER_SERVICE, TimerService};
 use crate::runtime::{HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, PendingOperation};
 use crate::value::{ObjectId, ValueRef};
 
@@ -267,10 +269,12 @@ pub(super) fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(
 pub(super) fn load_operations(
     bindings: &Bindings,
     heap: &Heap,
+    elapsed_ms: u64,
     records: Vec<PendingOperationRecord>,
 ) -> Result<BTreeMap<u64, PendingOperation>, VmError> {
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
+    let mut timeout_signals = BTreeSet::new();
     for record in records {
         if record.id == 0 || record.id == u64::MAX || operations.contains_key(&record.id) {
             return Err(VmError::InvalidSnapshot(format!(
@@ -278,28 +282,58 @@ pub(super) fn load_operations(
                 record.id
             )));
         }
-        let (declaration, recovery, rejection) = bindings
-            .operation(&record.name, record.schema)
-            .ok_or_else(|| {
-                VmError::InvalidSnapshot(format!(
-                    "operation {} schema {} is not declared",
+        let (declaration, recovery, rejection) = if let DeliveryTarget::Timeout {
+            signal,
+            deadline_ms,
+        } = record.target
+        {
+            if record.name != TIMEOUT_OPERATION_NAME
+                || record.schema != TIMEOUT_OPERATION_SCHEMA
+                || record.recovery != Recovery::Reissue
+                || !record.state.is_empty()
+                || record.signal.is_some()
+                // A timeout is created at or before the snapshot cut with a u64 delay.
+                || deadline_ms > u128::from(elapsed_ms) + u128::from(u64::MAX)
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "timeout operation {} has invalid metadata",
+                    record.id
+                )));
+            }
+            if !matches!(heap.get(signal), Ok(Object::AbortSignal { signal, .. }) if signal.reason.is_none() && !signal.dependent)
+                || !timeout_signals.insert(signal)
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "timeout operation {} has invalid or duplicate AbortSignal {signal}",
+                    record.id
+                )));
+            }
+            (None, Recovery::Reissue, TIMEOUT_OPERATION_REJECTION)
+        } else {
+            let (declaration, recovery, rejection) = bindings
+                .operation(&record.name, record.schema)
+                .ok_or_else(|| {
+                    VmError::InvalidSnapshot(format!(
+                        "operation {} schema {} is not declared",
+                        record.name, record.schema
+                    ))
+                })?;
+            if recovery != record.recovery {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "operation {} schema {} recovery mismatch",
                     record.name, record.schema
-                ))
-            })?;
-        if recovery != record.recovery {
-            return Err(VmError::InvalidSnapshot(format!(
-                "operation {} schema {} recovery mismatch",
-                record.name, record.schema
-            )));
-        }
-        bindings
-            .decode_operation(&record.name, record.schema, &record.state)
-            .map_err(|error| {
-                VmError::InvalidSnapshot(format!(
-                    "operation {} schema {} state: {error}",
-                    record.name, record.schema
-                ))
-            })?;
+                )));
+            }
+            bindings
+                .decode_operation(&record.name, record.schema, &record.state)
+                .map_err(|error| {
+                    VmError::InvalidSnapshot(format!(
+                        "operation {} schema {} state: {error}",
+                        record.name, record.schema
+                    ))
+                })?;
+            (Some(declaration), recovery, rejection)
+        };
         if let DeliveryTarget::Promise(promise) = record.target {
             let pending = matches!(heap.get(promise), Ok(Object::Promise(p)) if matches!(p.state, PromiseState::Pending));
             if !pending {
@@ -357,6 +391,15 @@ pub(super) fn load_operations(
                 "operation {id} is missing its reciprocal AbortSignal link"
             )));
         }
+    }
+    if !timeout_signals.is_empty()
+        && bindings
+            .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
+            .is_none()
+    {
+        return Err(VmError::InvalidSnapshot(
+            "pending timeout operations require the wintertc.timer service".to_owned(),
+        ));
     }
     Ok(operations)
 }

@@ -587,6 +587,7 @@ fn test_bindings(
     labels: Arc<LabelService>,
     clock: &Arc<FakeClock>,
 ) -> Result<Bindings, String> {
+    let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
     host_bindings! {
         dts: "test.d.ts",
         modules: [test, console],
@@ -598,6 +599,7 @@ fn test_bindings(
             ("node-factory", 1, NodeFactory),
             ("labels", 1, labels),
             ("clock", 1, Arc::clone(clock)),
+            ("wintertc.timer", 1, wakeups),
         ],
     }
 }

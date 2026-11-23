@@ -247,9 +247,16 @@ impl Vm {
             if let Some(signal) = operation.signal {
                 tracer.mark_object(signal)?;
             }
-            if let crate::snapshot::DeliveryTarget::Promise(promise) = operation.target {
-                tracer.mark_object(promise)?;
+            match operation.target {
+                crate::snapshot::DeliveryTarget::Promise(promise) => tracer.mark_object(promise)?,
+                crate::snapshot::DeliveryTarget::Timeout { signal, .. } => {
+                    tracer.mark_object(signal)?;
+                }
+                crate::snapshot::DeliveryTarget::Task(_) => {}
             }
+        }
+        for &signal in &self.ready_timeouts {
+            tracer.mark_object(signal)?;
         }
         for task in self.host_tasks.values() {
             task.trace(&mut tracer)?;

@@ -139,6 +139,7 @@
 - `EventTarget` 按捕获与非捕获两遍同步调用目标监听器；支持 `once`、`passive` 和动态 `handleEvent`。监听器脚本异常交给宿主报告，不中断后续监听器，也不在监听器之间排空微任务。快照格式 **69** 保存目标、监听器、事件内部状态和 VM 相对时钟；恢复不重新登记监听器。
 - 标记的 Rust 宿主实例直接参与事件传播，不分配代理目标。每次派发先固定父槽路径，再依次捕获、调用目标监听器和冒泡；回调中修改父槽仅影响后续派发。CPS 宿主派发使用固定入口，不读取脚本可覆盖的 `dispatchEvent`。
 - `AbortController` 与 `AbortSignal` 保留取消原因身份；`AbortSignal.any` 先标记受影响信号，再按源、依赖的登记顺序执行取消步骤和可信 `abort` 事件。`{signal}` 依据监听器登记 ID 清理，不受事件传播停止影响。快照格式 **70** 保存取消图及 pending operation 关联。
+- `AbortSignal.timeout` 通过可选的 `wintertc.timer` 唤醒服务在独立轮次触发可信 `abort`，原因是 `TimeoutError`；零延迟也异步。快照格式 **71** 保存 VM 相对截止时间，恢复后按剩余时长重新登记，不累计离线时间；字节码与容器编码不变。
 - 同步全局 `structuredClone(value, { transfer })` 在同一 VM 内创建新对象图，保留循环与共享引用。普通对象复制可枚举自有字符串键，数组保留洞；Map、Set、日期、正则、错误、包装原始值和二进制视图按内部类型重建。转移列表转参和校验先于遍历，遍历成功后按顺序移动 `ArrayBuffer` 后备存储；后项失败不回滚前项。不可克隆值抛出 `DataCloneError`，用户 getter 或转参抛出的值原样传播。快照格式 **68** 同时登记该函数的固有根。
 - `SuppressedError(error, suppressed, message?)` 不读取 `cause` 选项，前两个值存为可写、可配置、不可枚举的自有属性。快照格式 **62** 保存新增的固有根并保留两个释放协议 Symbol。
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。

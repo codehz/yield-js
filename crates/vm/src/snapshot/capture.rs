@@ -66,6 +66,11 @@ impl Vm {
                 "snapshot requires a drained microtask queue".to_owned(),
             ));
         }
+        if !self.ready_timeouts.is_empty() {
+            return Err(VmError::InvalidState(
+                "snapshot requires a drained timeout queue".to_owned(),
+            ));
+        }
 
         let live = self.trace_roots(roots)?;
         if self
@@ -276,6 +281,19 @@ impl Vm {
         }
         checkpoint(|profile| &mut profile.records);
         for (id, operation) in &self.operations {
+            if matches!(operation.target, DeliveryTarget::Timeout { .. }) {
+                // The absolute VM deadline is authoritative, not platform timer state.
+                snapshot.operations.push(PendingOperationRecord {
+                    id: *id,
+                    name: TIMEOUT_OPERATION_NAME.to_owned(),
+                    schema: TIMEOUT_OPERATION_SCHEMA,
+                    recovery: Recovery::Reissue,
+                    state: Vec::new(),
+                    target: operation.target,
+                    signal: None,
+                });
+                continue;
+            }
             snapshot.operations.push(PendingOperationRecord {
                 id: *id,
                 name: operation.name.clone(),
@@ -451,7 +469,8 @@ impl Vm {
                 &snapshot.imports,
             )?;
         }
-        let operations = load_operations(&bindings, &heap, snapshot.operations)?;
+        let operations =
+            load_operations(&bindings, &heap, snapshot.elapsed_ms, snapshot.operations)?;
         let host_tasks = load_host_tasks(
             &bindings,
             &heap,

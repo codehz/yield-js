@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Abort signal graphs and operation associations.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 70;
+// Internal AbortSignal timeout delivery targets.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 71;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -125,7 +125,12 @@ pub enum ContinuationTargetRecord {
 pub enum DeliveryTarget {
     Promise(ObjectId),
     Task(u64),
+    Timeout { signal: ObjectId, deadline_ms: u128 },
 }
+
+pub(crate) const TIMEOUT_OPERATION_NAME: &str = "wintertc.timeout";
+pub(crate) const TIMEOUT_OPERATION_SCHEMA: u32 = 1;
+pub(crate) const TIMEOUT_OPERATION_REJECTION: &str = "timeout timer failed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingOperationRecord {

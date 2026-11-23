@@ -563,8 +563,12 @@ pub trait Registration<O: Operation>: 'static {
     }
 }
 
-pub(crate) trait LiveRegistration {
-    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault>;
+/// Erased platform registration; dropping it cancels the registration.
+pub trait LiveRegistration: 'static {
+    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault> {
+        out.extend_from_slice(original);
+        Ok(())
+    }
 }
 
 pub(crate) struct TypedRegistration<O: OperationDriver>(pub(crate) O::Live);

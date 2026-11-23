@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::sync::{Arc, Mutex};
 
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, HostFault, JsResult, JsValue, OperationDriver, OperationToken,
-    Registration,
+    Bindings, CallCx, CodecError, HostFault, JsResult, JsValue, LiveRegistration, OperationDriver,
+    OperationToken, Registration,
 };
-use yield_vm::host::Completion;
+use yield_vm::host::{Completion, TimerService};
 use yield_vm::{Host, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
@@ -16,7 +16,7 @@ pub struct FakeClock(Mutex<ClockState>);
 #[derive(Debug, Default)]
 struct ClockState {
     now_ms: u64,
-    deadlines: BTreeMap<OperationToken, u64>,
+    deadlines: BTreeMap<OperationToken, u128>,
     arm_count: usize,
     fail_start: bool,
     fail_resume: bool,
@@ -30,7 +30,7 @@ impl yield_vm::host::MonotonicClock for FakeClock {
 }
 
 impl FakeClock {
-    pub fn registrations(&self) -> Vec<(OperationToken, u64)> {
+    pub fn registrations(&self) -> Vec<(OperationToken, u128)> {
         self.0
             .lock()
             .unwrap()
@@ -89,7 +89,7 @@ impl FakeClock {
     fn arm(
         self: &Arc<Self>,
         token: OperationToken,
-        delay: u32,
+        delay: u64,
         resuming: bool,
     ) -> Result<ArmedTimer, HostFault> {
         let mut state = self.0.lock().unwrap();
@@ -99,10 +99,7 @@ impl FakeClock {
         if !resuming && state.fail_start {
             return Err(HostFault::new("timer start failed"));
         }
-        let deadline = state
-            .now_ms
-            .checked_add(u64::from(delay))
-            .ok_or_else(|| HostFault::new("timer deadline overflow"))?;
+        let deadline = u128::from(state.now_ms) + u128::from(delay);
         match state.deadlines.entry(token) {
             Entry::Occupied(_) => return Err(HostFault::new("timer already registered")),
             Entry::Vacant(entry) => entry.insert(deadline),
@@ -123,7 +120,7 @@ impl FakeClock {
             .deadlines
             .get(&token)
             .ok_or_else(|| HostFault::new("timer is not registered"))?;
-        u32::try_from(deadline.saturating_sub(state.now_ms))
+        u32::try_from(deadline.saturating_sub(u128::from(state.now_ms)))
             .map_err(|_| HostFault::new("remaining timer delay overflow"))
     }
 
@@ -148,16 +145,26 @@ impl FakeClock {
             .deadlines
             .iter()
             .map(|(&token, &deadline)| (deadline, token))
-            .filter(|&(deadline, _)| deadline <= target)
+            .filter(|&(deadline, _)| deadline <= u128::from(target))
             .min();
         if let Some((deadline, token)) = next {
-            state.now_ms = state.now_ms.max(deadline);
+            state.now_ms = state.now_ms.max(deadline as u64);
             state.deadlines.remove(&token);
             Ok(Some(token))
         } else {
             state.now_ms = target;
             Ok(None)
         }
+    }
+}
+
+impl TimerService for FakeClock {
+    fn arm(
+        self: Arc<Self>,
+        token: OperationToken,
+        delay_ms: u64,
+    ) -> Result<Box<dyn LiveRegistration>, HostFault> {
+        Ok(Box::new(FakeClock::arm(&self, token, delay_ms, false)?))
     }
 }
 
@@ -202,11 +209,21 @@ impl OperationDriver for Timer {
     type Live = ArmedTimer;
 
     fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<ArmedTimer, HostFault> {
-        Self::clock(bindings)?.arm(token, self.remaining_ms, false)
+        FakeClock::arm(
+            Self::clock(bindings)?,
+            token,
+            u64::from(self.remaining_ms),
+            false,
+        )
     }
 
     fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<ArmedTimer, HostFault> {
-        Self::clock(bindings)?.arm(token, self.remaining_ms, true)
+        FakeClock::arm(
+            Self::clock(bindings)?,
+            token,
+            u64::from(self.remaining_ms),
+            true,
+        )
     }
 }
 
@@ -214,6 +231,8 @@ pub struct ArmedTimer {
     clock: Arc<FakeClock>,
     token: OperationToken,
 }
+
+impl LiveRegistration for ArmedTimer {}
 
 impl Registration<Timer> for ArmedTimer {
     fn checkpoint(&self) -> Result<Option<Timer>, HostFault> {
