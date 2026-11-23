@@ -190,6 +190,7 @@ builtin_globals! {
     "console" => Global::Owner(super::console::OWNER),
     "self" => Global::Root(GLOBAL_THIS),
     "navigator" => Global::Owner(super::navigator::OWNER),
+    "crypto" => Global::Owner(super::crypto::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

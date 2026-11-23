@@ -8,7 +8,9 @@ use yield_vm::binding::{
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
-use yield_vm::{ConsoleEvent, ConsoleSink, GuestOutcome, Host, HostStep, JsString, Vm};
+use yield_vm::{
+    ConsoleEvent, ConsoleSink, CryptoService, GuestOutcome, Host, HostStep, JsString, Vm,
+};
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
@@ -460,6 +462,18 @@ impl ConsoleSink for CapturedConsole {
     }
 }
 
+// Test-only repeating sequence, deliberately not a cryptographic entropy source.
+struct DeterministicEntropy;
+
+impl CryptoService for DeterministicEntropy {
+    fn fill_random(&self, bytes: &mut [u8]) -> Result<(), HostFault> {
+        for (slot, byte) in bytes.iter_mut().zip((0..=u8::MAX).cycle()) {
+            *slot = byte;
+        }
+        Ok(())
+    }
+}
+
 pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
@@ -483,26 +497,40 @@ impl Default for TestHost {
 
 impl TestHost {
     pub fn new() -> Self {
-        Self::with_services(true, None, true)
+        Self::with_services(true, None, true, Some(Arc::new(DeterministicEntropy)))
     }
 
     pub fn without_timer_service() -> Self {
-        Self::with_services(false, None, true)
+        Self::with_services(false, None, true, Some(Arc::new(DeterministicEntropy)))
     }
 
     pub fn without_console_service() -> Self {
-        Self::with_services(true, None, false)
+        Self::with_services(true, None, false, Some(Arc::new(DeterministicEntropy)))
+    }
+
+    pub fn without_crypto_service() -> Self {
+        Self::with_services(true, None, true, None)
+    }
+
+    pub fn with_crypto_service(service: Arc<dyn CryptoService>) -> Self {
+        Self::with_services(true, None, true, Some(service))
     }
 
     /// A host that also registers an explicit Fetch adapter.
     pub fn with_fetch_service(service: Arc<dyn yield_vm::fetch::FetchService>) -> Self {
-        Self::with_services(true, Some(service), true)
+        Self::with_services(
+            true,
+            Some(service),
+            true,
+            Some(Arc::new(DeterministicEntropy)),
+        )
     }
 
     fn with_services(
         timers: bool,
         fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
         capture_console: bool,
+        crypto: Option<Arc<dyn CryptoService>>,
     ) -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
@@ -516,6 +544,7 @@ impl TestHost {
             timers,
             fetch,
             sink,
+            crypto,
         )
         .expect("test bindings");
         Self {
@@ -649,6 +678,7 @@ fn test_bindings(
     timers: bool,
     fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
     console: Option<Arc<dyn ConsoleSink>>,
+    crypto: Option<Arc<dyn CryptoService>>,
 ) -> Result<Bindings, String> {
     macro_rules! link {
         ($($service:tt)*) => {
@@ -668,11 +698,19 @@ fn test_bindings(
             }
         };
     }
+    macro_rules! link_crypto {
+        ($($service:tt)*) => {
+            match crypto {
+                Some(entropy) => link!(("wintertc.crypto", 1, entropy), $($service)*),
+                None => link!($($service)*),
+            }
+        };
+    }
     macro_rules! link_platform {
         ($($service:tt)*) => {
             match console {
-                Some(sink) => link!(("wintertc.console", 1, sink), $($service)*),
-                None => link!($($service)*),
+                Some(sink) => link_crypto!(("wintertc.console", 1, sink), $($service)*),
+                None => link_crypto!($($service)*),
             }
         };
     }

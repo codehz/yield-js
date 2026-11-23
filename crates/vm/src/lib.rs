@@ -102,7 +102,7 @@ pub use fetch::{
     FetchFailure, FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
 };
 pub use heap::{Object, PromiseState};
-pub use host::{CONSOLE_SERVICE, Completion, ConsoleSink, Host};
+pub use host::{CONSOLE_SERVICE, CRYPTO_SERVICE, Completion, ConsoleSink, CryptoService, Host};
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};
 #[doc(hidden)]

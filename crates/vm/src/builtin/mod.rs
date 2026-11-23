@@ -79,6 +79,7 @@ mod boolean;
 pub(crate) mod call;
 pub(crate) mod collections;
 mod console;
+mod crypto;
 mod date;
 #[path = "date/calendar.rs"]
 pub(crate) mod date_calendar;

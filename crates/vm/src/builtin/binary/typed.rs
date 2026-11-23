@@ -681,7 +681,12 @@ impl Vm {
     }
 
     /// Raw byte write into a buffer, used by clone and copy paths.
-    fn write_buffer(&mut self, buffer: ObjectId, at: usize, bytes: &[u8]) -> Result<(), VmError> {
+    pub(in crate::builtin) fn write_buffer(
+        &mut self,
+        buffer: ObjectId,
+        at: usize,
+        bytes: &[u8],
+    ) -> Result<(), VmError> {
         let Some(Object::ArrayBuffer(target)) = Some(self.heap.get_mut(buffer)?) else {
             return Err(VmError::InvalidState(
                 "byte write requires an ArrayBuffer".to_owned(),

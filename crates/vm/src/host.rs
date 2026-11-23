@@ -17,6 +17,15 @@ pub trait ConsoleSink: Send + Sync {
     fn write(&self, event: &ConsoleEvent);
 }
 
+/// Optional, synchronous entropy for the Web Crypto random APIs.
+pub const CRYPTO_SERVICE: &str = "wintertc.crypto";
+
+/// Supplies cryptographically secure random bytes without access to guest values.
+/// Implementations must fill the entire slice on success and must not reenter the VM.
+pub trait CryptoService: Send + Sync {
+    fn fill_random(&self, bytes: &mut [u8]) -> Result<(), HostFault>;
+}
+
 /// Arms a platform wakeup without carrying any guest values into its callback.
 /// The scheduler calls [`crate::Vm::wake_timer`] on the VM thread, then drains the turn.
 pub trait TimerService: Send + Sync {

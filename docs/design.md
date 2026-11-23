@@ -120,7 +120,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 | 微任务、流与压缩 | `queueMicrotask`；`ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 和增量编解码进度进入 VM 快照。 |
 | Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；VM 实现 Fetch 算法和 JS 对象，外部网络及环境服务通过可选宿主能力接入，见下文。 |
 | Console | 全局 `console` 的规范方法、参数处理、分组与计时状态由 VM 管理；输出交给可选宿主 sink，恢复不重放日志。 |
-| Web Crypto | `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`。VM 实现参数、类型、用法与可导出性约束，熵源及密码操作由可选宿主能力提供，不回退到 `Math.random`。可导出性与快照可恢复性独立；不可导出密钥不以明文或进程句柄落盘，无法安全恢复的可达密钥应使快照失败。 |
+| Web Crypto | 目标接口为 `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`；当前仅提供 `crypto.getRandomValues()` 与 `crypto.randomUUID()`。VM 实现参数、类型、用法与可导出性约束，熵源及密码操作由可选宿主能力提供。可导出性与快照可恢复性独立；不可导出密钥不以明文或进程句柄落盘，无法安全恢复的可达密钥应使快照失败。 |
 | WebAssembly（范围外） | 缺少整个命名空间，包括 `Global`、`Instance`、`Memory`、`Module`、`Table`、`Tag`、`Exception`、`CompileError`、`LinkError`、`RuntimeError`，以及 `compile`、`compileStreaming`、`instantiate`、`instantiateStreaming`、`JSTag`、`validate`。仅记为标准差异，不纳入当前引擎设计范围。 |
 
 - **全局暴露。** 不引入 `Window`、`WorkerGlobalScope` 或 Worker。非 `[Exposed=*]` 接口在 VM 自有作用域暴露是相对 §6 的设计偏差。新增全局同步纳入 `globalThis` 和静态裸名解析，保留局部绑定遮蔽规则，不把宿主属性动态注入编译器名字表。
@@ -138,6 +138,10 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 启动 VM 时以独立的类型化服务注册定时器、Fetch、Console 输出和 Crypto 等能力，复用现有 service / operation 生命周期，不要求脚本导入宿主模块、不要求宿主实现全局对象或字符串分派。语言无关的边界传递有类型的记录、字节和代际令牌；宿主不持有脚本函数、`JsValue`、Promise 或流对象，也不从平台回调同步重入 VM。宿主可以在后台线程执行工作，仅在 VM 线程按任务投递；每个脚本任务后进行微任务检查。服务声明、状态 schema 及恢复策略可版本化，活动快照记录声明所需的兼容版本；不保存服务实例。恢复时需重新登记的 operation 缺少匹配能力则在发布前报错；有纯 VM 终结策略的记录不必重连服务。
 
 能力默认关闭，不回退到进程的全局网络客户端、凭据库、文件系统或熵源。全局名字仍存在；需调用外部服务的同步 API 缺能力时抛出可捕获的异常（定时器、Crypto 或 Console 输出默认 `NotSupportedError`），Promise API 按正常时序拒绝（网络 Fetch 为网络错误 `TypeError`，异步 Crypto 为 `NotSupportedError`）。无外部工作时按原 API 行为，例如清除不存在的 timer 是空操作，`new Response()` 和本地 `data:` Fetch 不依赖网络能力。宿主拒绝权限或操作失败由 VM 映射到对应 API 错误；过期令牌、越权投递及协议违约是宿主集成错误，不当作正常结果。
+
+#### Web Crypto 随机 API
+
+`crypto` 全局始终存在。宿主可通过 `Bindings` 在稳定 ID `wintertc.crypto` 注册 `Arc<dyn CryptoService>`；同步 `fill_random(&mut [u8]) -> Result<(), HostFault>` 成功时须填满切片，既不接收脚本值，也不重入 VM。两种随机方法仅在调用时查找服务，不回退到 `Math.random` 或进程全局熵源。无匹配服务（包括类型不符）时抛出 `NotSupportedError`；宿主失败时抛出 `OperationError`，不提交部分写入。快照不保存服务实例、熵源状态或内部临时字节；脚本保留的返回值和缓冲区仍按普通值保存。
 
 #### 定时器
 

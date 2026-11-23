@@ -2,6 +2,7 @@
 
 mod bindings;
 mod console;
+mod crypto;
 mod date;
 mod defaults;
 mod disposal;
