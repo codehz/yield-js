@@ -173,6 +173,7 @@
 - 快照保存缓冲区字节与 `maxByteLength`（分离记为空）、视图的 `buffer` / `byteOffset` / `byteLength` / 元素种类，以及 Array 迭代器记录中的字节视图游标。快照格式 **75** 另记录 `TextDecoder` 的编码，与已有的 `fatal` / `ignoreBOM`、流标记、BOM 已见标志、未完成前缀及 fatal 流错误留下的待处理字节一起恢复。完整校验拒绝与编码或流状态不一致的记录。字节块与视图在运行期 GC 与快照追踪中都按强引用边处理。
 - `CountQueuingStrategy` 与 `ByteLengthQueuingStrategy` 的 `highWaterMark` 为必需的 unrestricted double；实例访问器检查品牌，`size` 返回同一 realm 共享的函数。计数函数返回 `1`，字节长度函数按普通属性访问读取 `chunk.byteLength`。快照保留高水位数值和共享函数身份。
 - `ReadableStream` 的普通读取路径包含默认 reader 与 controller、带大小的 FIFO、锁和取消。控制器 `start` / `pull` 的等待与 reader 的 `closed`、待完成读取均随快照保存；恢复不重调已开始的用户回调。
+- 字节读取支持默认 reader 自动分配和 BYOB reader 的 `min`、偏移及元素边界。字节队列保存缓冲区区间；同长转移移动后备存储并分离旧缓冲区。快照保留未完成的 pull-into 和 BYOB request，完整校验检查关联、区间与对齐。
 - `URL`、`URLSearchParams`、`URLPattern` 同时暴露为静态裸名与 `globalThis` 属性，不依赖宿主服务。`URL` 支持组件读写、`toString` / `toJSON` 与静态 `parse` / `canParse`；`URLSearchParams` 支持字符串、键值对序列和记录初始化、查询修改、排序与实时迭代；`URLPattern` 支持字符串与字典、组件访问器、`test` / `exec`。
 - `VmOptions::base_url` 在模块求值前设置绝对基准 URL，只用于构造器省略 `base` 时的解析，不改变静态方法。快照格式 **74** 保存基准、URL 与查询列表的双向链接、迭代游标及模式输入；恢复只使用快照保存的基准（也保留无基准的情况），不能通过 `RestoreOptions` 覆盖，也不重新运行模块初始化。
 - `Number`、`BigInt` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。

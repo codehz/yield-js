@@ -30,11 +30,12 @@ pub(crate) use types::{
 };
 pub use types::{
     AbortSignalState, AbortStep, ArrayBufferObject, ArrayIterationKind, ArrayObject,
-    AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive, CollectionIteration,
-    CollectionKind, CombineKind, CombineState, DataViewObject, DisposableResource, DisposeHint,
-    DisposeState, ElementKind, EnvironmentObject, EventListener, EventPayload, EventState,
-    EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object,
-    PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    ReadableReaderObject, ReadableState, ReadableStreamObject, RejectionStatus, Resolution,
-    TextDecoderObject, TextEncoding, TypedArrayObject, WeakKey,
+    AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive, ByteStreamRange,
+    CollectionIteration, CollectionKind, CombineKind, CombineState, DataViewObject,
+    DisposableResource, DisposeHint, DisposeState, ElementKind, EnvironmentObject, EventListener,
+    EventPayload, EventState, EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus,
+    NativeObject, Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property,
+    PropertyTable, PullInto, PullIntoReader, ReadableByteState, ReadableReaderObject,
+    ReadableState, ReadableStreamObject, RejectionStatus, Resolution, TextDecoderObject,
+    TextEncoding, TypedArrayObject, WeakKey,
 };

@@ -1,4 +1,4 @@
-//! Default readable streams. Durable callback waits are heap edges and stream
+//! Readable streams. Durable callback waits are heap edges and stream
 //! reactions; synchronous guest calls never hold heap borrows.
 
 use std::collections::VecDeque;
@@ -97,6 +97,10 @@ macro_rules! converted {
     };
 }
 
+mod bytes;
+pub(in crate::builtin) use bytes::{BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER};
+use bytes::{BYOB_READER_PROTO, BYTE_CONTROLLER_PROTO, enforce_unsigned};
+
 fn member(
     vm: &mut Vm,
     host: &mut dyn Host,
@@ -142,13 +146,36 @@ fn construct_stream(
     let roots = &roots.with(&args);
     let roots = &roots.with(target);
     let source = arg(&args, 0);
-    if !matches!(source.view(), ValueRef::Undefined | ValueRef::Object(_)) {
+    if !matches!(
+        source.view(),
+        ValueRef::Null | ValueRef::Undefined | ValueRef::Object(_)
+    ) {
         return vm.throw_type_error(roots, "Underlying source must be an object");
     }
 
-    // The IDL strategy argument converts before constructor steps. The
-    // UnderlyingSource dictionary is converted inside those steps.
+    // The underlying source dictionary converts first in IDL member order,
+    // then the queuing strategy dictionary.
     let strategy = arg(&args, 1);
+    let start = converted!(callback_member(vm, host, roots, source, "start"));
+    let roots = &roots.with(&start);
+    let pull = converted!(callback_member(vm, host, roots, source, "pull"));
+    let roots = &roots.with(&pull);
+    let cancel = converted!(callback_member(vm, host, roots, source, "cancel"));
+    let roots = &roots.with(&cancel);
+    let kind = converted!(member(vm, host, roots, source, "type"));
+    let byte = !is_undefined(&kind);
+    if byte {
+        let kind = converted!(vm.coerce_string(host, &roots.with(&kind), &kind));
+        if kind != "bytes" {
+            return vm.throw_type_error(roots, "Invalid readable stream type");
+        }
+    }
+    let allocation = converted!(member(vm, host, roots, source, "autoAllocateChunkSize"));
+    let allocation = if is_undefined(&allocation) {
+        None
+    } else {
+        Some(converted!(enforce_unsigned(vm, host, roots, &allocation)))
+    };
     let mark = converted!(member(vm, host, roots, strategy, "highWaterMark"));
     let mark = if is_undefined(&mark) {
         None
@@ -164,42 +191,26 @@ fn construct_stream(
     let prototype = converted!(new_target_prototype(vm, host, roots, target, STREAM_PROTO));
     let roots = &roots.with(&prototype);
 
-    let allocation = converted!(member(vm, host, roots, source, "autoAllocateChunkSize"));
-    if !is_undefined(&allocation) {
-        let number = converted!(vm.coerce_number(host, &roots.with(&allocation), &allocation));
-        if !(0.0..=9_007_199_254_740_991.0).contains(&number.trunc()) {
-            return vm.throw_type_error(roots, "autoAllocateChunkSize is out of range");
-        }
+    if byte && size.is_some() {
+        return vm.throw_range_error(roots, "A byte stream cannot use a size algorithm");
     }
-    let cancel = converted!(callback_member(vm, host, roots, source, "cancel"));
-    let roots = &roots.with(&cancel);
-    let pull = converted!(callback_member(vm, host, roots, source, "pull"));
-    let roots = &roots.with(&pull);
-    let start = converted!(callback_member(vm, host, roots, source, "start"));
-    let roots = &roots.with(&start);
-    let kind = converted!(member(vm, host, roots, source, "type"));
-    if !is_undefined(&kind) {
-        let kind = converted!(vm.coerce_string(host, &roots.with(&kind), &kind));
-        if kind != "bytes" {
-            return vm.throw_type_error(roots, "Invalid readable stream type");
-        }
-        if size.is_some() {
-            return vm.throw_range_error(roots, "A byte stream cannot use a size algorithm");
-        }
-        if mark.is_some_and(|mark| mark.is_nan() || mark < 0.0) {
-            return vm.throw_range_error(roots, "Invalid readable stream highWaterMark");
-        }
-        return vm.throw_type_error(roots, "Readable byte streams are not supported");
-    }
-    let high_water_mark = mark.unwrap_or(1.0);
+    let high_water_mark = mark.unwrap_or(if byte { 0.0 } else { 1.0 });
     if high_water_mark.is_nan() || high_water_mark < 0.0 {
         return vm.throw_range_error(roots, "Invalid readable stream highWaterMark");
     }
+    if byte && allocation == Some(0) {
+        return vm.throw_type_error(roots, "autoAllocateChunkSize must be positive");
+    }
+    let controller_proto = if byte {
+        BYTE_CONTROLLER_PROTO
+    } else {
+        CONTROLLER_PROTO
+    };
 
     // There is no guest call or GC between allocating and linking the pair.
     let controller = vm
         .heap
-        .alloc_plain_with(Some(vm.builtins.get(CONTROLLER_PROTO)));
+        .alloc_plain_with(Some(vm.builtins.get(controller_proto)));
     let stream = vm.heap.alloc(Object::ReadableStream(ReadableStreamObject {
         object: PlainObject::new(Some(prototype)),
         controller,
@@ -207,6 +218,12 @@ fn construct_stream(
         state: ReadableState::Readable,
         disturbed: false,
         queue: VecDeque::new(),
+        byte: byte.then(|| crate::heap::ReadableByteState {
+            queue: VecDeque::new(),
+            pending: VecDeque::new(),
+            byob_request: None,
+            auto_allocate: allocation,
+        }),
         total_size: 0.0,
         high_water_mark,
         size: size.clone(),
@@ -221,7 +238,7 @@ fn construct_stream(
         pull_wait: None,
     }));
     *vm.heap.get_mut(controller)? = Object::ReadableController {
-        object: PlainObject::new(Some(vm.builtins.get(CONTROLLER_PROTO))),
+        object: PlainObject::new(Some(vm.builtins.get(controller_proto))),
         stream,
     };
     let roots = &roots.with(&stream);
@@ -256,20 +273,29 @@ fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
 }
 
 fn reader_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+    reader_of_kind(vm, value, false)
+}
+
+fn reader_of_kind(vm: &Vm, value: &Value, byob: bool) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
-    Ok(matches!(vm.heap.get(id)?, Object::ReadableReader(_)).then_some(id))
+    Ok(matches!(vm.heap.get(id)?, Object::ReadableReader(r) if r.byob == byob).then_some(id))
 }
 
 fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+    controller_of_kind(vm, value, false)
+}
+
+fn controller_of_kind(vm: &Vm, value: &Value, byte: bool) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
-    Ok(match vm.heap.get(id)? {
-        Object::ReadableController { stream, .. } => Some(*stream),
-        _ => None,
-    })
+    let Object::ReadableController { stream, .. } = vm.heap.get(id)? else {
+        return Ok(None);
+    };
+    let stream = *stream;
+    Ok((vm.readable(stream)?.byte.is_some() == byte).then_some(stream))
 }
 
 fn locked(
@@ -305,7 +331,7 @@ fn get_reader(
         if mode != "byob" {
             return vm.throw_type_error(roots, "Invalid readable stream reader mode");
         }
-        return vm.throw_type_error(roots, "A BYOB reader requires a readable byte stream");
+        return vm.acquire_reader(roots, stream, vm.builtins.get(BYOB_READER_PROTO), true);
     }
     vm.acquire_readable_reader(roots, stream, vm.builtins.get(READER_PROTO))
 }
@@ -548,9 +574,22 @@ impl Vm {
         stream: ObjectId,
         prototype: ObjectId,
     ) -> Result<Invocation, VmError> {
+        self.acquire_reader(roots, stream, prototype, false)
+    }
+
+    fn acquire_reader(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        stream: ObjectId,
+        prototype: ObjectId,
+        byob: bool,
+    ) -> Result<Invocation, VmError> {
         let record = self.readable(stream)?;
         if record.reader.is_some() {
             return self.throw_type_error(roots, "ReadableStream is already locked");
+        }
+        if byob && record.byte.is_none() {
+            return self.throw_type_error(roots, "A BYOB reader requires a readable byte stream");
         }
         let state = record.state.clone();
         let closed = self.heap.alloc_promise();
@@ -560,6 +599,7 @@ impl Vm {
                 object: PlainObject::new(Some(prototype)),
                 stream: Some(stream),
                 closed,
+                byob,
                 requests: VecDeque::new(),
             }));
         self.readable_mut(stream)?.reader = Some(reader);
@@ -598,6 +638,7 @@ impl Vm {
             self.settle(closed, Settlement::Rejected(error))?;
             self.readable_reader_mut(reader)?.closed = closed;
         }
+        self.release_byte_reader(stream)?;
         self.readable_mut(stream)?.reader = None;
         let record = self.readable_reader_mut(reader)?;
         record.stream = None;
@@ -620,6 +661,9 @@ impl Vm {
         let Some(stream) = self.readable_reader(reader)?.stream else {
             return self.reject_readable_type(roots, "Reader has no stream");
         };
+        if self.readable(stream)?.byte.is_some() {
+            return self.read_byte_default(host, roots, stream, reader);
+        }
         let request = self.heap.alloc_promise();
         let live = (reader, stream, request);
         let roots = &roots.with(&live);
@@ -688,7 +732,11 @@ impl Vm {
         if let Some(reader) = record.reader {
             let record = self.readable_reader_mut(reader)?;
             let closed = record.closed;
-            let requests = std::mem::take(&mut record.requests);
+            let requests = if record.byob {
+                VecDeque::new()
+            } else {
+                std::mem::take(&mut record.requests)
+            };
             self.settle_readable(closed, Settlement::Fulfilled(Value::UNDEFINED))?;
             let views = requests.as_slices();
             let live = (stream, reader, views);
@@ -721,6 +769,11 @@ impl Vm {
         let record = self.readable_mut(stream)?;
         if !matches!(record.state, ReadableState::Readable) {
             return Ok(());
+        }
+        self.clear_byte_pending(stream)?;
+        let record = self.readable_mut(stream)?;
+        if let Some(byte) = &mut record.byte {
+            byte.queue.clear();
         }
         reset_queue(record);
         clear_algorithms(record);
@@ -821,12 +874,27 @@ impl Vm {
         let live = (stream, reason);
         let roots = &roots.with(&live);
         self.close_readable(host, roots, stream)?;
+        self.clear_byte_pending(stream)?;
+        let requests = match self.readable(stream)?.reader {
+            Some(reader) => std::mem::take(&mut self.readable_reader_mut(reader)?.requests),
+            None => VecDeque::new(),
+        };
+        let slices = requests.as_slices();
+        let roots = &roots.with(&slices);
         let record = self.readable_mut(stream)?;
         reset_queue(record);
+        if let Some(byte) = &mut record.byte {
+            byte.queue.clear();
+        }
         let callback = record.cancel.take();
         let source = std::mem::replace(&mut record.source, Value::UNDEFINED);
         clear_algorithms(record);
-        let wait = self.invoke_readable_callback(host, roots, callback, &source, reason)?;
+        let callback_roots = (callback.as_ref(), &source);
+        let roots = &roots.with(&callback_roots);
+        for request in requests.iter().copied() {
+            self.finish_read(host, roots, request, Value::UNDEFINED, true)?;
+        }
+        let wait = self.invoke_readable_callback(host, roots, callback.clone(), &source, reason)?;
         let result = self.heap.alloc_promise();
         self.heap.promise_mut(result)?.stream_dependency = Some(wait);
         self.observe_stream_job(wait, StreamJob::ReadableCancel(result))?;

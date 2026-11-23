@@ -1267,3 +1267,59 @@ export function run() {
         PromiseState::Fulfilled(Value::number(42.0))
     );
 }
+
+#[test]
+fn stream_byte_queue_full_restore_rejects_bad_offset() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Object, Snapshot, Value, Vm, VmError};
+
+    let build = build(
+        r#"
+const stream = new ReadableStream({
+    type: "bytes",
+    start(controller) {
+        const payload = new Uint8Array([11, 22, 33]);
+        controller.enqueue(payload.subarray(1));
+        controller.close();
+    }
+});
+export async function run() {
+    const reader = stream.getReader();
+    const chunk = await reader.read();
+    const end = await reader.read();
+    return !chunk.done && end.done && chunk.value.join(",") === "22,33";
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    vm.collect_garbage(&[]).unwrap();
+    let captured = vm.snapshot(&[]).unwrap();
+    let snapshot = Snapshot::from_json(&captured.to_json().unwrap()).unwrap();
+    let full = || RestoreOptions {
+        validation: SnapshotValidation::Full,
+        ..Default::default()
+    };
+    let mut malformed = snapshot.clone();
+    let bytes = malformed
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::ReadableStream(stream) => stream.byte.as_mut(),
+            _ => None,
+        })
+        .unwrap();
+    bytes.queue.front_mut().unwrap().offset = usize::MAX;
+    assert!(matches!(
+        Vm::restore(malformed, build.clone(), &mut host, full()),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+
+    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        yield_vm::PromiseState::Fulfilled(Value::boolean(true))
+    );
+}

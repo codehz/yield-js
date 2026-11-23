@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Readable stream slots and pending stream reactions.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 77;
+// Readable byte stream state, pull-into descriptors, and BYOB requests.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 78;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

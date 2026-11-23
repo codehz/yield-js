@@ -1,7 +1,10 @@
 //! Web IDL installation and argument conversion shared by the stream interfaces.
 
 mod readable;
-pub(super) use readable::{CONTROLLER_OWNER, READER_OWNER, STREAM_OWNER};
+pub(super) use readable::{
+    BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER, CONTROLLER_OWNER, READER_OWNER,
+    STREAM_OWNER,
+};
 mod strategy;
 mod validate;
 pub(crate) use validate::{validate_job, validate_record};

@@ -8,7 +8,7 @@ use super::{ARRAY_BUFFER, ARRAY_BUFFER_PROTOTYPE, Completion, arg, getter, is_vi
 use crate::builtin::define_builtin_data;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
-use crate::heap::{Attributes, Object, TO_STRING_TAG_SYMBOL};
+use crate::heap::{ArrayBufferObject, Attributes, Object, PlainObject, TO_STRING_TAG_SYMBOL};
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
@@ -399,29 +399,68 @@ impl Vm {
         } else {
             None
         };
-        if buffer.is_detached() {
-            return self.throw_type_error(roots, "cannot transfer a detached ArrayBuffer");
-        }
-        let bytes = buffer.bytes.clone().expect("attached buffer has bytes");
+        Ok(
+            match self.transfer_array_buffer_block(roots, id, new_length, max)? {
+                Ok(result) => Invocation::Value(Value::object(result)),
+                Err(error) => Invocation::Thrown(error),
+            },
+        )
+    }
+
+    /// Transfer the backing block without consulting script. A same-length
+    /// transfer moves the allocation; changing the length prepares a new block
+    /// before detaching the source.
+    pub(crate) fn transfer_array_buffer_block(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        new_length: usize,
+        max: Option<usize>,
+    ) -> Completion<ObjectId> {
+        let Some(old_length) = self.heap.buffer(id)?.and_then(|b| b.byte_length()) else {
+            return Ok(Err(
+                self.type_error(roots, "cannot transfer a detached ArrayBuffer")?
+            ));
+        };
         if max.is_some_and(|max| new_length > max) {
-            return self.throw_range_error(roots, "ArrayBuffer transfer exceeds maxByteLength");
+            return Ok(Err(self.make_range_error(
+                roots,
+                "ArrayBuffer transfer exceeds maxByteLength",
+            )?));
         }
-        let result = match self.allocate_array_buffer(roots, new_length, max)? {
-            Ok(id) => id,
-            Err(error) => return Ok(Invocation::Thrown(error)),
+        let replacement = if new_length == old_length {
+            None
+        } else {
+            match self.allocate_block(roots, new_length)? {
+                Ok(bytes) => Some(bytes),
+                Err(error) => return Ok(Err(error)),
+            }
         };
-        let copied = new_length.min(bytes.len());
-        let Some(Object::ArrayBuffer(target)) = Some(self.heap.get_mut(result)?) else {
-            unreachable!("freshly allocated ArrayBuffer")
+        let Object::ArrayBuffer(source) = self.heap.get_mut(id)? else {
+            unreachable!("source was validated")
         };
-        target.bytes.as_mut().expect("new buffer is attached")[..copied]
-            .copy_from_slice(&bytes[..copied]);
-        // Detach only after the copy has succeeded.
-        let Some(Object::ArrayBuffer(source)) = Some(self.heap.get_mut(id)?) else {
-            unreachable!("receiver was validated")
+        let old = source.bytes.take().expect("source was attached");
+        #[cfg(debug_assertions)]
+        let old_allocation = old.as_ptr();
+        let bytes = match replacement {
+            None => old,
+            Some(mut bytes) => {
+                let keep = new_length.min(old_length);
+                bytes[..keep].copy_from_slice(&old[..keep]);
+                bytes
+            }
         };
-        source.bytes = None;
-        Ok(Invocation::Value(Value::object(result)))
+        #[cfg(debug_assertions)]
+        if new_length == old_length {
+            debug_assert_eq!(old_allocation, bytes.as_ptr());
+        }
+        Ok(Ok(self.heap.alloc(Object::ArrayBuffer(
+            ArrayBufferObject {
+                object: PlainObject::new(Some(self.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
+                bytes: Some(bytes),
+                max_byte_length: max,
+            },
+        ))))
     }
 
     /// SpeciesConstructor: the `constructor` property, then `@@species`.

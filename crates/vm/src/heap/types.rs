@@ -1546,6 +1546,7 @@ pub struct ReadableStreamObject {
     pub state: ReadableState,
     pub disturbed: bool,
     pub queue: VecDeque<(Value, f64)>,
+    pub byte: Option<ReadableByteState>,
     #[serde(with = "stream_number")]
     pub total_size: f64,
     #[serde(with = "stream_number")]
@@ -1562,11 +1563,47 @@ pub struct ReadableStreamObject {
     pub pull_wait: Option<ObjectId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteStreamRange {
+    pub buffer: ObjectId,
+    pub offset: usize,
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PullIntoReader {
+    None,
+    Default,
+    Byob,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullInto {
+    pub range: ByteStreamRange,
+    pub buffer_length: usize,
+    pub bytes_filled: usize,
+    pub minimum_fill: usize,
+    pub element_size: usize,
+    /// None denotes DataView; otherwise the intrinsic typed-array family.
+    pub view_kind: Option<ElementKind>,
+    pub reader_type: PullIntoReader,
+    pub request: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadableByteState {
+    pub queue: VecDeque<ByteStreamRange>,
+    pub pending: VecDeque<PullInto>,
+    pub byob_request: Option<ObjectId>,
+    pub auto_allocate: Option<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadableReaderObject {
     pub object: PlainObject,
     pub stream: Option<ObjectId>,
     pub closed: ObjectId,
+    pub byob: bool,
     pub requests: VecDeque<ObjectId>,
 }
 
@@ -1631,6 +1668,11 @@ pub enum Object {
     ReadableController {
         object: PlainObject,
         stream: ObjectId,
+    },
+    ReadableByobRequest {
+        object: PlainObject,
+        controller: Option<ObjectId>,
+        view: Option<ObjectId>,
     },
     Url {
         object: PlainObject,
@@ -1827,6 +1869,18 @@ impl PartialEq for Object {
                     stream: y,
                 },
             ) => a == b && x == y,
+            (
+                ReadableByobRequest {
+                    object: a,
+                    controller: x,
+                    view: u,
+                },
+                ReadableByobRequest {
+                    object: b,
+                    controller: y,
+                    view: v,
+                },
+            ) => a == b && x == y && u == v,
             (
                 QueuingStrategy {
                     object: a,

@@ -118,6 +118,7 @@ macro_rules! map_object_storage {
             | Object::ReadableStream(super::types::ReadableStreamObject { object: $storage, .. })
             | Object::ReadableReader(super::types::ReadableReaderObject { object: $storage, .. })
             | Object::ReadableController { object: $storage, .. }
+            | Object::ReadableByobRequest { object: $storage, .. }
             | Object::Url { object: $storage, .. }
             | Object::UrlSearchParams { object: $storage, .. }
             | Object::UrlSearchParamsIterator { object: $storage, .. }
@@ -520,6 +521,16 @@ impl Object {
             }
             Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
             Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::ReadableByobRequest {
+                controller, view, ..
+            } => {
+                out.extend(
+                    [*controller, *view]
+                        .into_iter()
+                        .flatten()
+                        .map(OwnedEdge::Object),
+                );
+            }
             Self::ReadableReader(reader) => {
                 out.extend(
                     reader
@@ -547,6 +558,18 @@ impl Object {
                 }
                 for (chunk, _) in &stream.queue {
                     push_value(out, chunk);
+                }
+                if let Some(byte) = &stream.byte {
+                    out.extend(byte.byob_request.into_iter().map(OwnedEdge::Object));
+                    out.extend(
+                        byte.queue
+                            .iter()
+                            .map(|range| OwnedEdge::Object(range.buffer)),
+                    );
+                    for descriptor in &byte.pending {
+                        out.push(OwnedEdge::Object(descriptor.range.buffer));
+                        out.extend(descriptor.request.into_iter().map(OwnedEdge::Object));
+                    }
                 }
                 for value in [&stream.size, &stream.pull, &stream.cancel]
                     .into_iter()
