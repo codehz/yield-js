@@ -419,7 +419,7 @@ pub(super) fn check_heap_edges(
                 "queuing strategy {id} has a nonnumeric high water mark"
             )));
         }
-        crate::builtin::streams::validate_record(heap, id, heap.get(id)?)?;
+        crate::builtin::streams::validate_composition(heap, id, heap.get(id)?)?;
         if let Object::RegExpStringIterator { regexp, .. } = heap.get(id)?
             && heap.get(*regexp).is_err()
         {

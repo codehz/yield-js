@@ -1392,3 +1392,67 @@ export async function run() {
         PromiseState::Fulfilled(Value::number(123.0))
     );
 }
+
+#[test]
+fn stream_transform_restores_pending_write_algorithm() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Completion, JsValue, Object, PromiseState, Snapshot, Vm, VmError};
+
+    let build = build(
+        r#"
+import { wait } from "test";
+export function run() {
+    const transform = new TransformStream({
+        async transform(chunk, controller) { controller.enqueue(await wait("transform")); },
+        flush(controller) { controller.enqueue("done"); }
+    });
+    const writer = transform.writable.getWriter();
+    const reader = transform.readable.getReader();
+    const output = reader.read();
+    const write = writer.write(1);
+    const closed = writer.close();
+    return Promise.all([output, write, closed]);
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let roots = std::slice::from_ref(&result);
+    vm.collect_garbage(roots).unwrap();
+    let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
+    let full = || RestoreOptions {
+        validation: SnapshotValidation::Full,
+        ..Default::default()
+    };
+    let mut malformed = snapshot.clone();
+    let transform = malformed
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::TransformStream(transform) => Some(transform),
+            _ => None,
+        })
+        .unwrap();
+    let (_, stage) = transform.write_wait.expect("pending transform write");
+    transform.write_wait = Some((transform.backpressure_change, stage));
+    assert!(matches!(
+        Vm::restore(malformed, build.clone(), &mut host, full()),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+
+    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
+    vm.start_recovered_operations().unwrap();
+    host.complete(
+        &mut vm,
+        "wait:transform",
+        Completion::Fulfilled(JsValue::number(8.0)),
+    )
+    .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert!(matches!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(_)
+    ));
+}

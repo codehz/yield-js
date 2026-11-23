@@ -174,6 +174,8 @@ builtin_globals! {
     "WritableStream" => Global::Owner(super::streams::WRITABLE_OWNER),
     "WritableStreamDefaultWriter" => Global::Owner(super::streams::WRITER_OWNER),
     "WritableStreamDefaultController" => Global::Owner(super::streams::WRITABLE_CONTROLLER_OWNER),
+    "TransformStream" => Global::Owner(super::streams::TRANSFORM_OWNER),
+    "TransformStreamDefaultController" => Global::Owner(super::streams::TRANSFORM_CONTROLLER_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

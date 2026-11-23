@@ -120,6 +120,9 @@ macro_rules! map_object_storage {
             | Object::WritableStream(super::types::WritableStreamObject { object: $storage, .. })
             | Object::WritableWriter(super::types::WritableWriterObject { object: $storage, .. })
             | Object::WritableController { object: $storage, .. }
+            | Object::TransformStream(super::types::TransformStreamObject { object: $storage, .. })
+            | Object::TransformController { object: $storage, .. }
+            | Object::StreamIterator(crate::builtin::streams::iteration::StreamIterator { object: $storage, .. })
             | Object::ReadableController { object: $storage, .. }
             | Object::ReadableByobRequest { object: $storage, .. }
             | Object::Url { object: $storage, .. }
@@ -146,7 +149,8 @@ macro_rules! map_object_storage {
             Object::Array($storage) => Some($projection),
             Object::Function($storage) => Some($projection),
             Object::Promise($storage) => Some($projection),
-            Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_) => None,
+            Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_)
+            | Object::StreamPipe(_) | Object::Tee(_) | Object::StreamFromIterator(_) => None,
         }
     };
 }
@@ -165,6 +169,7 @@ impl Object {
         if let Self::AbortSignal { signal, .. } = self {
             signal.sources.retain(|id| live.contains(id));
             signal.dependents.retain(|id| live.contains(id));
+            signal.pipe_steps.retain(|id| live.contains(id));
             signal.steps.retain(|step| match step {
                 AbortStep::Listener { target, .. } => live.contains(target),
                 AbortStep::Operation(_) => true,
@@ -525,6 +530,32 @@ impl Object {
             Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
             Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
             Self::WritableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::TransformController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::TransformStream(s) => {
+                out.extend(
+                    [s.readable, s.writable, s.controller, s.backpressure_change]
+                        .into_iter()
+                        .chain(s.write)
+                        .chain(s.finish)
+                        .chain(s.write_wait.map(|w| w.0))
+                        .chain(s.finish_wait.map(|w| w.0))
+                        .map(OwnedEdge::Object),
+                );
+                push_value(out, &s.finish_reason);
+                if let Some(a) = &s.algorithms {
+                    for value in [&a.transform, &a.flush, &a.cancel]
+                        .into_iter()
+                        .flatten()
+                        .chain([&a.receiver])
+                    {
+                        push_value(out, value);
+                    }
+                }
+            }
+            Self::StreamPipe(p) => p.write_edges(out),
+            Self::Tee(t) => t.write_edges(out),
+            Self::StreamIterator(i) => i.write_edges(out),
+            Self::StreamFromIterator(i) => i.write_edges(out),
             Self::WritableWriter(writer) => {
                 out.extend(
                     [Some(writer.ready), Some(writer.closed), writer.stream]
@@ -584,6 +615,7 @@ impl Object {
                         .stream
                         .into_iter()
                         .chain([reader.closed])
+                        .chain(reader.iterator)
                         .chain(reader.requests.iter().copied())
                         .map(OwnedEdge::Object),
                 );

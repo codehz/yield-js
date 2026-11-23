@@ -381,6 +381,51 @@ impl Vm {
         start: Option<Value>,
         high_water_mark: f64,
     ) -> Result<Invocation, VmError> {
+        let stream = self.allocate_writable(prototype, sink, high_water_mark)?;
+        let controller = self.writable(stream)?.controller;
+        let roots = &roots.with(&stream);
+        let result = if let Some(start) = start {
+            let receiver = self.writable(stream)?.sink.receiver.clone();
+            match self.invoke(
+                host,
+                roots,
+                &start,
+                Arguments::Values(&[Value::object(controller)]),
+                &receiver,
+            )? {
+                Invocation::Value(v) => v,
+                thrown => return Ok(thrown),
+            }
+        } else {
+            Value::UNDEFINED
+        };
+        let wait = self.stream_callback_promise(host, roots, result)?;
+        self.observe_writable_start(stream, wait)?;
+        Ok(object(stream))
+    }
+
+    pub(super) fn create_writable_internal(
+        &mut self,
+        sink: WritableSink,
+        hwm: f64,
+        start: ObjectId,
+    ) -> Result<ObjectId, VmError> {
+        let stream = self.allocate_writable(self.builtins.get(STREAM_PROTO), sink, hwm)?;
+        self.observe_writable_start(stream, start)?;
+        Ok(stream)
+    }
+
+    fn observe_writable_start(&mut self, stream: ObjectId, wait: ObjectId) -> Result<(), VmError> {
+        self.writable_mut(stream)?.start_wait = Some(wait);
+        self.observe_stream_job(wait, StreamJob::WritableStart(stream))
+    }
+
+    fn allocate_writable(
+        &mut self,
+        prototype: ObjectId,
+        sink: WritableSink,
+        high_water_mark: f64,
+    ) -> Result<ObjectId, VmError> {
         let controller_proto = self.builtins.get(CONTROLLER_PROTO);
         let controller = self.heap.alloc_plain_with(Some(controller_proto));
         let signal = self.alloc_abort_signal(Default::default());
@@ -408,26 +453,7 @@ impl Vm {
             object: PlainObject::new(Some(controller_proto)),
             stream,
         };
-        let roots = &roots.with(&stream);
-        let result = if let Some(start) = start {
-            let receiver = self.writable(stream)?.sink.receiver.clone();
-            match self.invoke(
-                host,
-                roots,
-                &start,
-                Arguments::Values(&[Value::object(controller)]),
-                &receiver,
-            )? {
-                Invocation::Value(v) => v,
-                thrown => return Ok(thrown),
-            }
-        } else {
-            Value::UNDEFINED
-        };
-        let wait = self.stream_callback_promise(host, roots, result)?;
-        self.writable_mut(stream)?.start_wait = Some(wait);
-        self.observe_stream_job(wait, StreamJob::WritableStart(stream))?;
-        Ok(object(stream))
+        Ok(stream)
     }
 
     fn writable_request(&mut self, owner: ObjectId) -> Result<ObjectId, VmError> {
@@ -767,6 +793,12 @@ impl Vm {
         receiver: Value,
         args: &[Value],
     ) -> Result<(), VmError> {
+        let native = match receiver.view() {
+            ValueRef::Object(id) if matches!(self.heap.get(id)?, Object::TransformStream(_)) => {
+                Some(id)
+            }
+            _ => None,
+        };
         let wait = if let Some(callback) = callback {
             match self.invoke(host, roots, &callback, Arguments::Values(args), &receiver)? {
                 Invocation::Value(value) => self.stream_callback_promise(host, roots, value)?,
@@ -775,6 +807,11 @@ impl Vm {
                     self.settle(p, Settlement::Rejected(error))?;
                     p
                 }
+            }
+        } else if let Some(transform) = native {
+            match args.split_first() {
+                Some((chunk, _)) => self.invoke_transform_write(host, roots, transform, chunk)?,
+                None => self.invoke_transform_flush(host, roots, transform)?,
             }
         } else {
             self.writable_fulfilled()?
@@ -846,10 +883,10 @@ impl Vm {
         if matches!(job, StreamJob::WritableStart(_)) {
             s.start_wait = None;
             s.started = true;
-            if let Some(error) = rejected {
-                if matches!(s.state, WritableState::Writable) {
-                    return self.start_writable_erroring(host, roots, stream, error);
-                }
+            if let Some(error) = rejected
+                && matches!(s.state, WritableState::Writable)
+            {
+                return self.start_writable_erroring(host, roots, stream, error);
             }
             return self.advance_writable(host, roots, stream);
         }

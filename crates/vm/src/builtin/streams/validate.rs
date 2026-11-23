@@ -24,6 +24,16 @@ pub(crate) fn validate_job(heap: &Heap, source: ObjectId, job: StreamJob) -> boo
             matches!(heap.get(id), Ok(Object::ReadableStream(s)) if s.pull_wait == Some(source))
         }
         StreamJob::ReadableCancel(id) => pending_dependency(heap, id, source),
+        StreamJob::Transform(id, stage) => {
+            crate::builtin::streams::transform::validate_transform_job(heap, source, id, stage)
+        }
+        StreamJob::Tee(id, _) => crate::builtin::streams::tee::validate_job(heap, source, id),
+        StreamJob::Pipe { target, stage } => {
+            matches!(heap.get(target), Ok(Object::StreamPipe(record)) if record.validate_job(source, stage))
+        }
+        StreamJob::Iteration { target, stage } => {
+            crate::builtin::streams::iteration::validate_job(heap, source, target, stage)
+        }
         StreamJob::WritableStart(id) => {
             matches!(heap.get(id), Ok(Object::WritableStream(s)) if s.start_wait == Some(source))
         }
@@ -194,7 +204,7 @@ fn validate_writable(heap: &Heap, id: ObjectId, s: &crate::heap::WritableStreamO
         && s.queue.iter().all(|r| r.size.is_finite() && r.size >= 0.0 && request(r.promise))
         && s.close.is_none_or(|p| (active || abort_flight.is_some()) && request(p))
         && s.abort.as_ref().is_none_or(|a| matches!(s.state, WritableState::Erroring(_)) && request(a.promise))
-        && abort_flight.is_none_or(|p| request(p))
+        && abort_flight.is_none_or(request)
         && match s.flight {
             Some(WritableFlight::Write) => active && !s.queue.is_empty(),
             Some(WritableFlight::Close) => active && s.close.is_some() && s.queue.is_empty(),
@@ -258,6 +268,32 @@ fn validate_writable_writer(
         WritableState::Closed => {
             fulfilled(w.closed) && (fulfilled(w.ready) || rejected(w.ready, None))
         }
+    }
+}
+
+pub(crate) fn validate_composition(
+    heap: &Heap,
+    id: ObjectId,
+    object: &Object,
+) -> Result<(), VmError> {
+    let valid = crate::builtin::streams::validate_record(heap, id, object).is_ok()
+        && match object {
+            Object::TransformStream(_) | Object::TransformController { .. } => {
+                crate::builtin::streams::transform::validate_transform_record(heap, id, object)
+            }
+            Object::StreamPipe(record) => record.validate(heap, id),
+            Object::Tee(record) => record.validate(heap, id),
+            Object::StreamIterator(_) | Object::StreamFromIterator(_) => {
+                crate::builtin::streams::iteration::validate_record(heap, id, object)
+            }
+            _ => true,
+        };
+    if valid {
+        Ok(())
+    } else {
+        Err(VmError::InvalidSnapshot(format!(
+            "invalid stream record {id}"
+        )))
     }
 }
 
@@ -332,6 +368,15 @@ pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Res
                     Ok(Object::Promise(_)) => {
                         has_job(heap, dependency, StreamJob::ReadableCancel(id))
                     }
+                    Ok(Object::TransformStream(_)) => {
+                        crate::builtin::streams::transform::validate_transform_dependency(
+                            heap, id, dependency,
+                        )
+                    }
+                    Ok(Object::StreamIterator(record)) => record.owns_result(id),
+                    Ok(Object::StreamFromIterator(record)) => record.owns_output(id),
+                    Ok(Object::Tee(record)) => record.cancel_promise == id,
+                    Ok(Object::StreamPipe(_)) => false,
                     _ => false,
                 }
         }

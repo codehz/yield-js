@@ -1525,6 +1525,7 @@ pub struct AbortSignalState {
     // Weak links in registration order, flattened to independent sources.
     pub sources: Vec<ObjectId>,
     pub dependents: Vec<ObjectId>,
+    pub pipe_steps: Vec<ObjectId>,
     pub steps: Vec<AbortStep>,
     // Stable registration ID of the event handler, not a callback identity.
     pub onabort: Option<u64>,
@@ -1604,6 +1605,8 @@ pub struct ReadableReaderObject {
     pub stream: Option<ObjectId>,
     pub closed: ObjectId,
     pub byob: bool,
+    pub internal: bool,
+    pub iterator: Option<ObjectId>,
     pub requests: VecDeque<ObjectId>,
 }
 
@@ -1688,6 +1691,39 @@ pub struct WritableWriterObject {
     pub closed: ObjectId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransformStage {
+    Backpressure,
+    Transform,
+    Flush,
+    SinkAbort,
+    SourceCancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransformAlgorithms {
+    pub receiver: Value,
+    pub transform: Option<Value>,
+    pub flush: Option<Value>,
+    pub cancel: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransformStreamObject {
+    pub object: PlainObject,
+    pub readable: ObjectId,
+    pub writable: ObjectId,
+    pub controller: ObjectId,
+    pub algorithms: Option<TransformAlgorithms>,
+    pub backpressure: bool,
+    pub backpressure_change: ObjectId,
+    pub write: Option<ObjectId>,
+    pub finish: Option<ObjectId>,
+    pub write_wait: Option<(ObjectId, TransformStage)>,
+    pub finish_wait: Option<(ObjectId, TransformStage)>,
+    pub finish_reason: Value,
+}
+
 mod stream_number {
     use super::*;
     use crate::value::ValueRef;
@@ -1752,6 +1788,15 @@ pub enum Object {
         object: PlainObject,
         stream: ObjectId,
     },
+    TransformStream(TransformStreamObject),
+    TransformController {
+        object: PlainObject,
+        stream: ObjectId,
+    },
+    StreamPipe(crate::builtin::streams::pipe::PipeRecord),
+    Tee(crate::builtin::streams::tee::TeeRecord),
+    StreamIterator(crate::builtin::streams::iteration::StreamIterator),
+    StreamFromIterator(crate::builtin::streams::iteration::FromIterator),
     ReadableController {
         object: PlainObject,
         stream: ObjectId,

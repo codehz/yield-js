@@ -507,6 +507,16 @@ impl Vm {
                     AbortStep::Operation(id) => self.abort_operation(id, reason.clone())?,
                 }
             }
+            let pipe_steps = std::mem::take(
+                &mut self
+                    .abort_signal_state_mut(signal)?
+                    .expect("affected signal")
+                    .pipe_steps,
+            );
+            let roots = &roots.with(&pipe_steps);
+            for &target in &pipe_steps {
+                self.abort_stream_pipe(host, roots, target, &reason)?;
+            }
             let time_stamp = self.monotonic_millis(host);
             let event = self.alloc_event(
                 None,

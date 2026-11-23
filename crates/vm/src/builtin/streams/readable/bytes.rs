@@ -117,7 +117,7 @@ fn byob_release(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn byob_read(
+pub(in crate::builtin::streams) fn byob_read(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -174,6 +174,7 @@ fn byob_read(
     };
     let range = ByteStreamRange { buffer, ..range };
     let request = vm.heap.alloc_promise();
+    vm.heap.promise_mut(request)?.stream_dependency = Some(reader);
     let live = (stream, request);
     let roots = &roots.with(&live);
     if matches!(vm.readable(stream)?.state, ReadableState::Closed)
@@ -230,7 +231,7 @@ fn byte_desired_size(
     }))
 }
 
-fn byte_close(
+pub(in crate::builtin::streams) fn byte_close(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -265,7 +266,7 @@ fn byte_error(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn byte_enqueue(
+pub(in crate::builtin::streams) fn byte_enqueue(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -347,10 +348,10 @@ fn request_view(
     _: Vec<Value>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
-    if let ValueRef::Object(id) = receiver.view() {
-        if let Object::ReadableByobRequest { view, .. } = vm.heap.get(id)? {
-            return Ok(Invocation::Value(view.map_or(Value::NULL, Value::object)));
-        }
+    if let ValueRef::Object(id) = receiver.view()
+        && let Object::ReadableByobRequest { view, .. } = vm.heap.get(id)?
+    {
+        return Ok(Invocation::Value(view.map_or(Value::NULL, Value::object)));
     }
     vm.throw_type_error(roots, "Expected a ReadableStreamBYOBRequest")
 }
@@ -423,21 +424,27 @@ fn respond_with_new_view(
 }
 
 impl Vm {
-    fn byte(&self, stream: ObjectId) -> Result<&ReadableByteState, VmError> {
+    pub(in crate::builtin::streams) fn byte(
+        &self,
+        stream: ObjectId,
+    ) -> Result<&ReadableByteState, VmError> {
         self.readable(stream)?
             .byte
             .as_ref()
             .ok_or_else(|| VmError::InvalidState("Expected byte stream".into()))
     }
 
-    fn byte_mut(&mut self, stream: ObjectId) -> Result<&mut ReadableByteState, VmError> {
+    pub(in crate::builtin::streams) fn byte_mut(
+        &mut self,
+        stream: ObjectId,
+    ) -> Result<&mut ReadableByteState, VmError> {
         self.readable_mut(stream)?
             .byte
             .as_mut()
             .ok_or_else(|| VmError::InvalidState("Expected byte stream".into()))
     }
 
-    fn byte_view_range(
+    pub(in crate::builtin::streams) fn byte_view_range(
         &self,
         value: &Value,
     ) -> Result<Option<(ByteStreamRange, Option<ElementKind>, usize)>, VmError> {
@@ -466,7 +473,11 @@ impl Vm {
         )))
     }
 
-    fn make_byte_view(&mut self, range: ByteStreamRange, kind: Option<ElementKind>) -> Value {
+    pub(in crate::builtin::streams) fn make_byte_view(
+        &mut self,
+        range: ByteStreamRange,
+        kind: Option<ElementKind>,
+    ) -> Value {
         let ByteStreamRange {
             buffer,
             offset: byte_offset,
@@ -535,12 +546,12 @@ impl Vm {
     }
 
     pub(super) fn release_byte_reader(&mut self, stream: ObjectId) -> Result<(), VmError> {
-        if let Some(byte) = &mut self.readable_mut(stream)?.byte {
-            if let Some(head) = byte.pending.front_mut() {
-                head.reader_type = PullIntoReader::None;
-                head.request = None;
-                byte.pending.truncate(1);
-            }
+        if let Some(byte) = &mut self.readable_mut(stream)?.byte
+            && let Some(head) = byte.pending.front_mut()
+        {
+            head.reader_type = PullIntoReader::None;
+            head.request = None;
+            byte.pending.truncate(1);
         }
         Ok(())
     }
@@ -565,6 +576,7 @@ impl Vm {
         reader: ObjectId,
     ) -> Result<Invocation, VmError> {
         let request = self.heap.alloc_promise();
+        self.heap.promise_mut(request)?.stream_dependency = Some(reader);
         let live = (stream, reader, request);
         let roots = &roots.with(&live);
         let state = {
@@ -580,30 +592,30 @@ impl Vm {
                 self.settle(request, Settlement::Rejected(error))?;
             }
             ReadableState::Readable => {
-                if self.byte(stream)?.queue.is_empty() {
-                    if let Some(length) = self.byte(stream)?.auto_allocate {
-                        let buffer = match self.allocate_array_buffer(roots, length, None)? {
-                            Ok(buffer) => buffer,
-                            Err(error) => {
-                                self.settle(request, Settlement::Rejected(error))?;
-                                return Ok(promise_or_object(request));
-                            }
-                        };
-                        self.byte_mut(stream)?.pending.push_back(PullInto {
-                            range: ByteStreamRange {
-                                buffer,
-                                offset: 0,
-                                length,
-                            },
-                            buffer_length: length,
-                            bytes_filled: 0,
-                            minimum_fill: 1,
-                            element_size: 1,
-                            view_kind: UINT8,
-                            reader_type: PullIntoReader::Default,
-                            request: Some(request),
-                        });
-                    }
+                if self.byte(stream)?.queue.is_empty()
+                    && let Some(length) = self.byte(stream)?.auto_allocate
+                {
+                    let buffer = match self.allocate_array_buffer(roots, length, None)? {
+                        Ok(buffer) => buffer,
+                        Err(error) => {
+                            self.settle(request, Settlement::Rejected(error))?;
+                            return Ok(promise_or_object(request));
+                        }
+                    };
+                    self.byte_mut(stream)?.pending.push_back(PullInto {
+                        range: ByteStreamRange {
+                            buffer,
+                            offset: 0,
+                            length,
+                        },
+                        buffer_length: length,
+                        bytes_filled: 0,
+                        minimum_fill: 1,
+                        element_size: 1,
+                        view_kind: UINT8,
+                        reader_type: PullIntoReader::Default,
+                        request: Some(request),
+                    });
                 }
                 self.add_byte_read_request(reader, request)?;
                 let ready = self.fill_byte_reads(roots, stream)?;
@@ -674,7 +686,7 @@ impl Vm {
         result.ok_or_else(|| VmError::InvalidState("Invalid byte stream copy range".into()))
     }
 
-    fn clone_byte_range(
+    pub(in crate::builtin::streams) fn clone_byte_range(
         &mut self,
         roots: &ActiveRoots<'_>,
         src: ByteStreamRange,
@@ -865,7 +877,7 @@ impl Vm {
         Ok(Ok(()))
     }
 
-    fn respond_byte_request(
+    pub(in crate::builtin::streams) fn respond_byte_request(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,

@@ -1,5 +1,10 @@
 //! Web IDL installation and argument conversion shared by the stream interfaces.
 
+pub(crate) mod iteration;
+pub(crate) mod pipe;
+pub(crate) mod tee;
+mod transform;
+pub(super) use transform::{TRANSFORM_CONTROLLER_OWNER, TRANSFORM_OWNER};
 mod readable;
 pub(super) use readable::{
     BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER, CONTROLLER_OWNER, READER_OWNER,
@@ -8,7 +13,7 @@ pub(super) use readable::{
 mod strategy;
 mod validate;
 mod writable;
-pub(crate) use validate::{validate_job, validate_record};
+pub(crate) use validate::{validate_composition, validate_job, validate_record};
 pub(super) use writable::{WRITABLE_CONTROLLER_OWNER, WRITABLE_OWNER, WRITER_OWNER};
 
 pub(super) use strategy::{BYTE_LENGTH_OWNER, COUNT_OWNER};
@@ -36,6 +41,16 @@ pub enum StreamJob {
     ReadableCancel(ObjectId),
     WritableStart(ObjectId),
     WritableFlight(ObjectId),
+    Transform(ObjectId, crate::heap::TransformStage),
+    Tee(ObjectId, tee::TeeJob),
+    Pipe {
+        target: ObjectId,
+        stage: pipe::PipeStage,
+    },
+    Iteration {
+        target: ObjectId,
+        stage: iteration::IterationStage,
+    },
 }
 
 impl StreamJob {
@@ -45,7 +60,11 @@ impl StreamJob {
             | Self::ReadablePull(id)
             | Self::ReadableCancel(id)
             | Self::WritableStart(id)
-            | Self::WritableFlight(id) => id,
+            | Self::WritableFlight(id)
+            | Self::Transform(id, _)
+            | Self::Tee(id, _)
+            | Self::Pipe { target: id, .. }
+            | Self::Iteration { target: id, .. } => id,
         }
     }
 }
@@ -61,6 +80,16 @@ impl Vm {
         match job {
             StreamJob::WritableStart(_) | StreamJob::WritableFlight(_) => {
                 self.resume_writable_job(host, roots, job, settlement)
+            }
+            StreamJob::Transform(id, stage) => {
+                self.resume_transform_job(host, roots, id, stage, settlement)
+            }
+            StreamJob::Tee(id, stage) => self.resume_tee_job(host, roots, id, stage, settlement),
+            StreamJob::Pipe { target, stage } => {
+                self.run_pipe_job(host, roots, target, stage, settlement)
+            }
+            StreamJob::Iteration { target, stage } => {
+                self.resume_iteration_job(host, roots, target, stage, settlement)
             }
             _ => self.resume_readable_job(host, roots, job, settlement),
         }

@@ -20,7 +20,7 @@ use crate::value::{ObjectId, Value, ValueRef};
 use crate::vm::Vm;
 
 const STREAM_PROTO: &str = "readableStream.prototype";
-const READER_PROTO: &str = "readableStreamDefaultReader.prototype";
+pub(super) const READER_PROTO: &str = "readableStreamDefaultReader.prototype";
 const CONTROLLER_PROTO: &str = "readableStreamDefaultController.prototype";
 
 macro_rules! interface {
@@ -48,12 +48,67 @@ macro_rules! interface {
 }
 pub(super) use interface;
 
-interface!(STREAM_OWNER, "readableStream", "ReadableStream", STREAM_PROTO,
-    KEY => IntrinsicDef::constructor_with_target(KEY, 0, illegal_constructor, construct_stream),
-    PrototypeGetter "locked" 0 => locked,
-    Prototype "cancel" 0 => stream_cancel,
-    Prototype "getReader" 0 => get_reader,
-);
+pub(in crate::builtin) const STREAM_OWNER: Owner = {
+    const KEY: IntrinsicKey = IntrinsicKey::new("ReadableStream", Slot::Global, "");
+    const MEMBERS: &[IntrinsicDef] = &[
+        IntrinsicDef::constructor_with_target(KEY, 0, illegal_constructor, construct_stream),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::PrototypeGetter, "locked"),
+            0,
+            locked,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::Prototype, "cancel"),
+            0,
+            stream_cancel,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::Prototype, "getReader"),
+            0,
+            get_reader,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeTo"),
+            1,
+            super::pipe::pipe_to,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::Prototype, "pipeThrough"),
+            1,
+            super::pipe::pipe_through,
+        ),
+        IntrinsicDef::call(
+            IntrinsicKey::new("ReadableStream", Slot::Prototype, "tee"),
+            0,
+            super::tee::tee,
+        ),
+    ];
+    Owner::new(
+        "readableStream",
+        &[
+            RootSpec::new("readableStream", RootKind::Native(KEY), FUNCTION_PARENT)
+                .fixed(STREAM_PROTO)
+                .backlink(Some(Attributes::METHOD)),
+            RootSpec::new(STREAM_PROTO, RootKind::Plain, OBJECT_PARENT),
+            RootSpec::new(
+                "ReadableStreamAsyncIterator.prototype",
+                RootKind::Plain,
+                Some(crate::builtin::iterator::ASYNC_ROOT),
+            ),
+        ],
+        &[MEMBERS, super::iteration::INTRINSICS],
+        Some(|vm, _| {
+            install(
+                vm,
+                "ReadableStream",
+                "readableStream",
+                STREAM_PROTO,
+                MEMBERS,
+            );
+            super::iteration::install(vm);
+        }),
+    )
+};
 interface!(READER_OWNER, "readableStreamDefaultReader", "ReadableStreamDefaultReader", READER_PROTO,
     KEY => IntrinsicDef::constructor_with_target(KEY, 1, illegal_constructor, construct_reader),
     PrototypeGetter "closed" 0 => reader_closed,
@@ -99,7 +154,7 @@ macro_rules! converted {
 }
 pub(super) use converted;
 
-mod bytes;
+pub(super) mod bytes;
 pub(in crate::builtin) use bytes::{BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER};
 use bytes::{BYOB_READER_PROTO, BYTE_CONTROLLER_PROTO, enforce_unsigned};
 
@@ -203,46 +258,18 @@ fn construct_stream(
     if byte && allocation == Some(0) {
         return vm.throw_type_error(roots, "autoAllocateChunkSize must be positive");
     }
-    let controller_proto = if byte {
-        BYTE_CONTROLLER_PROTO
-    } else {
-        CONTROLLER_PROTO
-    };
-
-    // There is no guest call or GC between allocating and linking the pair.
-    let controller = vm
-        .heap
-        .alloc_plain_with(Some(vm.builtins.get(controller_proto)));
-    let stream = vm.heap.alloc(Object::ReadableStream(ReadableStreamObject {
-        object: PlainObject::new(Some(prototype)),
-        controller,
-        reader: None,
-        state: ReadableState::Readable,
-        disturbed: false,
-        queue: VecDeque::new(),
-        byte: byte.then(|| crate::heap::ReadableByteState {
-            queue: VecDeque::new(),
-            pending: VecDeque::new(),
-            byob_request: None,
-            auto_allocate: allocation,
-        }),
-        total_size: 0.0,
+    let stream = vm.allocate_readable(
+        prototype,
+        source.clone(),
         high_water_mark,
-        size: size.clone(),
-        source: source.clone(),
-        pull: pull.clone(),
-        cancel: cancel.clone(),
-        started: false,
-        pulling: false,
-        pull_again: false,
-        close_requested: false,
-        start_wait: None,
-        pull_wait: None,
-    }));
-    *vm.heap.get_mut(controller)? = Object::ReadableController {
-        object: PlainObject::new(Some(vm.builtins.get(controller_proto))),
-        stream,
-    };
+        size.clone(),
+        byte,
+        allocation,
+    )?;
+    let controller = vm.readable(stream)?.controller;
+    let record = vm.readable_mut(stream)?;
+    record.pull = pull.clone();
+    record.cancel = cancel.clone();
     let roots = &roots.with(&stream);
     let start_result = match &start {
         Some(start) => match vm.invoke(
@@ -267,7 +294,7 @@ fn promise_or_object(id: ObjectId) -> Invocation {
     Invocation::Value(Value::object(id))
 }
 
-fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+pub(super) fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -491,7 +518,7 @@ fn controller_error(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-fn can_close_or_enqueue(stream: &ReadableStreamObject) -> bool {
+pub(super) fn can_close_or_enqueue(stream: &ReadableStreamObject) -> bool {
     !stream.close_requested && matches!(stream.state, ReadableState::Readable)
 }
 
@@ -508,7 +535,78 @@ fn reset_queue(stream: &mut ReadableStreamObject) {
 }
 
 impl Vm {
-    fn readable(&self, id: ObjectId) -> Result<&ReadableStreamObject, VmError> {
+    fn allocate_readable(
+        &mut self,
+        prototype: ObjectId,
+        source: Value,
+        high_water_mark: f64,
+        size: Option<Value>,
+        byte: bool,
+        allocation: Option<usize>,
+    ) -> Result<ObjectId, VmError> {
+        let controller_proto = self.builtins.get(if byte {
+            BYTE_CONTROLLER_PROTO
+        } else {
+            CONTROLLER_PROTO
+        });
+        let controller = self.heap.alloc_plain_with(Some(controller_proto));
+        let stream = self
+            .heap
+            .alloc(Object::ReadableStream(ReadableStreamObject {
+                object: PlainObject::new(Some(prototype)),
+                controller,
+                reader: None,
+                state: ReadableState::Readable,
+                disturbed: false,
+                queue: VecDeque::new(),
+                byte: byte.then(|| crate::heap::ReadableByteState {
+                    queue: VecDeque::new(),
+                    pending: VecDeque::new(),
+                    byob_request: None,
+                    auto_allocate: allocation,
+                }),
+                total_size: 0.0,
+                high_water_mark,
+                size,
+                source,
+                pull: None,
+                cancel: None,
+                started: false,
+                pulling: false,
+                pull_again: false,
+                close_requested: false,
+                start_wait: None,
+                pull_wait: None,
+            }));
+        *self.heap.get_mut(controller)? = Object::ReadableController {
+            object: PlainObject::new(Some(controller_proto)),
+            stream,
+        };
+        Ok(stream)
+    }
+
+    pub(super) fn create_readable_internal(
+        &mut self,
+        source: Value,
+        hwm: f64,
+        size: Option<Value>,
+        byte: bool,
+        start: ObjectId,
+    ) -> Result<ObjectId, VmError> {
+        let stream = self.allocate_readable(
+            self.builtins.get(STREAM_PROTO),
+            source,
+            hwm,
+            size,
+            byte,
+            None,
+        )?;
+        self.readable_mut(stream)?.start_wait = Some(start);
+        self.observe_stream_job(start, StreamJob::ReadableStart(stream))?;
+        Ok(stream)
+    }
+
+    pub(super) fn readable(&self, id: ObjectId) -> Result<&ReadableStreamObject, VmError> {
         match self.heap.get(id)? {
             Object::ReadableStream(stream) => Ok(stream),
             _ => Err(VmError::InvalidState(
@@ -517,7 +615,10 @@ impl Vm {
         }
     }
 
-    fn readable_mut(&mut self, id: ObjectId) -> Result<&mut ReadableStreamObject, VmError> {
+    pub(super) fn readable_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<&mut ReadableStreamObject, VmError> {
         match self.heap.get_mut(id)? {
             Object::ReadableStream(stream) => Ok(stream),
             _ => Err(VmError::InvalidState(
@@ -526,7 +627,7 @@ impl Vm {
         }
     }
 
-    fn readable_reader(&self, id: ObjectId) -> Result<&ReadableReaderObject, VmError> {
+    pub(super) fn readable_reader(&self, id: ObjectId) -> Result<&ReadableReaderObject, VmError> {
         match self.heap.get(id)? {
             Object::ReadableReader(reader) => Ok(reader),
             _ => Err(VmError::InvalidState(
@@ -535,7 +636,10 @@ impl Vm {
         }
     }
 
-    fn readable_reader_mut(&mut self, id: ObjectId) -> Result<&mut ReadableReaderObject, VmError> {
+    pub(super) fn readable_reader_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<&mut ReadableReaderObject, VmError> {
         match self.heap.get_mut(id)? {
             Object::ReadableReader(reader) => Ok(reader),
             _ => Err(VmError::InvalidState(
@@ -544,7 +648,10 @@ impl Vm {
         }
     }
 
-    fn readable_settled_promise(&mut self, settlement: Settlement) -> Result<ObjectId, VmError> {
+    pub(super) fn readable_settled_promise(
+        &mut self,
+        settlement: Settlement,
+    ) -> Result<ObjectId, VmError> {
         let promise = self.heap.alloc_promise();
         self.settle(promise, settlement)?;
         Ok(promise)
@@ -561,7 +668,7 @@ impl Vm {
         ))
     }
 
-    fn settle_readable(
+    pub(super) fn settle_readable(
         &mut self,
         promise: ObjectId,
         settlement: Settlement,
@@ -579,7 +686,7 @@ impl Vm {
         self.acquire_reader(roots, stream, prototype, false)
     }
 
-    fn acquire_reader(
+    pub(super) fn acquire_reader(
         &mut self,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
@@ -602,6 +709,8 @@ impl Vm {
                 stream: Some(stream),
                 closed,
                 byob,
+                internal: false,
+                iterator: None,
                 requests: VecDeque::new(),
             }));
         self.readable_mut(stream)?.reader = Some(reader);
@@ -668,6 +777,7 @@ impl Vm {
         }
         let request = self.heap.alloc_promise();
         let live = (reader, stream, request);
+        self.heap.promise_mut(request)?.stream_dependency = Some(reader);
         let roots = &roots.with(&live);
         let record = self.readable_mut(stream)?;
         record.disturbed = true;
@@ -739,12 +849,16 @@ impl Vm {
             } else {
                 std::mem::take(&mut record.requests)
             };
+            let drained = !requests.is_empty();
             self.settle_readable(closed, Settlement::Fulfilled(Value::UNDEFINED))?;
             let views = requests.as_slices();
             let live = (stream, reader, views);
             let roots = &roots.with(&live);
             for &request in &requests {
                 self.finish_read(host, roots, request, Value::UNDEFINED, true)?;
+            }
+            if drained && self.readable_reader(reader)?.iterator.is_some() {
+                self.release_finished_stream_iterator(roots, reader)?;
             }
         }
         Ok(())
@@ -758,9 +872,16 @@ impl Vm {
         chunk: Value,
         done: bool,
     ) -> Result<(), VmError> {
-        self.heap.promise_mut(request)?.stream_dependency = None;
+        let internal = self.heap.promise(request)?.stream_dependency.is_some_and(
+            |reader| matches!(self.heap.get(reader), Ok(Object::ReadableReader(r)) if r.internal),
+        );
         let result = self.iterator_result_value(chunk, done)?;
-        self.resolve_promise(host, &roots.with(&request), request, result)
+        if internal {
+            self.settle(request, Settlement::Fulfilled(result))
+        } else {
+            self.heap.promise_mut(request)?.stream_dependency = None;
+            self.resolve_promise(host, &roots.with(&request), request, result)
+        }
     }
 
     pub(super) fn error_readable(
@@ -784,10 +905,14 @@ impl Vm {
             let record = self.readable_reader_mut(reader)?;
             let closed = record.closed;
             let requests = std::mem::take(&mut record.requests);
+            let drained = !requests.is_empty();
             self.mark_promise_handled(closed)?;
             self.settle_readable(closed, Settlement::Rejected(error.clone()))?;
             for request in requests {
                 self.settle_readable(request, Settlement::Rejected(error.clone()))?;
+            }
+            if drained && self.readable_reader(reader)?.iterator.is_some() {
+                self.release_finished_stream_iterator(&ActiveRoots::EMPTY, reader)?;
             }
         }
         Ok(())
@@ -896,6 +1021,25 @@ impl Vm {
         for request in requests.iter().copied() {
             self.finish_read(host, roots, request, Value::UNDEFINED, true)?;
         }
+        let native = match source.view() {
+            ValueRef::Object(id) => match self.heap.get(id)? {
+                Object::Tee(_) => Some(self.tee_cancel(host, roots, id, stream, reason)?),
+                Object::TransformStream(_) => {
+                    Some(self.invoke_transform_cancel(host, roots, id, reason, false)?)
+                }
+                Object::StreamFromIterator(_) => {
+                    Some(self.cancel_from_iterator(host, roots, id, reason)?)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(wait) = native {
+            let result = self.heap.alloc_promise();
+            self.heap.promise_mut(result)?.stream_dependency = Some(wait);
+            self.observe_stream_job(wait, StreamJob::ReadableCancel(result))?;
+            return Ok(promise_or_object(result));
+        }
         let wait = self.invoke_readable_callback(host, roots, callback.clone(), &source, reason)?;
         let result = self.heap.alloc_promise();
         self.heap.promise_mut(result)?.stream_dependency = Some(wait);
@@ -926,7 +1070,7 @@ impl Vm {
         }
     }
 
-    fn pull_readable_if_needed(
+    pub(super) fn pull_readable_if_needed(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,
@@ -954,7 +1098,21 @@ impl Vm {
         let source = record.source.clone();
         let controller = Value::object(record.controller);
         let roots = &roots.with(&stream);
-        let wait = self.invoke_readable_callback(host, roots, callback, &source, &controller)?;
+        let native = match source.view() {
+            ValueRef::Object(id) => match self.heap.get(id)? {
+                Object::Tee(_) => Some(self.tee_pull(host, roots, id, stream)?),
+                Object::TransformStream(_) => Some(self.invoke_transform_pull(id)?),
+                Object::StreamFromIterator(_) => {
+                    Some(self.pull_from_iterator(host, roots, id, stream)?)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let wait = match native {
+            Some(wait) => wait,
+            None => self.invoke_readable_callback(host, roots, callback, &source, &controller)?,
+        };
         self.readable_mut(stream)?.pull_wait = Some(wait);
         self.observe_stream_job(wait, StreamJob::ReadablePull(stream))
     }
