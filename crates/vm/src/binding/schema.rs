@@ -724,6 +724,7 @@ pub mod __macro_support {
             let is_fetch = id == crate::fetch::FETCH_SERVICE;
             let is_console = id == crate::host::CONSOLE_SERVICE;
             let is_crypto = id == crate::host::CRYPTO_SERVICE;
+            let is_subtle = id == crate::host::CRYPTO_SUBTLE_SERVICE;
             if is_timer && (version != 1 || !value.is::<Arc<dyn crate::host::TimerService>>()) {
                 return Err(format!(
                     "incompatible service {id:?}: expected TimerService version 1"
@@ -743,6 +744,15 @@ pub mod __macro_support {
                     "incompatible service {id:?}: expected ConsoleSink version 1"
                 ));
             }
+            if is_subtle
+                && (version != crate::host::CRYPTO_SUBTLE_PROTOCOL_VERSION
+                    || !value.is::<Arc<dyn crate::host::SubtleCryptoService>>())
+            {
+                return Err(format!(
+                    "incompatible service {id:?}: expected SubtleCryptoService version {}",
+                    crate::host::CRYPTO_SUBTLE_PROTOCOL_VERSION
+                ));
+            }
             match table.services.values.entry(id.to_owned()) {
                 Entry::Vacant(entry) => {
                     entry.insert(value);
@@ -752,8 +762,8 @@ pub mod __macro_support {
             // Timer and fetch compatibility is checked by the VM against the
             // saved work. A queued one-shot task needs no platform service to
             // run, and restored fetch work is interrupted instead of resumed.
-            // Console and Crypto have no outstanding work to recover.
-            if !is_timer && !is_fetch && !is_console && !is_crypto {
+            // Console and Crypto have no work to rerun on restore.
+            if !is_timer && !is_fetch && !is_console && !is_crypto && !is_subtle {
                 table.service_ids.insert(format!("{id}:{version}"));
             }
         }
