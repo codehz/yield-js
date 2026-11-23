@@ -44,11 +44,14 @@ pub trait Host {
         None
     }
 
-    /// Long-lived same-VM values retained by the host. Read only when a host
-    /// binding requests collection, not by `Vm::collect_garbage` or snapshots.
-    fn gc_roots(&self) -> &[Value] {
-        &[]
-    }
+    /// Visits host-retained roots when a host binding requests collection.
+    /// Explicit collection and snapshots take their own root slices instead.
+    ///
+    /// Pass borrowed values directly from host fields, for example:
+    /// `self.pending.iter().chain(self.cache.values()).for_each(visit)`.
+    /// Report only values from this VM. Duplicates are allowed; do not re-enter
+    /// the VM while visiting. The VM handles any marking errors.
+    fn visit_gc_roots(&self, _visit: &mut dyn FnMut(&Value)) {}
 
     /// Default report for an exception whose global error event was not canceled.
     /// This callback must not re-enter the VM.

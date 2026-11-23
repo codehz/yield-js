@@ -171,7 +171,7 @@ impl Vm {
                 "garbage collection requires a drained microtask queue".to_owned(),
             ));
         }
-        self.collect_with_roots(roots, None)
+        self.collect_with_roots(|tracer| roots.trace(tracer), None)
     }
 
     /// Monotonic allocation totals for host GC scheduling, read between VM
@@ -185,18 +185,29 @@ impl Vm {
 
     pub(crate) fn collect_active(
         &mut self,
-        roots: &[Value],
+        host: &dyn crate::Host,
         active: &ActiveRoots<'_>,
     ) -> Result<usize, VmError> {
-        self.collect_with_roots(roots, Some(active))
+        self.collect_with_roots(
+            |tracer| {
+                let mut status = Ok(());
+                host.visit_gc_roots(&mut |value| {
+                    if status.is_ok() {
+                        status = tracer.mark_value(value);
+                    }
+                });
+                status
+            },
+            Some(active),
+        )
     }
 
     fn collect_with_roots(
         &mut self,
-        roots: &[Value],
+        trace_external: impl FnOnce(&mut Tracer<'_>) -> Result<(), VmError>,
         active: Option<&ActiveRoots<'_>>,
     ) -> Result<usize, VmError> {
-        let live = self.trace_with_roots(roots, active)?;
+        let live = self.trace_with_roots(trace_external, active)?;
         for id in &live.symbols {
             if !self.heap.symbols.contains_key(id) {
                 return Err(VmError::InvalidState(format!(
@@ -217,16 +228,16 @@ impl Vm {
     }
 
     pub(crate) fn trace_roots(&self, roots: &[Value]) -> Result<LiveSet, VmError> {
-        self.trace_with_roots(roots, None)
+        self.trace_with_roots(|tracer| roots.trace(tracer), None)
     }
 
     fn trace_with_roots(
         &self,
-        roots: &[Value],
+        trace_external: impl FnOnce(&mut Tracer<'_>) -> Result<(), VmError>,
         active: Option<&ActiveRoots<'_>>,
     ) -> Result<LiveSet, VmError> {
         let mut tracer = Tracer::new(&self.heap, &self.continuations, &self.host_instances);
-        roots.trace(&mut tracer)?;
+        trace_external(&mut tracer)?;
         if let Some(active) = active {
             active.trace(&mut tracer)?;
             self.stack_registrations.trace(&mut tracer)?;

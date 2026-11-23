@@ -1,6 +1,6 @@
 use yield_vm::{
-    Completion, Host, JsString, JsValue, PromiseState, RestoreOptions, Snapshot, Value, ValueRef,
-    Vm, VmOptions,
+    Completion, JsString, JsValue, PromiseState, RestoreOptions, Snapshot, Value, ValueRef, Vm,
+    VmOptions,
 };
 
 use crate::{TestHost, compile_source};
@@ -43,7 +43,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let result = vm
         .start(&mut host, "run", args)
         .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
-    host.set_gc_roots(vec![result]);
+    host.set_case_result(Some(result));
     host.drain_subtle(&mut vm)
         .map_err(|error| format!("{name}: drain: {error}"))?;
 
@@ -88,7 +88,13 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                 assert_pending(name, step.line, &host, &expected)?;
             }
             Directive::Returns(expected) => {
-                assert_value(name, step.line, "@returns", &expected, &host.gc_roots()[0])?;
+                assert_value(
+                    name,
+                    step.line,
+                    "@returns",
+                    &expected,
+                    host.case_result().expect("case result set after start"),
+                )?;
             }
             Directive::Fulfilled(expected) => {
                 assert_settled(
@@ -96,7 +102,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line,
                     "@fulfilled",
                     &vm,
-                    &host.gc_roots()[0],
+                    host.case_result().expect("case result set after start"),
                     true,
                     &expected,
                 )?;
@@ -107,7 +113,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line,
                     "@rejected",
                     &vm,
-                    &host.gc_roots()[0],
+                    host.case_result().expect("case result set after start"),
                     false,
                     &expected,
                 )?;
@@ -469,8 +475,9 @@ fn restore(
     build: &yield_vm::bytecode::Build,
     host: &mut TestHost,
 ) -> Result<(), String> {
+    let result = host.case_result().expect("case result set after start");
     let snapshot = vm
-        .snapshot(host.gc_roots())
+        .snapshot(std::slice::from_ref(result))
         .map_err(|error| located(name, line, "@restore", error))?;
     // Round-trip the codec. Restoring the in-memory snapshot would skip it.
     let json = snapshot

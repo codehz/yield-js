@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use yield_harness::{TestHost, build, number};
-use yield_vm::{Host, Value, Vm};
+use yield_vm::{Value, Vm};
 
 use crate::workloads::WORKLOADS;
 
@@ -89,7 +89,7 @@ pub(super) fn run(workload: &str, policy: &str) {
             }
         };
         if due {
-            let roots = host.gc_roots();
+            let roots = host.case_result().map_or(&[][..], std::slice::from_ref);
             let start = Instant::now();
             let removed = vm.collect_garbage(roots).expect("collect at idle boundary");
             let (allocated_objects, allocated_bytes) = vm.allocation_totals();

@@ -802,12 +802,12 @@ fn gc_active_preserves_only_registered_external_roots() {
         panic!("expected object")
     };
     let roots = [Value::object(id)];
-    host.set_gc_roots(roots.to_vec());
+    host.set_case_result(Some(Value::object(id)));
     vm.start(&mut host, "collect", vec![]).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
     assert!(snapshot.objects.iter().any(|object| object.id == id));
 
-    host.set_gc_roots(vec![]);
+    host.set_case_result(None);
     vm.start(&mut host, "collect", vec![]).unwrap();
     assert!(matches!(vm.snapshot(&roots), Err(VmError::InvalidState(_))));
 }
@@ -829,13 +829,13 @@ fn gc_active_rejects_a_missing_root_without_sweeping() {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     let value = vm.start(&mut host, "make", vec![]).unwrap();
-    host.set_gc_roots(vec![Value::symbol(u32::MAX)]);
+    host.set_case_result(Some(Value::symbol(u32::MAX)));
     assert!(matches!(
         vm.start(&mut host, "collect", vec![]),
         Err(VmError::InvalidState(message))
             if message == format!("garbage collection references missing symbol {}", u32::MAX)
     ));
-    host.set_gc_roots(vec![]);
+    host.set_case_result(None);
     vm.snapshot(&[value])
         .expect("failed collection must not sweep the unrooted object");
 }

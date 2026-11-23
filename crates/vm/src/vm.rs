@@ -661,7 +661,7 @@ impl Vm {
                     &receiver,
                 )?,
                 Action::Gc => {
-                    let removed = self.collect_active(host.gc_roots(), &roots.with(&saved))?;
+                    let removed = self.collect_active(host, &roots.with(&saved))?;
                     Invocation::Value(Value::number(removed as f64))
                 }
                 Action::External { decl, state } => {

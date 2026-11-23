@@ -512,7 +512,7 @@ pub struct TestHost {
     user_agent: Option<String>,
     errors: Vec<JsValue>,
     rejection_events: Vec<RejectionEvent>,
-    gc_roots: Vec<yield_vm::Value>,
+    case_result: Option<yield_vm::Value>,
     pub reject_native: bool,
     fetch_environment: yield_vm::FetchEnvironment,
 }
@@ -696,7 +696,7 @@ impl TestHost {
             user_agent: None,
             errors: Vec::new(),
             rejection_events: Vec::new(),
-            gc_roots: Vec::new(),
+            case_result: None,
             reject_native: false,
             fetch_environment: yield_vm::FetchEnvironment::default(),
         }
@@ -729,10 +729,14 @@ impl TestHost {
         })
     }
 
-    /// Replaces the values kept alive by guest-triggered GC. The values must
-    /// belong to the VM this host is about to run.
-    pub fn set_gc_roots(&mut self, roots: Vec<yield_vm::Value>) {
-        self.gc_roots = roots;
+    /// Stores the case result, if any, and keeps it alive during guest GC.
+    /// The value must belong to the VM this host is about to run.
+    pub fn set_case_result(&mut self, result: Option<yield_vm::Value>) {
+        self.case_result = result;
+    }
+
+    pub fn case_result(&self) -> Option<&yield_vm::Value> {
+        self.case_result.as_ref()
     }
 
     pub fn labels(&self) -> &Arc<LabelService> {
@@ -815,8 +819,8 @@ impl Host for TestHost {
         self.user_agent.as_deref()
     }
 
-    fn gc_roots(&self) -> &[yield_vm::Value] {
-        &self.gc_roots
+    fn visit_gc_roots(&self, visit: &mut dyn FnMut(&yield_vm::Value)) {
+        self.case_result.iter().for_each(visit);
     }
 
     fn report_error(&mut self, error: JsValue) {
