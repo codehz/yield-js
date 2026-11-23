@@ -440,7 +440,7 @@ mod test {
         ];
 
         // Feed input bytes one at a time to the decompressor
-        let mut out = vec![0; 50];
+        let mut out = [0; 50];
         let mut state = InflateState::new_boxed(DataFormat::Zlib);
         let mut part_in = 0;
         let mut part_out = 0;
@@ -457,11 +457,11 @@ mod test {
             } else {
                 assert_eq!(status, MZStatus::Ok);
             }
-            part_out += res.bytes_written as usize;
+            part_out += res.bytes_written;
             part_in += res.bytes_consumed;
         }
 
-        assert_eq!(out[..part_out as usize], b"Hello, zlib!"[..]);
+        assert_eq!(out[..part_out], b"Hello, zlib!"[..]);
         assert_eq!(part_in, encoded.len());
         assert_eq!(state.decompressor().adler32(), Some(459605011));
     }

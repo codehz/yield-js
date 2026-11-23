@@ -500,8 +500,10 @@ impl DecompressorOxide {
 
     /// Rebuild active Huffman tables without traversing checkpoint-provided offsets.
     fn valid_checkpoint_tables(&self, hufflen: bool) -> bool {
-        let mut rebuilt = Self::default();
-        rebuilt.table_sizes = self.table_sizes;
+        let mut rebuilt = DecompressorOxide {
+            table_sizes: self.table_sizes,
+            ..Default::default()
+        };
         let mut cursor = LocalVars {
             bit_buf: 0,
             num_bits: 0,
@@ -732,7 +734,7 @@ fn fill_bit_buffer(l: &mut LocalVars, in_iter: &mut InputWrapper) {
 const fn validate_zlib_header(cmf: u32, flg: u32, flags: u32, mask: usize) -> Action {
     let mut failed =
     // cmf + flg should be divisible by 31.
-        (((cmf * 256) + flg) % 31 != 0) ||
+        !((cmf * 256) + flg).is_multiple_of(31) ||
     // If this flag is set, a dictionary was used for this zlib compressed data.
     // This is currently not supported by miniz or miniz-oxide
         ((flg & 0b0010_0000) != 0) ||
@@ -1099,10 +1101,10 @@ fn init_tree(r: &mut DecompressorOxide, l: &mut LocalVars) -> Option<Action> {
         }
 
         let mut tree_next = -1;
-        for symbol_index in 0..table_size {
+        for (symbol_index, &code_size_raw) in code_sizes.iter().enumerate().take(table_size) {
             // Code sizes are limited to 15 according to the spec
             // It's already checked earlier but the compiler might not be smart enough to know that.
-            let code_size = code_sizes[symbol_index] & 15;
+            let code_size = code_size_raw & 15;
             if code_size == 0 {
                 continue;
             }
@@ -1220,11 +1222,7 @@ fn transfer(
     // special case that comes up surprisingly often. in the case that `source_pos`
     // is 1 less than `out_pos`, we can say that the entire range will be the same
     // value and optimize this to be a simple `memset`
-    let source_diff = if source_pos > out_pos {
-        source_pos - out_pos
-    } else {
-        out_pos - source_pos
-    };
+    let source_diff = source_pos.abs_diff(out_pos);
 
     // The last 3 bytes can wrap as those are dealt with separately at the end.
     // Use wrapping_sub rather than saturating for performance reasons here as

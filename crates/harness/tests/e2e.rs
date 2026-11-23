@@ -1498,7 +1498,7 @@ export async function run(size) {
             .unwrap()
             .to_bytes()
             .unwrap();
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
         println!(
             "stream_performance size={} elapsed_ms={} snapshot_bytes={} throughput_mib_s={:.1}",
             size,

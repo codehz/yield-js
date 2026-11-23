@@ -1299,8 +1299,8 @@ pub(crate) struct DictOxide {
 
 const fn probes_from_flags(flags: u32) -> [u32; 2] {
     [
-        1 + ((flags & 0xFFF) + 2) / 3,
-        1 + (((flags & 0xFFF) >> 2) + 2) / 3,
+        1 + (flags & 0xFFF).div_ceil(3),
+        1 + ((flags & 0xFFF) >> 2).div_ceil(3),
     ]
 }
 
@@ -1680,9 +1680,6 @@ fn compress_lz_codes(
         if flags & 1 == 1 {
             flags >>= 1;
 
-            let sym;
-            let num_extra_bits;
-
             let match_len = lz_code_buf[i & LZ_CODE_BUF_MASK] as usize;
 
             let match_dist = lz_code_buf[(i + 1) & LZ_CODE_BUF_MASK] as u16
@@ -1702,13 +1699,17 @@ fn compress_lz_codes(
                 u32::from(LEN_EXTRA[match_len]),
             );
 
-            if match_dist < 512 {
-                sym = SMALL_DIST_SYM[match_dist as usize] as usize;
-                num_extra_bits = SMALL_DIST_EXTRA[(match_dist >> 2) as usize] as usize;
+            let (sym, num_extra_bits) = if match_dist < 512 {
+                (
+                    SMALL_DIST_SYM[match_dist as usize] as usize,
+                    SMALL_DIST_EXTRA[(match_dist >> 2) as usize] as usize,
+                )
             } else {
-                sym = LARGE_DIST_SYM[(match_dist >> 8) as usize] as usize;
-                num_extra_bits = LARGE_DIST_EXTRA[(match_dist >> 8) as usize] as usize;
-            }
+                (
+                    LARGE_DIST_SYM[(match_dist >> 8) as usize] as usize,
+                    LARGE_DIST_EXTRA[(match_dist >> 8) as usize] as usize,
+                )
+            };
 
             debug_assert!(huff.code_sizes[1][sym] != 0);
             bb.put_fast(
@@ -1988,16 +1989,16 @@ fn compress_normal(d: &mut CompressorOxide, callback: &mut CallbackOxide) -> boo
             let dictb = &mut d.dict.b;
 
             let mut dst_pos = (lookahead_pos + lookahead_size) & LZ_DICT_SIZE_MASK;
-            let mut ins_pos = lookahead_pos + lookahead_size - 2;
+            let hash_pos = lookahead_pos + lookahead_size - 2;
             // Start the hash value from the first two bytes
             let mut hash = update_hash(
-                u16::from(dictb.dict[ins_pos & LZ_DICT_SIZE_MASK]),
-                dictb.dict[(ins_pos + 1) & LZ_DICT_SIZE_MASK],
+                u16::from(dictb.dict[hash_pos & LZ_DICT_SIZE_MASK]),
+                dictb.dict[(hash_pos + 1) & LZ_DICT_SIZE_MASK],
             );
 
             lookahead_size += num_bytes_to_process;
 
-            for &c in bytes_to_process {
+            for (ins_pos, &c) in (hash_pos..).zip(bytes_to_process.iter()) {
                 // Add byte to input buffer.
                 dictb.dict[dst_pos] = c;
                 if dst_pos < MAX_MATCH_LEN - 1 {
@@ -2010,7 +2011,6 @@ fn compress_normal(d: &mut CompressorOxide, callback: &mut CallbackOxide) -> boo
                 // and insert it into the hash chain.
                 dictb.hash[hash as usize] = ins_pos as u16;
                 dst_pos = (dst_pos + 1) & LZ_DICT_SIZE_MASK;
-                ins_pos += 1;
             }
 
             src_pos += num_bytes_to_process;

@@ -660,7 +660,7 @@ fn parse_transforms_list(reader: &mut Reader, mut out: Option<&mut [u32]>) -> Re
   if let Some(meta) = out {
     meta[TL_NUM_TRANSFORMS] = num_transforms as u32;
     meta[TL_TRANSFORMS_OFFSET] = transforms_offset as u32;
-    meta[TL_PARAMS_OFFSET] = if has_params { params_offset as u32 } else { u32::max_value() };
+    meta[TL_PARAMS_OFFSET] = if has_params { params_offset as u32 } else { u32::MAX };
     // Compute the identity cutoff transform: the first ["", IDENTITY, ""].
     let mut cutoff: i16 = -1;
     {
