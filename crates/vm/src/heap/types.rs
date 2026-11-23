@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::object::ReactionJob;
 use crate::builtin::string::utf16_unit_string;
@@ -108,6 +108,8 @@ pub struct PromiseObject {
     pub(super) extensible: bool,
     /// Private disposal state driving this pending async stack result.
     pub disposal: Option<ObjectId>,
+    /// Keeps a pending stream operation alive when only its result is reachable.
+    pub stream_dependency: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1528,6 +1530,62 @@ pub struct AbortSignalState {
     pub onabort: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadableState {
+    Readable,
+    Closed,
+    Errored(Value),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadableStreamObject {
+    pub object: PlainObject,
+    pub controller: ObjectId,
+    pub reader: Option<ObjectId>,
+    pub state: ReadableState,
+    pub disturbed: bool,
+    pub queue: VecDeque<(Value, f64)>,
+    #[serde(with = "stream_number")]
+    pub total_size: f64,
+    #[serde(with = "stream_number")]
+    pub high_water_mark: f64,
+    pub size: Option<Value>,
+    pub source: Value,
+    pub pull: Option<Value>,
+    pub cancel: Option<Value>,
+    pub started: bool,
+    pub pulling: bool,
+    pub pull_again: bool,
+    pub close_requested: bool,
+    pub start_wait: Option<ObjectId>,
+    pub pull_wait: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadableReaderObject {
+    pub object: PlainObject,
+    pub stream: Option<ObjectId>,
+    pub closed: ObjectId,
+    pub requests: VecDeque<ObjectId>,
+}
+
+mod stream_number {
+    use super::*;
+    use crate::value::ValueRef;
+
+    pub fn serialize<S: Serializer>(number: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        Value::number(*number).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        match Value::deserialize(deserializer)?.view() {
+            ValueRef::Number(number) => Ok(number),
+            _ => Err(serde::de::Error::custom("expected stream number")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -1567,6 +1625,12 @@ pub enum Object {
         // Value's Number encoding preserves NaN and infinities in JSON.
         high_water_mark: Value,
         byte_length: bool,
+    },
+    ReadableStream(ReadableStreamObject),
+    ReadableReader(ReadableReaderObject),
+    ReadableController {
+        object: PlainObject,
+        stream: ObjectId,
     },
     Url {
         object: PlainObject,
@@ -1751,6 +1815,30 @@ impl PartialEq for Object {
         use Object::*;
         match (self, other) {
             (Promise(a), Promise(b)) => a == b,
+            (ReadableStream(a), ReadableStream(b)) => a == b,
+            (ReadableReader(a), ReadableReader(b)) => a == b,
+            (
+                ReadableController {
+                    object: a,
+                    stream: x,
+                },
+                ReadableController {
+                    object: b,
+                    stream: y,
+                },
+            ) => a == b && x == y,
+            (
+                QueuingStrategy {
+                    object: a,
+                    high_water_mark: x,
+                    byte_length: p,
+                },
+                QueuingStrategy {
+                    object: b,
+                    high_water_mark: y,
+                    byte_length: q,
+                },
+            ) => a == b && x == y && p == q,
             (DisposeState(a), DisposeState(b)) => a == b,
             (
                 DisposableStack {

@@ -212,6 +212,7 @@ impl Heap {
             locked: false,
             adopting: None,
             disposal: None,
+            stream_dependency: None,
             props: PropertyTable::new(),
             symbol_props: PropertyTable::new(),
             prototype: self.promise_prototype,

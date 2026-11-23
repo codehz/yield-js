@@ -929,6 +929,11 @@ impl Vm {
                 } => {
                     self.resume_array_from_async(host, roots, state, settlement)?;
                 }
+                Microtask::Streams { .. } => {
+                    if let Microtask::Streams { job, settlement } = &task {
+                        self.resume_readable_job(host, roots, *job, settlement)?;
+                    }
+                }
                 Microtask::Call {
                     ref function,
                     ref args,
@@ -1336,6 +1341,7 @@ impl Vm {
                 )));
             }
             promise_object.state = settlement.to_state();
+            promise_object.stream_dependency = None;
             if matches!(settlement, Settlement::Rejected(_))
                 && promise_object.rejection_status == RejectionStatus::Unobserved
             {
@@ -1356,6 +1362,10 @@ impl Vm {
             None => self.heap.promise_mut(promise)?.reactions.push(job),
             Some(settlement) => self.enqueue_job(job, settlement)?,
         }
+        self.mark_promise_handled(promise)
+    }
+
+    pub(crate) fn mark_promise_handled(&mut self, promise: ObjectId) -> Result<(), VmError> {
         let status = &mut self.heap.promise_mut(promise)?.rejection_status;
         match *status {
             RejectionStatus::Unobserved => *status = RejectionStatus::Handled,
@@ -1426,6 +1436,10 @@ impl Vm {
             ReactionJob::ArrayFromAsync(state) => {
                 self.microtasks
                     .push_back(Microtask::ArrayFromAsync { state, settlement });
+            }
+            ReactionJob::Streams(job) => {
+                self.microtasks
+                    .push_back(Microtask::Streams { job, settlement });
             }
         }
         Ok(())

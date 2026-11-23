@@ -82,6 +82,7 @@ pub enum ReactionJob {
         result: ObjectId,
     },
     ArrayFromAsync(crate::builtin::array::ArrayFromAsyncJob),
+    Streams(crate::builtin::streams::StreamJob),
 }
 
 /// Project a field of the ordinary-object record an object kind stores.
@@ -114,6 +115,9 @@ macro_rules! map_object_storage {
             | Object::TextEncoder { object: $storage }
             | Object::TextDecoder(TextDecoderObject { object: $storage, .. })
             | Object::QueuingStrategy { object: $storage, .. }
+            | Object::ReadableStream(super::types::ReadableStreamObject { object: $storage, .. })
+            | Object::ReadableReader(super::types::ReadableReaderObject { object: $storage, .. })
+            | Object::ReadableController { object: $storage, .. }
             | Object::Url { object: $storage, .. }
             | Object::UrlSearchParams { object: $storage, .. }
             | Object::UrlSearchParamsIterator { object: $storage, .. }
@@ -442,6 +446,9 @@ impl Object {
                 if let Some(id) = promise.disposal {
                     out.push(OwnedEdge::Object(id));
                 }
+                if let Some(id) = promise.stream_dependency {
+                    out.push(OwnedEdge::Object(id));
+                }
                 for job in &promise.reactions {
                     job.write_edges(out);
                 }
@@ -512,6 +519,43 @@ impl Object {
                 }
             }
             Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
+            Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::ReadableReader(reader) => {
+                out.extend(
+                    reader
+                        .stream
+                        .into_iter()
+                        .chain([reader.closed])
+                        .chain(reader.requests.iter().copied())
+                        .map(OwnedEdge::Object),
+                );
+            }
+            Self::ReadableStream(stream) => {
+                out.extend(
+                    [
+                        Some(stream.controller),
+                        stream.reader,
+                        stream.start_wait,
+                        stream.pull_wait,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(OwnedEdge::Object),
+                );
+                if let super::types::ReadableState::Errored(reason) = &stream.state {
+                    push_value(out, reason);
+                }
+                for (chunk, _) in &stream.queue {
+                    push_value(out, chunk);
+                }
+                for value in [&stream.size, &stream.pull, &stream.cancel]
+                    .into_iter()
+                    .flatten()
+                    .chain([&stream.source])
+                {
+                    push_value(out, value);
+                }
+            }
             Self::Native(_)
             | Self::Plain(_)
             | Self::Proxy { slots: None, .. }
@@ -692,6 +736,7 @@ impl ReactionJob {
                 out.push(OwnedEdge::Object(*result));
             }
             Self::ArrayFromAsync(job) => job.write_edges(out),
+            Self::Streams(job) => out.push(OwnedEdge::Object(job.target())),
         }
     }
 

@@ -1209,3 +1209,61 @@ export function run() {
         Err(VmError::InvalidSnapshot(message)) if message.contains("nonnumeric high water mark")
     ));
 }
+
+#[test]
+fn stream_readable_restores_pending_pull_and_rejects_broken_lock() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Completion, JsValue, Object, PromiseState, Snapshot, Value, Vm, VmError};
+
+    let build = build(
+        r#"
+import { wait } from "test";
+export function run() {
+    const stream = new ReadableStream({ async pull(controller) {
+        controller.enqueue(await wait("chunk"));
+        controller.close();
+    } }, { highWaterMark: 0 });
+    return stream.getReader().read().then(result => result.value);
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let roots = std::slice::from_ref(&result);
+    vm.collect_garbage(roots).unwrap();
+    let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
+    let full = || RestoreOptions {
+        validation: SnapshotValidation::Full,
+        ..Default::default()
+    };
+    let mut malformed = snapshot.clone();
+    let stream = malformed
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::ReadableStream(stream) => Some(stream),
+            _ => None,
+        })
+        .unwrap();
+    assert!(stream.reader.take().is_some());
+    assert!(
+        matches!(Vm::restore(malformed, build.clone(), &mut host, full()),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("invalid readable stream record"))
+    );
+
+    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
+    vm.start_recovered_operations().unwrap();
+    host.complete(
+        &mut vm,
+        "wait:chunk",
+        Completion::Fulfilled(JsValue::number(42.0)),
+    )
+    .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::number(42.0))
+    );
+}

@@ -1,6 +1,10 @@
 //! Web IDL installation and argument conversion shared by the stream interfaces.
 
+mod readable;
+pub(super) use readable::{CONTROLLER_OWNER, READER_OWNER, STREAM_OWNER};
 mod strategy;
+mod validate;
+pub(crate) use validate::{validate_job, validate_record};
 
 pub(super) use strategy::{BYTE_LENGTH_OWNER, COUNT_OWNER};
 
@@ -13,6 +17,55 @@ use crate::intrinsic::{IntrinsicDef, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, PropertyKeyRef, Value};
 use crate::vm::Vm;
+
+use crate::heap::ReactionJob;
+use crate::runtime::Settlement;
+use crate::value::ObjectId;
+use serde::{Deserialize, Serialize};
+
+/// The target's heap record owns all durable state outside the job identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamJob {
+    ReadableStart(ObjectId),
+    ReadablePull(ObjectId),
+    ReadableCancel(ObjectId),
+}
+
+impl StreamJob {
+    pub(crate) fn target(self) -> ObjectId {
+        match self {
+            Self::ReadableStart(id) | Self::ReadablePull(id) | Self::ReadableCancel(id) => id,
+        }
+    }
+}
+
+impl Vm {
+    fn observe_stream_job(&mut self, promise: ObjectId, job: StreamJob) -> Result<(), VmError> {
+        self.react(promise, ReactionJob::Streams(job))
+    }
+
+    fn stream_callback_promise(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        value: Value,
+    ) -> Result<ObjectId, VmError> {
+        let roots = &roots.with(&value);
+        match self.promise_identity(host, roots, &value)? {
+            Ok(Some(id)) => Ok(id),
+            Ok(None) => {
+                let promise = self.heap.alloc_promise();
+                self.resolve_promise(host, roots, promise, value.clone())?;
+                Ok(promise)
+            }
+            Err(error) => {
+                let promise = self.heap.alloc_promise();
+                self.settle(promise, Settlement::Rejected(error))?;
+                Ok(promise)
+            }
+        }
+    }
+}
 
 fn install(
     vm: &mut Vm,

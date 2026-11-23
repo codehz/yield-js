@@ -42,7 +42,7 @@
 | `Proxy` | 目标限于普通对象、数组、原始值包装对象、Date、DOMException、ArrayBuffer、TypedArray、DataView 及最终指向它们的代理；仅提供 `get` / `set` / `has` / `deleteProperty` / `ownKeys` / `getOwnPropertyDescriptor` 六种 trap。基线之外的代理特性见第 6 节 |
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | `TextEncoder` 输出 UTF-8；`TextDecoder` 支持 UTF-8、UTF-16LE、UTF-16BE 及其标准标签。其他标签（如 `gbk`）按设计不支持，抛 `RangeError`。`decode` 的 `stream` 状态随快照保存，但这不是 Streams API；仍需实现设计范围内的 `TextEncoderStream` / `TextDecoderStream`。 |
-| Streams | 已提供两种排队策略；尚未接入流实例。Readable、Writable、Transform、字节读取、流转移及压缩接口均未提供。 |
+| Streams | 已提供两种排队策略及普通 ReadableStream、默认 reader/controller。尚未实现字节读取、异步迭代/`from`、pipe/tee、Writable、Transform、流转移或压缩接口。 |
 | `URL` / `URLSearchParams` / `URLPattern` | 尚未运行完整上游 WPT；不提供依赖 Blob 存储的对象 URL，也没有 Fetch 消费 VM 基准 URL |
 | `structuredClone` | 只支持转移 `ArrayBuffer`；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
 

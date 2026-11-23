@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Queuing strategy records and shared size function roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 76;
+// Readable stream slots and pending stream reactions.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 77;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

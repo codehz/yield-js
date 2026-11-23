@@ -35,5 +35,6 @@ pub use types::{
     DisposeState, ElementKind, EnvironmentObject, EventListener, EventPayload, EventState,
     EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object,
     PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    RejectionStatus, Resolution, TextDecoderObject, TextEncoding, TypedArrayObject, WeakKey,
+    ReadableReaderObject, ReadableState, ReadableStreamObject, RejectionStatus, Resolution,
+    TextDecoderObject, TextEncoding, TypedArrayObject, WeakKey,
 };

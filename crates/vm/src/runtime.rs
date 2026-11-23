@@ -359,6 +359,10 @@ pub(crate) enum Microtask {
         state: crate::builtin::array::ArrayFromAsyncJob,
         settlement: Settlement,
     },
+    Streams {
+        job: crate::builtin::streams::StreamJob,
+        settlement: Settlement,
+    },
     /// `queueMicrotask`. A throw is reported separately from Promise rejections.
     Call {
         function: Value,
@@ -409,6 +413,7 @@ impl TraceRoots for Microtask {
                 settlement,
             } => (state, result, settlement).trace(tracer),
             Self::ArrayFromAsync { state, settlement } => (state, settlement).trace(tracer),
+            Self::Streams { job, settlement } => (job.target(), settlement).trace(tracer),
             Self::Call { function, args } => (function, args).trace(tracer),
         }
     }

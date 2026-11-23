@@ -102,7 +102,7 @@ pub(super) mod queue_family;
 mod reflect;
 pub(crate) mod regexp_runtime;
 pub(crate) mod roots;
-mod streams;
+pub(crate) mod streams;
 pub(crate) mod string;
 mod structured_clone;
 pub(super) mod symbol_family;

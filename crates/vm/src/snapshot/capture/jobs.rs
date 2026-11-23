@@ -75,6 +75,13 @@ pub(super) fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                                 )));
                             }
                         }
+                        ReactionJob::Streams(job) => {
+                            if !crate::builtin::streams::validate_job(heap, id, *job) {
+                                return Err(VmError::InvalidSnapshot(format!(
+                                    "invalid stream reaction on Promise {id}"
+                                )));
+                            }
+                        }
                     }
                     if let ReactionJob::Adopt { result } = job {
                         *adopts.entry(*result).or_default() += 1;

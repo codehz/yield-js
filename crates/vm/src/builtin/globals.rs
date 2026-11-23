@@ -165,6 +165,9 @@ builtin_globals! {
     "btoa" => Global::Function(global_functions::BTOA),
     "CountQueuingStrategy" => Global::Owner(super::streams::COUNT_OWNER),
     "ByteLengthQueuingStrategy" => Global::Owner(super::streams::BYTE_LENGTH_OWNER),
+    "ReadableStream" => Global::Owner(super::streams::STREAM_OWNER),
+    "ReadableStreamDefaultReader" => Global::Owner(super::streams::READER_OWNER),
+    "ReadableStreamDefaultController" => Global::Owner(super::streams::CONTROLLER_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
