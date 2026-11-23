@@ -72,8 +72,6 @@ pub fn bindings() -> Result<yield_vm::Bindings, String> {{
     host_bindings! {{
         dts: "host.d.ts",
         modules: [A, B],
-        classes: [],
-        operations: [],
         services: {{}},
     }}
 }}
@@ -183,7 +181,7 @@ impl Counter {
 }
 
 pub fn bind() -> Result<yield_vm::Bindings, String> {
-    host_bindings! { dts: "host.d.ts", modules: [Counter], classes: [], operations: [], services: {} }
+    host_bindings! { dts: "host.d.ts", modules: [Counter], services: {} }
 }
 "#;
     let fixture = Fixture::new("typed-modules");
@@ -208,7 +206,7 @@ pub fn bind() -> Result<yield_vm::Bindings, String> {
     fixture.write("src/host.d.ts", declarations);
     fixture.write(
         "src/lib.rs",
-        &source.replace("classes: [],", "classes: [], states: [],"),
+        &source.replace("modules: [Counter],", "modules: [Counter], states: [],"),
     );
     let (ok, output) = fixture.check();
     assert!(

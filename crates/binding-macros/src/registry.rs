@@ -106,14 +106,34 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     check_struct(&item)?;
     let span = item.ident.span();
     let mut module = None;
+    let mut classes = None;
+    let mut operations = None;
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
+            "classes" => set(&mut classes, &key, || {
+                input.parse::<Token![=]>()?;
+                list::<TypePath>(input)
+            }),
+            "operations" => set(&mut operations, &key, || {
+                input.parse::<Token![=]>()?;
+                list::<TypePath>(input)
+            }),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
     })
     .parse2(args)?;
     let module = required(module, span, "name")?;
+    let classes = classes.unwrap_or_default();
+    let operations = operations.unwrap_or_default();
+    let dependencies = (!classes.is_empty() || !operations.is_empty()).then(|| {
+        quote! {
+            fn register_dependencies(deps: &mut ::yield_vm::__macro_support::ModuleDependencies) {
+                #(deps.class::<#classes>();)*
+                #(deps.operation::<#operations>();)*
+            }
+        }
+    });
     let slots = extract_slots(&mut item)?;
     let empty = match &item.fields {
         syn::Fields::Unit => Some(quote!(Self)),
@@ -182,6 +202,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
+            #dependencies
         }
         #encode
         #decode
@@ -189,7 +210,6 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
 }
 
 fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
-    input.parse::<Token![:]>()?;
     let contents;
     bracketed!(contents in input);
     Ok(contents
@@ -232,24 +252,22 @@ fn service_bindings(input: ParseStream<'_>) -> Result<Vec<ServiceBinding>> {
 struct Registry {
     dts: LitStr,
     modules: Vec<TypePath>,
-    classes: Vec<syn::TypePath>,
-    operations: Vec<syn::TypePath>,
     services: Vec<ServiceBinding>,
 }
 
 impl Parse for Registry {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let span = input.span();
-        let (mut dts, mut modules, mut classes, mut operations, mut services) =
-            (None, None, None, None, None);
+        let (mut dts, mut modules, mut services) = (None, None, None);
         entries(input, |key, input| match key.to_string().as_str() {
             "dts" => set(&mut dts, &key, || {
                 input.parse::<Token![:]>()?;
                 input.parse()
             }),
-            "modules" => set(&mut modules, &key, || list(input)),
-            "classes" => set(&mut classes, &key, || list(input)),
-            "operations" => set(&mut operations, &key, || list(input)),
+            "modules" => set(&mut modules, &key, || {
+                input.parse::<Token![:]>()?;
+                list(input)
+            }),
             "services" => set(&mut services, &key, || {
                 input.parse::<Token![:]>()?;
                 service_bindings(input)
@@ -259,8 +277,6 @@ impl Parse for Registry {
         Ok(Self {
             dts: required(dts, span, "dts")?,
             modules: required(modules, span, "modules")?,
-            classes: required(classes, span, "classes")?,
-            operations: required(operations, span, "operations")?,
             services: required(services, span, "services")?,
         })
     }
@@ -270,8 +286,6 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
     let Registry {
         dts,
         modules,
-        classes,
-        operations,
         services,
     } = syn::parse2(input)?;
     let (path, declarations) = read_declarations(&dts, origin.as_deref())?;
@@ -292,6 +306,7 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
             }
         }
     });
+    let mutable = (!modules.is_empty()).then(|| quote!(mut));
     Ok(quote! {
         {
             const _: &str = include_str!(#include);
@@ -301,10 +316,11 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
                 ::core::result::Result::Ok(())
             }) {
                 ::core::result::Result::Ok(__yield_services) => {
+                    let #mutable __yield_deps = <::yield_vm::__macro_support::ModuleDependencies as ::core::default::Default>::default();
+                    let __yield_modules = [#(::yield_vm::__macro_support::module::<#modules>(&mut __yield_deps)),*];
                     ::yield_vm::__macro_support::link(
-                        [#(::yield_vm::__macro_support::module::<#modules>()),*],
-                        [#(::yield_vm::__macro_support::class::<#classes>()),*],
-                        [#(::yield_vm::__macro_support::operation::<#operations>()),*],
+                        __yield_modules,
+                        __yield_deps,
                         __yield_services,
                     )
                 }
@@ -493,24 +509,52 @@ mod tests {
     }
 
     #[test]
+    fn host_module_accepts_optional_dependency_lists() {
+        let item = quote!(
+            struct Counter;
+        );
+        for args in [
+            quote!(name = "counter"),
+            quote!(name = "counter", classes = [], operations = []),
+            quote!(
+                operations = [work::Wait,],
+                name = "counter",
+                classes = [crate::Point,]
+            ),
+        ] {
+            host_module(args, item.clone()).unwrap();
+        }
+    }
+
+    #[test]
+    fn host_module_rejects_duplicate_dependency_keys() {
+        let item = quote!(
+            struct Counter;
+        );
+        for key in ["classes", "operations"] {
+            let ident = Ident::new(key, MacroSpan::call_site());
+            diagnostic(
+                host_module(
+                    quote!(name = "counter", #ident = [], #ident = []),
+                    item.clone(),
+                ),
+                &format!("duplicate `{key}`"),
+            );
+        }
+    }
+
+    #[test]
     fn host_bindings_requires_all_sections_exactly_once() {
-        diagnostic(
-            host_bindings(quote!(
-                dts: "tests/dts/empty.d.ts",
-                modules: [],
-                classes: [],
-                operations: []
-            )),
-            "missing `services`",
-        );
-        diagnostic(
-            host_bindings(quote!(dts: "a.d.ts", dts: "b.d.ts")),
-            "duplicate `dts`",
-        );
-        diagnostic(
-            host_bindings(quote!(exports: [])),
-            "unknown host_bindings section",
-        );
+        for (input, error) in [
+            (quote!(modules: [], services: {}), "missing `dts`"),
+            (quote!(dts: "a.d.ts", services: {}), "missing `modules`"),
+            (quote!(dts: "a.d.ts", modules: []), "missing `services`"),
+            (quote!(dts: "a.d.ts", dts: "b.d.ts"), "duplicate `dts`"),
+            (quote!(modules: [], modules: []), "duplicate `modules`"),
+            (quote!(services: {}, services: {}), "duplicate `services`"),
+        ] {
+            diagnostic(host_bindings(input), error);
+        }
     }
 
     #[test]
@@ -518,8 +562,6 @@ mod tests {
         let error = host_bindings(quote!(
             dts: "tests/dts/missing.d.ts",
             modules: [],
-            classes: [],
-            operations: [],
             services: {}
         ))
         .unwrap_err()
@@ -533,8 +575,6 @@ mod tests {
         let error = host_bindings(quote!(
             dts: "tests/dts/reexport.d.ts",
             modules: [X],
-            classes: [],
-            operations: [],
             services: {}
         ))
         .unwrap_err()
@@ -544,11 +584,13 @@ mod tests {
     }
 
     #[test]
-    fn host_bindings_rejects_duplicate_services_sections() {
-        diagnostic(
-            host_bindings(quote!(services: {}, services: {})),
-            "duplicate `services`",
-        );
+    fn host_bindings_rejects_old_sections() {
+        for key in [quote!(classes), quote!(operations), quote!(exports)] {
+            diagnostic(
+                host_bindings(quote!(dts: "a.d.ts", modules: [], services: {}, #key: [])),
+                "unknown host_bindings section",
+            );
+        }
     }
 
     #[test]
@@ -557,28 +599,37 @@ mod tests {
             host_bindings(quote!(
                 dts: "tests/dts/empty.d.ts",
                 modules: [],
-                classes: [],
-                operations: [],
                 services: {},
             ))
             .is_ok()
         );
-        let expanded = host_bindings(quote! {
+        let registry: Registry = syn::parse2(quote! {
             dts: "tests/dts/empty.d.ts",
             services: {
                 Clock => tick(),
                 Timer? => timer,
                 Console? => ::core::option::Option::None,
             },
-            operations: [work::Wait,],
-            classes: [types::Point],
             modules: [api::V1,],
         })
-        .unwrap()
-        .to_string();
-        assert!(expanded.contains("module :: < api :: V1 > ()"));
-        assert!(expanded.contains("class :: < types :: Point > ()"));
-        assert!(expanded.contains("operation :: < work :: Wait > ()"));
+        .unwrap();
+        let [module] = registry.modules.as_slice() else {
+            panic!("expected one module type");
+        };
+        assert!(
+            module
+                .path
+                .segments
+                .iter()
+                .map(|segment| &segment.ident)
+                .eq(["api", "V1"])
+        );
+        let [clock, timer, console] = registry.services.as_slice() else {
+            panic!("expected three service bindings");
+        };
+        assert!(clock.key.path.is_ident("Clock") && !clock.optional);
+        assert!(timer.key.path.is_ident("Timer") && timer.optional);
+        assert!(console.key.path.is_ident("Console") && console.optional);
     }
 
     #[test]
@@ -586,8 +637,6 @@ mod tests {
         let error = host_bindings(quote!(
             dts: "tests/dts/empty.d.ts",
             modules: [],
-            classes: [],
-            operations: [],
             services: { Clock tick() }
         ))
         .unwrap_err()

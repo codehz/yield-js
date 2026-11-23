@@ -380,7 +380,7 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     assert_eq!(vm.get_export("total").unwrap(), Value::number(3.0));
 }
 
-#[yield_vm::host_module(name = "chain")]
+#[yield_vm::host_module(name = "chain", operations = [yield_harness::Timer])]
 struct Chain;
 
 #[yield_vm::module_exports]
@@ -437,12 +437,11 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     use super::support::compile_main;
     use super::support::declared;
     use std::sync::Arc;
-    use yield_harness::Timer;
 
     let clock = Arc::new(yield_harness::FakeClock::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/chain.d.ts",
-        modules: [Chain], classes: [], operations: [Timer],
+        modules: [Chain],
         services: {
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },

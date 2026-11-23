@@ -137,8 +137,6 @@ fn demo_bindings(
     host_bindings! {
         dts: "../demo.d.ts",
         modules: [Demo],
-        classes: [],
-        operations: [Wait],
         services: {
             DemoCountersKey => counters,
             LabelServiceKey => labels,
@@ -147,7 +145,7 @@ fn demo_bindings(
     }
 }
 
-#[host_module(name = "demo")]
+#[host_module(name = "demo", operations = [Wait])]
 struct Demo;
 
 #[module_exports]

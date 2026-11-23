@@ -205,7 +205,7 @@ flowchart LR
 下面以 `test` 模块的 `expect` 导出为例：`Matcher` 与模块类型一起静态注册，只有工厂函数向 JS 返回其实例。Rust 宏示例：
 
 ```rust
-#[host_module(name = "test")]
+#[host_module(name = "test", classes = [Matcher])]
 struct TestModule;
 
 #[module_exports]

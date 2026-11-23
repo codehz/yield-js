@@ -273,7 +273,7 @@ macro_rules! timer_contract {
         mod $name {
             use super::*;
 
-            #[host_module(name = "contract")]
+            #[host_module(name = "contract", operations = [Timer])]
             struct Api;
 
             #[module_exports]
@@ -297,8 +297,6 @@ macro_rules! timer_contract {
                 host_bindings! {
                     dts: "../dts/contract.d.ts",
                     modules: [Api],
-                    classes: [],
-                    operations: [Timer],
                     services: {
                         yield_harness::timer::FakeClockKey => Arc::clone(clock),
                     },

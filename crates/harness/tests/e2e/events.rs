@@ -69,7 +69,7 @@ impl EventNode {
     }
 }
 
-#[host_module(name = "event-fixture")]
+#[host_module(name = "event-fixture", classes = [EventNode])]
 struct EventModule;
 
 #[module_exports]
@@ -105,8 +105,8 @@ impl EventHost {
         Self(Arc::new(
             host_bindings! {
                 dts: "../dts/event-fixture.d.ts",
-                modules: [EventModule], classes: [EventNode],
-                operations: [], services: {},
+                modules: [EventModule],
+                services: {},
             }
             .unwrap(),
         ))

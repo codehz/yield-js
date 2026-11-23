@@ -95,7 +95,10 @@ mod strategy_fixture {
     strategy_operation!(ReissueOperation, "reissue", reissue, "reissue rejected");
     strategy_operation!(RejectOperation, "reject", reject, "strategy rejected");
 
-    #[host_module(name = "ops")]
+    #[host_module(
+        name = "ops",
+        operations = [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
+    )]
     struct Ops;
 
     #[module_exports]
@@ -141,8 +144,6 @@ mod strategy_fixture {
         host_bindings! {
             dts: "../dts/ops.d.ts",
             modules: [Ops],
-            classes: [],
-            operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
             services: {
                 LabelServiceKey => Arc::clone(labels),
             },
@@ -433,7 +434,7 @@ mod stale_fixture {
         const VERSION: u32 = 1;
     }
 
-    #[host_module(name = "stale")]
+    #[host_module(name = "stale", classes = [Sink])]
     struct Stale;
 
     #[module_exports]
@@ -463,8 +464,6 @@ mod stale_fixture {
         host_bindings! {
             dts: "../dts/stale.d.ts",
             modules: [Stale],
-            classes: [Sink],
-            operations: [],
             services: {
                 StashKey => Stash::default(),
             },
@@ -632,8 +631,6 @@ mod guest_call_fixture {
         let bindings = host_bindings! {
             dts: "../dts/guest.d.ts",
             modules: [Guest],
-            classes: [],
-            operations: [],
             services: {
                 StashKey => Stash::default(),
                 RunsKey => runs.clone(),
@@ -765,27 +762,44 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "test")]
+    #[host_module(name = "test", operations = [Wait])]
     struct TestModule;
 
     #[module_exports]
     impl TestModule {
         #[function(name = "wait")]
         fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
-            let label = cx
-                .string(&arg)?
-                .to_utf8()
-                .map_err(|_| cx.type_error("wait requires a valid label"))?;
-            cx.promise(Wait { label })
+            wait_for_label(cx, arg)
         }
+    }
+
+    // This fixture keeps the wait export without registering its operation.
+    #[host_module(name = "test")]
+    struct TestModuleWithoutWait;
+
+    #[module_exports]
+    impl TestModuleWithoutWait {
+        #[function(name = "wait")]
+        fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
+            wait_for_label(cx, arg)
+        }
+    }
+
+    fn wait_for_label<M: yield_vm::HostModule>(
+        cx: &mut yield_vm::ModuleCx<'_, M>,
+        arg: JsValue,
+    ) -> JsResult<JsValue> {
+        let label = cx
+            .string(&arg)?
+            .to_utf8()
+            .map_err(|_| cx.type_error("wait requires a valid label"))?;
+        cx.promise(Wait { label })
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
             modules: [Counter, TestModule],
-            classes: [],
-            operations: [Wait],
             services: {
                 LabelServiceKey => Arc::clone(labels),
             },
@@ -859,7 +873,7 @@ mod counter_fixture {
     pub(super) fn service_bindings(service: Arc<PayloadService>) -> Bindings {
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
-            modules: [ServiceCounter, TestModule], classes: [], operations: [],
+            modules: [ServiceCounter, TestModuleWithoutWait],
             services: { PayloadKey => service },
         }
         .unwrap()
@@ -1005,7 +1019,7 @@ mod geom_fixture {
         }
     }
 
-    #[host_module(name = "geom")]
+    #[host_module(name = "geom", classes = [Point])]
     struct Geom;
 
     #[module_exports]
@@ -1024,8 +1038,6 @@ mod geom_fixture {
         host_bindings! {
             dts: "../dts/geom.d.ts",
             modules: [Geom],
-            classes: [Point],
-            operations: [],
             services: {},
         }
         .expect("geometry bindings")
@@ -1155,7 +1167,7 @@ mod inherit_fixture {
         }
     }
 
-    #[host_module(name = "inherit")]
+    #[host_module(name = "inherit", classes = [Base, Derived], operations = [InheritWait])]
     struct Inherit;
 
     #[module_exports]
@@ -1200,8 +1212,6 @@ mod inherit_fixture {
         host_bindings! {
             dts: "../dts/inherit.d.ts",
             modules: [Inherit],
-            classes: [Base, Derived],
-            operations: [InheritWait],
             services: {
                 LabelServiceKey => Arc::clone(labels),
             },
@@ -1393,8 +1403,6 @@ mod subset_fixture {
         host_bindings! {
             dts: "../dts/subset.d.ts",
             modules: [Subset],
-            classes: [],
-            operations: [],
             services: {},
         }
         .expect("subset bindings")

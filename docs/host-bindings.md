@@ -51,7 +51,11 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 只接受 `name`，为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`host_bindings!` 按类型一次性链接模块、类、operation 与服务，并读取 `dts` 指定的声明文件。`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
+`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait])]` 中的两个依赖列表可省略，省略等同于空列表。每个模块要列出自身的完整依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
+
+`host_bindings!` 只接受 `dts`、`modules`、`services` 三个必填段。链接只收集选中模块的依赖：同一 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。Rust 类型身份只用于链接时去重，不进入绑定指纹或快照。
+
+`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
 ```rust
 #[host_module(name = "demo")]
@@ -207,8 +211,6 @@ pub trait Decode: Sized {
 host_bindings! {
     dts: "test.d.ts",
     modules: [TestModule],
-    classes: [Node],
-    operations: [Wait],
     services: {
         CountersKey => counters,
         LabelServiceKey => labels,

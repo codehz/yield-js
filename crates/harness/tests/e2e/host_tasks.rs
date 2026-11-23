@@ -50,7 +50,9 @@ impl TaskHost {
         services
             .insert::<LabelServiceKey>(Arc::clone(&labels))
             .unwrap();
-        let bindings = abi::link([module], [], [abi::operation::<Wait>()], services).unwrap();
+        let mut deps = abi::ModuleDependencies::default();
+        deps.operation::<Wait>();
+        let bindings = abi::link([module], deps, services).unwrap();
         Self {
             bindings: Arc::new(bindings),
             labels,
@@ -219,7 +221,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-#[yield_vm::host_module(name = "branch")]
+#[yield_vm::host_module(name = "branch", operations = [Wait])]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
     count: u8,
@@ -465,7 +467,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
-        modules: [Branch, Mirror], classes: [], operations: [Wait],
+        modules: [Branch, Mirror],
         services: {
             LabelServiceKey => Arc::clone(&labels),
             CountersKey => Arc::clone(&counters),
@@ -583,7 +585,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
-        modules: [Branch, Mirror], classes: [], operations: [Wait],
+        modules: [Branch, Mirror],
         services: {
             LabelServiceKey => Arc::clone(&labels),
             CountersKey => Arc::clone(&counters),

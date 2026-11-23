@@ -18,7 +18,7 @@ mod original {
     #[host_class(tag = "Auxiliary")]
     struct Auxiliary;
 
-    #[host_module(name = "auxiliary")]
+    #[host_module(name = "auxiliary", classes = [Auxiliary])]
     struct ExtraModule;
 
     #[module_exports]
@@ -32,7 +32,7 @@ mod original {
         }
     }
 
-    #[host_module(name = "contract")]
+    #[host_module(name = "contract", classes = [Entity], operations = [Wait])]
     struct Api;
 
     #[module_exports]
@@ -53,7 +53,7 @@ mod original {
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
         host_bindings! {
             dts: "../dts/auxiliary-contract.d.ts",
-            modules: [Api, ExtraModule], classes: [Entity, Auxiliary], operations: [Wait],
+            modules: [Api, ExtraModule],
             services: {
                 LabelServiceKey => Arc::clone(labels),
             },
@@ -72,7 +72,7 @@ macro_rules! independent_contract {
             #[host_class(tag = "Auxiliary")]
             struct Extra;
 
-            #[host_module(name = "auxiliary")]
+            #[host_module(name = "auxiliary", classes = [Extra])]
             struct ExtraModule;
 
             #[module_exports]
@@ -85,7 +85,7 @@ macro_rules! independent_contract {
                 fn renamed_getter($getter_cx: &mut CallCx<'_>, _: This<Entity>) -> JsResult<$($getter)+> $view
             }
 
-            #[host_module(name = "contract")]
+            #[host_module(name = "contract", classes = [Entity], operations = [Wait])]
             struct AlternateApi;
 
             #[module_exports]
@@ -102,7 +102,7 @@ macro_rules! independent_contract {
             pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
                 host_bindings! {
                     dts: "../dts/auxiliary-contract.d.ts",
-                    modules: [ExtraModule, AlternateApi], classes: [Extra, Entity], operations: [Wait],
+                    modules: [ExtraModule, AlternateApi],
                     services: {
                         LabelServiceKey => Arc::clone(labels),
                     },

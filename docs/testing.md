@@ -52,3 +52,4 @@ SubtleCrypto 的算法向量与脚本 Promise 行为放在 `cases/crypto/`，密
 - 真实宿主：`crates/harness/test.d.ts`、`crates/harness/demo.d.ts`。
 - e2e 夹具：`crates/harness/tests/dts/<modules>.d.ts`，模块名排序后用 `-` 连接；只链接 `TestHost` 的夹具经 `support::TEST_DECLARATIONS` 复用 `harness/test.d.ts`。
 - 宏测试：`crates/binding-macros/tests/dts/`。`host_dts_fixture` 以 `cargo test` 设置的包根目录为起点，在运行时定位 workspace，避免共用 `target` 的不同检出复用带有旧路径的测试二进制时访问错误位置。
+- `crates/binding-macros/tests/external/registry.rs` 是真实宏消费者，覆盖按模块选择依赖、同类型去重、稳定指纹及不同类型的重名冲突。

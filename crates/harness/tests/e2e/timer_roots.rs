@@ -168,7 +168,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
     assert!(idle.operations.is_empty());
 }
 
-#[yield_vm::host_module(name = "repeat_timer")]
+#[yield_vm::host_module(name = "repeat_timer", operations = [yield_harness::Timer])]
 struct RepeatTimer;
 
 #[yield_vm::module_exports]
@@ -207,7 +207,7 @@ impl RepeatTimer {
 fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     use super::support::{compile_main, declared};
     use std::sync::Arc;
-    use yield_harness::{FakeClock, Timer};
+    use yield_harness::FakeClock;
     use yield_vm::{Bindings, Host};
 
     struct RepeatHost(Arc<Bindings>);
@@ -224,7 +224,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     let clock = Arc::new(FakeClock::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/repeat_timer.d.ts",
-        modules: [RepeatTimer], classes: [], operations: [Timer],
+        modules: [RepeatTimer],
         services: {
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },

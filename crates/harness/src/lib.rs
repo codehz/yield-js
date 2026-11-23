@@ -797,8 +797,6 @@ fn test_bindings(
     host_bindings! {
         dts: "../test.d.ts",
         modules: [TestModule],
-        classes: [Node, Matcher],
-        operations: [Wait, Pause, Reject, Reissue, Timer],
         services: {
             CountersKey => counters,
             NodeFactoryKey => NodeFactory,
@@ -814,7 +812,11 @@ fn test_bindings(
     }
 }
 
-#[host_module(name = "test")]
+#[host_module(
+    name = "test",
+    classes = [Node, Matcher],
+    operations = [Wait, Pause, Reject, Reissue, Timer],
+)]
 struct TestModule;
 
 #[module_exports]

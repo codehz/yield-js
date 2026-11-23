@@ -29,7 +29,7 @@ impl Example {
     }
 }
 
-#[host_module(name = "example")]
+#[host_module(name = "example", classes = [Example])]
 struct ExampleModule;
 
 #[module_exports]
@@ -51,7 +51,7 @@ impl ExampleModule {
 fn links_an_external_module_and_class() -> Result<(), String> {
     let bindings = host_bindings! {
         dts: "dts/example.d.ts",
-        modules: [ExampleModule], classes: [Example], operations: [],
+        modules: [ExampleModule],
         services: {},
     }?;
     assert_eq!(
@@ -77,7 +77,7 @@ struct Mixed {
     history: Vec<JsValue>,
 }
 
-#[host_module(name = "implicit")]
+#[host_module(name = "implicit", classes = [Mixed], operations = [MixedWork])]
 struct Implicit {
     #[js_slot]
     item: JsValue,
@@ -121,7 +121,7 @@ fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -
 
     let bindings = host_bindings! {
         dts: "dts/state.d.ts",
-        modules: [Implicit, Explicit], classes: [Mixed], operations: [MixedWork],
+        modules: [Implicit, Explicit],
         services: {},
     }?;
     let value = MixedWork(Mixed {
