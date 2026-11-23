@@ -17,6 +17,9 @@ pub(crate) fn validate_job(heap: &Heap, source: ObjectId, job: StreamJob) -> boo
         return false;
     }
     match job {
+        StreamJob::Transfer(id, stage) => {
+            matches!(heap.get(id), Ok(Object::StreamTransfer(record)) if record.wait(stage) == Some(source))
+        }
         StreamJob::ReadableStart(id) => {
             matches!(heap.get(id), Ok(Object::ReadableStream(s)) if s.start_wait == Some(source))
         }
@@ -195,6 +198,7 @@ fn validate_writable(heap: &Heap, id: ObjectId, s: &crate::heap::WritableStreamO
     matches!(heap.get(s.controller), Ok(Object::WritableController { stream, .. }) if *stream == id)
         && matches!(heap.get(s.signal), Ok(Object::AbortSignal { signal, .. }) if !signal.dependent)
         && s.writer.is_none_or(|writer| matches!(heap.get(writer), Ok(Object::WritableWriter(w)) if w.stream == Some(id)))
+        && super::transfer::validate_proxy(heap, &s.sink.receiver, id, false)
         && !s.high_water_mark.is_nan() && s.high_water_mark >= 0.0
         && !s.total_size.is_nan() && s.total_size >= 0.0
         && (active || s.queue.is_empty())
@@ -282,6 +286,7 @@ pub(crate) fn validate_composition(
                 crate::builtin::streams::transform::validate_transform_record(heap, id, object)
             }
             Object::StreamPipe(record) => record.validate(heap, id),
+            Object::StreamTransfer(record) => record.validate(heap, id),
             Object::Tee(record) => record.validate(heap, id),
             Object::StreamIterator(_) | Object::StreamFromIterator(_) => {
                 crate::builtin::streams::iteration::validate_record(heap, id, object)
@@ -307,6 +312,7 @@ pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Res
         Object::ReadableStream(s) => {
             matches!(heap.get(s.controller), Ok(Object::ReadableController { stream, .. }) if *stream == id)
                 && s.reader.is_none_or(|reader| matches!(heap.get(reader), Ok(Object::ReadableReader(r)) if r.stream == Some(id)))
+                && super::transfer::validate_proxy(heap, &s.source, id, true)
                 && !s.high_water_mark.is_nan() && s.high_water_mark >= 0.0
                 && !s.total_size.is_nan() && s.total_size >= 0.0
                 && validate_bytes(heap, s)
@@ -377,6 +383,7 @@ pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Res
                     Ok(Object::StreamFromIterator(record)) => record.owns_output(id),
                     Ok(Object::Tee(record)) => record.cancel_promise == id,
                     Ok(Object::StreamPipe(_)) => false,
+                    Ok(Object::StreamTransfer(record)) => record.owns_result(id),
                     _ => false,
                 }
         }

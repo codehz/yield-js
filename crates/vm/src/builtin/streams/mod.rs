@@ -3,6 +3,7 @@
 pub(crate) mod iteration;
 pub(crate) mod pipe;
 pub(crate) mod tee;
+pub(crate) mod transfer;
 mod transform;
 pub(super) use transform::{TRANSFORM_CONTROLLER_OWNER, TRANSFORM_OWNER};
 mod readable;
@@ -36,6 +37,7 @@ use serde::{Deserialize, Serialize};
 /// The target's heap record owns all durable state outside the job identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamJob {
+    Transfer(ObjectId, transfer::TransferStage),
     ReadableStart(ObjectId),
     ReadablePull(ObjectId),
     ReadableCancel(ObjectId),
@@ -57,6 +59,7 @@ impl StreamJob {
     pub(crate) fn target(self) -> ObjectId {
         match self {
             Self::ReadableStart(id)
+            | Self::Transfer(id, _)
             | Self::ReadablePull(id)
             | Self::ReadableCancel(id)
             | Self::WritableStart(id)
@@ -85,6 +88,9 @@ impl Vm {
                 self.resume_transform_job(host, roots, id, stage, settlement)
             }
             StreamJob::Tee(id, stage) => self.resume_tee_job(host, roots, id, stage, settlement),
+            StreamJob::Transfer(id, stage) => {
+                self.resume_transfer(host, roots, id, stage, settlement)
+            }
             StreamJob::Pipe { target, stage } => {
                 self.run_pipe_job(host, roots, target, stage, settlement)
             }

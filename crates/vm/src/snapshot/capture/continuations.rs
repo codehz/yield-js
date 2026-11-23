@@ -257,7 +257,9 @@ pub(super) fn validate_rejection_notifications(
                 }
             }
             OrdinaryTask::RejectionHandled(id) => check(*id, PendingHandled, false)?,
-            OrdinaryTask::AbortTimeout(_) | OrdinaryTask::ScriptTimer(_) => {}
+            OrdinaryTask::AbortTimeout(_)
+            | OrdinaryTask::ScriptTimer(_)
+            | OrdinaryTask::StreamMessage(..) => {}
             _ => return Err(VmError::InvalidSnapshot("invalid ordinary task".into())),
         }
     }

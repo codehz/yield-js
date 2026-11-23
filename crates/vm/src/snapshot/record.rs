@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Stream composition state machines and dedicated AbortSignal steps.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 80;
+// Resumable stream transfer endpoints and ordinary message tasks.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 81;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -23,6 +23,7 @@ pub enum OrdinaryTask {
     ScriptTimer(TimerKey),
     UnhandledBatch(Vec<ObjectId>),
     RejectionHandled(ObjectId),
+    StreamMessage(ObjectId, u64),
 }
 
 fn snapshot_codec() -> impl Options {
@@ -248,6 +249,7 @@ pub struct Snapshot {
     /// Rejection candidates not yet transferred to an ordinary task.
     pub pending_rejection_notifications: Vec<ObjectId>,
     pub ordinary_tasks: Vec<OrdinaryTask>,
+    pub next_stream_message: u64,
     #[serde(with = "ordered_pairs")]
     pub script_timers: BTreeMap<i32, ScriptTimer>,
     pub next_timer_id: i32,
@@ -297,6 +299,7 @@ impl Snapshot {
             next_host_task_id: 1,
             pending_rejection_notifications: Vec::new(),
             ordinary_tasks: Vec::new(),
+            next_stream_message: 0,
             script_timers: BTreeMap::new(),
             next_timer_id: 1,
             next_operation_id: 1,

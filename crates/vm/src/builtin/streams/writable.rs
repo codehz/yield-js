@@ -351,7 +351,10 @@ impl Vm {
         }
     }
 
-    fn writable_mut(&mut self, id: ObjectId) -> Result<&mut WritableStreamObject, VmError> {
+    pub(super) fn writable_mut(
+        &mut self,
+        id: ObjectId,
+    ) -> Result<&mut WritableStreamObject, VmError> {
         match self.heap.get_mut(id)? {
             Object::WritableStream(s) => Ok(s),
             _ => Err(VmError::InvalidState("expected writable stream".into())),
@@ -793,6 +796,17 @@ impl Vm {
         receiver: Value,
         args: &[Value],
     ) -> Result<(), VmError> {
+        if let ValueRef::Object(id) = receiver.view()
+            && matches!(self.heap.get(id)?, Object::StreamTransfer(_))
+        {
+            let flight = self
+                .writable(stream)?
+                .flight
+                .expect("active writable flight");
+            let wait = self.transfer_send(host, roots, id, flight, args.first())?;
+            self.writable_mut(stream)?.flight_wait = Some(wait);
+            return self.observe_stream_job(wait, StreamJob::WritableFlight(stream));
+        }
         let native = match receiver.view() {
             ValueRef::Object(id) if matches!(self.heap.get(id)?, Object::TransformStream(_)) => {
                 Some(id)

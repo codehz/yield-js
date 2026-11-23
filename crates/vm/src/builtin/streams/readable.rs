@@ -1024,6 +1024,7 @@ impl Vm {
         let native = match source.view() {
             ValueRef::Object(id) => match self.heap.get(id)? {
                 Object::Tee(_) => Some(self.tee_cancel(host, roots, id, stream, reason)?),
+                Object::StreamTransfer(_) => Some(self.transfer_cancel(host, roots, id, reason)?),
                 Object::TransformStream(_) => {
                     Some(self.invoke_transform_cancel(host, roots, id, reason, false)?)
                 }
@@ -1101,6 +1102,7 @@ impl Vm {
         let native = match source.view() {
             ValueRef::Object(id) => match self.heap.get(id)? {
                 Object::Tee(_) => Some(self.tee_pull(host, roots, id, stream)?),
+                Object::StreamTransfer(_) => Some(self.transfer_pull(id)?),
                 Object::TransformStream(_) => Some(self.invoke_transform_pull(id)?),
                 Object::StreamFromIterator(_) => {
                     Some(self.pull_from_iterator(host, roots, id, stream)?)

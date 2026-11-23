@@ -153,6 +153,7 @@ pub(crate) struct RestoredState {
     pub(crate) next_operation_id: u64,
     pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
     pub(crate) next_timer_id: i32,
+    pub(crate) next_stream_message: u64,
     pub(crate) clock: crate::runtime::VmClock,
     pub(crate) base_url: Option<url::Url>,
     pub(crate) host_classes: Vec<HostClassRecord>,
@@ -347,6 +348,7 @@ pub struct Vm {
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) ordinary_tasks: VecDeque<OrdinaryTask>,
+    pub(crate) next_stream_message: u64,
     pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
     pub(crate) next_timer_id: i32,
     pub(crate) timer_nesting: u32,
@@ -861,6 +863,9 @@ impl Vm {
                 return Ok(());
             };
             match task {
+                OrdinaryTask::StreamMessage(id, sequence) => {
+                    self.deliver_stream_message(host, id, sequence)?
+                }
                 OrdinaryTask::AbortTimeout(signal) => {
                     let reason = self.alloc_dom_exception(
                         "TimeoutError".into(),
@@ -1601,6 +1606,7 @@ impl Vm {
             next_operation_id,
             script_timers,
             next_timer_id,
+            next_stream_message,
             clock,
             base_url,
             host_tasks,
@@ -1653,6 +1659,7 @@ impl Vm {
             next_host_task_id,
             recovered_operations,
             ordinary_tasks: VecDeque::new(),
+            next_stream_message,
             script_timers,
             next_timer_id,
             timer_nesting: 0,

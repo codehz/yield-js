@@ -263,6 +263,7 @@ impl Vm {
             use crate::snapshot::OrdinaryTask::*;
             match task {
                 AbortTimeout(id) | RejectionHandled(id) => id.trace(&mut tracer)?,
+                StreamMessage(id, _) => id.trace(&mut tracer)?,
                 UnhandledBatch(batch) => batch.trace(&mut tracer)?,
                 ScriptTimer(_) => {}
             }

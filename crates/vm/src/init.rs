@@ -156,6 +156,7 @@ impl Vm {
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
             ordinary_tasks: VecDeque::new(),
+            next_stream_message: 0,
             script_timers: BTreeMap::new(),
             next_timer_id: 1,
             timer_nesting: 0,

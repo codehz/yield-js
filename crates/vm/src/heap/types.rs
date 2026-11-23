@@ -1710,6 +1710,7 @@ pub struct TransformAlgorithms {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransformStreamObject {
+    pub transfer_proxy: bool,
     pub object: PlainObject,
     pub readable: ObjectId,
     pub writable: ObjectId,
@@ -1794,6 +1795,7 @@ pub enum Object {
         stream: ObjectId,
     },
     StreamPipe(crate::builtin::streams::pipe::PipeRecord),
+    StreamTransfer(crate::builtin::streams::transfer::TransferRecord),
     Tee(crate::builtin::streams::tee::TeeRecord),
     StreamIterator(crate::builtin::streams::iteration::StreamIterator),
     StreamFromIterator(crate::builtin::streams::iteration::FromIterator),

@@ -98,6 +98,7 @@ impl Vm {
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
         snapshot.pending_rejection_notifications = self.pending_rejection_notifications.clone();
         snapshot.ordinary_tasks = self.ordinary_tasks.iter().cloned().collect();
+        snapshot.next_stream_message = self.next_stream_message;
         for (class, tag) in self.bindings.classes() {
             snapshot
                 .class_prototypes
@@ -475,6 +476,13 @@ impl Vm {
             snapshot.host_tasks,
             snapshot.next_host_task_id,
         )?;
+        if AUDIT {
+            crate::builtin::streams::transfer::validate_tasks(
+                &heap,
+                &snapshot.ordinary_tasks,
+                snapshot.next_stream_message,
+            )?;
+        }
         validate_timers(
             &bindings,
             &heap,
@@ -496,6 +504,7 @@ impl Vm {
                 next_operation_id: snapshot.next_operation_id,
                 script_timers: snapshot.script_timers,
                 next_timer_id: snapshot.next_timer_id,
+                next_stream_message: snapshot.next_stream_message,
                 clock: crate::runtime::VmClock::new(clock, snapshot.elapsed),
                 base_url: snapshot.base_url,
                 host_tasks,

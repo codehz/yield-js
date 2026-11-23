@@ -108,6 +108,20 @@ fn transfer_list(
     }
 }
 
+pub(super) fn clone_message(
+    vm: &mut Vm,
+    host: &mut dyn Host,
+    roots: &ActiveRoots<'_>,
+    value: &Value,
+) -> Completion<Value> {
+    match Graph::default().walk(vm, host, &roots.with(value), value.clone())? {
+        Ok(cloned) => Ok(Ok(cloned)),
+        // A getter can throw an arbitrary source-side object. Transport errors
+        // must not carry that object across the link either.
+        Err(_) => rejected(vm),
+    }
+}
+
 fn rejected<T>(vm: &mut Vm) -> Completion<T> {
     Ok(Err(vm.alloc_dom_exception(
         "DataCloneError".into(),
@@ -134,17 +148,29 @@ fn clone(
     ));
     let mut graph = Graph::default();
     for &source in &transfers {
-        if graph.memory.contains_key(&source)
-            || !matches!(vm.heap.get(source)?, Object::ArrayBuffer(_))
-        {
+        if graph.memory.contains_key(&source) {
             return rejected(vm);
         }
-        let target = alloc_buffer(vm, None, None);
+        let target = match vm.heap.get(source)? {
+            Object::ArrayBuffer(_) => alloc_buffer(vm, None, None),
+            Object::ReadableStream(_) | Object::WritableStream(_) | Object::TransformStream(_) => {
+                vm.allocate_transfer_proxy(source)?
+            }
+            _ => return rejected(vm),
+        };
         graph.memory.insert(source, target);
     }
-    let result = normal!(graph.walk(vm, host, roots, value.clone()));
+    let result = normal!(graph.walk(vm, host, &roots.with(&transfers), value.clone()));
     for source in transfers {
         let target = graph.memory[&source];
+        if !matches!(vm.heap.get(source)?, Object::ArrayBuffer(_)) {
+            if !super::streams::transfer::transferable(vm, source)? {
+                return rejected(vm);
+            }
+            let live = (&graph, &result);
+            vm.commit_stream_transfer(&roots.with(&live), source, target)?;
+            continue;
+        }
         let Object::ArrayBuffer(buffer) = vm.heap.get_mut(source)? else {
             unreachable!()
         };
@@ -288,6 +314,9 @@ impl Graph {
             return rejected(vm);
         }
         let target = match vm.heap.get(source)? {
+            Object::ReadableStream(_) | Object::WritableStream(_) | Object::TransformStream(_) => {
+                return rejected(vm);
+            }
             Object::Event { .. }
             | Object::EventTarget { .. }
             | Object::Performance { .. }

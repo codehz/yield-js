@@ -269,6 +269,37 @@ impl Vm {
         }
     }
 
+    /// Wrap transfer proxies without supplying a local transformer.
+    pub(super) fn create_transfer_transform(
+        &mut self,
+        readable: ObjectId,
+        writable: ObjectId,
+    ) -> Result<ObjectId, VmError> {
+        let prototype = self.builtins.get(STREAM_PROTO);
+        let stream = self.heap.alloc_plain_with(Some(prototype));
+        let controller = self.heap.alloc(Object::TransformController {
+            object: PlainObject::new(Some(self.builtins.get(CONTROLLER_PROTO))),
+            stream,
+        });
+        let backpressure_change = self.heap.alloc_promise();
+        *self.heap.get_mut(stream)? = Object::TransformStream(TransformStreamObject {
+            transfer_proxy: true,
+            object: PlainObject::new(Some(prototype)),
+            readable,
+            writable,
+            controller,
+            algorithms: None,
+            backpressure: true,
+            backpressure_change,
+            write: None,
+            finish: None,
+            write_wait: None,
+            finish_wait: None,
+            finish_reason: Value::UNDEFINED,
+        });
+        Ok(stream)
+    }
+
     /// Internal initialization shared by guest transformers and native producers.
     /// The caller owns the shared start capability; neither endpoint runs script here.
     #[allow(clippy::too_many_arguments)]
@@ -306,6 +337,7 @@ impl Vm {
             writable,
             controller,
             algorithms: Some(algorithms),
+            transfer_proxy: false,
             backpressure: true,
             backpressure_change,
             write: None,
@@ -717,6 +749,37 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
     let Ok(Object::WritableStream(writable)) = heap.get(s.writable) else {
         return false;
     };
+    if s.transfer_proxy {
+        let proxy_source = |value: &Value, endpoint, readable| {
+            matches!(value.view(), ValueRef::Object(link)
+                if matches!(heap.get(link), Ok(Object::StreamTransfer(r)) if r.owns_proxy(endpoint, readable)))
+        };
+        return matches!(heap.get(s.controller), Ok(Object::TransformController { stream, .. }) if *stream == id)
+            && readable.byte.is_none()
+            && readable.high_water_mark == 0.0
+            && writable.high_water_mark == 1.0
+            && readable.pull.is_none()
+            && readable.cancel.is_none()
+            && readable.size.is_none()
+            && (proxy_source(&readable.source, s.readable, true)
+                || ((!matches!(readable.state, ReadableState::Readable)
+                    || readable.close_requested)
+                    && is_undefined(&readable.source)))
+            && (proxy_source(&writable.sink.receiver, s.writable, false)
+                || (writable.sink == WritableSink::default()
+                    && (!matches!(writable.state, crate::heap::WritableState::Writable)
+                        || writable.flight == Some(WritableFlight::Close))))
+            && s.algorithms.is_none()
+            && s.backpressure
+            && s.write.is_none()
+            && s.finish.is_none()
+            && s.write_wait.is_none()
+            && s.finish_wait.is_none()
+            && is_undefined(&s.finish_reason)
+            && heap
+                .promise(s.backpressure_change)
+                .is_ok_and(|p| matches!(p.state, PromiseState::Pending));
+    }
     let owner = Value::object(id);
     let pending = |p| {
         heap.promise(p)

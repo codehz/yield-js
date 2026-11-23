@@ -150,7 +150,8 @@ macro_rules! map_object_storage {
             Object::Function($storage) => Some($projection),
             Object::Promise($storage) => Some($projection),
             Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_)
-            | Object::StreamPipe(_) | Object::Tee(_) | Object::StreamFromIterator(_) => None,
+            | Object::StreamPipe(_) | Object::Tee(_) | Object::StreamFromIterator(_)
+            | Object::StreamTransfer(_) => None,
         }
     };
 }
@@ -553,6 +554,7 @@ impl Object {
                 }
             }
             Self::StreamPipe(p) => p.write_edges(out),
+            Self::StreamTransfer(record) => record.write_edges(out),
             Self::Tee(t) => t.write_edges(out),
             Self::StreamIterator(i) => i.write_edges(out),
             Self::StreamFromIterator(i) => i.write_edges(out),
