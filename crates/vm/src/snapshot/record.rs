@@ -10,7 +10,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Extractable raw CryptoKey object records.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 90;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 91;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -223,7 +223,7 @@ pub struct HostInstanceRecord {
 pub struct ModuleStateRecord {
     pub module: String,
     pub slots: Vec<HostSlotRecord>,
-    pub payload: PayloadRecord,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

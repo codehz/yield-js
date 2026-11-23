@@ -753,7 +753,7 @@ mod counter_fixture {
     use super::*;
     use yield_harness::Wait;
 
-    #[host_module(name = "counter", schema = 1, init = Self::new, encode = Self::encode_payload, decode = Self::decode_payload)]
+    #[host_module(name = "counter", init = Self::new, encode = Self::encode_payload, decode = Self::decode_payload)]
     struct Counter {
         count: u32,
     }
@@ -850,10 +850,9 @@ export async function run() {
         panic!("expected exactly one record per registered module");
     };
     assert_eq!(counter.module, "counter");
-    assert_eq!(counter.payload.bytes, 2u32.to_le_bytes());
+    assert_eq!(counter.bytes, 2u32.to_le_bytes());
     assert_eq!(test.module, "test");
-    assert_eq!(test.payload.schema, 1);
-    assert!(test.payload.bytes.is_empty());
+    assert!(test.bytes.is_empty());
 
     let mut second = Vm::new(build.clone(), &mut host, Default::default()).expect("second VM");
     assert_eq!(
@@ -863,13 +862,13 @@ export async function run() {
 
     let mut missing = snapshot.clone();
     missing.module_states.pop();
-    let mut wrong_schema = snapshot.clone();
-    wrong_schema.module_states[0].payload.schema += 1;
+    let mut truncated = snapshot.clone();
+    truncated.module_states[0].bytes.truncate(2);
     let mut nonempty = snapshot.clone();
-    nonempty.module_states[1].payload.bytes.push(0);
+    nonempty.module_states[1].bytes.push(0);
     for (invalid, expected) in [
         (missing, "module state count mismatch"),
-        (wrong_schema, "state payload schema mismatch"),
+        (truncated, "counter state must be four bytes"),
         (nonempty, "unexpected module payload"),
     ] {
         let options = RestoreOptions {

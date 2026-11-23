@@ -124,11 +124,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let mut item: ItemStruct = syn::parse2(item)?;
     check_struct(&item)?;
     let span = item.ident.span();
-    let (mut module, mut schema, mut init, mut encode, mut decode) = (None, None, None, None, None);
+    let (mut module, mut init, mut encode, mut decode) = (None, None, None, None);
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
-            "schema" => set(&mut schema, &key, || attribute_value::<LitInt>(input)),
             "init" => set(&mut init, &key, || attribute_value::<Path>(input)),
             "encode" => set(&mut encode, &key, || attribute_value::<Path>(input)),
             "decode" => set(&mut decode, &key, || attribute_value::<Path>(input)),
@@ -144,11 +143,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         syn::Fields::Unnamed(fields) if fields.unnamed.is_empty() => Some(quote!(Self())),
         _ => None,
     };
-    let (schema, new, encode, decode) = if let Some(empty) =
-        empty.filter(|_| schema.is_none() && init.is_none() && encode.is_none() && decode.is_none())
+    let (new, encode, decode) = if let Some(empty) =
+        empty.filter(|_| init.is_none() && encode.is_none() && decode.is_none())
     {
         (
-            quote!(1),
             empty.clone(),
             quote!(Ok(())),
             quote! {
@@ -158,12 +156,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             },
         )
     } else {
-        let schema = required(schema, span, "schema")?;
         let init = required(init, span, "init")?;
         let encode = required(encode, span, "encode")?;
         let decode = required(decode, span, "decode")?;
         (
-            quote!(#schema),
             quote! {
                 let callback: fn() -> Self = #init;
                 callback()
@@ -207,7 +203,6 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
-            const PAYLOAD_SCHEMA: u32 = #schema;
 
             fn new() -> Self { #new }
 
@@ -486,12 +481,7 @@ mod tests {
     fn host_module_reports_missing_init_and_slot_constant_collisions() {
         diagnostic(
             host_module(
-                quote!(
-                    name = "counter",
-                    schema = 1,
-                    encode = encode,
-                    decode = decode
-                ),
+                quote!(name = "counter", encode = encode, decode = decode),
                 quote!(
                     struct Counter;
                 ),
@@ -502,7 +492,6 @@ mod tests {
             host_module(
                 quote!(
                     name = "counter",
-                    schema = 1,
                     init = init,
                     encode = encode,
                     decode = decode

@@ -523,11 +523,10 @@ pub enum Recovery {
 }
 
 /// Per-VM module state. JavaScript references live in slots; the payload is
-/// ordinary Rust data with an independent schema version.
+/// ordinary Rust data.
 pub trait HostModule: Sized + 'static {
     const NAME: &'static str;
     const SLOTS: &'static [SlotDecl] = &[];
-    const PAYLOAD_SCHEMA: u32;
 
     fn new() -> Self;
 
@@ -702,7 +701,6 @@ struct ClassDecl {
 struct StateDecl {
     rust_type: TypeId,
     slots: &'static [SlotDecl],
-    payload_schema: u32,
     new: fn() -> Box<dyn Any>,
     decode: DecodeFn,
     encode: EncodeFn,
@@ -799,7 +797,6 @@ pub mod __macro_support {
 
     impl super::HostModule for RawModule {
         const NAME: &'static str = "";
-        const PAYLOAD_SCHEMA: u32 = 1;
 
         fn new() -> Self {
             Self
@@ -1200,10 +1197,6 @@ impl Bindings {
         self.inner.modules[module].state.slots
     }
 
-    pub(crate) fn state_schema(&self, module: usize) -> u32 {
-        self.inner.modules[module].state.payload_schema
-    }
-
     pub(crate) fn state_new(&self, module: usize) -> Box<dyn Any> {
         (self.inner.modules[module].state.new)()
     }
@@ -1304,7 +1297,6 @@ impl StateDecl {
         Self {
             rust_type: TypeId::of::<S>(),
             slots: S::SLOTS,
-            payload_schema: S::PAYLOAD_SCHEMA,
             new: || Box::new(S::new()),
             decode: |input, cx| Ok(Box::new(S::decode_payload(input, cx)?)),
             encode: |payload, out| {
@@ -1646,13 +1638,7 @@ fn fingerprint(
     }
     for module in modules {
         let state = &module.state;
-        hash_line(
-            &mut hasher,
-            format!(
-                "module-state {} schema={}",
-                module.name, state.payload_schema
-            ),
-        );
+        hash_line(&mut hasher, format!("module-state {}", module.name));
         for slot in state.slots {
             hash_line(
                 &mut hasher,

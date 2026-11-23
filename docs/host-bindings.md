@@ -44,7 +44,7 @@
 - **H6 payload 不含 VM 引用。** payload 字节中不得出现 VM 对象 ID、`NativeKey` 或函数指针；这类边只能走槽。
 - **H7 恢复原子。** 任何声明缺失、指纹不符、槽非法或 payload 解码失败都整体拒绝恢复；不启动脚本、不投递事件、不重发请求。
 - **H8 无同步重入。** 宿主函数不得在调用期间回调 VM 执行脚本或排空微任务。异步结果只能通过 operation 或新任务轮次交付。
-- **H9 精确版本。** 格式版本、字节码版本、Build ID、绑定指纹、payload schema 版本和 operation 策略必须全部匹配。
+- **H9 精确版本。** 格式版本、字节码版本、Build ID、绑定指纹、类 payload schema 版本和 operation 策略必须全部匹配。
 - **H10 中断必有策略。** 没有声明恢复策略的异步类型不能注册，也不能启动。
 
 ## 4. 声明层
@@ -117,7 +117,7 @@ impl Matcher {
 
 绑定声明在链接期计算**指纹**，写入快照头部；恢复时用本进程的声明重新计算并比对。指纹只覆盖语义字段：
 
-- 模块名、导出名及种类、每个模块的状态 schema 与槽名字/顺序/种类；
+- 模块名、导出名及种类、每个模块的状态槽名字/顺序/种类；
 - 类标签、槽名字/顺序/种类、payload schema 版本与 codec 标识；
 - 成员名、种类（方法/访问器/数据）、参数与返回种类；
 - operation 类型、状态 schema 版本、恢复策略；
@@ -198,7 +198,7 @@ trait PayloadCodec<T> {
 - **上下文提供能力，快照提供状态。** `EncodeCx` 可提供只读的 VM 元信息；`DecodeCx` 按键借用服务，例如 `cx.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
-- **版本独立。** 每种 payload 有自己的 schema 版本；同一 crate 内不同类的版本互不影响。未知版本拒绝恢复。
+- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本；同一 crate 内不同类型的版本互不影响。未知版本拒绝恢复。模块状态的字节没有 schema 版本，恢复时只由声明方的 `decode` 校验自身格式。
 - **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
 - 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
 
@@ -232,7 +232,7 @@ host_bindings! {
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
-- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。没有 Rust payload 字段时可省略 `schema`、`init`、`encode`、`decode` 整组，使用 schema `1` 和空 payload；有字段时必须显式指定整组。
+- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。没有 Rust payload 字段时可省略 `init`、`encode`、`decode` 整组，使用空 payload；有字段时必须显式指定整组。模块状态 payload 不声明 schema 版本：字节按原样保存，恢复时只由 `decode` 校验，编码格式变化必须让旧字节解码失败而不是静默接受。
 - 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
 ## 6. 调用协议
@@ -337,7 +337,7 @@ Snapshot {
     header:    format, bytecode, build_id, binding_fingerprints, payload_schemas,
                service_ids, instance_epochs?          // 见 11
     objects:   [ObjectRecord]                        // 含绑定实例
-    module_states: [ { module, state } ]
+    module_states: [ { module, slots, bytes } ]
     continuations: […]                               // 现有续体记录
     operations: [ { type, schema, state, target, strategy } ]
     host_tasks: [ { id, owner, stage, receiver, saved, waiting_on } ]

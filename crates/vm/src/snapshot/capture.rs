@@ -225,7 +225,6 @@ impl Vm {
                     HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
                 })
                 .collect();
-            let schema = self.bindings.state_schema(module);
             let mut bytes = Vec::new();
             self.bindings
                 .state_encode(module, state.payload.as_ref(), &mut bytes)
@@ -242,7 +241,7 @@ impl Vm {
                     .expect("linked module index")
                     .to_owned(),
                 slots,
-                payload: PayloadRecord { schema, bytes },
+                bytes,
             });
         }
         checkpoint(|profile| &mut profile.host_records);

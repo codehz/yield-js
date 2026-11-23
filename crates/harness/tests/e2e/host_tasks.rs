@@ -219,7 +219,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-#[yield_vm::host_module(name = "branch", schema = 1, init = Self::new, encode = Self::encode, decode = Self::decode)]
+#[yield_vm::host_module(name = "branch", init = Self::new, encode = Self::encode, decode = Self::decode)]
 struct Branch {
     count: u8,
 }

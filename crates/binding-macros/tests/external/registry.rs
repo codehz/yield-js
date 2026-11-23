@@ -7,7 +7,7 @@ use yield_vm::{
     host_module, module_exports, operation,
 };
 
-#[host_module(name = "state", schema = 1, init = State::init, encode = State::encode, decode = State::decode)]
+#[host_module(name = "state", init = State::init, encode = State::encode, decode = State::decode)]
 struct State {
     #[js_slot]
     current: JsValue,

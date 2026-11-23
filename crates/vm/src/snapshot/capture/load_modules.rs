@@ -224,15 +224,8 @@ pub(super) fn load_module_states(
             }
             slots.push(slot);
         }
-        let schema = bindings.state_schema(module);
-        if record.payload.schema != schema {
-            return Err(VmError::InvalidSnapshot(format!(
-                "module {name} state payload schema mismatch: snapshot {}, bindings {}",
-                record.payload.schema, schema
-            )));
-        }
         let payload = bindings
-            .state_decode(module, &record.payload.bytes)
+            .state_decode(module, &record.bytes)
             .map_err(|error| {
                 VmError::InvalidSnapshot(format!("module {name} state payload: {error}"))
             })?;
