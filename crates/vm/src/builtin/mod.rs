@@ -95,6 +95,7 @@ pub(crate) mod globals;
 pub(crate) mod iterator;
 pub(crate) mod json;
 pub(crate) mod math;
+mod navigator;
 pub(crate) mod number;
 mod object;
 mod performance;

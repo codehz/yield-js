@@ -188,6 +188,8 @@ builtin_globals! {
     "TransformStreamDefaultController" => Global::Owner(super::streams::TRANSFORM_CONTROLLER_OWNER),
     "fetch" => Global::Function(super::fetch::controller::OWNER),
     "console" => Global::Owner(super::console::OWNER),
+    "self" => Global::Root(GLOBAL_THIS),
+    "navigator" => Global::Owner(super::navigator::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -256,7 +258,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn init_builtins(&mut self) {
+    pub(crate) fn init_builtins(&mut self, user_agent: Option<&str>) {
         self.allocate_builtin_roots();
         let function_prototype = self.builtins.get("function.prototype");
         super::link_constructor(self, self.builtins.get("function"), function_prototype);
@@ -312,6 +314,7 @@ impl Vm {
                 install(self, &identity);
             }
         }
+        super::navigator::install(self, user_agent);
         for (root, tag) in [
             (math::OWNER.root, "Math"),
             (json::OWNER.root, "JSON"),

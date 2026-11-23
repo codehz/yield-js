@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Console count, timer, and group state.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 87;
+// Global aliases and the navigator root.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 88;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

@@ -49,6 +49,13 @@ pub trait Host {
     /// The host's local time zone as a valid IANA identifier.
     fn time_zone(&self) -> &str;
 
+    /// Value exposed as `navigator.userAgent`. `None` selects the runtime
+    /// default. This identifies the script runtime for compatibility probes
+    /// and is unrelated to the Fetch `User-Agent` request header.
+    fn user_agent(&self) -> Option<&str> {
+        None
+    }
+
     /// Long-lived same-VM values retained by the host. Read only when a host
     /// binding requests collection, not by `Vm::collect_garbage` or snapshots.
     fn gc_roots(&self) -> &[Value] {

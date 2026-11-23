@@ -33,6 +33,7 @@
 | `DOMException` | 提供 Web IDL 异常对象和历史常量，不因此提供浏览器 DOM API |
 | 事件与取消 | 不提供 `Node`、`ShadowRoot`、activation 或 retargeting。全局错误位置仅来自报告时可见的同步脚本帧。 |
 | 定时器与时钟 | 不支持字符串 timer handler、Performance Timeline 或 User Timing。`performance.timeOrigin` 只是 VM 相对时间域的零点，不是 epoch；全局 timer 和 `AbortSignal.timeout` 需要宿主唤醒服务。 |
+| `navigator` | 只提供 `userAgent` 与 `platform` 两个属性；没有 `Navigator` 原型、语言、硬件能力、在线状态等其它 HTML 成员。`platform` 是编译目标 `<target_os>-<target_arch>`，不是浏览器平台字符串。 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
 | `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数 |

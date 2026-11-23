@@ -10,6 +10,7 @@ mod fetch;
 mod fetch_http;
 mod fetch_network;
 mod generator;
+mod globals;
 mod host_tasks;
 mod liveness;
 mod module_graph;

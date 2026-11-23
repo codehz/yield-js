@@ -123,7 +123,7 @@ impl Vm {
         let resolved = Self::resolve_imports(&build, &bindings)?;
         let clock = VmClock::new(clock, std::time::Duration::ZERO);
         let mut vm = Self::empty(build, bindings.clone(), clock);
-        vm.init_builtins();
+        vm.init_builtins(host.user_agent());
         vm.install_templates();
         vm.install_classes(&bindings)?;
         vm.install_module_states(&bindings);

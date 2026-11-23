@@ -467,6 +467,7 @@ pub struct TestHost {
     clock: Arc<FakeClock>,
     console: Option<Arc<CapturedConsole>>,
     time_zone: String,
+    user_agent: Option<String>,
     errors: Vec<JsValue>,
     rejection_events: Vec<RejectionEvent>,
     gc_roots: Vec<yield_vm::Value>,
@@ -524,6 +525,7 @@ impl TestHost {
             clock,
             console,
             time_zone: "Etc/UTC".into(),
+            user_agent: None,
             errors: Vec::new(),
             rejection_events: Vec::new(),
             gc_roots: Vec::new(),
@@ -578,6 +580,11 @@ impl TestHost {
         self.time_zone = time_zone.into();
     }
 
+    /// Overrides the value exposed as `navigator.userAgent` for new VMs.
+    pub fn set_user_agent(&mut self, user_agent: impl Into<String>) {
+        self.user_agent = Some(user_agent.into());
+    }
+
     pub fn advance(&mut self, vm: &mut Vm, ms: u64) -> Result<(), String> {
         Arc::clone(&self.clock).advance(vm, self, ms)
     }
@@ -615,6 +622,10 @@ impl Host for TestHost {
 
     fn time_zone(&self) -> &str {
         &self.time_zone
+    }
+
+    fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
     }
 
     fn gc_roots(&self) -> &[yield_vm::Value] {

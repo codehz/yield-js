@@ -39,7 +39,7 @@ export async function run() {
 
 ## 用例目录
 
-新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`fetch`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`performance`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`、`timers`、`url`。不要在 `tests/cases/` 顶层新增用例。
+新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`fetch`、`finally`、`functions`、`gc`、`globals`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`performance`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`、`timers`、`url`。不要在 `tests/cases/` 顶层新增用例。
 
 `build.rs` 递归遍历目录，文件名用 `snake_case.js`；stem 与类别名都必须匹配 `[a-z][a-z0-9_]*`；生成的测试名为 `case_<category>_<stem>`（顶层为 `case_<stem>`）。每个目录都登记 `cargo:rerun-if-changed`，目录为空或缺失会 panic。指令解析器自身的失败用例放在 `crates/harness/tests/cases.rs`，夹具源码在 `crates/harness/tests/failing_cases/`。
 

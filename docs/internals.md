@@ -89,6 +89,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 | 宿主协议 | `vm/src/host.rs`、`vm/src/binding/`（`schema.rs` 声明、`call.rs` 的 `CallCx`）；实现方是 `harness/src/lib.rs`、`harness/src/main.rs` |
 | 宿主声明语法 | `host-dts/src/lib.rs`（清单与拒绝）、`compiler/src/lib.rs`（`from_dts`）、`binding-macros/src/registry.rs`（`dts`、常量校验）、`binding-macros/src/typed.rs`（`__YIELD_NAMES`） |
 | Fetch 对象与获取算法 | `vm/src/builtin/fetch/`（`blob`/`headers`/`form_data`/`body`/`request`/`response`/`controller`/`transaction`）；对象记录在 `vm/src/heap/types.rs` 与 `check_edges.rs`，控制器只在 VM 线程推进，适配器见 `vm/src/fetch.rs` |
+| 全局别名 / navigator | `vm/src/builtin/globals.rs`（`BUILTINS` 只能追加，旧索引保持不变）、`vm/src/builtin/navigator.rs`（宿主 `user_agent`、编译目标平台、只读属性）、`vm/src/host.rs` |
 | 可观察的 JS 行为 | 一个 `.js` 用例，不是新的 Rust harness |
 | ArrayBuffer / DataView / TypedArray / TextEncoder / TextDecoder 成员 | `vm/src/builtin/binary/`（`buffer.rs`、`view.rs`、`typed.rs`、`element.rs`、`codec.rs`、`text.rs`）；异形索引查找在 `vm/src/heap/binary.rs` |
 
