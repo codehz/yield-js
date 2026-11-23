@@ -1700,12 +1700,26 @@ pub enum TransformStage {
     SourceCancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextDecoderConfig {
+    pub encoding: TextEncoding,
+    pub fatal: bool,
+    pub ignore_bom: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TransformAlgorithms {
-    pub receiver: Value,
-    pub transform: Option<Value>,
-    pub flush: Option<Value>,
-    pub cancel: Option<Value>,
+pub enum TransformAlgorithms {
+    Script {
+        receiver: Value,
+        transform: Option<Value>,
+        flush: Option<Value>,
+        cancel: Option<Value>,
+    },
+    TextEncoder(crate::builtin::binary::text_codec::Utf8Encoder),
+    TextDecoder(
+        TextDecoderConfig,
+        crate::builtin::binary::text_codec::DecoderState,
+    ),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1775,6 +1789,12 @@ pub enum Object {
         object: PlainObject,
     },
     TextDecoder(TextDecoderObject),
+    TextStream {
+        object: PlainObject,
+        transform: ObjectId,
+        /// None brands an encoder; decoder settings outlive the algorithms.
+        decoder: Option<TextDecoderConfig>,
+    },
     QueuingStrategy {
         object: PlainObject,
         // Value's Number encoding preserves NaN and infinities in JSON.

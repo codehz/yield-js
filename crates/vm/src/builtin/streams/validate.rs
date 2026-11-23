@@ -285,6 +285,9 @@ pub(crate) fn validate_composition(
             Object::TransformStream(_) | Object::TransformController { .. } => {
                 crate::builtin::streams::transform::validate_transform_record(heap, id, object)
             }
+            Object::TextStream {
+                transform, decoder, ..
+            } => super::text::validate_wrapper(heap, *transform, *decoder),
             Object::StreamPipe(record) => record.validate(heap, id),
             Object::StreamTransfer(record) => record.validate(heap, id),
             Object::Tee(record) => record.validate(heap, id),

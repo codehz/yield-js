@@ -114,6 +114,7 @@ macro_rules! map_object_storage {
             | Object::DataView(DataViewObject { object: $storage, .. })
             | Object::TextEncoder { object: $storage }
             | Object::TextDecoder(TextDecoderObject { object: $storage, .. })
+            | Object::TextStream { object: $storage, .. }
             | Object::QueuingStrategy { object: $storage, .. }
             | Object::ReadableStream(super::types::ReadableStreamObject { object: $storage, .. })
             | Object::ReadableReader(super::types::ReadableReaderObject { object: $storage, .. })
@@ -532,6 +533,7 @@ impl Object {
             Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
             Self::WritableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
             Self::TransformController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::TextStream { transform, .. } => out.push(OwnedEdge::Object(*transform)),
             Self::TransformStream(s) => {
                 out.extend(
                     [s.readable, s.writable, s.controller, s.backpressure_change]
@@ -543,11 +545,17 @@ impl Object {
                         .map(OwnedEdge::Object),
                 );
                 push_value(out, &s.finish_reason);
-                if let Some(a) = &s.algorithms {
-                    for value in [&a.transform, &a.flush, &a.cancel]
+                if let Some(super::TransformAlgorithms::Script {
+                    receiver,
+                    transform,
+                    flush,
+                    cancel,
+                }) = &s.algorithms
+                {
+                    for value in [transform, flush, cancel]
                         .into_iter()
                         .flatten()
-                        .chain([&a.receiver])
+                        .chain([receiver])
                     {
                         push_value(out, value);
                     }

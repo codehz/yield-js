@@ -2,7 +2,7 @@
 
 use std::str;
 
-use crate::heap::TextEncoding;
+use crate::heap::{TextDecoderConfig, TextEncoding};
 
 /// One scalar from UTF-16 units: a surrogate pair, a lone surrogate as U+FFFD,
 /// or one BMP code unit. The second value is the units consumed.
@@ -26,18 +26,23 @@ pub(crate) fn scalar_at(units: &[u16], index: usize) -> (char, usize) {
 
 /// Incremental USVString conversion. An ending high surrogate is kept until
 /// the next chunk determines whether it forms a pair or needs replacement.
-#[derive(Default)]
-pub(crate) struct Utf8Encoder {
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Utf8Encoder {
     high: Option<u16>,
 }
 
 impl Utf8Encoder {
+    pub(crate) fn valid_checkpoint(&self) -> bool {
+        self.high
+            .is_none_or(|unit| (0xd800..=0xdbff).contains(&unit))
+    }
+
     pub(crate) fn encode(
         &mut self,
         units: impl ExactSizeIterator<Item = u16>,
         last: bool,
     ) -> Vec<u8> {
-        let mut out = Vec::with_capacity(units.len() * 3);
+        let mut out = Vec::new();
         let mut units = units.peekable();
         let mut encoded = [0u8; 4];
         let mut next = self.high.take().or_else(|| units.next());
@@ -48,6 +53,9 @@ impl Utf8Encoder {
             }
             let pair = [first, units.peek().copied().unwrap_or_default()];
             let (scalar, consumed) = scalar_at(&pair, 0);
+            if out.is_empty() {
+                out.reserve(units.len().saturating_mul(3).saturating_add(4));
+            }
             out.extend_from_slice(scalar.encode_utf8(&mut encoded).as_bytes());
             if consumed == 2 {
                 units.next();
@@ -60,8 +68,8 @@ impl Utf8Encoder {
 
 /// Decoder checkpoint between calls. Kept separate from the object header so
 /// a caller can supply bytes and choose when to flush without invoking JS.
-#[derive(Default)]
-pub(crate) struct DecoderState {
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DecoderState {
     pub(crate) streaming: bool,
     pub(crate) bom_seen: bool,
     pub(crate) prefix: [u8; 3],
@@ -72,6 +80,22 @@ pub(crate) struct DecoderState {
 pub(crate) struct FatalDecode;
 
 impl DecoderState {
+    pub(crate) fn valid_stream_checkpoint(&self, encoding: TextEncoding, ignore_bom: bool) -> bool {
+        self.pending.is_empty()
+            && (self.streaming || *self == Self::default())
+            && (!ignore_bom || !self.bom_seen)
+            && match self.prefix.get(..usize::from(self.prefix_len)) {
+                Some([]) => true,
+                Some(bytes) if encoding == TextEncoding::Utf8 => std::str::from_utf8(bytes)
+                    .is_err_and(|error| error.valid_up_to() == 0 && error.error_len().is_none()),
+                Some([_]) => true,
+                Some([first, second, ..]) => {
+                    (0xd800..=0xdbff).contains(&encoding.utf16_unit([*first, *second]))
+                }
+                None => false,
+            }
+    }
+
     pub(crate) fn decode(
         &mut self,
         encoding: TextEncoding,
@@ -80,14 +104,48 @@ impl DecoderState {
         input: &[u8],
         stream: bool,
     ) -> Result<String, FatalDecode> {
+        self.decode_chunk(
+            TextDecoderConfig {
+                encoding,
+                fatal,
+                ignore_bom,
+            },
+            input,
+            stream,
+            stream,
+        )
+    }
+
+    pub(crate) fn decode_stream(
+        &mut self,
+        config: TextDecoderConfig,
+        input: &[u8],
+        flush: bool,
+    ) -> Result<String, FatalDecode> {
+        // A fatal stream error is terminal; don't copy the unprocessed suffix.
+        let result = self.decode_chunk(config, input, !flush, false);
+        if flush || result.is_err() {
+            *self = Self::default();
+        }
+        result
+    }
+
+    fn decode_chunk(
+        &mut self,
+        config: TextDecoderConfig,
+        input: &[u8],
+        stream: bool,
+        retain_on_error: bool,
+    ) -> Result<String, FatalDecode> {
         if !self.streaming {
             *self = Self::default();
         }
         self.streaming = stream;
         let mut decoder = Decoder {
-            encoding,
-            fatal,
-            ignore_bom,
+            encoding: config.encoding,
+            fatal: config.fatal,
+            ignore_bom: config.ignore_bom,
+            retain_on_error,
             bom_seen: self.bom_seen,
             prefix: self.prefix,
             prefix_len: usize::from(self.prefix_len),
@@ -104,7 +162,7 @@ impl DecoderState {
             // Fatal calls serialize no output, so they leave the BOM mark alone.
             self.prefix = [0; 3];
             self.prefix_len = 0;
-            if stream {
+            if retain_on_error {
                 self.pending = decoder.retained;
             }
             Err(FatalDecode)
@@ -117,6 +175,7 @@ struct Decoder {
     encoding: TextEncoding,
     fatal: bool,
     ignore_bom: bool,
+    retain_on_error: bool,
     bom_seen: bool,
     prefix: [u8; 3],
     prefix_len: usize,
@@ -188,7 +247,7 @@ impl Decoder {
             if let Some(scalar) = scalar {
                 self.push(scalar);
             } else if self.fatal {
-                if !last {
+                if self.retain_on_error {
                     self.retained.extend_from_slice(&bytes[consumed..len]);
                     cursor.copy_remainder(&mut self.retained);
                 }
@@ -248,7 +307,7 @@ impl Decoder {
                         match error.error_len() {
                             Some(bad) => {
                                 if self.fatal {
-                                    if !last {
+                                    if self.retain_on_error {
                                         let start = valid + bad;
                                         self.retained.extend_from_slice(&buffer[start..len]);
                                         cursor.copy_remainder(&mut self.retained);
@@ -302,7 +361,7 @@ impl Decoder {
                     match error.error_len() {
                         Some(bad) => {
                             if self.fatal {
-                                if !last {
+                                if self.retain_on_error {
                                     self.retained.extend_from_slice(&rest[bad..]);
                                     cursor.skip_source();
                                     cursor.copy_remainder(&mut self.retained);

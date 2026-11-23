@@ -101,7 +101,7 @@ fn construct(
         rm,
         rsize.clone(),
         start_promise,
-        TransformAlgorithms {
+        TransformAlgorithms::Script {
             receiver: receiver.clone(),
             cancel: cancel.clone(),
             flush: flush.clone(),
@@ -262,7 +262,10 @@ impl Vm {
         }
     }
 
-    fn transform_mut(&mut self, stream: ObjectId) -> Result<&mut TransformStreamObject, VmError> {
+    pub(super) fn transform_mut(
+        &mut self,
+        stream: ObjectId,
+    ) -> Result<&mut TransformStreamObject, VmError> {
         match self.heap.get_mut(stream)? {
             Object::TransformStream(s) => Ok(s),
             _ => Err(VmError::InvalidState("expected transform stream".into())),
@@ -346,6 +349,24 @@ impl Vm {
             finish_wait: None,
             finish_reason: Value::UNDEFINED,
         });
+        Ok(stream)
+    }
+
+    pub(super) fn create_native_transform(
+        &mut self,
+        algorithms: TransformAlgorithms,
+    ) -> Result<ObjectId, VmError> {
+        let start = self.heap.alloc_promise();
+        let stream = self.create_transform_internal(
+            self.builtins.get(STREAM_PROTO),
+            1.0,
+            None,
+            0.0,
+            None,
+            start,
+            algorithms,
+        )?;
+        self.settle(start, Settlement::Fulfilled(Value::UNDEFINED))?;
         Ok(stream)
     }
 
@@ -466,9 +487,8 @@ impl Vm {
         Ok(result)
     }
 
-    /// Dispatch boundary for native producers: extend the durable algorithm
-    /// record and dispatch here for transform, flush, and cancellation. The
-    /// callback outcome is normalized and observed by the caller.
+    /// Native algorithms are durable heap state and use the same settlement
+    /// path as guest callbacks, including flush and cancellation.
     fn invoke_transform_algorithm(
         &mut self,
         host: &mut dyn Host,
@@ -481,10 +501,19 @@ impl Vm {
         let Some(algorithms) = &s.algorithms else {
             return Ok(Invocation::Value(Value::UNDEFINED));
         };
+        let TransformAlgorithms::Script {
+            receiver,
+            transform,
+            flush,
+            cancel,
+        } = algorithms
+        else {
+            return self.invoke_text_transform(host, roots, stream, stage, value);
+        };
         let callback = match stage {
-            TransformStage::Transform => &algorithms.transform,
-            TransformStage::Flush => &algorithms.flush,
-            TransformStage::SinkAbort | TransformStage::SourceCancel => &algorithms.cancel,
+            TransformStage::Transform => transform,
+            TransformStage::Flush => flush,
+            TransformStage::SinkAbort | TransformStage::SourceCancel => cancel,
             TransformStage::Backpressure => unreachable!("backpressure is not a callback"),
         };
         let Some(callback) = callback.clone() else {
@@ -494,7 +523,7 @@ impl Vm {
                 Ok(Invocation::Value(Value::UNDEFINED))
             };
         };
-        let receiver = algorithms.receiver.clone();
+        let receiver = receiver.clone();
         let controller = Value::object(s.controller);
         let pair;
         let args = match stage {
@@ -815,9 +844,14 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
                 && is_undefined(&readable.source)))
         && (writable.sink.receiver == owner || is_undefined(&writable.sink.receiver))
         && pending(s.backpressure_change) && s.algorithms.as_ref().is_none_or(|a| {
-        s.finish.is_none() && [&a.transform, &a.flush, &a.cancel].into_iter().flatten().all(|v| {
-                matches!(v.view(), ValueRef::Object(f) if heap.get(f).is_ok_and(is_callable_object))
-            })
+        s.finish.is_none() && match a {
+            TransformAlgorithms::Script { transform, flush, cancel, .. } => {
+                [transform, flush, cancel].into_iter().flatten().all(|v| {
+                    matches!(v.view(), ValueRef::Object(f) if heap.get(f).is_ok_and(is_callable_object))
+                })
+            }
+            native => super::text::validate_native(native, readable, writable),
+        }
     }) && match (s.write, s.write_wait) {
         (None, None) => true,
         (Some(p), Some((source, stage))) => {

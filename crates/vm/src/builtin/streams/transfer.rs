@@ -266,25 +266,25 @@ impl TransferRecord {
                 }
                 match (flight.phase, messages.next()) {
                     (Phase::Sending, Some(Message::Request(_, cmd)))
-                        if match (self.readable, stage, cmd) {
+                        if matches!(
+                            (self.readable, stage, cmd),
                             (true, TransferStage::Data, Command::Pull)
-                            | (
-                                false,
-                                TransferStage::Data,
-                                Command::Write(_) | Command::Invalid(_),
-                            )
-                            | (
-                                false,
-                                TransferStage::Finish,
-                                Command::Close | Command::Stop(_) | Command::Invalid(_),
-                            )
-                            | (
-                                true,
-                                TransferStage::Finish,
-                                Command::Stop(_) | Command::Invalid(_),
-                            ) => true,
-                            _ => false,
-                        } => {}
+                                | (
+                                    false,
+                                    TransferStage::Data,
+                                    Command::Write(_) | Command::Invalid(_),
+                                )
+                                | (
+                                    false,
+                                    TransferStage::Finish,
+                                    Command::Close | Command::Stop(_) | Command::Invalid(_),
+                                )
+                                | (
+                                    true,
+                                    TransferStage::Finish,
+                                    Command::Stop(_) | Command::Invalid(_),
+                                )
+                        ) => {}
                     (Phase::Waiting(_), None) => {}
                     (Phase::Returning, Some(Message::Response(_, reply)))
                         if match (self.readable, stage, reply) {

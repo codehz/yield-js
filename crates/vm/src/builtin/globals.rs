@@ -129,6 +129,8 @@ builtin_globals! {
     "BigUint64Array" => Global::Root("bigUint64Array"),
     "TextEncoder" => Global::Owner(binary::text::ENCODER_OWNER),
     "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
+    "TextEncoderStream" => Global::Owner(super::streams::text::ENCODER_OWNER),
+    "TextDecoderStream" => Global::Owner(super::streams::text::DECODER_OWNER),
     "URL" => Global::Owner(super::url_api::URL_OWNER),
     "URLSearchParams" => Global::Owner(super::url_api::params::PARAMS_OWNER),
     "URLPattern" => Global::Owner(super::url_api::pattern::PATTERN_OWNER),

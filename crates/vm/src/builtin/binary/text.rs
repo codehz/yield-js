@@ -19,8 +19,8 @@ use crate::builtin::{
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL, TextDecoderObject,
-    TextEncoding, ViewRange,
+    Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL, TextDecoderConfig,
+    TextDecoderObject, TextEncoding, ViewRange,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -86,14 +86,7 @@ const DECODER_INTRINSICS: &[IntrinsicDef] = &[
     ),
     IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, roots, _, receiver| {
         match vm.text_decoder_state(receiver)? {
-            Some(state) => Ok(Invocation::Value(Value::string(
-                match state.encoding {
-                    TextEncoding::Utf8 => "utf-8",
-                    TextEncoding::Utf16Le => "utf-16le",
-                    TextEncoding::Utf16Be => "utf-16be",
-                }
-                .into(),
-            ))),
+            Some(state) => Ok(Invocation::Value(encoding_value(state.encoding))),
             None => vm.throw_type_error(
                 roots,
                 "TextDecoder method called on an incompatible receiver",
@@ -237,29 +230,16 @@ fn construct_decoder(
     prototype: Option<ObjectId>,
 ) -> Result<Invocation, VmError> {
     let roots = &roots.with(&args);
-    let label = match arg(&args, 0).view() {
-        ValueRef::Undefined => "utf-8".to_owned(),
-        _ => match vm.coerce_string(host, roots, arg(&args, 0))? {
-            Ok(text) => text.to_utf8().unwrap_or_default(),
-            Err(error) => return Ok(Invocation::Thrown(error)),
-        },
-    };
-    let (fatal, ignore_bom) = match decoder_options(vm, host, roots, arg(&args, 1))? {
-        Ok(values) => values,
+    let config = match decoder_config(vm, host, roots, &args)? {
+        Ok(config) => config,
         Err(error) => return Ok(Invocation::Thrown(error)),
-    };
-    let Some(encoding) = canonical_label(&label) else {
-        return Ok(Invocation::Thrown(vm.make_range_error(
-            roots,
-            "unsupported TextDecoder encoding label",
-        )?));
     };
     let prototype = prototype.unwrap_or_else(|| vm.builtins.get(DECODER_PROTOTYPE));
     let object = vm.heap.alloc(Object::TextDecoder(TextDecoderObject {
         object: PlainObject::new(Some(prototype)),
-        encoding,
-        fatal,
-        ignore_bom,
+        encoding: config.encoding,
+        fatal: config.fatal,
+        ignore_bom: config.ignore_bom,
         streaming: false,
         bom_seen: false,
         prefix: [0; 3],
@@ -267,6 +247,43 @@ fn construct_decoder(
         pending: Vec::new(),
     }));
     Ok(Invocation::Value(Value::object(object)))
+}
+
+pub(in crate::builtin) fn decoder_config(
+    vm: &mut Vm,
+    host: &mut dyn Host,
+    roots: &ActiveRoots<'_>,
+    args: &[Value],
+) -> Completion<TextDecoderConfig> {
+    let label = match arg(args, 0).view() {
+        ValueRef::Undefined => "utf-8".to_owned(),
+        _ => match vm.coerce_string(host, roots, arg(args, 0))? {
+            Ok(text) => text.to_utf8().unwrap_or_default(),
+            Err(error) => return Ok(Err(error)),
+        },
+    };
+    let (fatal, ignore_bom) = match decoder_options(vm, host, roots, arg(args, 1))? {
+        Ok(values) => values,
+        Err(error) => return Ok(Err(error)),
+    };
+    let Some(encoding) = canonical_label(&label) else {
+        let error = vm.make_range_error(roots, "unsupported TextDecoder encoding label")?;
+        return Ok(Err(error));
+    };
+    Ok(Ok(TextDecoderConfig {
+        encoding,
+        fatal,
+        ignore_bom,
+    }))
+}
+
+pub(in crate::builtin) fn encoding_value(encoding: TextEncoding) -> Value {
+    let name = match encoding {
+        TextEncoding::Utf8 => "utf-8",
+        TextEncoding::Utf16Le => "utf-16le",
+        TextEncoding::Utf16Be => "utf-16be",
+    };
+    Value::string(name.into())
 }
 
 /// Strip ASCII whitespace and ASCII-lowercase, then look the label up.
@@ -337,13 +354,17 @@ fn options_dictionary(
 /// A buffer source the decoder may read: its bytes are resolved after the
 /// `stream` getter, because that getter can detach or resize the buffer.
 #[derive(Clone, Copy)]
-enum Source {
+pub(in crate::builtin) enum Source {
     Empty,
     Buffer(ObjectId),
     View(ObjectId),
 }
 
-fn buffer_source(vm: &mut Vm, roots: &ActiveRoots<'_>, value: &Value) -> Completion<Source> {
+pub(in crate::builtin) fn buffer_source(
+    vm: &mut Vm,
+    roots: &ActiveRoots<'_>,
+    value: &Value,
+) -> Completion<Source> {
     let ValueRef::Object(id) = value.view() else {
         return match value.view() {
             ValueRef::Undefined => Ok(Ok(Source::Empty)),
@@ -367,7 +388,7 @@ fn buffer_source(vm: &mut Vm, roots: &ActiveRoots<'_>, value: &Value) -> Complet
 
 /// The raw byte window of a validated buffer source. A detached or
 /// out-of-bounds view contributes no bytes.
-fn source_bytes(vm: &Vm, source: Source) -> Result<&[u8], VmError> {
+pub(in crate::builtin) fn source_bytes(vm: &Vm, source: Source) -> Result<&[u8], VmError> {
     match source {
         Source::Empty => Ok(&[]),
         Source::Buffer(id) => Ok(vm

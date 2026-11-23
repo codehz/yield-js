@@ -3,6 +3,7 @@
 pub(crate) mod iteration;
 pub(crate) mod pipe;
 pub(crate) mod tee;
+pub(super) mod text;
 pub(crate) mod transfer;
 mod transform;
 pub(super) use transform::{TRANSFORM_CONTROLLER_OWNER, TRANSFORM_OWNER};
