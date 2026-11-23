@@ -43,7 +43,8 @@
 | `ArrayBuffer` / `DataView` / TypedArray | 缓冲区、11 种 `DataView` 宽度、12 个 TypedArray 构造器及其原型方法按 ES2026 实现，含可调整长度缓冲区与 base64/hex 编解码。`toLocaleString` 复用 `Number.prototype.toLocaleString` 与 `BigInt.prototype.toLocaleString`，没有 Intl 文本（与 `Number` / `BigInt` 的限制相同）。`SharedArrayBuffer`、`Atomics`、分离后重新附加不在范围内 |
 | `TextEncoder` / `TextDecoder` | `TextEncoder` 输出 UTF-8；`TextDecoder` 支持 UTF-8、UTF-16LE、UTF-16BE 及其标准标签。其他标签（如 `gbk`）按设计不支持，抛 `RangeError`。`TextEncoderStream` / `TextDecoderStream` 复用同一编码规则与增量状态。 |
 | Streams | 已提供排队策略、Readable/Writable/Transform、字节读取、pipe/tee、async iterator/`from`、文本转换流、流转移与压缩转换流。 |
-| `URL` / `URLSearchParams` / `URLPattern` | 尚未运行完整上游 WPT；不提供依赖 Blob 存储的对象 URL，也没有 Fetch 消费 VM 基准 URL |
+| `URL` / `URLSearchParams` / `URLPattern` | 尚未运行完整上游 WPT；对象 URL 表仅在本 VM 内可见 |
+| Fetch 与二进制对象 | 已提供 `Blob`、`File`、`FormData`、`Headers`、`Request`、`Response` 和 `fetch`；`FormData` 不读取 HTML 表单。没有 TLS、代理、cookie jar、HTTP 缓存或预检结果缓存（每次跨源非简单请求重新预检）；示例适配器只允许显式配置的 `127.0.0.1` 明文 HTTP/1.1，HTTPS 需其他适配器实现。`keepalive` 不跨 VM 销毁或快照恢复继续传输；恢复中的在途传输按设计中断且不重发，`only-if-cached` 因无缓存总是 miss |
 | `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
 
 未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。

@@ -33,6 +33,20 @@ pub(super) fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                         "invalid disposal backlink on Promise {id}"
                     )));
                 }
+                if let Some(active) = promise.body_read {
+                    let valid = matches!(promise.state, PromiseState::Pending)
+                        && matches!(heap.get(active), Ok(Object::Promise(read))
+                            if matches!(read.state, PromiseState::Pending)
+                                && read.reactions.iter().filter(|job| {
+                                    matches!(job, ReactionJob::FetchBody(body)
+                                        if body.active == active && body.promise == id)
+                                }).count() == 1);
+                    if !valid {
+                        return Err(VmError::InvalidSnapshot(format!(
+                            "Promise {id} has an invalid body read link"
+                        )));
+                    }
+                }
                 for job in &promise.reactions {
                     match job {
                         ReactionJob::Await(_) => {}
@@ -82,6 +96,28 @@ pub(super) fn validate_jobs(heap: &Heap) -> Result<(), VmError> {
                                 )));
                             }
                         }
+                        ReactionJob::FetchBody(job) => {
+                            if !matches!(promise.state, PromiseState::Pending)
+                                || !matches!(
+                                    heap.get(job.promise),
+                                    Ok(Object::Promise(promise)) if matches!(promise.state, PromiseState::Pending)
+                                )
+                                || !matches!(heap.get(job.reader), Ok(Object::ReadableReader(_)))
+                                || !matches!(heap.get(job.active), Ok(Object::Promise(read))
+                                    if matches!(read.state, PromiseState::Pending))
+                                || job.total
+                                    != job
+                                        .chunks
+                                        .iter()
+                                        .map(|chunk| chunk.len() as u64)
+                                        .sum::<u64>()
+                            {
+                                return Err(VmError::InvalidSnapshot(format!(
+                                    "invalid body reaction on Promise {id}"
+                                )));
+                            }
+                        }
+                        ReactionJob::FetchUpload(_) => {}
                     }
                     if let ReactionJob::Adopt { result } = job {
                         *adopts.entry(*result).or_default() += 1;
@@ -278,6 +314,7 @@ pub(super) fn load_operations(
     heap: &Heap,
     elapsed: std::time::Duration,
     records: Vec<PendingOperationRecord>,
+    fetch_state: &crate::builtin::fetch::transaction::FetchState,
 ) -> Result<BTreeMap<u64, PendingOperation>, VmError> {
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
@@ -369,15 +406,25 @@ pub(super) fn load_operations(
             };
             if signal.reason.is_some()
                 || !linked.insert(*id)
-                || !operations.get(id).is_some_and(|operation| {
+                || !(operations.get(id).is_some_and(|operation| {
                     operation.signal == Some(signal_id)
                         && matches!(operation.target, DeliveryTarget::Promise(_))
-                })
+                }) || fetch_state
+                    .transactions
+                    .get(id)
+                    .is_some_and(|transaction| transaction.signal == Some(signal_id)))
             {
                 return Err(VmError::InvalidSnapshot(format!(
                     "AbortSignal {signal_id} has invalid operation link {id}"
                 )));
             }
+        }
+    }
+    for (id, transaction) in &fetch_state.transactions {
+        if transaction.signal.is_some() && !linked.contains(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "fetch {id} is missing its reciprocal AbortSignal link"
+            )));
         }
     }
     for (id, operation) in &operations {

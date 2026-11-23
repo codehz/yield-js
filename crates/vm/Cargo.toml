@@ -12,6 +12,7 @@ brotli = { version = "=9.0.0", features = ["portable-float"] }
 brotli-decompressor = "=6.0.1"
 chrono = { version = "0.4", default-features = false }
 chrono-tz = "=0.10.4"
+getrandom = "0.4"
 icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 # Match chrono-tz 0.10.4's IANA 2025b data.
@@ -23,6 +24,7 @@ regress.workspace = true
 ryu-js.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 xxhash-rust.workspace = true
 thiserror.workspace = true
 yield-binding-macros = { path = "../binding-macros" }

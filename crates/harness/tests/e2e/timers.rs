@@ -77,6 +77,7 @@ fn timeout_rearms_early_tokens_and_restores_remaining_time() {
         RestoreOptions {
             test_clock: Some(clock),
             validation: SnapshotValidation::Full,
+            fetch_environment: None,
         },
     )
     .unwrap();
@@ -174,6 +175,7 @@ fn timer_arm_failure_is_not_an_abort() {
         RestoreOptions {
             test_clock: Some(clock),
             validation: SnapshotValidation::Full,
+            fetch_environment: None,
         },
     )
     .unwrap();
@@ -543,6 +545,7 @@ fn fractional_performance_clock_survives_restore_without_timer_service() {
         RestoreOptions {
             test_clock: Some(restored_clock.clone()),
             validation: SnapshotValidation::Full,
+            fetch_environment: None,
         },
     )
     .unwrap();
@@ -641,6 +644,7 @@ fn script_timeout_snapshot_cuts_preserve_roots_and_cancellation() {
                 RestoreOptions {
                     test_clock: Some(clock.clone()),
                     validation: SnapshotValidation::Full,
+                    fetch_environment: None,
                 },
             )
             .unwrap();
@@ -787,6 +791,7 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
             RestoreOptions {
                 test_clock: Some(clock.clone()),
                 validation: SnapshotValidation::Full,
+                fetch_environment: None,
             },
         );
         assert!(matches!(restored, Err(VmError::InvalidSnapshot(_))));
@@ -886,6 +891,7 @@ fn restored_interval_does_not_catch_up_and_can_cancel_itself_after_throwing() {
         RestoreOptions {
             test_clock: Some(clock.clone()),
             validation: SnapshotValidation::Full,
+            fetch_environment: None,
         },
     )
     .unwrap();

@@ -110,6 +110,8 @@ pub struct PromiseObject {
     pub disposal: Option<ObjectId>,
     /// Keeps a pending stream operation alive when only its result is reachable.
     pub stream_dependency: Option<ObjectId>,
+    /// Pending read promise driving a body consumption whose result is reachable.
+    pub body_read: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1859,6 +1861,40 @@ pub enum Object {
         ignore_case: bool,
         #[serde(skip)]
         cache: crate::builtin::url_api::pattern::PatternCache,
+    },
+    Blob {
+        object: PlainObject,
+        data: crate::builtin::fetch::blob::BlobData,
+    },
+    File {
+        object: PlainObject,
+        data: crate::builtin::fetch::blob::FileData,
+    },
+    Request {
+        object: PlainObject,
+        data: crate::builtin::fetch::request::RequestRecord,
+    },
+    Response {
+        object: PlainObject,
+        data: crate::builtin::fetch::response::ResponseRecord,
+    },
+    Headers {
+        object: PlainObject,
+        data: crate::builtin::fetch::headers::HeadersRecord,
+    },
+    HeadersIterator {
+        object: PlainObject,
+        headers: ObjectId,
+        index: usize,
+        kind: crate::builtin::fetch::headers::HeadersIteratorKind,
+    },
+    FormData {
+        object: PlainObject,
+        data: crate::builtin::fetch::form_data::FormDataRecord,
+    },
+    FormDataIterator {
+        object: PlainObject,
+        data: crate::builtin::fetch::form_data::FormDataIteratorRecord,
     },
     /// A non-callable proxy over an ordinary object, array, or another proxy.
     Proxy {

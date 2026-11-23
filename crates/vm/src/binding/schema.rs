@@ -721,9 +721,19 @@ pub mod __macro_support {
         };
         for Service(id, version, value) in services {
             let is_timer = id == crate::host::TIMER_SERVICE;
+            let is_fetch = id == crate::fetch::FETCH_SERVICE;
             if is_timer && (version != 1 || !value.is::<Arc<dyn crate::host::TimerService>>()) {
                 return Err(format!(
                     "incompatible service {id:?}: expected TimerService version 1"
+                ));
+            }
+            if is_fetch
+                && (version != crate::fetch::FETCH_PROTOCOL_VERSION
+                    || !value.is::<Arc<dyn crate::fetch::FetchService>>())
+            {
+                return Err(format!(
+                    "incompatible service {id:?}: expected FetchService version {}",
+                    crate::fetch::FETCH_PROTOCOL_VERSION
                 ));
             }
             match table.services.values.entry(id.to_owned()) {
@@ -732,9 +742,10 @@ pub mod __macro_support {
                 }
                 Entry::Occupied(_) => return Err(format!("duplicate host service {id:?}")),
             }
-            // Timer compatibility is checked by the VM against the saved work.
-            // A queued one-shot task needs no platform service to run.
-            if !is_timer {
+            // Timer and fetch compatibility is checked by the VM against the
+            // saved work. A queued one-shot task needs no platform service to
+            // run, and restored fetch work is interrupted instead of resumed.
+            if !is_timer && !is_fetch {
                 table.service_ids.insert(format!("{id}:{version}"));
             }
         }

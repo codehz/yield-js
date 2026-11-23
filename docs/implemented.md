@@ -179,6 +179,9 @@
 - `CompressionStream` 与 `DecompressionStream` 支持 `gzip`、`deflate`、`deflate-raw` 与 `brotli`。编码器跨 64 KiB 输入块产生单个合法流，gzip/zlib 包装与 CRC32/Adler32 随外层状态推进；解码器接受任意合法块、跨块回引和校验，拒绝截断、尾随数据与非法头。位缓存、窗口、熵表和包装游标随快照保存而不重放历史输入。
 - `URL`、`URLSearchParams`、`URLPattern` 同时暴露为静态裸名与 `globalThis` 属性，不依赖宿主服务。`URL` 支持组件读写、`toString` / `toJSON` 与静态 `parse` / `canParse`；`URLSearchParams` 支持字符串、键值对序列和记录初始化、查询修改、排序与实时迭代；`URLPattern` 支持字符串与字典、组件访问器、`test` / `exec`。
 - `VmOptions::base_url` 在模块求值前设置绝对基准 URL，只用于构造器省略 `base` 时的解析，不改变静态方法。快照格式 **74** 保存基准、URL 与查询列表的双向链接、迭代游标及模式输入；恢复只使用快照保存的基准（也保留无基准的情况），不能通过 `RestoreOptions` 覆盖，也不重新运行模块初始化。
+- `Blob`、`File`、`FormData`、`Headers`、`Request`、`Response` 与 `fetch` 同时作为裸名和 `globalThis` 属性，不依赖网络即可构造和消费。Blob 复制可变 BufferSource 的有效窗口，切片共享不可变字节；File 持有 `name` 与 `lastModified`，structured clone 保留 Blob/File 品牌和内容。FormData 保留重复项和顺序；Headers 保留原始字节对、排序合并后的公开视图、guard 与 `getSetCookie()`；Body mixin 共享同一字节流状态，`bodyUsed` 由流状态派生，clone 使用 tee。`URL.createObjectURL` 在本 VM 保活对象，撤销只影响后续解析。
+- `fetch` 实现 `about:blank`、`data:`、本 VM 的 `blob:` 与 HTTP(S) 单跳算法：CORS 预检、响应头过滤、重定向及跨源头清理、307/308 不可重放体拒绝、`only-if-cached` 不联网、gzip/deflate/br 单次解码、SRI（sha256/384/512）、keepalive 64 KiB 预算，以及保留脚本 reason 的 abort。上行按宿主额度从原流读取，下行只在授予额度内投递。无 `wintertc.fetch` 适配器时 HTTP Fetch 以 `TypeError` 拒绝；404/500 是正常响应。
+- 快照格式 **86** 保存上述记录、迭代游标、对象 URL 表、fetch 环境（origin、referrer、分区与授权标识）和逐事务阶段。恢复先消费镜像中已接受的事件，再以 `AbortError` 中断仍依赖外部传输的事务：未暴露的响应拒绝原 Promise，已暴露的响应只让未完成的体出错，已完整接收的体继续可读。恢复不重发请求，也不启动新传输；宿主授权域不一致时拒绝恢复。
 - `Number`、`BigInt` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
 - 编译器接受溢出为无穷的数字字面量；`NaN` 和 `Infinity` 仍按作用域解析。字节码版本 **31** 的 Build 常量和快照值共用 JSON 数值编码：有限值保留数值形式和负零，非有限值用专用字符串标记，NaN 不保留 payload。宿主返回值、槽与异步操作的兑现值和拒绝原因均可包含非有限数。
 - `Map`、`Set` 构造器及其共享的实例原型和迭代器原型是快照根；条目顺序、对象及 Symbol 的身份、迭代器的游标和已耗尽状态可跨快照保留。

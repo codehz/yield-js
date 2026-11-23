@@ -40,6 +40,27 @@ pub(super) fn check_snapshot_header(snapshot: &Snapshot) -> Result<(), VmError> 
     Ok(())
 }
 
+pub(super) fn authorize_fetch_environment(
+    recorded: &crate::fetch::FetchEnvironment,
+    provided: Option<&crate::fetch::FetchEnvironment>,
+) -> Result<(), VmError> {
+    let authorized = match provided {
+        Some(provided) => {
+            provided.origin == recorded.origin
+                && provided.partition == recorded.partition
+                && provided.authorization == recorded.authorization
+        }
+        None => *recorded == crate::fetch::FetchEnvironment::default(),
+    };
+    if authorized {
+        Ok(())
+    } else {
+        Err(VmError::InvalidSnapshot(
+            "fetch environment is not authorized for restore".to_owned(),
+        ))
+    }
+}
+
 /// Symbol tables validate exact reserved well-known records and registry integrity
 /// before any heap edge is checked; all ids stay below the high-water mark.
 pub(super) fn validate_symbol_tables(snapshot: &Snapshot) -> Result<(), VmError> {

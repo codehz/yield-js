@@ -63,6 +63,7 @@ pub mod bytecode;
 mod digest;
 pub mod error;
 mod exec;
+pub mod fetch;
 mod frame;
 mod gc;
 pub mod heap;
@@ -94,6 +95,10 @@ pub use bytecode::{
     ResumeEntry, Slot, SlotKind,
 };
 pub use error::VmError;
+pub use fetch::{
+    CredentialsMode, FETCH_PROTOCOL_VERSION, FETCH_SERVICE, FetchEnvironment, FetchEvent,
+    FetchFailure, FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
+};
 pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host};
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};

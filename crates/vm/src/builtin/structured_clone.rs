@@ -333,6 +333,14 @@ impl Graph {
                 };
                 id
             }
+            Object::Blob { data, .. } => vm.heap.alloc(Object::Blob {
+                object: PlainObject::new(Some(vm.builtins.get("blob.prototype"))),
+                data: data.clone(),
+            }),
+            Object::File { data, .. } => vm.heap.alloc(Object::File {
+                object: PlainObject::new(Some(vm.builtins.get("file.prototype"))),
+                data: data.clone(),
+            }),
             object if object.has_error_brand() => normal!(self.error(vm, host, roots, source)),
             Object::Plain(_) => {
                 let target = vm

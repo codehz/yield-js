@@ -12,6 +12,7 @@ use yield_vm::{GuestOutcome, Host, HostStep, JsString, Vm};
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
+pub mod fetch;
 pub mod timer;
 
 pub use case::run_case;
@@ -460,6 +461,7 @@ pub struct TestHost {
     rejection_events: Vec<RejectionEvent>,
     gc_roots: Vec<yield_vm::Value>,
     pub reject_native: bool,
+    fetch_environment: yield_vm::FetchEnvironment,
 }
 
 impl Default for TestHost {
@@ -477,12 +479,27 @@ impl TestHost {
         Self::with_timer_service(false)
     }
 
+    /// A host that also registers an explicit Fetch adapter.
+    pub fn with_fetch_service(service: Arc<dyn yield_vm::fetch::FetchService>) -> Self {
+        Self::with_services(true, Some(service))
+    }
+
     fn with_timer_service(timers: bool) -> Self {
+        Self::with_services(timers, None)
+    }
+
+    fn with_services(timers: bool, fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>) -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
-        let bindings = test_bindings(Arc::clone(&counters), Arc::clone(&labels), &clock, timers)
-            .expect("test bindings");
+        let bindings = test_bindings(
+            Arc::clone(&counters),
+            Arc::clone(&labels),
+            &clock,
+            timers,
+            fetch,
+        )
+        .expect("test bindings");
         Self {
             bindings: Arc::new(bindings),
             counters,
@@ -493,7 +510,17 @@ impl TestHost {
             rejection_events: Vec::new(),
             gc_roots: Vec::new(),
             reject_native: false,
+            fetch_environment: yield_vm::FetchEnvironment::default(),
         }
+    }
+
+    /// Origin, referrer, partition and authorization recorded in snapshots.
+    pub fn fetch_environment(&self) -> yield_vm::FetchEnvironment {
+        self.fetch_environment.clone()
+    }
+
+    pub fn set_fetch_environment(&mut self, environment: yield_vm::FetchEnvironment) {
+        self.fetch_environment = environment;
     }
 
     pub fn count(&self, name: &str) -> usize {
@@ -585,6 +612,7 @@ fn test_bindings(
     labels: Arc<LabelService>,
     clock: &Arc<FakeClock>,
     timers: bool,
+    fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
 ) -> Result<Bindings, String> {
     macro_rules! link {
         ($($service:tt)*) => {
@@ -604,11 +632,17 @@ fn test_bindings(
             }
         };
     }
-    if timers {
-        let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-        link!(("wintertc.timer", 1, wakeups))
-    } else {
-        link!()
+    match (timers, fetch) {
+        (true, Some(fetch)) => {
+            let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
+            link!(("wintertc.timer", 1, wakeups), ("wintertc.fetch", 1, fetch))
+        }
+        (true, None) => {
+            let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
+            link!(("wintertc.timer", 1, wakeups))
+        }
+        (false, Some(fetch)) => link!(("wintertc.fetch", 1, fetch)),
+        (false, None) => link!(),
     }
 }
 

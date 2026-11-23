@@ -139,7 +139,7 @@ fn invocation_id(result: Invocation) -> Result<ObjectId, VmError> {
     }
 }
 
-pub(super) fn tee(
+pub(crate) fn tee(
     vm: &mut Vm,
     _: &mut dyn Host,
     roots: &ActiveRoots<'_>,

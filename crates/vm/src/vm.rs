@@ -156,6 +156,9 @@ pub(crate) struct RestoredState {
     pub(crate) next_stream_message: u64,
     pub(crate) clock: crate::runtime::VmClock,
     pub(crate) base_url: Option<url::Url>,
+    pub(crate) fetch_environment: crate::fetch::FetchEnvironment,
+    pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
+    pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
@@ -383,6 +386,10 @@ pub struct Vm {
     pub(crate) random_state: u64,
     pub(crate) clock: crate::runtime::VmClock,
     pub(crate) base_url: Option<url::Url>,
+    pub(crate) fetch_environment: crate::fetch::FetchEnvironment,
+    pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
+    pub(crate) fetch_live: BTreeMap<u64, Box<dyn crate::fetch::FetchRegistration>>,
+    pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
     /// Per-function, per-PC monomorphic property cache. Never serialized.
@@ -878,6 +885,7 @@ impl Vm {
                 OrdinaryTask::RejectionHandled(id) => {
                     self.run_rejection_notification(host, &ActiveRoots::EMPTY, id, true)?
                 }
+                OrdinaryTask::FetchEvent(id, event) => self.process_fetch_event(host, id, event)?,
             }
         }
     }
@@ -938,6 +946,15 @@ impl Vm {
                     if let Microtask::Streams { job, settlement } = &task {
                         self.resume_stream_job(host, roots, *job, settlement)?;
                     }
+                }
+                Microtask::FetchBody {
+                    ref job,
+                    ref settlement,
+                } => {
+                    self.resume_fetch_body(host, roots, job.clone(), settlement.clone())?;
+                }
+                Microtask::FetchUpload { id, ref settlement } => {
+                    self.resume_fetch_upload(host, id, settlement)?;
                 }
                 Microtask::Call {
                     ref function,
@@ -1069,6 +1086,7 @@ impl Vm {
 
     pub(crate) fn abort_operation(&mut self, id: u64, reason: Value) -> Result<(), VmError> {
         let Some(operation) = self.remove_operation(id) else {
+            self.abort_fetch(id, reason)?;
             return Ok(());
         };
         let target = operation.target;
@@ -1446,6 +1464,14 @@ impl Vm {
                 self.microtasks
                     .push_back(Microtask::Streams { job, settlement });
             }
+            ReactionJob::FetchBody(job) => {
+                self.microtasks
+                    .push_back(Microtask::FetchBody { job, settlement });
+            }
+            ReactionJob::FetchUpload(id) => {
+                self.microtasks
+                    .push_back(Microtask::FetchUpload { id, settlement });
+            }
         }
         Ok(())
     }
@@ -1609,6 +1635,9 @@ impl Vm {
             next_stream_message,
             clock,
             base_url,
+            fetch_environment,
+            fetch_state,
+            object_urls,
             host_tasks,
             next_host_task_id,
             host_classes,
@@ -1684,6 +1713,10 @@ impl Vm {
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
             base_url,
+            fetch_environment,
+            fetch_state,
+            fetch_live: Default::default(),
+            object_urls,
             module_envs,
             module_namespaces,
         }

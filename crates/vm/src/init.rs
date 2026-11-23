@@ -24,6 +24,9 @@ use std::sync::Arc;
 pub struct VmOptions<'a> {
     /// Default absolute base for relative URL construction.
     pub base_url: Option<&'a str>,
+    /// Origin, referrer, partition and host authorization used by `fetch`.
+    /// The default is an opaque origin with no referrer or permissions.
+    pub fetch_environment: Option<crate::fetch::FetchEnvironment>,
     #[doc(hidden)]
     pub test_clock: Option<Arc<dyn crate::TestClock>>,
 }
@@ -34,6 +37,10 @@ pub struct RestoreOptions {
     /// Additional graph checks to run after the snapshot compatibility checks.
     /// Defaults to [`SnapshotValidation::Trusted`].
     pub validation: SnapshotValidation,
+    /// Host authorization for the restored VM. The recorded environment is
+    /// retained; this value must identify the same origin, partition and
+    /// authorization or restore is refused, so resuming cannot widen access.
+    pub fetch_environment: Option<crate::fetch::FetchEnvironment>,
     #[doc(hidden)]
     pub test_clock: Option<Arc<dyn crate::TestClock>>,
 }
@@ -71,6 +78,7 @@ impl Vm {
         let build = build.try_into().map_err(Into::into)?;
         let mut vm = Self::prepare(build, host, options.test_clock)?;
         vm.base_url = base_url;
+        vm.fetch_environment = options.fetch_environment.unwrap_or_default();
         vm.initialize_modules(host)?;
         Ok(vm)
     }
@@ -180,6 +188,10 @@ impl Vm {
             random_state: crate::builtin::math::RANDOM_SEED,
             clock,
             base_url: None,
+            fetch_environment: Default::default(),
+            fetch_state: Default::default(),
+            fetch_live: Default::default(),
+            object_urls: Default::default(),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
         }

@@ -39,9 +39,11 @@ export async function run() {
 
 ## 用例目录
 
-新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`performance`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`、`timers`、`url`。不要在 `tests/cases/` 顶层新增用例。
+新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`fetch`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`performance`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`、`timers`、`url`。不要在 `tests/cases/` 顶层新增用例。
 
 `build.rs` 递归遍历目录，文件名用 `snake_case.js`；stem 与类别名都必须匹配 `[a-z][a-z0-9_]*`；生成的测试名为 `case_<category>_<stem>`（顶层为 `case_<stem>`）。每个目录都登记 `cargo:rerun-if-changed`，目录为空或缺失会 panic。指令解析器自身的失败用例放在 `crates/harness/tests/cases.rs`，夹具源码在 `crates/harness/tests/failing_cases/`。
+
+Fetch 的网络与切点测试放在 `crates/harness/tests/e2e/`：`fetch_http.rs` 是脚本化 loopback HTTP/1.1 服务器，按序记录每个请求；`fetch_network.rs` 用真实连接覆盖 CORS/预检、跨源重定向、307 不可重放体、`only-if-cached`、SRI、gzip、keepalive、abort 与上传额度，并用 `ControllableFetchService` 精确推进 `UploadCredit`/`Head`/`Data`/`Eof`/`Failed` 以及上传、等 head、读体和 EOF 各阶段的快照恢复。离线可观察行为仍写在 `cases/fetch/`，不新增 Rust harness。
 
 ## 宿主声明夹具
 

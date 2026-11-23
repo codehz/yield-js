@@ -29,11 +29,13 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let build = compile_source(source).map_err(|error| format!("{name}: compile: {error}"))?;
     let mut host = TestHost::default();
     let clock = host.clock().clone();
+    let fetch_environment = host.fetch_environment();
     let mut vm = Vm::new(
         build.clone(),
         &mut host,
         VmOptions {
             test_clock: Some(clock),
+            fetch_environment: Some(fetch_environment),
             ..Default::default()
         },
     )
@@ -474,12 +476,14 @@ fn restore(
     let snapshot =
         Snapshot::from_json(&json).map_err(|error| located(name, line, "@restore", error))?;
     let clock = host.clock().clone();
+    let fetch_environment = host.fetch_environment();
     *vm = Vm::restore(
         snapshot,
         build.clone(),
         host,
         RestoreOptions {
             test_clock: Some(clock),
+            fetch_environment: Some(fetch_environment),
             ..Default::default()
         },
     )

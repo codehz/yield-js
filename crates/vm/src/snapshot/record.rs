@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Durable native compression algorithms and stream wrappers.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 83;
+// Fetch data objects, live transactions, object URL names and the environment.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 86;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -24,6 +24,8 @@ pub enum OrdinaryTask {
     UnhandledBatch(Vec<ObjectId>),
     RejectionHandled(ObjectId),
     StreamMessage(ObjectId, u64),
+    /// One accepted adapter event, in delivery order.
+    FetchEvent(u64, crate::fetch::FetchEvent),
 }
 
 fn snapshot_codec() -> impl Options {
@@ -275,6 +277,11 @@ pub struct Snapshot {
     pub random_state: u64,
     pub(crate) elapsed: std::time::Duration,
     pub(crate) base_url: Option<url::Url>,
+    /// Origin, referrer, partition and host authorization for `fetch`.
+    pub fetch_environment: crate::fetch::FetchEnvironment,
+    /// Live Fetch invocations, including accepted but unprocessed events.
+    pub(crate) fetch_state: crate::builtin::fetch::transaction::FetchState,
+    pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
     pub symbols: BTreeMap<SymbolId, Option<JsString>>,
     /// `Symbol.for` registry entries kept alive by the snapshot.
@@ -317,6 +324,9 @@ impl Snapshot {
             random_state: crate::builtin::math::RANDOM_SEED,
             elapsed: std::time::Duration::ZERO,
             base_url: None,
+            fetch_environment: Default::default(),
+            fetch_state: Default::default(),
+            object_urls: Default::default(),
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: 0,

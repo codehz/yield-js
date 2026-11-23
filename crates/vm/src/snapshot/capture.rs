@@ -83,6 +83,9 @@ impl Vm {
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.elapsed = self.clock.elapsed();
         snapshot.base_url = self.base_url.clone();
+        snapshot.fetch_environment = self.fetch_environment.clone();
+        snapshot.fetch_state = self.fetch_state.clone();
+        snapshot.object_urls = self.object_urls.clone();
         snapshot.script_timers = self.script_timers.clone();
         snapshot.next_timer_id = self.next_timer_id;
         snapshot.next_operation_id = self.next_operation_id;
@@ -332,6 +335,10 @@ impl Vm {
         options: RestoreOptions,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
+        authorize_fetch_environment(
+            &snapshot.fetch_environment,
+            options.fetch_environment.as_ref(),
+        )?;
         let build = build.try_into().map_err(Into::into)?;
         match options.validation {
             SnapshotValidation::Trusted => {
@@ -356,6 +363,7 @@ impl Vm {
         let mut last = start;
         let mut profile = crate::perf::Restore::default();
         check_snapshot_header(&snapshot)?;
+        authorize_fetch_environment(&snapshot.fetch_environment, None)?;
         let vm = Self::restore_image::<true>(snapshot, build, host, None, |field| {
             let now = Instant::now();
             *field(&mut profile) = now.duration_since(last);
@@ -451,6 +459,13 @@ impl Vm {
             }
         }
         let builtins = BuiltinRoots::load(&snapshot.roots, &heap)?;
+        if AUDIT {
+            snapshot.object_urls.validate(&heap)?;
+            snapshot.fetch_state.validate(&heap)?;
+            snapshot
+                .fetch_state
+                .validate_queue(&snapshot.ordinary_tasks)?;
+        }
         let templates = load_templates(&build, &heap, std::mem::take(&mut snapshot.templates))?;
         if AUDIT {
             validate_source_modules(
@@ -467,6 +482,7 @@ impl Vm {
             &heap,
             snapshot.elapsed,
             std::mem::take(&mut snapshot.operations),
+            &snapshot.fetch_state,
         )?;
         let host_tasks = load_host_tasks(
             &bindings,
@@ -507,6 +523,9 @@ impl Vm {
                 next_stream_message: snapshot.next_stream_message,
                 clock: crate::runtime::VmClock::new(clock, snapshot.elapsed),
                 base_url: snapshot.base_url,
+                fetch_environment: snapshot.fetch_environment,
+                fetch_state: snapshot.fetch_state,
+                object_urls: snapshot.object_urls,
                 host_tasks,
                 next_host_task_id: snapshot.next_host_task_id,
                 host_classes,
@@ -522,6 +541,9 @@ impl Vm {
         // Recovery can append new notifications; the captured ones must stay first.
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications;
         vm.ordinary_tasks = snapshot.ordinary_tasks.into();
+        // Accepted events run first; work that still depends on the old host
+        // transport is interrupted locally without starting a new request.
+        vm.start_fetch_interruptions(host)?;
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         checkpoint(|profile| &mut profile.vm_assembly);
         if AUDIT {

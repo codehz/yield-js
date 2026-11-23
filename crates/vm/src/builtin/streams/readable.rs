@@ -585,6 +585,47 @@ impl Vm {
         Ok(stream)
     }
 
+    pub(crate) fn readable_from_bytes(&mut self, bytes: Vec<u8>) -> Result<ObjectId, VmError> {
+        use crate::builtin::binary::ARRAY_BUFFER_PROTOTYPE;
+        use crate::heap::{ArrayBufferObject, ByteStreamRange};
+
+        let stream = self.allocate_readable(
+            self.builtins.get(STREAM_PROTO),
+            Value::UNDEFINED,
+            0.0,
+            None,
+            true,
+            None,
+        )?;
+        let length = bytes.len();
+        let buffer = (length != 0).then(|| {
+            self.heap.alloc(Object::ArrayBuffer(ArrayBufferObject {
+                object: PlainObject::new(Some(self.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
+                bytes: Some(bytes),
+                max_byte_length: None,
+            }))
+        });
+        let record = self.readable_mut(stream)?;
+        record.started = true;
+        if let Some(buffer) = buffer {
+            record.close_requested = true;
+            record.total_size = length as f64;
+            record
+                .byte
+                .as_mut()
+                .expect("byte stream")
+                .queue
+                .push_back(ByteStreamRange {
+                    buffer,
+                    offset: 0,
+                    length,
+                });
+        } else {
+            record.state = ReadableState::Closed;
+        }
+        Ok(stream)
+    }
+
     pub(super) fn create_readable_internal(
         &mut self,
         source: Value,
@@ -677,7 +718,7 @@ impl Vm {
         self.settle(promise, settlement)
     }
 
-    pub(super) fn acquire_readable_reader(
+    pub(crate) fn acquire_readable_reader(
         &mut self,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
@@ -729,7 +770,7 @@ impl Vm {
         Ok(promise_or_object(reader))
     }
 
-    pub(super) fn release_readable_reader(
+    pub(crate) fn release_readable_reader(
         &mut self,
         roots: &ActiveRoots<'_>,
         reader: ObjectId,
@@ -763,7 +804,7 @@ impl Vm {
         Ok(())
     }
 
-    pub(super) fn read_readable(
+    pub(crate) fn read_readable(
         &mut self,
         host: &mut dyn Host,
         roots: &ActiveRoots<'_>,

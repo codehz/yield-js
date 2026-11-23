@@ -136,6 +136,12 @@ builtin_globals! {
     "URL" => Global::Owner(super::url_api::URL_OWNER),
     "URLSearchParams" => Global::Owner(super::url_api::params::PARAMS_OWNER),
     "URLPattern" => Global::Owner(super::url_api::pattern::PATTERN_OWNER),
+    "Blob" => Global::Owner(super::fetch::blob::BLOB_OWNER),
+    "File" => Global::Owner(super::fetch::blob::FILE_OWNER),
+    "Headers" => Global::Owner(super::fetch::headers::HEADERS_OWNER),
+    "FormData" => Global::Owner(super::fetch::form_data::FORM_DATA_OWNER),
+    "Request" => Global::Owner(super::fetch::request::REQUEST_OWNER),
+    "Response" => Global::Owner(super::fetch::response::RESPONSE_OWNER),
     "SuppressedError" => Global::Owner(error_family::SUPPRESSED_ERROR),
     "DisposableStack" => Global::Owner(disposable_stack::SYNC_OWNER),
     "AsyncDisposableStack" => Global::Owner(disposable_stack::ASYNC_OWNER),
@@ -180,6 +186,7 @@ builtin_globals! {
     "WritableStreamDefaultController" => Global::Owner(super::streams::WRITABLE_CONTROLLER_OWNER),
     "TransformStream" => Global::Owner(super::streams::TRANSFORM_OWNER),
     "TransformStreamDefaultController" => Global::Owner(super::streams::TRANSFORM_CONTROLLER_OWNER),
+    "fetch" => Global::Function(super::fetch::controller::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

@@ -89,6 +89,16 @@ const FUNCTIONS: &[IntrinsicDef] = &[
     IntrinsicDef::call(key(Slot::Static, "parse"), 1, |vm, host, roots, args, _| {
         parse(vm, host, roots, &args, ParseMode::Parse)
     }),
+    IntrinsicDef::call(
+        key(Slot::Static, "createObjectURL"),
+        1,
+        super::fetch::object_url::create,
+    ),
+    IntrinsicDef::call(
+        key(Slot::Static, "revokeObjectURL"),
+        1,
+        super::fetch::object_url::revoke,
+    ),
     IntrinsicDef::call(key(Slot::Prototype, "toString"), 0, stringify),
     IntrinsicDef::call(key(Slot::Prototype, "toJSON"), 0, stringify),
     IntrinsicDef::call(
@@ -194,7 +204,7 @@ fn bad_receiver(vm: &mut Vm, roots: &ActiveRoots<'_>) -> Result<Invocation, VmEr
     vm.throw_type_error(roots, "URL member called on an incompatible receiver")
 }
 
-fn usv_string(text: &JsString) -> String {
+pub(crate) fn usv_string(text: &JsString) -> String {
     text.to_utf8()
         .unwrap_or_else(|_| String::from_utf16_lossy(&text.to_utf16()))
 }

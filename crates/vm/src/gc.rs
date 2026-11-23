@@ -240,6 +240,12 @@ impl Vm {
         for value in self.globals.values() {
             tracer.mark_value(value)?;
         }
+        for id in self.object_urls.ids() {
+            tracer.mark_object(id)?;
+        }
+        for id in self.fetch_state.ids() {
+            tracer.mark_object(id)?;
+        }
         for import in &self.imports {
             tracer.mark_object(import.namespace)?;
         }
@@ -265,7 +271,7 @@ impl Vm {
                 AbortTimeout(id) | RejectionHandled(id) => id.trace(&mut tracer)?,
                 StreamMessage(id, _) => id.trace(&mut tracer)?,
                 UnhandledBatch(batch) => batch.trace(&mut tracer)?,
-                ScriptTimer(_) => {}
+                ScriptTimer(_) | FetchEvent(..) => {}
             }
         }
         for timer in self.script_timers.values() {

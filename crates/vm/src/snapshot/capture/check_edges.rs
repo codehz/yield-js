@@ -383,6 +383,64 @@ pub(super) fn check_heap_edges(
             } => {
                 pattern::validate(input, *ignore_case).map_err(|error| invalid_url(&error))?;
             }
+            Object::Blob { data, .. } if !data.valid() => {
+                return Err(VmError::InvalidSnapshot(format!("invalid Blob {id}")));
+            }
+            Object::File { data, .. } if !data.valid() => {
+                return Err(VmError::InvalidSnapshot(format!("invalid File {id}")));
+            }
+            Object::Request { data, .. } => {
+                if !matches!(heap.get(data.headers), Ok(Object::Headers { .. }))
+                    || !matches!(heap.get(data.signal), Ok(Object::AbortSignal { .. }))
+                    || data.body.as_ref().is_some_and(|body| {
+                        !matches!(heap.get(body.stream), Ok(Object::ReadableStream(_)))
+                    })
+                {
+                    return Err(VmError::InvalidSnapshot(format!("invalid Request {id}")));
+                }
+            }
+            Object::Response { data, .. } => {
+                if !matches!(heap.get(data.headers), Ok(Object::Headers { .. }))
+                    || data.body.as_ref().is_some_and(|body| {
+                        !matches!(heap.get(body.stream), Ok(Object::ReadableStream(_)))
+                    })
+                {
+                    return Err(VmError::InvalidSnapshot(format!("invalid Response {id}")));
+                }
+            }
+            Object::Headers { data, .. } => {
+                use crate::builtin::fetch::headers::{valid_name, valid_normalized_value};
+                if data.list.iter().any(|(name, value)| {
+                    !valid_name(name)
+                        || name.iter().any(u8::is_ascii_uppercase)
+                        || !valid_normalized_value(value)
+                }) {
+                    return Err(VmError::InvalidSnapshot(format!("invalid Headers {id}")));
+                }
+            }
+            Object::HeadersIterator {
+                headers: target, ..
+            } if !matches!(heap.get(*target), Ok(Object::Headers { .. })) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "invalid Headers iterator {id}"
+                )));
+            }
+            Object::FormData { data, .. } => {
+                use crate::builtin::fetch::form_data::FormDataValue;
+                if data.entries.iter().any(|(_, value)| {
+                    matches!(value, FormDataValue::File(file)
+                        if !matches!(heap.get(*file), Ok(Object::File { .. })))
+                }) {
+                    return Err(VmError::InvalidSnapshot(format!("invalid FormData {id}")));
+                }
+            }
+            Object::FormDataIterator { data, .. }
+                if !matches!(heap.get(data.target), Ok(Object::FormData { .. })) =>
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "invalid FormData iterator {id}"
+                )));
+            }
             _ => {}
         }
 

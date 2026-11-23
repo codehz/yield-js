@@ -625,6 +625,81 @@ impl Vm {
         Ok(promise_or_object(request))
     }
 
+    pub(crate) fn create_byte_stream(&mut self) -> Result<ObjectId, VmError> {
+        let stream = self.allocate_readable(
+            self.builtins.get(STREAM_PROTO),
+            Value::UNDEFINED,
+            0.0,
+            None,
+            true,
+            None,
+        )?;
+        self.readable_mut(stream)?.started = true;
+        Ok(stream)
+    }
+
+    /// Enqueues an owned block without a script-visible controller.
+    pub(crate) fn enqueue_byte_vec(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        stream: ObjectId,
+        bytes: Vec<u8>,
+    ) -> Result<(), VmError> {
+        use crate::builtin::binary::ARRAY_BUFFER_PROTOTYPE;
+        use crate::heap::ArrayBufferObject;
+
+        if !matches!(self.readable(stream)?.state, ReadableState::Readable) {
+            return Err(VmError::InvalidState(
+                "cannot enqueue into a closed body stream".into(),
+            ));
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let length = bytes.len();
+        let buffer = self.heap.alloc(Object::ArrayBuffer(ArrayBufferObject {
+            object: PlainObject::new(Some(self.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
+            bytes: Some(bytes),
+            max_byte_length: None,
+        }));
+        self.push_byte_range(
+            stream,
+            ByteStreamRange {
+                buffer,
+                offset: 0,
+                length,
+            },
+        )?;
+        let ready = self.fill_byte_reads(roots, stream)?;
+        self.deliver_byte_reads(host, roots, stream, ready, false)
+    }
+
+    pub(crate) fn close_body_stream(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        stream: ObjectId,
+    ) -> Result<(), VmError> {
+        if !matches!(self.readable(stream)?.state, ReadableState::Readable) {
+            return Ok(());
+        }
+        if !self.byte(stream)?.queue.is_empty() {
+            self.readable_mut(stream)?.close_requested = true;
+            return Ok(());
+        }
+        let _ = self.close_byte_stream(host, roots, stream)?;
+        Ok(())
+    }
+
+    pub(crate) fn error_body_stream(
+        &mut self,
+        stream: ObjectId,
+        error: &Value,
+    ) -> Result<(), VmError> {
+        self.error_readable(stream, error)
+    }
+
     fn push_byte_range(&mut self, stream: ObjectId, range: ByteStreamRange) -> Result<(), VmError> {
         let record = self.readable_mut(stream)?;
         record.total_size += range.length as f64;
@@ -648,6 +723,7 @@ impl Vm {
         } else {
             record.total_size - length as f64
         };
+        self.fetch_bytes_consumed(stream, length as u64)?;
         Ok(())
     }
 

@@ -67,6 +67,26 @@ impl Codec {
     }
 }
 
+/// Decodes exactly one HTTP content coding without retaining decoder state.
+pub(crate) fn decode_http_encoding(encoding: &[u8], data: &[u8]) -> Result<Vec<u8>, ()> {
+    let name = encoding.trim_ascii();
+    let format = if name.eq_ignore_ascii_case(b"gzip") || name.eq_ignore_ascii_case(b"x-gzip") {
+        Format::Gzip
+    } else if name.eq_ignore_ascii_case(b"deflate") {
+        Format::Deflate
+    } else if name.eq_ignore_ascii_case(b"br") {
+        Format::Brotli
+    } else {
+        return Err(());
+    };
+    let mut codec = Codec::new(format, true);
+    let mut output = Vec::new();
+    for chunk in codec.process(data, true)? {
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
+}
+
 const ENCODER_PROTO: &str = "compressionStream.prototype";
 const DECODER_PROTO: &str = "decompressionStream.prototype";
 

@@ -83,6 +83,10 @@ pub enum ReactionJob {
     },
     ArrayFromAsync(crate::builtin::array::ArrayFromAsyncJob),
     Streams(crate::builtin::streams::StreamJob),
+    /// One asynchronous read of a consuming body, resumable from a snapshot.
+    FetchBody(crate::builtin::fetch::body::BodyRead),
+    /// One asynchronous read of a streaming upload body.
+    FetchUpload(u64),
 }
 
 /// Project a field of the ordinary-object record an object kind stores.
@@ -131,6 +135,14 @@ macro_rules! map_object_storage {
             | Object::UrlSearchParams { object: $storage, .. }
             | Object::UrlSearchParamsIterator { object: $storage, .. }
             | Object::UrlPattern { object: $storage, .. }
+            | Object::Blob { object: $storage, .. }
+            | Object::File { object: $storage, .. }
+            | Object::Request { object: $storage, .. }
+            | Object::Response { object: $storage, .. }
+            | Object::Headers { object: $storage, .. }
+            | Object::HeadersIterator { object: $storage, .. }
+            | Object::FormData { object: $storage, .. }
+            | Object::FormDataIterator { object: $storage, .. }
             | Object::Set { object: $storage, .. }
             | Object::WeakMap { object: $storage, .. }
             | Object::WeakSet { object: $storage, .. }
@@ -461,6 +473,9 @@ impl Object {
                 if let Some(id) = promise.stream_dependency {
                     out.push(OwnedEdge::Object(id));
                 }
+                if let Some(id) = promise.body_read {
+                    out.push(OwnedEdge::Object(id));
+                }
                 for job in &promise.reactions {
                     job.write_edges(out);
                 }
@@ -531,6 +546,29 @@ impl Object {
                 }
             }
             Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
+            Self::Blob { .. } | Self::File { .. } | Self::Headers { .. } => {}
+            Self::Request { data, .. } => {
+                out.push(OwnedEdge::Object(data.headers));
+                out.push(OwnedEdge::Object(data.signal));
+                if let Some(body) = &data.body {
+                    out.push(OwnedEdge::Object(body.stream));
+                }
+            }
+            Self::Response { data, .. } => {
+                out.push(OwnedEdge::Object(data.headers));
+                if let Some(body) = &data.body {
+                    out.push(OwnedEdge::Object(body.stream));
+                }
+            }
+            Self::HeadersIterator { headers, .. } => out.push(OwnedEdge::Object(*headers)),
+            Self::FormDataIterator { data, .. } => out.push(OwnedEdge::Object(data.target)),
+            Self::FormData { data, .. } => {
+                use crate::builtin::fetch::form_data::FormDataValue;
+                out.extend(data.entries.iter().filter_map(|(_, value)| match value {
+                    FormDataValue::File(id) => Some(OwnedEdge::Object(*id)),
+                    FormDataValue::String(_) => None,
+                }));
+            }
             Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
             Self::WritableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
             Self::TransformController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
@@ -852,6 +890,12 @@ impl ReactionJob {
             }
             Self::ArrayFromAsync(job) => job.write_edges(out),
             Self::Streams(job) => out.push(OwnedEdge::Object(job.target())),
+            Self::FetchBody(job) => {
+                out.push(OwnedEdge::Object(job.reader));
+                out.push(OwnedEdge::Object(job.promise));
+                out.push(OwnedEdge::Object(job.active));
+            }
+            Self::FetchUpload(_) => {}
         }
     }
 

@@ -200,6 +200,8 @@ trait PayloadCodec<T> {
 
 平台服务不是快照的一部分，但它的**稳定 ID**进入声明指纹。缺少服务或服务版本不匹配时，恢复整体拒绝，而不是在首次调用时失败。 VM 专用的 `wintertc.timer` 例外：链接时校验版本 `1` 和类型 `Arc<dyn TimerService>`，不计入通用服务指纹；恢复按定时器记录检查是否需要该能力。
 
+Fetch 适配器 `wintertc.fetch`（协议版本 `1`）注册为 `Arc<dyn FetchService>`，同样在链接时校验类型和版本，且不计入通用服务指纹：快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
+
 ### 5.5 模块状态
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
