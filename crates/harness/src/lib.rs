@@ -10,8 +10,8 @@ use yield_vm::binding::{
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
-    ConsoleEvent, ConsoleSink, CryptoService, GuestOutcome, Host, HostStep, JsString,
-    SubtleCryptoService, Vm, VmError,
+    ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, FetchKey, GuestOutcome, Host,
+    HostStep, JsString, Services, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
 };
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
@@ -25,6 +25,14 @@ pub use timer::{FakeClock, Timer};
 
 #[derive(Default)]
 pub struct Counters(Mutex<BTreeMap<String, usize>>);
+
+pub struct CountersKey;
+
+impl yield_vm::ServiceKey for CountersKey {
+    type Value = Arc<Counters>;
+    const ID: &'static str = "counters";
+    const VERSION: u32 = 1;
+}
 
 impl Counters {
     pub fn hit(&self, name: &str) {
@@ -47,6 +55,14 @@ impl Counters {
 }
 
 pub struct NodeFactory;
+
+pub struct NodeFactoryKey;
+
+impl yield_vm::ServiceKey for NodeFactoryKey {
+    type Value = NodeFactory;
+    const ID: &'static str = "node-factory";
+    const VERSION: u32 = 1;
+}
 
 #[host_class(tag = "Node", methods, schema = 1, encode = Node::encode_payload, decode = Node::decode_payload)]
 pub struct Node {
@@ -87,7 +103,7 @@ impl Node {
     }
 
     fn decode_payload(input: &[u8], cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-        if cx.service::<NodeFactory>("node-factory").is_none() {
+        if cx.service::<NodeFactoryKey>().is_none() {
             return Err(CodecError::new("node factory service is unavailable"));
         }
         let label = std::str::from_utf8(input)
@@ -347,6 +363,14 @@ fn decode_operation_label(input: &[u8]) -> Result<String, CodecError> {
 #[derive(Default)]
 pub struct LabelService(Mutex<LabelState>);
 
+pub struct LabelServiceKey;
+
+impl yield_vm::ServiceKey for LabelServiceKey {
+    type Value = Arc<LabelService>;
+    const ID: &'static str = "labels";
+    const VERSION: u32 = 1;
+}
+
 #[derive(Default)]
 struct LabelState {
     pending: BTreeMap<String, OperationToken>,
@@ -446,7 +470,7 @@ fn register_label<O: Operation>(
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
     let service = bindings
-        .service::<Arc<LabelService>>("labels")
+        .service::<LabelServiceKey>()
         .ok_or_else(|| HostFault::new("missing labels service"))?;
     service.register(format!("{}:{label}", O::NAME), token, restoring)
 }
@@ -748,59 +772,33 @@ fn test_bindings(
     crypto: Option<Arc<dyn CryptoService>>,
     subtle: Option<Arc<dyn SubtleCryptoService>>,
 ) -> Result<Bindings, String> {
-    macro_rules! link {
-        ($($service:tt)*) => {
-            host_bindings! {
-                dts: "test.d.ts",
-                modules: [test],
-                classes: [Node, Matcher],
-                states: [],
-                operations: [Wait, Pause, Reject, Reissue, Timer],
-                services: [
-                    ("counters", 1, counters),
-                    ("node-factory", 1, NodeFactory),
-                    ("labels", 1, labels),
-                    ("clock", 1, Arc::clone(clock)),
-                    $($service)*
-                ],
-            }
-        };
+    let mut services = Services::default();
+    services.insert::<CountersKey>(counters)?;
+    services.insert::<NodeFactoryKey>(NodeFactory)?;
+    services.insert::<LabelServiceKey>(labels)?;
+    services.insert::<timer::FakeClockKey>(Arc::clone(clock))?;
+    if timers {
+        services.insert::<TimerKey>(clock.clone())?;
     }
-    macro_rules! link_subtle {
-        ($($service:tt)*) => {
-            match subtle {
-                Some(service) => link!(("wintertc.crypto.subtle", 1, service), $($service)*),
-                None => link!($($service)*),
-            }
-        };
+    if let Some(fetch) = fetch {
+        services.insert::<FetchKey>(fetch)?;
     }
-    macro_rules! link_crypto {
-        ($($service:tt)*) => {
-            match crypto {
-                Some(entropy) => link_subtle!(("wintertc.crypto", 1, entropy), $($service)*),
-                None => link_subtle!($($service)*),
-            }
-        };
+    if let Some(console) = console {
+        services.insert::<ConsoleKey>(console)?;
     }
-    macro_rules! link_platform {
-        ($($service:tt)*) => {
-            match console {
-                Some(sink) => link_crypto!(("wintertc.console", 1, sink), $($service)*),
-                None => link_crypto!($($service)*),
-            }
-        };
+    if let Some(crypto) = crypto {
+        services.insert::<CryptoKey>(crypto)?;
     }
-    match (timers, fetch) {
-        (true, Some(fetch)) => {
-            let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-            link_platform!(("wintertc.timer", 1, wakeups), ("wintertc.fetch", 1, fetch))
-        }
-        (true, None) => {
-            let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-            link_platform!(("wintertc.timer", 1, wakeups))
-        }
-        (false, Some(fetch)) => link_platform!(("wintertc.fetch", 1, fetch)),
-        (false, None) => link_platform!(),
+    if let Some(subtle) = subtle {
+        services.insert::<SubtleCryptoKey>(subtle)?;
+    }
+    host_bindings! {
+        dts: "test.d.ts",
+        modules: [test],
+        classes: [Node, Matcher],
+        states: [],
+        operations: [Wait, Pause, Reject, Reissue, Timer],
+        services: services,
     }
 }
 
@@ -846,7 +844,7 @@ mod test {
 
     #[function(name = "inspect")]
     fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+        if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("inspect");
         }
         Ok(())
@@ -854,7 +852,7 @@ mod test {
 
     #[function(name = "seed")]
     fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+        if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -862,7 +860,7 @@ mod test {
 
     #[function(name = "wait")]
     fn wait(cx: &mut CallCx<'_>, arg: Option<JsValue>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+        if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("wait");
         }
         let arg = match arg {
@@ -918,7 +916,7 @@ mod test {
         _node: Option<JsValue>,
         _label: Option<JsValue>,
     ) -> JsResult<()> {
-        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+        if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("setLabel");
         }
         Ok(())
@@ -926,13 +924,13 @@ mod test {
 
     #[function(name = "expect")]
     fn expect(cx: &mut CallCx<'_>, actual: Option<JsValue>) -> JsResult<Instance<Matcher>> {
-        if let Some(counters) = cx.service::<Arc<Counters>>("counters") {
+        if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("expect");
         }
         let actual = actual.unwrap_or_else(JsValue::undefined);
         let matcher = cx.alloc(Matcher)?;
         if !actual.is_undefined()
-            && let Some(counters) = cx.service::<Arc<Counters>>("counters")
+            && let Some(counters) = cx.service::<CountersKey>()
         {
             counters.hit("expect:value");
         }

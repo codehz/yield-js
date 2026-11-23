@@ -1,14 +1,12 @@
 //! The always-present Web Crypto singleton; random APIs require host entropy.
 
-use std::sync::Arc;
-
 use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
 use super::{define_builtin_data, install_getter};
 use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ElementKind, TO_STRING_TAG_SYMBOL, ViewRange};
-use crate::host::{CRYPTO_SERVICE, CryptoService};
+use crate::host::CryptoKey as CryptoServiceKey;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value, ValueRef};
@@ -148,10 +146,7 @@ fn random_uuid(
 }
 
 fn fill_random(vm: &mut Vm, bytes: &mut [u8]) -> Result<(), Invocation> {
-    let Some(service) = vm
-        .bindings
-        .service::<Arc<dyn CryptoService>>(CRYPTO_SERVICE)
-    else {
+    let Some(service) = vm.bindings.service::<CryptoServiceKey>() else {
         return Err(dom_error(
             vm,
             "NotSupportedError",

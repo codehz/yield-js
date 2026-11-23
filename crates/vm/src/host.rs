@@ -3,13 +3,7 @@ use std::sync::Arc;
 use crate::binding::{Bindings, HostFault, JsValue, LiveRegistration, OperationToken};
 use crate::value::Value;
 
-/// Optional one-shot wakeup service for script timers and AbortSignal.timeout.
-pub const TIMER_SERVICE: &str = "wintertc.timer";
-
 pub use crate::console::ConsoleEvent;
-
-/// Optional, synchronous console Printer service (version 1).
-pub const CONSOLE_SERVICE: &str = "wintertc.console";
 
 /// Receives owned-data notifications by reference. Implementations may clone
 /// events but must not reenter the VM.
@@ -17,8 +11,15 @@ pub trait ConsoleSink: Send + Sync {
     fn write(&self, event: &ConsoleEvent);
 }
 
-/// Optional, synchronous entropy for the Web Crypto random APIs.
-pub const CRYPTO_SERVICE: &str = "wintertc.crypto";
+/// Optional, synchronous console Printer service.
+pub struct ConsoleKey;
+
+impl crate::ServiceKey for ConsoleKey {
+    type Value = Arc<dyn ConsoleSink>;
+    const ID: &'static str = "wintertc.console";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
+}
 
 /// Supplies cryptographically secure random bytes without access to guest values.
 /// Implementations must fill the entire slice on success and must not reenter the VM.
@@ -26,8 +27,16 @@ pub trait CryptoService: Send + Sync {
     fn fill_random(&self, bytes: &mut [u8]) -> Result<(), HostFault>;
 }
 
-/// Optional worker-side Web Crypto primitives, separate from synchronous entropy.
-pub const CRYPTO_SUBTLE_SERVICE: &str = "wintertc.crypto.subtle";
+/// Optional, synchronous entropy for the Web Crypto random APIs.
+pub struct CryptoKey;
+
+impl crate::ServiceKey for CryptoKey {
+    type Value = Arc<dyn CryptoService>;
+    const ID: &'static str = "wintertc.crypto";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
+}
+
 pub const CRYPTO_SUBTLE_PROTOCOL_VERSION: u32 = 1;
 
 /// An owned request. PBKDF2 output length and GCM tag length are in bits.
@@ -67,6 +76,16 @@ pub trait SubtleCryptoService: Send + Sync {
     fn execute(&self, request: SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>;
 }
 
+/// Optional worker-side Web Crypto primitives, separate from synchronous entropy.
+pub struct SubtleCryptoKey;
+
+impl crate::ServiceKey for SubtleCryptoKey {
+    type Value = Arc<dyn SubtleCryptoService>;
+    const ID: &'static str = "wintertc.crypto.subtle";
+    const VERSION: u32 = CRYPTO_SUBTLE_PROTOCOL_VERSION;
+    const IN_FINGERPRINT: bool = false;
+}
+
 /// Arms a platform wakeup without carrying any guest values into its callback.
 /// The scheduler calls [`crate::Vm::wake_timer`] on the VM thread, then drains the turn.
 pub trait TimerService: Send + Sync {
@@ -75,6 +94,16 @@ pub trait TimerService: Send + Sync {
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault>;
+}
+
+/// Optional one-shot wakeup service for script timers and AbortSignal.timeout.
+pub struct TimerKey;
+
+impl crate::ServiceKey for TimerKey {
+    type Value = Arc<dyn TimerService>;
+    const ID: &'static str = "wintertc.timer";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
 }
 
 /// How a host operation completed. Values are produced outside a call, so

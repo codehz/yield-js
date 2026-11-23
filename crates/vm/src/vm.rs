@@ -12,7 +12,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
-use crate::host::{Completion, Host, TIMER_SERVICE, TimerService};
+use crate::host::{Completion, Host, TimerKey};
 use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
@@ -1252,7 +1252,7 @@ impl Vm {
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
         bindings
-            .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
+            .service::<TimerKey>()
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
             .clone()
             .arm(token, delay_ms)

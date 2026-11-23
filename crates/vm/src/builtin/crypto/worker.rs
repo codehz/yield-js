@@ -12,7 +12,7 @@ use crate::Vm;
 use crate::builtin::binary::{ARRAY_BUFFER_PROTOTYPE, MAX_BYTE_LENGTH};
 use crate::error::VmError;
 use crate::heap::{ArrayBufferObject, CryptoKeyAlgorithm, CryptoKeyUsage, Object, PlainObject};
-use crate::host::{CRYPTO_SUBTLE_SERVICE, SubtleCryptoRequest, SubtleCryptoService};
+use crate::host::{SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService};
 use crate::runtime::Settlement;
 use crate::value::{ObjectId, Value};
 
@@ -110,10 +110,7 @@ impl Vm {
     ) -> Result<(), VmError> {
         let state = &mut self.subtle_state;
         if state.worker.is_none() {
-            let Some(service) = self
-                .bindings
-                .service::<Arc<dyn SubtleCryptoService>>(CRYPTO_SUBTLE_SERVICE)
-            else {
+            let Some(service) = self.bindings.service::<SubtleCryptoKey>() else {
                 let reason = self.alloc_dom_exception(
                     "NotSupportedError".into(),
                     "SubtleCrypto service unavailable".into(),

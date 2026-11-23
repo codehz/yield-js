@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::support::{compile_main, declared};
-use yield_harness::{LabelRegistration, LabelService};
+use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
 use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
 use yield_vm::{
     Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
@@ -55,7 +55,7 @@ fn register_label(
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
     bindings
-        .service::<Arc<LabelService>>("labels")
+        .service::<LabelServiceKey>()
         .ok_or_else(|| HostFault::new("missing labels service"))?
         .register(label.to_owned(), token, restoring)
 }
@@ -147,13 +147,17 @@ mod strategy_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+        let mut services = yield_vm::Services::default();
+        services
+            .insert::<LabelServiceKey>(Arc::clone(labels))
+            .unwrap();
         host_bindings! {
             dts: "tests/dts/ops.d.ts",
             modules: [ops],
             classes: [],
             states: [],
             operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
-            services: [("labels", 1, Arc::clone(labels))],
+            services: services,
         }
         .expect("strategy bindings")
     }
@@ -434,6 +438,12 @@ mod stale_fixture {
     }
 
     type Stash = Arc<Mutex<Option<JsValue>>>;
+    struct StashKey;
+    impl yield_vm::ServiceKey for StashKey {
+        type Value = Stash;
+        const ID: &'static str = "stash";
+        const VERSION: u32 = 1;
+    }
 
     #[host_module(name = "stale")]
     mod stale {
@@ -442,7 +452,7 @@ mod stale_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut CallCx<'_>, value: JsValue) -> JsResult<()> {
             let stash = cx
-                .service::<Stash>("stash")
+                .service::<StashKey>()
                 .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
             *stash.lock().expect("stash lock") = Some(value);
             Ok(())
@@ -451,7 +461,7 @@ mod stale_fixture {
         #[function(name = "unstash")]
         fn unstash(cx: &mut CallCx<'_>) -> JsResult<Instance<Sink>> {
             let value = cx
-                .service::<Stash>("stash")
+                .service::<StashKey>()
                 .and_then(|stash| stash.lock().expect("stash lock").clone())
                 .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
             let sink = cx.alloc(Sink)?;
@@ -461,13 +471,15 @@ mod stale_fixture {
     }
 
     pub(super) fn bindings() -> Bindings {
+        let mut services = yield_vm::Services::default();
+        services.insert::<StashKey>(Stash::default()).unwrap();
         host_bindings! {
             dts: "tests/dts/stale.d.ts",
             modules: [stale],
             classes: [Sink],
             states: [],
             operations: [],
-            services: [("stash", 1, Arc::new(Mutex::new(None::<JsValue>)))],
+            services: services,
         }
         .expect("stale bindings")
     }
@@ -500,6 +512,19 @@ mod guest_call_fixture {
     use super::*;
 
     type Stash = Mutex<Option<HostStep>>;
+    struct StashKey;
+    impl yield_vm::ServiceKey for StashKey {
+        type Value = Stash;
+        const ID: &'static str = "stash";
+        const VERSION: u32 = 1;
+    }
+
+    struct RunsKey;
+    impl yield_vm::ServiceKey for RunsKey {
+        type Value = Arc<AtomicUsize>;
+        const ID: &'static str = "runs";
+        const VERSION: u32 = 1;
+    }
 
     #[host_module(name = "guest")]
     mod guest {
@@ -519,21 +544,21 @@ mod guest_call_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut CallCx<'_>, callee: JsValue) -> JsResult<()> {
             let request = later(cx, callee)?;
-            *cx.service::<Stash>("stash").unwrap().lock().unwrap() = Some(request);
+            *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "stashGc")]
         fn stash_gc(cx: &mut CallCx<'_>) -> JsResult<()> {
             let request = cx.request_gc(vec![], unexpected_resume)?;
-            *cx.service::<Stash>("stash").unwrap().lock().unwrap() = Some(request);
+            *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "replay")]
         fn replay(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
             Ok(cx
-                .service::<Stash>("stash")
+                .service::<StashKey>()
                 .unwrap()
                 .lock()
                 .unwrap()
@@ -548,7 +573,7 @@ mod guest_call_fixture {
 
         #[function(name = "mark")]
         fn mark(cx: &mut CallCx<'_>) -> JsResult<()> {
-            cx.service::<Arc<AtomicUsize>>("runs")
+            cx.service::<RunsKey>()
                 .unwrap()
                 .fetch_add(1, Ordering::Relaxed);
             Ok(())
@@ -611,13 +636,16 @@ mod guest_call_fixture {
 
     pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
         let runs = Arc::new(AtomicUsize::new(0));
+        let mut services = yield_vm::Services::default();
+        services.insert::<StashKey>(Stash::default()).unwrap();
+        services.insert::<RunsKey>(runs.clone()).unwrap();
         let bindings = host_bindings! {
             dts: "tests/dts/guest.d.ts",
             modules: [guest],
             classes: [],
             states: [],
             operations: [],
-            services: [("stash", 1, Stash::default()), ("runs", 1, runs.clone())],
+            services: services,
         }
         .expect("guest bindings");
         let build =
@@ -783,13 +811,17 @@ mod counter_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+        let mut services = yield_vm::Services::default();
+        services
+            .insert::<LabelServiceKey>(Arc::clone(labels))
+            .unwrap();
         host_bindings! {
             dts: "tests/dts/counter-test.d.ts",
             modules: [counter, test],
             classes: [],
             states: [CounterState],
             operations: [Wait],
-            services: [("labels", 1, Arc::clone(labels))],
+            services: services,
         }
         .expect("counter bindings")
     }
@@ -884,7 +916,7 @@ mod geom_fixture {
             classes: [Point],
             states: [],
             operations: [],
-            services: [],
+            services: ::yield_vm::Services::default(),
         }
         .expect("geometry bindings")
     }
@@ -936,7 +968,7 @@ mod loose_fixture {
             classes: [Loose],
             states: [],
             operations: [],
-            services: [],
+            services: ::yield_vm::Services::default(),
         }
         .expect("loose bindings")
     }
@@ -1111,13 +1143,17 @@ mod inherit_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+        let mut services = yield_vm::Services::default();
+        services
+            .insert::<LabelServiceKey>(Arc::clone(labels))
+            .unwrap();
         host_bindings! {
             dts: "tests/dts/inherit.d.ts",
             modules: [inherit],
             classes: [Base, Derived],
             states: [],
             operations: [InheritWait],
-            services: [("labels", 1, Arc::clone(labels))],
+            services: services,
         }
         .expect("derived bindings")
     }
@@ -1308,7 +1344,7 @@ mod subset_fixture {
             classes: [],
             states: [],
             operations: [],
-            services: [],
+            services: ::yield_vm::Services::default(),
         }
         .expect("subset bindings")
     }

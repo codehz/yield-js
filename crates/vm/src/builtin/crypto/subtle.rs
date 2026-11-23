@@ -14,12 +14,11 @@ use crate::heap::{
     Attributes, CryptoKey, CryptoKeyAlgorithm, CryptoKeyUsage, MAX_CRYPTO_KEY_BYTES, Object,
     PlainObject, TO_STRING_TAG_SYMBOL, ViewRange,
 };
-use crate::host::{CRYPTO_SUBTLE_SERVICE, Host, SubtleCryptoRequest, SubtleCryptoService};
+use crate::host::{Host, SubtleCryptoKey, SubtleCryptoRequest};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
-use std::sync::Arc;
 
 pub(super) const INSTANCE: &str = "subtleCrypto.instance";
 pub(super) const PROTOTYPE: &str = "subtleCrypto.prototype";
@@ -301,11 +300,7 @@ fn call(
     let result = if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(INSTANCE))
     {
         Err(Failure::Type("Incompatible SubtleCrypto receiver"))
-    } else if vm
-        .bindings
-        .service::<Arc<dyn SubtleCryptoService>>(CRYPTO_SUBTLE_SERVICE)
-        .is_none()
-    {
+    } else if vm.bindings.service::<SubtleCryptoKey>().is_none() {
         Err(Failure::Dom(
             "NotSupportedError",
             "Host SubtleCrypto service is not available",

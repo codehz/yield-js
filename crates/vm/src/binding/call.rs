@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::fmt;
 
 use crate::gc::ActiveRoots;
@@ -500,8 +499,8 @@ impl<'a> CallCx<'a> {
         crate::ops::same_value(&left.value, &right.value)
     }
 
-    pub fn service<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
-        self.bindings.service(id)
+    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
+        self.bindings.service::<K>()
     }
 
     fn state_module<S: crate::binding::HostModuleState>(&self) -> JsResult<usize> {

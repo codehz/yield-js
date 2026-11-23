@@ -117,7 +117,7 @@ impl Matcher {
 - 类标签、槽名字/顺序/种类、payload schema 版本与 codec 标识；
 - 成员名、种类（方法/访问器/数据）、参数与返回种类；
 - operation 类型、状态 schema 版本、恢复策略；
-- 声明引用的服务 ID 集合。
+- 参与指纹的服务契约，按 `id:version` 排序。
 
 指纹不含 Rust 类型名、函数地址、宏展开细节或调试名称，因此重命名内部符号不会使快照失效；删除槽、改变顺序、更换 codec 或改变恢复策略会使快照失效。变更策略沿用项目的精确版本约定：不自动迁移，报告具体不匹配项。
 
@@ -191,20 +191,22 @@ trait PayloadCodec<T> {
 
 规则：
 
-- **上下文提供能力，快照提供状态。** `EncodeCx` 可提供只读的 VM 元信息（例如当前时间、服务 ID）；`DecodeCx` 提供服务句柄，例如 `cx.service::<NodeFactory>()?`。解码绝不能依赖「旧宿主里的节点 42」。
+- **上下文提供能力，快照提供状态。** `EncodeCx` 可提供只读的 VM 元信息；`DecodeCx` 按键借用服务，例如 `cx.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
 - **版本独立。** 每种 payload 有自己的 schema 版本；同一 crate 内不同类的版本互不影响。未知版本拒绝恢复。
 - **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
 - 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
 
-平台服务不是快照的一部分，但它的**稳定 ID**进入声明指纹。缺少服务或服务版本不匹配时，恢复整体拒绝，而不是在首次调用时失败。 VM 专用的 `wintertc.timer` 例外：链接时校验版本 `1` 和类型 `Arc<dyn TimerService>`，不计入通用服务指纹；恢复按定时器记录检查是否需要该能力。
+服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。宿主先建立 `Services::default()`，用 `services.insert::<Key>(value)?` 注册，再将表作为 `host_bindings!` 的 `services:` 表达式传入；重复 ID 返回错误且不覆盖。链接后，`Bindings`、`CallCx` 和 `DecodeCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
-Fetch 适配器 `wintertc.fetch`（协议版本 `1`）注册为 `Arc<dyn FetchService>`，同样在链接时校验类型和版本，且不计入通用服务指纹：快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
+资源值不进入快照。默认只有契约的 ID 和版本进入绑定指纹，缺失或版本不匹配会拒绝恢复。五种可选内建适配器均不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；其余三种如下。
 
-Console 的 `wintertc.console` 是可选同步服务，链接时要求版本 `1` 和 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不参与绑定指纹，不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
+`FetchKey`（`wintertc.fetch`，协议版本 `1`）注册 `Arc<dyn FetchService>`。快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
 
-SubtleCrypto 的 `wintertc.crypto.subtle` 是独立的可选原语服务，链接时要求版本 `CRYPTO_SUBTLE_PROTOCOL_VERSION`（`1`）与 `Arc<dyn SubtleCryptoService>`，不计入通用绑定指纹。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行，只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
+`ConsoleKey`（`wintertc.console`，版本 `1`）注册 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
+
+`SubtleCryptoKey`（`wintertc.crypto.subtle`，协议版本 `1`）注册独立于同步熵的 `Arc<dyn SubtleCryptoService>`。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行，只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
 
 ### 5.5 模块状态
 

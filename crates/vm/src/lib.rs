@@ -88,8 +88,8 @@ pub use binding::__macro_support;
 pub use binding::{
     Bindings, ClassId, ConstKind, ConstValue, ExportId, GuestOutcome, HostClass, HostFault,
     HostModuleState, HostStep, Instance, JsError, JsResult, JsValue, MemberName, MethodId,
-    NativeTarget, Operation, OperationDriver, OperationToken, Recovery, Registration, SlotDecl,
-    SuspendRequest, This, WellKnownSymbol,
+    NativeTarget, Operation, OperationDriver, OperationToken, Recovery, Registration, ServiceKey,
+    Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
@@ -98,13 +98,13 @@ pub use bytecode::{
 pub use console::ConsoleEvent;
 pub use error::VmError;
 pub use fetch::{
-    CredentialsMode, FETCH_PROTOCOL_VERSION, FETCH_SERVICE, FetchEnvironment, FetchEvent,
-    FetchFailure, FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
+    CredentialsMode, FETCH_PROTOCOL_VERSION, FetchEnvironment, FetchEvent, FetchFailure, FetchKey,
+    FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
 };
 pub use heap::{Object, PromiseState};
 pub use host::{
-    CONSOLE_SERVICE, CRYPTO_SERVICE, CRYPTO_SUBTLE_PROTOCOL_VERSION, CRYPTO_SUBTLE_SERVICE,
-    Completion, ConsoleSink, CryptoService, Host, SubtleCryptoRequest, SubtleCryptoService,
+    CRYPTO_SUBTLE_PROTOCOL_VERSION, Completion, ConsoleKey, ConsoleSink, CryptoKey, CryptoService,
+    Host, SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService, TimerKey,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};

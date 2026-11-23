@@ -17,8 +17,8 @@ use crate::builtin::{
 };
 use crate::error::VmError;
 use crate::fetch::{
-    CredentialsMode, FETCH_SERVICE, FetchEvent, FetchFailure, FetchRegistration, FetchService,
-    HopRequest, Origin, ResponseHead, UploadBody,
+    CredentialsMode, FetchEvent, FetchFailure, FetchKey, FetchRegistration, HopRequest, Origin,
+    ResponseHead, UploadBody,
 };
 use crate::gc::ActiveRoots;
 use crate::heap::{AbortStep, ElementKind, Object, ReactionJob};
@@ -466,11 +466,7 @@ impl Vm {
         if let Err(message) = self.configure_hop(&data, &mut hop) {
             return reject(self, message);
         }
-        if self
-            .bindings
-            .service::<Arc<dyn FetchService>>(FETCH_SERVICE)
-            .is_none()
-        {
+        if self.bindings.service::<FetchKey>().is_none() {
             return reject(self, "Fetch service unavailable");
         }
         let upload = match &data.body {
@@ -575,20 +571,17 @@ impl Vm {
                 .push(AbortStep::Operation(id));
         }
         self.fetch_state.transactions.insert(id, tx);
-        let registration = self
-            .bindings
-            .service::<Arc<dyn FetchService>>(FETCH_SERVICE)
-            .and_then(|service| {
-                Arc::clone(service)
-                    .start(
-                        OperationToken {
-                            epoch: self.epoch,
-                            id,
-                        },
-                        outgoing,
-                    )
-                    .ok()
-            });
+        let registration = self.bindings.service::<FetchKey>().and_then(|service| {
+            Arc::clone(service)
+                .start(
+                    OperationToken {
+                        epoch: self.epoch,
+                        id,
+                    },
+                    outgoing,
+                )
+                .ok()
+        });
         if let Some(registration) = registration {
             self.fetch_live.insert(id, registration);
             let tx = &self.fetch_state.transactions[&id];

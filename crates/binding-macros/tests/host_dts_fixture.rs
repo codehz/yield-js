@@ -17,9 +17,8 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("yield-host-dts-fixture-{}", std::process::id()));
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("yield-{name}-fixture-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("src")).expect("fixture source dir");
         let vm = workspace_root().join("crates/vm");
@@ -75,7 +74,7 @@ pub fn bindings() -> Result<yield_vm::Bindings, String> {{
         classes: [],
         states: [],
         operations: [],
-        services: [],
+        services: ::yield_vm::Services::default(),
     }}
 }}
 "#
@@ -120,7 +119,7 @@ impl Drop for Fixture {
 
 #[test]
 fn declared_exports_are_checked_while_expanding_the_registry() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new("host-dts");
     fixture.write(
         "host.d.ts",
         r#"declare module "a" {
@@ -163,4 +162,24 @@ declare module "b" {
     let (ok, output) = fixture.check();
     assert!(!ok, "a newly declared export must fail:\n{output}");
     assert!(output.contains("missing host export: b:added"), "{output}");
+}
+
+#[test]
+fn timer_key_rejects_the_wrong_value_type() {
+    let fixture = Fixture::new("timer-key");
+    fixture.write(
+        "src/lib.rs",
+        r#"use yield_vm::{Services, TimerKey};
+
+pub fn services() -> Result<(), String> {
+    Services::default().insert::<TimerKey>(17u64)
+}
+"#,
+    );
+    let (ok, output) = fixture.check();
+    assert!(!ok, "invalid TimerKey value must fail:\n{output}");
+    assert!(
+        output.contains("E0308") && output.contains("TimerService") && output.contains("u64"),
+        "{output}"
+    );
 }

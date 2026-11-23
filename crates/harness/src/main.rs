@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use yield_compiler::{CompileOptions, MemoryResolver, compile};
-use yield_harness::{LabelRegistration, LabelService};
+use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, JsResult, JsValue, OperationDriver, OperationToken,
 };
@@ -26,6 +26,14 @@ export async function run(input) {
 
 #[derive(Default)]
 struct DemoCounters(Mutex<BTreeMap<String, usize>>);
+
+struct DemoCountersKey;
+
+impl yield_vm::ServiceKey for DemoCountersKey {
+    type Value = Arc<DemoCounters>;
+    const ID: &'static str = "demo-counters";
+    const VERSION: u32 = 1;
+}
 
 impl DemoCounters {
     fn hit(&self, name: &str) {
@@ -87,7 +95,7 @@ impl Wait {
         restoring: bool,
     ) -> Result<LabelRegistration, HostFault> {
         let labels = bindings
-            .service::<Arc<LabelService>>("labels")
+            .service::<LabelServiceKey>()
             .ok_or_else(|| HostFault::new("missing labels service"))?;
         labels.register(self.label.clone(), token, restoring)
     }
@@ -155,13 +163,16 @@ fn demo_bindings(
     counters: Arc<DemoCounters>,
     labels: Arc<LabelService>,
 ) -> Result<Bindings, String> {
+    let mut services = yield_vm::Services::default();
+    services.insert::<DemoCountersKey>(counters)?;
+    services.insert::<LabelServiceKey>(labels)?;
     host_bindings! {
         dts: "demo.d.ts",
         modules: [demo],
         classes: [],
         states: [],
         operations: [Wait],
-        services: [("demo-counters", 1, counters), ("labels", 1, labels)],
+        services: services,
     }
 }
 
@@ -172,7 +183,7 @@ mod demo {
     #[function(name = "inspect")]
     fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
         println!("  host call: inspect({:?})", cx.args());
-        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+        if let Some(counters) = cx.service::<DemoCountersKey>() {
             counters.hit("inspect");
         }
         Ok(())
@@ -181,7 +192,7 @@ mod demo {
     #[function(name = "seed")]
     fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
         println!("  host call: seed()");
-        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+        if let Some(counters) = cx.service::<DemoCountersKey>() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -194,7 +205,7 @@ mod demo {
             .to_utf8()
             .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
         println!("  host call: wait({label:?})");
-        if let Some(counters) = cx.service::<Arc<DemoCounters>>("demo-counters") {
+        if let Some(counters) = cx.service::<DemoCountersKey>() {
             counters.hit("wait");
         }
         cx.promise(Wait { label })

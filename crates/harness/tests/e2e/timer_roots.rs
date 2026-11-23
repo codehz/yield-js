@@ -219,10 +219,14 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     }
 
     let clock = Arc::new(FakeClock::default());
+    let mut services = yield_vm::Services::default();
+    services
+        .insert::<yield_harness::timer::FakeClockKey>(Arc::clone(&clock))
+        .unwrap();
     let bindings = yield_vm::host_bindings! {
         dts: "tests/dts/repeat_timer.d.ts",
         modules: [repeat_timer], classes: [], states: [], operations: [Timer],
-        services: [("clock", 1, Arc::clone(&clock))],
+        services: services,
     }
     .unwrap();
     let mut host = RepeatHost(Arc::new(bindings), Arc::clone(&clock));

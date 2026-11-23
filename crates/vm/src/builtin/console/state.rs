@@ -4,11 +4,10 @@ use std::time::Duration;
 
 use crate::console::{ConsoleEvent, ConsoleGroup, ConsoleLevel, ConsolePayload};
 use crate::gc::ActiveRoots;
-use crate::host::{CONSOLE_SERVICE, ConsoleSink, Host};
+use crate::host::{ConsoleKey, Host};
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
 use crate::{JsString, Value, Vm, VmError, ops};
-use std::sync::Arc;
 
 use super::{Method, logging};
 
@@ -169,7 +168,7 @@ fn print_message(
 }
 
 fn print(vm: &mut Vm, level: ConsoleLevel, payload: ConsolePayload) -> Result<(), Value> {
-    let Some(sink) = vm.bindings.service::<Arc<dyn ConsoleSink>>(CONSOLE_SERVICE) else {
+    let Some(sink) = vm.bindings.service::<ConsoleKey>() else {
         return Err(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Console service is not available".into(),

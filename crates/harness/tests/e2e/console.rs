@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use yield_compiler::CompileOptions;
 use yield_harness::{TestHost, build};
@@ -7,8 +7,7 @@ use yield_vm::console::{
     ConsoleProperty, ConsoleValue,
 };
 use yield_vm::{
-    __macro_support as link, CONSOLE_SERVICE, ConsoleEvent, ConsoleSink, RestoreOptions, Snapshot,
-    SnapshotValidation, Value, Vm, VmError, VmOptions,
+    ConsoleEvent, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm, VmError, VmOptions,
 };
 
 fn args(event: &ConsoleEvent) -> &[ConsoleArg] {
@@ -263,22 +262,6 @@ fn console_missing_sink_is_lazy_and_preserves_earlier_effects() {
     assert_eq!(message(&events[0]), "x: 2");
     assert_eq!(events[1].level, ConsoleLevel::Warn);
     assert_eq!(message(&events[1]), "No timer for label: t");
-}
-
-#[test]
-fn console_service_checks_type_and_version_during_link() {
-    struct Sink;
-    impl ConsoleSink for Sink {
-        fn write(&self, _: &ConsoleEvent) {}
-    }
-    let sink: Arc<dyn ConsoleSink> = Arc::new(Sink);
-    for service in [
-        link::service(CONSOLE_SERVICE, 1, Arc::new(Sink)),
-        link::service(CONSOLE_SERVICE, 2, sink),
-    ] {
-        assert!(matches!(link::link([], [], [], [], [service]), Err(message)
-            if message.contains("expected ConsoleSink version 1")));
-    }
 }
 
 #[test]

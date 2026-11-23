@@ -102,7 +102,7 @@ impl EventHost {
             host_bindings! {
                 dts: "tests/dts/event-fixture.d.ts",
                 modules: [fixture], classes: [EventNode],
-                states: [], operations: [], services: [],
+                states: [], operations: [], services: ::yield_vm::Services::default(),
             }
             .unwrap(),
         ))

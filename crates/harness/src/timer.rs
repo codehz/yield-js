@@ -13,6 +13,14 @@ const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
 #[derive(Debug, Default)]
 pub struct FakeClock(Mutex<ClockState>);
 
+pub struct FakeClockKey;
+
+impl yield_vm::ServiceKey for FakeClockKey {
+    type Value = Arc<FakeClock>;
+    const ID: &'static str = "clock";
+    const VERSION: u32 = 1;
+}
+
 #[derive(Debug, Default)]
 struct ClockState {
     now_ms: u64,
@@ -228,7 +236,7 @@ impl Timer {
 
     fn clock(bindings: &Bindings) -> Result<&Arc<FakeClock>, HostFault> {
         bindings
-            .service::<Arc<FakeClock>>("clock")
+            .service::<FakeClockKey>()
             .ok_or_else(|| HostFault::new("missing clock service"))
     }
 }

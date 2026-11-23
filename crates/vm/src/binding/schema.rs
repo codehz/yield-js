@@ -591,12 +591,11 @@ type ArmOperation =
 /// are never captured by the snapshot.
 pub struct DecodeCx<'a> {
     bindings: &'a Bindings,
-    services: &'a Services,
 }
 
 impl<'a> DecodeCx<'a> {
-    pub fn service<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
-        self.services.get(id)
+    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
+        self.bindings.service::<K>()
     }
 
     pub fn bindings(&self) -> &'a Bindings {
@@ -604,14 +603,49 @@ impl<'a> DecodeCx<'a> {
     }
 }
 
-#[derive(Default)]
-pub struct Services {
-    values: BTreeMap<String, Arc<dyn Any + Send + Sync>>,
+/// The stable contract for a host service role, independent of its implementation.
+pub trait ServiceKey: 'static {
+    type Value: Any + Send + Sync;
+    const ID: &'static str;
+    const VERSION: u32;
+    const IN_FINGERPRINT: bool = true;
 }
 
+/// Host resources assembled before linking and borrowed after linking.
+#[derive(Default)]
+pub struct Services {
+    values: BTreeMap<&'static str, ServiceEntry>,
+}
+
+struct ServiceEntry {
+    version: u32,
+    in_fingerprint: bool,
+    value: Box<dyn Any + Send + Sync>,
+}
+
+// Preserve the role's identity even when two keys use the same value type.
+struct Stored<K: ServiceKey>(K::Value);
+
 impl Services {
-    pub fn get<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
-        self.values.get(id)?.downcast_ref()
+    pub fn insert<K: ServiceKey>(&mut self, value: K::Value) -> Result<(), String> {
+        use std::collections::btree_map::Entry;
+
+        let id = K::ID;
+        match self.values.entry(id) {
+            Entry::Vacant(entry) => {
+                entry.insert(ServiceEntry {
+                    version: K::VERSION,
+                    in_fingerprint: K::IN_FINGERPRINT,
+                    value: Box::new(Stored::<K>(value)),
+                });
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(format!("duplicate host service {id:?}")),
+        }
+    }
+
+    pub fn get<K: ServiceKey>(&self) -> Option<&K::Value> {
+        Some(&self.values.get(K::ID)?.value.downcast_ref::<Stored<K>>()?.0)
     }
 }
 
@@ -675,15 +709,11 @@ pub mod __macro_support {
     use super::{
         Bindings, ClassDecl, HostClass, HostModuleState, OperationDecl, OperationDriver, StateDecl,
     };
-    use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
-    use std::any::Any;
-    use std::collections::btree_map::Entry;
-    use std::sync::Arc;
+    use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall, Services};
 
     pub struct Class(ClassDecl);
     pub struct State(StateDecl);
     pub struct OperationType(OperationDecl);
-    pub struct Service(&'static str, u32, Arc<dyn Any + Send + Sync>);
 
     pub fn class<T: HostClass>() -> Class {
         Class(ClassDecl::of::<T>())
@@ -697,18 +727,14 @@ pub mod __macro_support {
         OperationType(OperationDecl::of::<T>())
     }
 
-    pub fn service(id: &'static str, version: u32, value: impl Any + Send + Sync) -> Service {
-        Service(id, version, Arc::new(value))
-    }
-
     pub fn link(
         modules: impl IntoIterator<Item = ModuleDecl>,
         classes: impl IntoIterator<Item = Class>,
         states: impl IntoIterator<Item = State>,
         operations: impl IntoIterator<Item = OperationType>,
-        services: impl IntoIterator<Item = Service>,
+        services: Services,
     ) -> Result<Bindings, String> {
-        let mut table = UnlinkedBindings {
+        UnlinkedBindings {
             modules: modules.into_iter().collect(),
             classes: classes.into_iter().map(|class| class.0).collect(),
             states: states.into_iter().map(|state| state.0).collect(),
@@ -716,58 +742,9 @@ pub mod __macro_support {
                 .into_iter()
                 .map(|operation| operation.0)
                 .collect(),
-            services: Default::default(),
-            service_ids: Default::default(),
-        };
-        for Service(id, version, value) in services {
-            let is_timer = id == crate::host::TIMER_SERVICE;
-            let is_fetch = id == crate::fetch::FETCH_SERVICE;
-            let is_console = id == crate::host::CONSOLE_SERVICE;
-            let is_crypto = id == crate::host::CRYPTO_SERVICE;
-            let is_subtle = id == crate::host::CRYPTO_SUBTLE_SERVICE;
-            if is_timer && (version != 1 || !value.is::<Arc<dyn crate::host::TimerService>>()) {
-                return Err(format!(
-                    "incompatible service {id:?}: expected TimerService version 1"
-                ));
-            }
-            if is_fetch
-                && (version != crate::fetch::FETCH_PROTOCOL_VERSION
-                    || !value.is::<Arc<dyn crate::fetch::FetchService>>())
-            {
-                return Err(format!(
-                    "incompatible service {id:?}: expected FetchService version {}",
-                    crate::fetch::FETCH_PROTOCOL_VERSION
-                ));
-            }
-            if is_console && (version != 1 || !value.is::<Arc<dyn crate::host::ConsoleSink>>()) {
-                return Err(format!(
-                    "incompatible service {id:?}: expected ConsoleSink version 1"
-                ));
-            }
-            if is_subtle
-                && (version != crate::host::CRYPTO_SUBTLE_PROTOCOL_VERSION
-                    || !value.is::<Arc<dyn crate::host::SubtleCryptoService>>())
-            {
-                return Err(format!(
-                    "incompatible service {id:?}: expected SubtleCryptoService version {}",
-                    crate::host::CRYPTO_SUBTLE_PROTOCOL_VERSION
-                ));
-            }
-            match table.services.values.entry(id.to_owned()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(value);
-                }
-                Entry::Occupied(_) => return Err(format!("duplicate host service {id:?}")),
-            }
-            // Timer and fetch compatibility is checked by the VM against the
-            // saved work. A queued one-shot task needs no platform service to
-            // run, and restored fetch work is interrupted instead of resumed.
-            // Console and Crypto have no work to rerun on restore.
-            if !is_timer && !is_fetch && !is_console && !is_crypto && !is_subtle {
-                table.service_ids.insert(format!("{id}:{version}"));
-            }
+            services,
         }
-        table.build()
+        .build()
     }
 
     pub fn module(name: &str, exports: Vec<ExportDecl>) -> ModuleDecl {
@@ -1180,15 +1157,12 @@ impl Bindings {
             .map(|state| state.module.as_str())
     }
 
-    pub fn service<T: Any + Send + Sync>(&self, id: &str) -> Option<&T> {
-        self.inner.services.get(id)
+    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
+        self.inner.services.get::<K>()
     }
 
     pub(crate) fn decode_cx(&self) -> DecodeCx<'_> {
-        DecodeCx {
-            bindings: self,
-            services: &self.inner.services,
-        }
+        DecodeCx { bindings: self }
     }
 
     pub(crate) fn class_decode(
@@ -1221,7 +1195,6 @@ struct UnlinkedBindings {
     operations: Vec<OperationDecl>,
     states: Vec<StateDecl>,
     services: Services,
-    service_ids: BTreeSet<String>,
 }
 
 impl ClassDecl {
@@ -1366,12 +1339,19 @@ impl UnlinkedBindings {
                 ));
             }
         }
+        let service_ids = self
+            .services
+            .values
+            .iter()
+            .filter(|(_, entry)| entry.in_fingerprint)
+            .map(|(id, entry)| format!("{id}:{}", entry.version))
+            .collect();
         let fingerprint = fingerprint(
             &self.modules,
             &self.classes,
             &self.operations,
             &states,
-            &self.service_ids,
+            &service_ids,
         );
         Ok(Bindings {
             inner: Arc::new(BindingsInner {

@@ -6,9 +6,7 @@ use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{
-    Error, Expr, Ident, ItemStruct, LitInt, LitStr, Path, Result, Token, bracketed, parenthesized,
-};
+use syn::{Error, Expr, Ident, ItemStruct, LitInt, LitStr, Path, Result, Token, bracketed};
 
 use super::typed::{extract_slots, slot_decls};
 
@@ -200,38 +198,13 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .collect())
 }
 
-struct Service {
-    id: LitStr,
-    version: LitInt,
-    value: Expr,
-}
-
-impl Parse for Service {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let contents;
-        parenthesized!(contents in input);
-        let id = contents.parse()?;
-        contents.parse::<Token![,]>()?;
-        let version = contents.parse()?;
-        contents.parse::<Token![,]>()?;
-        let value = contents.parse()?;
-        if contents.peek(Token![,]) {
-            contents.parse::<Token![,]>()?;
-        }
-        if !contents.is_empty() {
-            return Err(contents.error("expected `(id, version, value)`"));
-        }
-        Ok(Self { id, version, value })
-    }
-}
-
 struct Registry {
     dts: LitStr,
     modules: Vec<Path>,
     classes: Vec<syn::TypePath>,
     states: Vec<syn::TypePath>,
     operations: Vec<syn::TypePath>,
-    services: Vec<Service>,
+    services: Expr,
 }
 
 impl Parse for Registry {
@@ -248,7 +221,10 @@ impl Parse for Registry {
             "classes" => set(&mut classes, &key, || list(input)),
             "states" => set(&mut states, &key, || list(input)),
             "operations" => set(&mut operations, &key, || list(input)),
-            "services" => set(&mut services, &key, || list(input)),
+            "services" => set(&mut services, &key, || {
+                input.parse::<Token![:]>()?;
+                input.parse()
+            }),
             _ => Err(Error::new(key.span(), "unknown host_bindings section")),
         })?;
         Ok(Self {
@@ -274,9 +250,6 @@ pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
     let (path, declarations) = read_declarations(&dts)?;
     let include = LitStr::new(&path.to_string_lossy(), dts.span());
     let checks = declaration_checks(&declarations, &modules);
-    let services = services.into_iter().map(|Service { id, version, value }| {
-        quote!(::yield_vm::__macro_support::service(#id, #version, #value))
-    });
     Ok(quote! {
         {
             const _: &str = include_str!(#include);
@@ -286,7 +259,7 @@ pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
                 [#(::yield_vm::__macro_support::class::<#classes>()),*],
                 [#(::yield_vm::__macro_support::state::<#states>()),*],
                 [#(::yield_vm::__macro_support::operation::<#operations>()),*],
-                [#(#services),*],
+                #services,
             )
         }
     })
@@ -472,7 +445,7 @@ mod tests {
             classes: [],
             states: [],
             operations: [],
-            services: []
+            services: ::yield_vm::Services::default()
         ))
         .unwrap_err()
         .to_string();
@@ -488,7 +461,7 @@ mod tests {
             classes: [],
             states: [],
             operations: [],
-            services: []
+            services: ::yield_vm::Services::default()
         ))
         .unwrap_err()
         .to_string();
@@ -497,18 +470,10 @@ mod tests {
     }
 
     #[test]
-    fn host_bindings_checks_service_tuple_syntax() {
+    fn host_bindings_rejects_duplicate_services_sections() {
         diagnostic(
-            host_bindings(quote!(services: [(ID, 1, value)])),
-            "expected string literal",
-        );
-        diagnostic(
-            host_bindings(quote!(services: [("id", VERSION, value)])),
-            "expected integer literal",
-        );
-        diagnostic(
-            host_bindings(quote!(services: [("id", 1, value, extra)])),
-            "expected `(id, version, value)`",
+            host_bindings(quote!(services: first, services: second)),
+            "duplicate `services`",
         );
     }
 
@@ -521,14 +486,14 @@ mod tests {
                 classes: [],
                 states: [],
                 operations: [],
-                services: [],
+                services: ::yield_vm::Services::default(),
             ))
             .is_ok()
         );
         assert!(
             host_bindings(quote! {
                 dts: "tests/dts/empty.d.ts",
-                services: [("id", 1, make_service(1, 2),),],
+                services: { make_services(1, 2) },
                 operations: [work::Wait,],
                 states: [data::Counter],
                 classes: [types::Point],

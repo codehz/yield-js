@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::super::support::{compile_main, declared};
 use super::StrategyHost;
-use yield_harness::{LabelService, Wait};
+use yield_harness::{LabelService, LabelServiceKey, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
     Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
@@ -47,10 +47,12 @@ mod original {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
+        let mut services = yield_vm::Services::default();
+        services.insert::<LabelServiceKey>(Arc::clone(labels))?;
         host_bindings! {
             dts: "tests/dts/auxiliary-contract.d.ts",
             modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
-            services: [("labels", 1, Arc::clone(labels))],
+            services: services,
         }
     }
 }
@@ -90,10 +92,12 @@ macro_rules! independent_contract {
             }
 
             pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
+                let mut services = yield_vm::Services::default();
+                services.insert::<LabelServiceKey>(Arc::clone(labels))?;
                 host_bindings! {
                     dts: "tests/dts/auxiliary-contract.d.ts",
                     modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
-                    services: [("labels", 1, Arc::clone(labels))],
+                    services: services,
                 }
             }
         }
