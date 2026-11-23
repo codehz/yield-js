@@ -1433,9 +1433,29 @@ impl<'de> Deserialize<'de> for WeakKey {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub enum EventPayload {
+    #[default]
+    Event,
+    CustomEvent {
+        detail: Value,
+    },
+    ErrorEvent {
+        message: JsString,
+        filename: JsString,
+        lineno: u32,
+        colno: u32,
+        error: Value,
+    },
+    PromiseRejectionEvent {
+        promise: ObjectId,
+        reason: Value,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventState {
     pub ty: JsString,
-    pub detail: Option<Value>,
+    pub payload: EventPayload,
     pub bubbles: bool,
     pub cancelable: bool,
     pub composed: bool,
@@ -1460,6 +1480,7 @@ pub struct EventListener {
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
+    pub global_handler: bool,
     // The registration retains its signal, but the signal's step is weak.
     pub signal: Option<ObjectId>,
 }
@@ -1468,6 +1489,7 @@ pub struct EventListener {
 pub struct EventTargetState {
     pub listeners: Vec<EventListener>,
     pub next_id: u64,
+    pub global_handlers: [Option<u64>; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

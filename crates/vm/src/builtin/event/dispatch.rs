@@ -1,7 +1,7 @@
 use super::event_receiver;
 use crate::VmError;
 use crate::gc::ActiveRoots;
-use crate::heap::{AbortStep, EventListener, EventState, EventTargetState, Object};
+use crate::heap::{AbortStep, EventListener, EventPayload, EventState, EventTargetState, Object};
 use crate::host::Host;
 use crate::runtime::{Arguments, HostSlot, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -109,6 +109,7 @@ fn change_listener(
             .expect("checked EventTarget receiver");
         let existing = state.listeners.iter().position(|listener| {
             Some(listener.id) != onabort
+                && !listener.global_handler
                 && listener.ty == ty
                 && listener.callback == callback
                 && listener.capture == capture
@@ -126,6 +127,7 @@ fn change_listener(
                     capture,
                     once,
                     passive,
+                    global_handler: false,
                     signal,
                 });
                 if let Some(signal) = signal {
@@ -397,30 +399,52 @@ impl Vm {
             let listener = &listeners[index];
             let callback = Value::object(listener.callback);
             let passive = listener.passive;
+            let global_handler = listener.global_handler;
             if listener.once {
                 self.remove_listener_id(current, id)?;
             }
-            let is_handler = self
-                .abort_signal_state(current)?
-                .and_then(|signal| signal.onabort)
-                == Some(id);
+            let is_handler = global_handler
+                || self
+                    .abort_signal_state(current)?
+                    .and_then(|signal| signal.onabort)
+                    == Some(id);
             if is_handler && !self.is_callable(&callback) {
                 continue;
             }
             let roots = &roots.with(&callback);
+            let error_args = match &self.dispatch_state(event)?.payload {
+                EventPayload::ErrorEvent {
+                    message,
+                    filename,
+                    lineno,
+                    colno,
+                    error,
+                } if global_handler && pass.ty == "error" => Some([
+                    Value::string(message.clone()),
+                    Value::string(filename.clone()),
+                    Value::number(f64::from(*lineno)),
+                    Value::number(f64::from(*colno)),
+                    error.clone(),
+                ]),
+                _ => None,
+            };
+            let call_args = error_args
+                .as_ref()
+                .map_or(args.as_slice(), |args| args.as_slice());
             self.dispatch_state(event)?.in_passive = passive;
-            let result = self.invoke_event_listener(host, roots, &callback, &receiver, &args);
+            let result = self.invoke_event_listener(host, roots, &callback, &receiver, call_args);
             self.dispatch_state(event)?.in_passive = false;
             match result {
                 Ok(Invocation::Value(value))
-                    if is_handler && matches!(value.view(), ValueRef::Bool(false)) =>
+                    if is_handler
+                        && matches!(value.view(), ValueRef::Bool(v) if v == error_args.is_some()) =>
                 {
                     let state = self.dispatch_state(event)?;
                     state.canceled |= state.cancelable;
                 }
                 Ok(Invocation::Value(_)) => {}
-                Ok(Invocation::Thrown(error)) | Err(VmError::Thrown(error)) => {
-                    host.report_error(self.host_value(error));
+                Ok(Invocation::Thrown(error)) => {
+                    self.report_exception(host, roots, error)?;
                 }
                 Err(error) => return Err(error),
             }

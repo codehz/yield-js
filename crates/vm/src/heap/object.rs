@@ -409,8 +409,14 @@ impl Object {
                 proxy: Some(proxy), ..
             } => out.push(OwnedEdge::Object(*proxy)),
             Self::Event { event, .. } => {
-                if let Some(detail) = &event.detail {
-                    push_value(out, detail);
+                match &event.payload {
+                    super::EventPayload::Event => {}
+                    super::EventPayload::CustomEvent { detail } => push_value(out, detail),
+                    super::EventPayload::ErrorEvent { error, .. } => push_value(out, error),
+                    super::EventPayload::PromiseRejectionEvent { promise, reason } => {
+                        out.push(OwnedEdge::Object(*promise));
+                        push_value(out, reason);
+                    }
                 }
                 if let Some(target) = event.target {
                     out.push(OwnedEdge::Object(target));

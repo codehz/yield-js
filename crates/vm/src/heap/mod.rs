@@ -32,8 +32,8 @@ pub use types::{
     AbortSignalState, AbortStep, ArrayBufferObject, ArrayIterationKind, ArrayObject,
     AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive, CollectionIteration,
     CollectionKind, CombineKind, CombineState, DataViewObject, DisposableResource, DisposeHint,
-    DisposeState, ElementKind, EnvironmentObject, EventListener, EventState, EventTargetState,
-    FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object, PlainObject,
-    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, RejectionStatus,
-    Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
+    DisposeState, ElementKind, EnvironmentObject, EventListener, EventPayload, EventState,
+    EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object,
+    PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
+    RejectionStatus, Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
 };

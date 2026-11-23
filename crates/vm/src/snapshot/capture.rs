@@ -66,7 +66,11 @@ impl Vm {
                 "snapshot requires a drained microtask queue".to_owned(),
             ));
         }
-        if !self.ready_timeouts.is_empty() {
+        if self
+            .ordinary_tasks
+            .iter()
+            .any(|task| matches!(task, OrdinaryTask::AbortTimeout(_)))
+        {
             return Err(VmError::InvalidState(
                 "snapshot requires a drained timeout queue".to_owned(),
             ));
@@ -97,11 +101,8 @@ impl Vm {
         }
         snapshot.templates = self.templates.clone();
         snapshot.imports = self.imports.iter().map(|import| import.namespace).collect();
-        snapshot.pending_rejection_notifications = self
-            .pending_rejection_notifications
-            .iter()
-            .copied()
-            .collect();
+        snapshot.pending_rejection_notifications = self.pending_rejection_notifications.clone();
+        snapshot.ordinary_tasks = self.ordinary_tasks.iter().cloned().collect();
         for (class, tag) in self.bindings.classes() {
             snapshot
                 .class_prototypes
@@ -424,8 +425,21 @@ impl Vm {
             heap.insert_restore(id, object)?;
         }
         checkpoint(|profile| &mut profile.heap_insert);
+        if snapshot
+            .ordinary_tasks
+            .iter()
+            .any(|task| matches!(task, OrdinaryTask::AbortTimeout(_)))
+        {
+            return Err(VmError::InvalidSnapshot(
+                "snapshot contains a ready timeout task".into(),
+            ));
+        }
         if AUDIT {
-            validate_rejection_notifications(&heap, &snapshot.pending_rejection_notifications)?;
+            validate_rejection_notifications(
+                &heap,
+                &snapshot.pending_rejection_notifications,
+                &snapshot.ordinary_tasks,
+            )?;
         }
         heap.combines = snapshot.combines.clone();
         heap.generators = load_generators(&build, &heap, snapshot.generators.clone())?;
@@ -501,12 +515,13 @@ impl Vm {
         );
         vm.clock = crate::runtime::VmClock::new(host.monotonic_clock(), snapshot.elapsed_ms);
         // Recovery can append new notifications; the captured ones must stay first.
-        vm.pending_rejection_notifications = snapshot.pending_rejection_notifications.into();
+        vm.pending_rejection_notifications = snapshot.pending_rejection_notifications;
+        vm.ordinary_tasks = snapshot.ordinary_tasks.into();
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
         checkpoint(|profile| &mut profile.vm_assembly);
         if AUDIT {
             validate_native_import_objects(&vm.heap, &vm.imports)?;
-            check_heap_edges(&vm.build, &vm.heap)?;
+            check_heap_edges(&vm.build, &vm.heap, vm.builtins.get("globalThis"))?;
             validate_jobs(&vm.heap)?;
             validate_combines(&vm.heap)?;
             checkpoint(|profile| &mut profile.graph_validation);

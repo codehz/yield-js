@@ -23,6 +23,7 @@ pub(crate) enum ReadOnlyName<'name> {
 pub(crate) enum ValueName<'name> {
     Binding(BindingId),
     ReadOnly(ReadOnlyName<'name>),
+    DynamicGlobal(&'name str),
     Undefined,
     /// Index into [`BUILTINS`]. Locals shadow this.
     Builtin(usize),
@@ -32,6 +33,7 @@ pub(crate) enum ValueName<'name> {
 pub(crate) enum Callee<'name> {
     Binding(BindingId),
     ReadOnly(ReadOnlyName<'name>),
+    DynamicGlobal(&'name str),
     Builtin(usize),
     Unknown,
 }
@@ -58,6 +60,8 @@ impl Tables<'_> {
             ValueName::Binding(binding)
         } else if let Some(read_only) = self.read_only(name) {
             ValueName::ReadOnly(read_only)
+        } else if is_dynamic_global(name) {
+            ValueName::DynamicGlobal(name)
         } else if name == "undefined" {
             ValueName::Undefined
         } else if let Some(index) = builtin_index(name) {
@@ -71,6 +75,7 @@ impl Tables<'_> {
         match self.value(env, name) {
             ValueName::Binding(binding) => Callee::Binding(binding),
             ValueName::ReadOnly(read_only) => Callee::ReadOnly(read_only),
+            ValueName::DynamicGlobal(name) => Callee::DynamicGlobal(name),
             ValueName::Builtin(index) => Callee::Builtin(index),
             ValueName::Undefined | ValueName::Unknown => Callee::Unknown,
         }
@@ -85,17 +90,18 @@ impl Tables<'_> {
     /// must not fold to `"function"`, so `typeof` of a shadowed import or
     /// top-level function reports the runtime value of the inner binding.
     pub(crate) fn typeof_fold(&self, env: &Env, name: &str) -> Option<&'static str> {
-        if env.lookup(name).is_some()
-            || self.read_only(name).is_some()
-            || name == "undefined"
-            || builtin_index(name).is_some()
-        {
-            return None;
-        }
-        Some("undefined")
+        matches!(self.value(env, name), ValueName::Unknown).then_some("undefined")
     }
 }
 
 pub(crate) fn builtin_index(name: &str) -> Option<usize> {
     BUILTINS.iter().position(|builtin| *builtin == name)
+}
+
+/// Known names whose values come from mutable global object properties.
+pub(crate) fn is_dynamic_global(name: &str) -> bool {
+    matches!(
+        name,
+        "onerror" | "onunhandledrejection" | "onrejectionhandled"
+    )
 }

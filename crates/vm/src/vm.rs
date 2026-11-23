@@ -9,6 +9,7 @@ use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
 use crate::error::VmError;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
+use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
 use crate::host::{Completion, Host, TIMER_SERVICE, TimerService};
@@ -17,7 +18,8 @@ use crate::runtime::{
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::{
-    DeliveryTarget, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION, TIMEOUT_OPERATION_SCHEMA,
+    DeliveryTarget, OrdinaryTask, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION,
+    TIMEOUT_OPERATION_SCHEMA,
 };
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -330,14 +332,13 @@ pub struct Vm {
     /// Operations loaded by restore whose `Resume` / `Reissue` work has not
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
-    /// Fired timeout tasks whose abort dispatch still needs a host turn.
-    pub(crate) ready_timeouts: VecDeque<ObjectId>,
+    pub(crate) ordinary_tasks: VecDeque<OrdinaryTask>,
     pub(crate) microtasks: VecDeque<Microtask>,
     /// Destinations of stack `use` calls currently running a getter. A move
     /// transfers the list; disposal detaches it. These calls never suspend.
     pub(crate) stack_registrations: Vec<Option<ObjectId>>,
-    /// FIFO of rejected promises with a pending host notification.
-    pub(crate) pending_rejection_notifications: VecDeque<ObjectId>,
+    /// Ordered rejection candidates for the next successful checkpoint.
+    pub(crate) pending_rejection_notifications: Vec<ObjectId>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) imports: Vec<ImportModule>,
     /// Class tag id to the VM-owned prototype object.
@@ -354,6 +355,8 @@ pub struct Vm {
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
     /// Synchronous dispatch stack; the shared paths are also active GC roots.
     pub(crate) active_event_paths: Vec<(ObjectId, std::rc::Rc<Vec<ObjectId>>)>,
+    /// Prevent recursive error event dispatch, but not nested default reporting.
+    pub(crate) reporting_exception: bool,
     pub(crate) builtins: BuiltinRoots,
     /// Frozen tagged-template objects, indexed by `Instr::GetTemplate`.
     pub(crate) templates: Vec<ObjectId>,
@@ -733,7 +736,7 @@ impl Vm {
                     )
                 });
         if let Some(Invocation::Thrown(error)) = self.finish_host_task(id, result)? {
-            host.report_error(self.host_value(error));
+            self.report_exception(host, roots, error)?;
         }
         Ok(())
     }
@@ -830,17 +833,27 @@ impl Vm {
             .ok_or_else(|| VmError::InvalidState(format!("module {module} has no namespace")))
     }
 
-    /// Runs queued VM microtasks and any ready timeout tasks. Host timer/event
+    /// Runs queued VM microtasks and ordinary tasks. External timer/event
     /// delivery belongs to the host; it should call this after completing an operation.
     pub fn run_until_idle(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
         loop {
             self.run_microtask_checkpoint(host)?;
-            let Some(signal) = self.ready_timeouts.pop_front() else {
+            let Some(task) = self.ordinary_tasks.pop_front() else {
                 return Ok(());
             };
-            let reason =
-                self.alloc_dom_exception("TimeoutError".into(), "The operation timed out".into());
-            self.abort_signal(host, &ActiveRoots::EMPTY, signal, reason)?;
+            match task {
+                OrdinaryTask::AbortTimeout(signal) => {
+                    let reason = self.alloc_dom_exception(
+                        "TimeoutError".into(),
+                        "The operation timed out".into(),
+                    );
+                    self.abort_signal(host, &ActiveRoots::EMPTY, signal, reason)?;
+                }
+                OrdinaryTask::UnhandledBatch(batch) => self.run_unhandled_batch(host, batch)?,
+                OrdinaryTask::RejectionHandled(id) => {
+                    self.run_rejection_notification(host, &ActiveRoots::EMPTY, id, true)?
+                }
+            }
         }
     }
 
@@ -902,33 +915,86 @@ impl Vm {
                 } => self.run_queue_call(host, roots, function, args)?,
             }
         }
-        self.deliver_rejection_notifications(host)
+        if !self.pending_rejection_notifications.is_empty() {
+            self.ordinary_tasks
+                .push_back(OrdinaryTask::UnhandledBatch(std::mem::take(
+                    &mut self.pending_rejection_notifications,
+                )));
+        }
+        Ok(())
     }
 
-    fn deliver_rejection_notifications(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
-        while let Some(id) = self.pending_rejection_notifications.pop_front() {
-            let object = self.heap.promise_mut(id)?;
-            let reason = match (&object.state, object.rejection_status) {
-                (PromiseState::Rejected(reason), RejectionStatus::PendingReport) => {
-                    object.rejection_status = RejectionStatus::Reported;
-                    Some(reason.clone())
+    fn run_unhandled_batch(
+        &mut self,
+        host: &mut dyn Host,
+        mut batch: Vec<ObjectId>,
+    ) -> Result<(), VmError> {
+        for (index, &id) in batch.iter().enumerate() {
+            let remaining = &batch[index..];
+            let roots = &ActiveRoots::EMPTY.with(&remaining);
+            if let Err(error) = self.run_rejection_notification(host, roots, id, false) {
+                // Preserve unstarted entries ahead of any work queued by the listener.
+                if index + 1 < batch.len() {
+                    self.ordinary_tasks
+                        .push_front(OrdinaryTask::UnhandledBatch(batch.split_off(index + 1)));
                 }
-                (PromiseState::Rejected(_), RejectionStatus::PendingHandled) => {
-                    object.rejection_status = RejectionStatus::Handled;
-                    None
-                }
-                _ => {
-                    return Err(VmError::InvalidState(format!(
-                        "invalid rejection notification for Promise {id}"
-                    )));
-                }
-            };
-            let promise = self.host_value(Value::object(id));
-            if let Some(reason) = reason {
-                host.unhandled_rejection(promise, self.host_value(reason));
-            } else {
-                host.rejection_handled(promise);
+                return Err(error);
             }
+        }
+        Ok(())
+    }
+
+    fn run_rejection_notification(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        handled: bool,
+    ) -> Result<(), VmError> {
+        let promise = self.heap.promise_mut(id)?;
+        let reason = match (&promise.state, promise.rejection_status, handled) {
+            (PromiseState::Rejected(reason), RejectionStatus::PendingReport, false) => {
+                reason.clone()
+            }
+            (PromiseState::Rejected(_), RejectionStatus::Handled, false) => return Ok(()),
+            (PromiseState::Rejected(reason), RejectionStatus::PendingHandled, true) => {
+                promise.rejection_status = RejectionStatus::Handled;
+                reason.clone()
+            }
+            _ => {
+                return Err(VmError::InvalidState(format!(
+                    "invalid rejection notification for Promise {id}"
+                )));
+            }
+        };
+        let ty = if handled {
+            "rejectionhandled"
+        } else {
+            "unhandledrejection"
+        };
+        let live = (id, &reason);
+        let roots = &roots.with(&live);
+        let result = self
+            .new_global_notification(
+                host,
+                ty,
+                !handled,
+                EventPayload::PromiseRejectionEvent {
+                    promise: id,
+                    reason: reason.clone(),
+                },
+            )
+            .and_then(|event| self.dispatch_global_notification(host, roots, event));
+        if !handled {
+            // A synchronous observation during dispatch wins even if the event
+            // was not canceled. Do not leave a consumed candidate pending on a fault.
+            let status = &mut self.heap.promise_mut(id)?.rejection_status;
+            if *status == RejectionStatus::PendingReport {
+                *status = RejectionStatus::Reported;
+            }
+        }
+        if result? && !handled {
+            host.unhandled_rejection(self.host_value(Value::object(id)), self.host_value(reason));
         }
         Ok(())
     }
@@ -964,7 +1030,8 @@ impl Vm {
             }
             let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
             if remaining == 0 {
-                self.ready_timeouts.push_back(signal);
+                self.ordinary_tasks
+                    .push_back(OrdinaryTask::AbortTimeout(signal));
             } else {
                 self.arm_new_timeout(signal, deadline_ms, remaining)
                     .map_err(|fault| VmError::HostFault(fault.0))?;
@@ -1080,7 +1147,8 @@ impl Vm {
                 let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
                 if remaining == 0 {
                     self.remove_operation(id);
-                    self.ready_timeouts.push_back(signal);
+                    self.ordinary_tasks
+                        .push_back(OrdinaryTask::AbortTimeout(signal));
                 } else {
                     match Self::arm_timeout(&self.bindings, token, remaining) {
                         Ok(live) => operation.live = Some(live),
@@ -1288,7 +1356,7 @@ impl Vm {
                 && promise_object.rejection_status == RejectionStatus::Unobserved
             {
                 promise_object.rejection_status = RejectionStatus::PendingReport;
-                self.pending_rejection_notifications.push_back(promise);
+                self.pending_rejection_notifications.push(promise);
             }
             std::mem::take(&mut promise_object.reactions)
         };
@@ -1319,7 +1387,8 @@ impl Vm {
             }
             RejectionStatus::Reported => {
                 *status = RejectionStatus::PendingHandled;
-                self.pending_rejection_notifications.push_back(promise);
+                self.ordinary_tasks
+                    .push_back(OrdinaryTask::RejectionHandled(promise));
             }
             RejectionStatus::Handled | RejectionStatus::PendingHandled => {}
         }
@@ -1572,10 +1641,10 @@ impl Vm {
             host_tasks,
             next_host_task_id,
             recovered_operations,
-            ready_timeouts: VecDeque::new(),
+            ordinary_tasks: VecDeque::new(),
             microtasks: VecDeque::new(),
             stack_registrations: Vec::new(),
-            pending_rejection_notifications: VecDeque::new(),
+            pending_rejection_notifications: Vec::new(),
             globals,
             imports: Vec::new(),
             host_classes,
@@ -1587,6 +1656,7 @@ impl Vm {
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
             active_event_paths: Vec::new(),
+            reporting_exception: false,
             builtins,
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,

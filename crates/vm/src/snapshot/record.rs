@@ -9,13 +9,20 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Internal AbortSignal timeout delivery targets.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 71;
+// Global event payloads and handlers, and ordinary rejection notification tasks.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 72;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
 const SNAPSHOT_MAGIC: &[u8; 8] = b"YIELDSNP";
 const SNAPSHOT_HEADER_LEN: usize = SNAPSHOT_MAGIC.len() + 2 * size_of::<u32>();
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrdinaryTask {
+    AbortTimeout(ObjectId),
+    UnhandledBatch(Vec<ObjectId>),
+    RejectionHandled(ObjectId),
+}
 
 fn snapshot_codec() -> impl Options {
     bincode::DefaultOptions::new()
@@ -203,8 +210,9 @@ pub struct Snapshot {
     pub operations: Vec<PendingOperationRecord>,
     pub host_tasks: Vec<HostTaskRecord>,
     pub next_host_task_id: u64,
-    /// Promises awaiting rejection notifications, in delivery order.
+    /// Rejection candidates not yet transferred to an ordinary task.
     pub pending_rejection_notifications: Vec<ObjectId>,
+    pub ordinary_tasks: Vec<OrdinaryTask>,
     #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
@@ -248,6 +256,7 @@ impl Snapshot {
             host_tasks: Vec::new(),
             next_host_task_id: 1,
             pending_rejection_notifications: Vec::new(),
+            ordinary_tasks: Vec::new(),
             imports: Vec::new(),
             class_prototypes: BTreeMap::new(),
             host_instances: Vec::new(),

@@ -46,6 +46,18 @@ function!(EVAL, "eval", 1, |vm, _, roots, _, _| {
     )
     .map(Invocation::Thrown)
 });
+function!(
+    REPORT_ERROR,
+    "reportError",
+    1,
+    |vm, host, roots, args, _| {
+        let Some(error) = args.into_iter().next() else {
+            return vm.throw_type_error(roots, "reportError requires one argument");
+        };
+        vm.report_exception(host, roots, error)?;
+        Ok(Invocation::Value(Value::UNDEFINED))
+    }
+);
 
 fn number_predicate(
     vm: &mut Vm,

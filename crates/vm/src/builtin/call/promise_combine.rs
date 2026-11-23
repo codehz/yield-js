@@ -294,8 +294,7 @@ impl Vm {
             Arguments::Values(args),
             &Value::UNDEFINED,
         )? {
-            let error = self.host_value(error);
-            host.report_error(error);
+            self.report_exception(host, roots, error)?;
         }
         Ok(())
     }

@@ -448,7 +448,6 @@ fn register_label<O: Operation>(
 #[derive(Debug, PartialEq)]
 pub enum RejectionEvent {
     Unhandled { promise: JsValue, reason: JsValue },
-    Handled { promise: JsValue },
 }
 
 pub struct TestHost {
@@ -574,11 +573,6 @@ impl Host for TestHost {
     fn unhandled_rejection(&mut self, promise: JsValue, reason: JsValue) {
         self.rejection_events
             .push(RejectionEvent::Unhandled { promise, reason });
-    }
-
-    fn rejection_handled(&mut self, promise: JsValue) {
-        self.rejection_events
-            .push(RejectionEvent::Handled { promise });
     }
 }
 

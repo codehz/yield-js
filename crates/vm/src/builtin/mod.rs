@@ -3,9 +3,9 @@
 //! Script-visible `Error` and `TypeError` are objects, including VM-generated
 //! TypeErrors. `Promise.any` rejects with an `AggregateError` object.
 //!
-//! `queueMicrotask` enqueues a VM microtask. A throw from its callback has no
-//! result promise and is delivered through `Host::report_error`. Promise
-//! rejection notifications are delivered separately at the microtask checkpoint.
+//! `queueMicrotask` has no result promise: a callback throw is reported as a
+//! synchronous global error event. Rejection events run as ordinary VM tasks
+//! after the microtask checkpoint.
 
 use crate::heap::{Attributes, DescriptorUpdate};
 use crate::intrinsic::IntrinsicKey;
@@ -88,6 +88,7 @@ pub(super) mod error_family;
 pub(crate) mod event;
 pub(crate) mod generator;
 mod global_functions;
+pub(crate) mod global_handlers;
 pub(crate) mod globals;
 pub(crate) mod iterator;
 pub(crate) mod json;

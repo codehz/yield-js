@@ -6,7 +6,7 @@ use crate::builtin::is_callable_object;
 use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::heap::{AbortStep, Heap, Object, OwnProperty, OwnedEdge, PrivateMemberKind, Property};
-use crate::heap::{CollectionIteration, CollectionKind, push_value};
+use crate::heap::{CollectionIteration, CollectionKind, EventPayload, push_value};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 
 use crate::snapshot::record::valid_string_position;
@@ -99,7 +99,11 @@ fn check_abort_state(
     Ok(signal.onabort)
 }
 
-pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
+pub(super) fn check_heap_edges(
+    build: &Build,
+    heap: &Heap,
+    global: ObjectId,
+) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     let mut revocable = BTreeSet::new();
@@ -428,9 +432,65 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                     "event {id} has invalid target {target}"
                 )));
             }
+            let guest_object = |object| {
+                heap.get(object).is_ok_and(|object| {
+                    !matches!(
+                        object,
+                        Object::Environment(_)
+                            | Object::ForInIterator { .. }
+                            | Object::DisposeState(_)
+                    )
+                })
+            };
+            let guest_value = |value: &Value| match value.view() {
+                ValueRef::Object(object) => guest_object(object),
+                _ => true,
+            };
+            let valid_payload = match &event.payload {
+                EventPayload::Event | EventPayload::CustomEvent { .. } => true,
+                EventPayload::ErrorEvent {
+                    filename, error, ..
+                } => {
+                    event.initialized
+                        && guest_value(error)
+                        && (filename.is_latin1()
+                            || char::decode_utf16(filename.units()).all(|unit| unit.is_ok()))
+                }
+                EventPayload::PromiseRejectionEvent { promise, reason } => {
+                    event.initialized && guest_object(*promise) && guest_value(reason)
+                }
+            };
+            if !valid_payload {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "event {id} has an invalid diagnostic payload"
+                )));
+            }
         }
         let onabort = check_abort_state(heap, id, object, &mut controller_signals)?;
         if let Some(target) = object.event_target_state() {
+            let mut handlers = BTreeSet::new();
+            for (ty, id_slot) in crate::builtin::global_handlers::TYPES
+                .into_iter()
+                .zip(target.global_handlers)
+            {
+                if let Some(handler) = id_slot
+                    && (id != global
+                        || !handlers.insert(handler)
+                        || !target.listeners.iter().any(|entry| {
+                            entry.id == handler
+                                && entry.global_handler
+                                && entry.ty == ty
+                                && !entry.capture
+                                && !entry.passive
+                                && !entry.once
+                                && entry.signal.is_none()
+                        }))
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has an invalid {ty} handler"
+                    )));
+                }
+            }
             let mut previous_id = None;
             let mut registrations = BTreeSet::new();
             for listener in &target.listeners {
@@ -465,7 +525,13 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                         listener.id
                     )));
                 }
+                if listener.global_handler != handlers.contains(&listener.id) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has an unmatched global handler registration"
+                    )));
+                }
                 if Some(listener.id) != onabort
+                    && !listener.global_handler
                     && !registrations.insert((&listener.ty, listener.callback, listener.capture))
                 {
                     return Err(VmError::InvalidSnapshot(format!(

@@ -14,7 +14,7 @@ use yield_vm::{BindingId, JsString};
 use super::{FunctionSource, HOME_BINDING, Lowerer, NEW_TARGET_BINDING, THIS_BINDING};
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
-use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index};
+use crate::names::{Callee, ReadOnlyName, ValueName, builtin_index, is_dynamic_global};
 
 #[derive(Clone, Copy)]
 pub(super) enum PropertyRef {
@@ -668,6 +668,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(dst)
             }
             ValueName::ReadOnly(read_only) => self.emit_read_only(read_only),
+            ValueName::DynamicGlobal(name) => self.emit_global_read(name),
             ValueName::Undefined => self.emit_undefined(),
             ValueName::Builtin(index) => {
                 let dst = self.alloc_reg()?;
@@ -694,16 +695,23 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 self.emit(crate::session::read_target(self.slot(dst), target));
                 Ok(dst)
             }
-            ReadOnlyName::Preload(name) => {
-                let global = self.alloc_reg()?;
-                self.emit(Instr::GetBuiltin {
-                    dst: self.slot(global),
-                    builtin: builtin_index("globalThis").expect("globalThis builtin") as u32,
-                });
-                let key = self.emit_constant(Constant::String(name.into()))?;
-                self.emit_get_member(global, key)
-            }
+            ReadOnlyName::Preload(name) => self.emit_global_read(name),
         }
+    }
+
+    pub(super) fn global_property(&mut self, name: &str) -> Result<PropertyRef, CompileError> {
+        let object = self.alloc_reg()?;
+        self.emit(Instr::GetBuiltin {
+            dst: self.slot(object),
+            builtin: builtin_index("globalThis").expect("globalThis builtin") as u32,
+        });
+        let key = self.emit_constant(Constant::String(name.into()))?;
+        Ok(PropertyRef::Member { object, key })
+    }
+
+    fn emit_global_read(&mut self, name: &str) -> Result<Reg, CompileError> {
+        let reference = self.global_property(name)?;
+        self.emit_get_property(reference)
     }
 
     fn compile_binary(
@@ -1372,6 +1380,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Ok(value)
             }
             Callee::ReadOnly(read_only) => self.emit_read_only(read_only),
+            Callee::DynamicGlobal(name) => self.emit_global_read(name),
             Callee::Builtin(index) => {
                 let value = self.alloc_reg()?;
                 self.emit(Instr::GetBuiltin {
@@ -1494,6 +1503,10 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 if let Some(read_only) = self.names().read_only(name) {
                     return self.compile_read_only_assignment(expression, read_only);
                 }
+                if is_dynamic_global(name) {
+                    let reference = self.global_property(name)?;
+                    return self.compile_property_assignment(expression, reference, Some(name));
+                }
                 if self.probed_missing(name) {
                     if matches!(expression.operator, AssignmentOperator::Assign) {
                         self.compile_named_expression(&expression.right, name)?;
@@ -1553,40 +1566,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             if expression.operator != AssignmentOperator::Assign {
                 reference = self.prepare_read_write_ref(reference, member.is_computed())?;
             }
-            if let Some(op) = logical_assignment_operator(expression.operator) {
-                let result = self.emit_get_property(reference)?;
-                let end = self.begin_logical_rhs(op, result)?;
-                let right = self.compile_expression(&expression.right)?;
-                self.emit_set_property(reference, right);
-                self.emit(Instr::Move {
-                    dst: self.slot(result),
-                    src: self.slot(right),
-                });
-                self.patch_jump(end, self.pc())?;
-                return Ok(result);
-            }
-            let value = if matches!(expression.operator, AssignmentOperator::Assign) {
-                self.compile_expression(&expression.right)?
-            } else {
-                let old = self.emit_get_property(reference)?;
-                let right = self.compile_expression(&expression.right)?;
-                let op = binary_assignment_operator(expression.operator);
-                let value = self.alloc_reg()?;
-                self.emit(Instr::Binary {
-                    dst: self.slot(value),
-                    op,
-                    lhs: self.slot(old),
-                    rhs: self.slot(right),
-                });
-                value
-            };
-            self.emit_set_property(reference, value);
-            let result = self.alloc_reg()?;
-            self.emit(Instr::Move {
-                dst: self.slot(result),
-                src: self.slot(value),
-            });
-            return Ok(result);
+            return self.compile_property_assignment(expression, reference, None);
         }
 
         if expression.operator == AssignmentOperator::Assign
@@ -1606,6 +1586,52 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             expression.span,
             "assignment to non-identifier/non-member target",
         ))
+    }
+
+    fn compile_property_assignment(
+        &mut self,
+        expression: &'ast AssignmentExpression<'ast>,
+        reference: PropertyRef,
+        inferred_name: Option<&str>,
+    ) -> Result<Reg, CompileError> {
+        let compile_rhs = |this: &mut Self| match inferred_name {
+            Some(name) => this.compile_named_expression(&expression.right, name),
+            None => this.compile_expression(&expression.right),
+        };
+        if let Some(op) = logical_assignment_operator(expression.operator) {
+            let result = self.emit_get_property(reference)?;
+            let end = self.begin_logical_rhs(op, result)?;
+            let right = compile_rhs(self)?;
+            self.emit_set_property(reference, right);
+            self.emit(Instr::Move {
+                dst: self.slot(result),
+                src: self.slot(right),
+            });
+            self.patch_jump(end, self.pc())?;
+            return Ok(result);
+        }
+        let value = if matches!(expression.operator, AssignmentOperator::Assign) {
+            compile_rhs(self)?
+        } else {
+            let old = self.emit_get_property(reference)?;
+            let right = self.compile_expression(&expression.right)?;
+            let op = binary_assignment_operator(expression.operator);
+            let value = self.alloc_reg()?;
+            self.emit(Instr::Binary {
+                dst: self.slot(value),
+                op,
+                lhs: self.slot(old),
+                rhs: self.slot(right),
+            });
+            value
+        };
+        self.emit_set_property(reference, value);
+        let result = self.alloc_reg()?;
+        self.emit(Instr::Move {
+            dst: self.slot(result),
+            src: self.slot(value),
+        });
+        Ok(result)
     }
 
     fn compile_read_only_assignment(
@@ -1667,6 +1693,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
                 Target::Binding(binding)
             } else if let Some(read_only) = self.names().read_only(name) {
                 Target::ReadOnly(read_only)
+            } else if is_dynamic_global(name) {
+                Target::Member(self.global_property(name)?)
             } else if self.probed_missing(name) {
                 return self.emit_missing_global(name);
             } else if self.is_probe() {

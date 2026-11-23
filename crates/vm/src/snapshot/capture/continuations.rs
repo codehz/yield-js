@@ -225,11 +225,12 @@ pub(super) fn validate_continuation(
 pub(super) fn validate_rejection_notifications(
     heap: &Heap,
     queue: &[ObjectId],
+    tasks: &[OrdinaryTask],
 ) -> Result<(), VmError> {
     use RejectionStatus::{Handled, PendingHandled, PendingReport, Reported, Unobserved};
 
     let mut queued = BTreeSet::new();
-    for &id in queue {
+    let mut check = |id, expected, allow_handled| {
         if !queued.insert(id) {
             return Err(VmError::InvalidSnapshot(format!(
                 "duplicate pending rejection notification for Promise {id}"
@@ -237,11 +238,26 @@ pub(super) fn validate_rejection_notifications(
         }
         if !matches!(heap.get(id), Ok(Object::Promise(promise))
             if matches!(promise.state, PromiseState::Rejected(_))
-                && matches!(promise.rejection_status, PendingReport | PendingHandled))
+                && (promise.rejection_status == expected || (allow_handled && promise.rejection_status == Handled)))
         {
             return Err(VmError::InvalidSnapshot(format!(
                 "pending rejection notification {id} must reference a rejected Promise with a pending notification"
             )));
+        }
+        Ok(())
+    };
+    for &id in queue {
+        check(id, PendingReport, false)?;
+    }
+    for task in tasks {
+        match task {
+            OrdinaryTask::UnhandledBatch(ids) if !ids.is_empty() => {
+                for &id in ids {
+                    check(id, PendingReport, true)?;
+                }
+            }
+            OrdinaryTask::RejectionHandled(id) => check(*id, PendingHandled, false)?,
+            _ => return Err(VmError::InvalidSnapshot("invalid ordinary task".into())),
         }
     }
 

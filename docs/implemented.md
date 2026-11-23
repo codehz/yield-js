@@ -136,7 +136,7 @@
 - `Error.isError(value)` 识别实际的 Error 内部标记（包括子类和 VM 自身创建的 Error），不依赖原型、`instanceof`、`Symbol.toStringTag` 或属性读取。
 - `DOMException` 必须用 `new` 构造；原型继承 `Error.prototype`。`name`、`message` 和旧式 `code` 由带品牌检查的只读 getter 提供，构造器和原型均定义历史常量。快照格式 **68** 保存内部名称和消息以及新增的内建根；字节码与二进制容器版本不变。
 - `Event`、`CustomEvent` 和 `EventTarget` 使用 VM 内部品牌，保留普通属性和子类原型；`globalThis` 本身是事件目标。`CustomEvent.detail` 按引用保存，事件时间戳以 VM 单调时钟为基准，恢复不累计离线时间。`structuredClone` 不克隆这些平台对象。
-- `EventTarget` 按捕获与非捕获两遍同步调用目标监听器；支持 `once`、`passive` 和动态 `handleEvent`。监听器脚本异常交给宿主报告，不中断后续监听器，也不在监听器之间排空微任务。快照格式 **69** 保存目标、监听器、事件内部状态和 VM 相对时钟；恢复不重新登记监听器。
+- `EventTarget` 按捕获与非捕获两遍同步调用目标监听器；支持 `once`、`passive` 和动态 `handleEvent`。监听器脚本异常进入 VM 的全局错误报告，不中断后续监听器，也不在监听器之间排空微任务。快照格式 **69** 保存目标、监听器、事件内部状态和 VM 相对时钟；恢复不重新登记监听器。
 - 标记的 Rust 宿主实例直接参与事件传播，不分配代理目标。每次派发先固定父槽路径，再依次捕获、调用目标监听器和冒泡；回调中修改父槽仅影响后续派发。CPS 宿主派发使用固定入口，不读取脚本可覆盖的 `dispatchEvent`。
 - `AbortController` 与 `AbortSignal` 保留取消原因身份；`AbortSignal.any` 先标记受影响信号，再按源、依赖的登记顺序执行取消步骤和可信 `abort` 事件。`{signal}` 依据监听器登记 ID 清理，不受事件传播停止影响。快照格式 **70** 保存取消图及 pending operation 关联。
 - `AbortSignal.timeout` 通过可选的 `wintertc.timer` 唤醒服务在独立轮次触发可信 `abort`，原因是 `TimeoutError`；零延迟也异步。快照格式 **71** 保存 VM 相对截止时间，恢复后按剩余时长重新登记，不累计离线时间；字节码与容器编码不变。
@@ -152,7 +152,9 @@
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
 - `CallCx::type_error(message)` 创建可由脚本捕获的 `TypeError`：`message` 原样保留，`stack` 首行只加一次 `TypeError: `，随后记录可见的同步脚本调用帧。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
-- `queueMicrotask` 回调抛出的异常通过独立的 `Host::report_error` 通道报告。微任务正常排空后，VM 按发生顺序调用 `Host::unhandled_rejection`，报告本轮仍无 reaction 的拒绝；之后第一次注册 reaction 会在下一次检查点调用 `Host::rejection_handled`。`.then()` 即使未提供拒绝回调也算观察，透传给子 Promise 的拒绝独立判定。快照格式 **53** 保存待交付队列及 Promise 的跟踪状态；恢复不立即交付，也不重报已交付通知。
+- `reportError(value)` 同步向 `globalThis` 派发可信、可取消的 `ErrorEvent`；监听器、后台宿主任务及 `queueMicrotask` 的未捕获异常走同一入口。消息和位置不经脚本 getter 或转换；仅未取消的报告交给 `Host::report_error`。错误报告期间再次抛出的异常直接进入宿主报告，不递归派发。
+- 微任务成功排空后，VM 将仍未观察的拒绝移入普通 FIFO 任务，批次中不穿插微任务。每项派发前重新检查，仍未观察的项收到可信且可取消的 `unhandledrejection`；仅未取消的事件触发 `Host::unhandled_rejection`。报告后首次观察会排入独立的非可取消 `rejectionhandled` 任务，不调用宿主日志。`.then()` 即使未提供拒绝回调也算观察，透传给子 Promise 的拒绝独立判定。
+- `ErrorEvent` 与 `PromiseRejectionEvent` 可由脚本构造为不可信事件，字段以只读原型访问器读取内部状态。全局的 `onerror`、`onunhandledrejection`、`onrejectionhandled` 与普通监听器共用登记顺序；非空替换保留位置。`onerror` 接收全局 `error` 事件的五个 `ErrorEvent` 字段，严格返回 `true` 时取消；其他处理器接收事件，严格返回 `false` 时取消。快照格式 **72** 保存事件内部值、处理器登记、拒绝候选及任务；恢复不派发。字节码 **56** 添加三个固定内建操作数，其他三个处理器名访问可变全局属性；二进制容器不变。
 - 快照与运行期 GC 共享只读追踪：从 operation 的 Promise 终点、待交付的拒绝通知、宿主任务的接收者和保存槽、内建单例、类原型、模块状态槽、顶层环境及宿主显式根出发，沿堆边访问可达的 async 续体和闭包环境。排队宿主续体的交付值由微任务追踪。well-known Symbol 和注册表项恒为根；普通 Symbol 由可达引用（包括属性键）或宿主显式根保留。
 - 宿主可在 VM 调用之间、排空微任务后显式调用 `Vm::collect_garbage(&[roots])`。它原地回收不可达对象（包括环）及其旁表、宿主实例和续体，清除不可达普通 Symbol，只返回删除的堆对象数；不改变存活 ID，也不复用被回收的 ID。宿主每次须显式提供仍要使用但不由 VM 持有的本 VM `Value`；这不延长临时宿主绑定 `JsValue` 的有效期。GC 不执行微任务、脚本或宿主绑定回调，标记失败不清扫。与快照不同，GC 可丢弃不可达且未调用的决议能力。
 - 宿主绑定可选择通过 `CallCx::request_gc` 暴露同步 GC。VM 在当前 `CallCx` 结束后追踪活动帧、跨调用的 Rust 值、排队及正在派发的微任务和 `Host::gc_roots()`，随后回收并以删除的对象数恢复宿主绑定。活动收集不会排空或重排微任务，也不改变快照边界；追踪失败直接返回 VM 错误，不清扫或恢复宿主绑定。

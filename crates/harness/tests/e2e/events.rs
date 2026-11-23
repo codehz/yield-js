@@ -186,3 +186,102 @@ fn host_events_keep_identity_and_freeze_parent_path_across_callbacks_and_restore
     );
     restored.run_until_idle(&mut new_host).unwrap();
 }
+
+#[test]
+fn global_events_and_handler_order_survive_binary_restore() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Object, Snapshot, VmError};
+
+    let build = build(
+        r#"
+        export let errorEvent, rejectionEvent;
+        export let order = '';
+        globalThis.addEventListener('error', e => { errorEvent = e; order += 'a'; });
+        onerror = () => { order += 'b'; return true; };
+        globalThis.addEventListener('error', () => { order += 'c'; });
+        onunhandledrejection = e => { rejectionEvent = e; return false; };
+        export function makeEvents() {
+            reportError({ marker: 'error' });
+            return Promise.reject({ marker: 'reason' });
+        }
+        export function errorValue() { return errorEvent.error; }
+        export function promiseValue() { return rejectionEvent.promise; }
+        export function reasonValue() { return rejectionEvent.reason; }
+        export function dispatchAgain() {
+            return globalThis.dispatchEvent(new ErrorEvent('error', { cancelable: true }));
+        }
+    "#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let promise = vm.start(&mut host, "makeEvents", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let error = vm.start(&mut host, "errorValue", vec![]).unwrap();
+    let reason = vm.start(&mut host, "reasonValue", vec![]).unwrap();
+    vm.collect_garbage(&[]).unwrap();
+    let image = vm.snapshot(&[]).unwrap();
+    let decoded = Snapshot::from_bytes(&image.to_bytes().unwrap()).unwrap();
+
+    let mut invalid_handler = image;
+    let global = invalid_handler.roots["globalThis"];
+    let global = invalid_handler
+        .objects
+        .iter_mut()
+        .find(|record| record.id == global)
+        .unwrap();
+    let Object::EventTarget { target, .. } = &mut global.object else {
+        panic!("global EventTarget")
+    };
+    // A regular error listener has the right type and flags but is not the handler.
+    target.global_handlers[0] = Some(target.listeners[0].id);
+    let mut invalid_payload = decoded.clone();
+    let event = invalid_payload
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::Event { event, .. } => match &mut event.payload {
+                yield_vm::heap::EventPayload::PromiseRejectionEvent { promise, .. } => {
+                    Some(promise)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap();
+    *event = u32::MAX;
+    assert!(matches!(
+        Vm::restore_validated(invalid_payload, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut host = TestHost::default();
+    assert!(matches!(
+        Vm::restore_validated(invalid_handler, build.clone(), &mut host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut vm = Vm::restore_validated(decoded, build, &mut host).unwrap();
+    assert_eq!(vm.get_export("order").unwrap(), Value::string("abc".into()));
+    for (name, expected) in [
+        ("errorValue", error),
+        ("promiseValue", promise.clone()),
+        ("reasonValue", reason.clone()),
+    ] {
+        assert_eq!(vm.start(&mut host, name, vec![]).unwrap(), expected);
+    }
+    assert_eq!(
+        vm.promise_state(&promise).unwrap(),
+        yield_vm::PromiseState::Rejected(reason)
+    );
+    for _ in 0..2 {
+        vm.run_until_idle(&mut host).unwrap();
+    }
+    assert_eq!(
+        vm.start(&mut host, "dispatchAgain", vec![]).unwrap(),
+        Value::boolean(false)
+    );
+    assert_eq!(
+        vm.get_export("order").unwrap(),
+        Value::string("abcabc".into())
+    );
+    assert!(host.errors().is_empty());
+    assert!(host.rejection_events().is_empty());
+}

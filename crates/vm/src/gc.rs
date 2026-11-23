@@ -255,8 +255,12 @@ impl Vm {
                 crate::snapshot::DeliveryTarget::Task(_) => {}
             }
         }
-        for &signal in &self.ready_timeouts {
-            tracer.mark_object(signal)?;
+        for task in &self.ordinary_tasks {
+            use crate::snapshot::OrdinaryTask::*;
+            match task {
+                AbortTimeout(id) | RejectionHandled(id) => id.trace(&mut tracer)?,
+                UnhandledBatch(batch) => batch.trace(&mut tracer)?,
+            }
         }
         for task in self.host_tasks.values() {
             task.trace(&mut tracer)?;

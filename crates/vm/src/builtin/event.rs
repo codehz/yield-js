@@ -1,4 +1,5 @@
 mod dispatch;
+mod report;
 
 use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
 use crate::VmError;
@@ -6,7 +7,7 @@ use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, DescriptorUpdate, EventState, EventTargetState, Object, PlainObject,
+    Attributes, DescriptorUpdate, EventPayload, EventState, EventTargetState, Object, PlainObject,
     TO_STRING_TAG_SYMBOL,
 };
 use crate::host::Host;
@@ -19,12 +20,19 @@ pub(crate) const EVENT_ROOT: &str = "event";
 const EVENT_PROTOTYPE: &str = "event.prototype";
 pub(crate) const CUSTOM_ROOT: &str = "customEvent";
 const CUSTOM_PROTOTYPE: &str = "customEvent.prototype";
+pub(crate) const ERROR_ROOT: &str = "errorEvent";
+const ERROR_PROTOTYPE: &str = "errorEvent.prototype";
+pub(crate) const PROMISE_REJECTION_ROOT: &str = "promiseRejectionEvent";
+const PROMISE_REJECTION_PROTOTYPE: &str = "promiseRejectionEvent.prototype";
 pub(crate) const TARGET_ROOT: &str = "eventTarget";
 pub(crate) const TARGET_PROTOTYPE: &str = "eventTarget.prototype";
 pub(crate) const TRUSTED_DISPATCH_ROOT: &str = "eventTarget.trustedDispatch";
 
 const EVENT: IntrinsicKey = IntrinsicKey::new("Event", Slot::Global, "");
 const CUSTOM: IntrinsicKey = IntrinsicKey::new("CustomEvent", Slot::Global, "");
+const ERROR: IntrinsicKey = IntrinsicKey::new("ErrorEvent", Slot::Global, "");
+const PROMISE_REJECTION: IntrinsicKey =
+    IntrinsicKey::new("PromiseRejectionEvent", Slot::Global, "");
 const TARGET: IntrinsicKey = IntrinsicKey::new("EventTarget", Slot::Global, "");
 // The getter is installed on instances only. StaticGetter supplies its function name.
 const TRUSTED_ROOT: &str = "event.getIsTrusted";
@@ -53,26 +61,81 @@ pub(crate) const ROOTS: &[RootSpec] = &[
         RootKind::Native(TRUSTED_DISPATCH_KEY),
         FUNCTION_PARENT,
     ),
+    RootSpec::new(ERROR_ROOT, RootKind::Native(ERROR), Some(EVENT_ROOT))
+        .fixed(ERROR_PROTOTYPE)
+        .backlink(Some(Attributes::METHOD)),
+    RootSpec::new(ERROR_PROTOTYPE, RootKind::Plain, Some(EVENT_PROTOTYPE)),
+    RootSpec::new(
+        PROMISE_REJECTION_ROOT,
+        RootKind::Native(PROMISE_REJECTION),
+        Some(EVENT_ROOT),
+    )
+    .fixed(PROMISE_REJECTION_PROTOTYPE)
+    .backlink(Some(Attributes::METHOD)),
+    RootSpec::new(
+        PROMISE_REJECTION_PROTOTYPE,
+        RootKind::Plain,
+        Some(EVENT_PROTOTYPE),
+    ),
 ];
+
+#[derive(Clone, Copy)]
+enum EventKind {
+    Event,
+    Custom,
+    Error,
+    PromiseRejection,
+}
+
+impl EventKind {
+    fn prototype(self) -> &'static str {
+        match self {
+            Self::Event => EVENT_PROTOTYPE,
+            Self::Custom => CUSTOM_PROTOTYPE,
+            Self::Error => ERROR_PROTOTYPE,
+            Self::PromiseRejection => PROMISE_REJECTION_PROTOTYPE,
+        }
+    }
+}
 
 const CONSTRUCTORS: &[IntrinsicDef] = &[
     IntrinsicDef::constructor_with_target(
         EVENT,
         1,
         |vm, _, roots, _, _| vm.throw_type_error(roots, "Event requires new"),
-        |vm, host, roots, args, target| construct_event(vm, host, roots, args, target, false),
+        |vm, host, roots, args, target| {
+            construct_event(vm, host, roots, args, target, EventKind::Event)
+        },
     ),
     IntrinsicDef::constructor_with_target(
         CUSTOM,
         1,
         |vm, _, roots, _, _| vm.throw_type_error(roots, "CustomEvent requires new"),
-        |vm, host, roots, args, target| construct_event(vm, host, roots, args, target, true),
+        |vm, host, roots, args, target| {
+            construct_event(vm, host, roots, args, target, EventKind::Custom)
+        },
     ),
     IntrinsicDef::constructor_with_target(
         TARGET,
         0,
         |vm, _, roots, _, _| vm.throw_type_error(roots, "EventTarget requires new"),
         construct_target,
+    ),
+    IntrinsicDef::constructor_with_target(
+        ERROR,
+        1,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "ErrorEvent requires new"),
+        |vm, host, roots, args, target| {
+            construct_event(vm, host, roots, args, target, EventKind::Error)
+        },
+    ),
+    IntrinsicDef::constructor_with_target(
+        PROMISE_REJECTION,
+        2,
+        |vm, _, roots, _, _| vm.throw_type_error(roots, "PromiseRejectionEvent requires new"),
+        |vm, host, roots, args, target| {
+            construct_event(vm, host, roots, args, target, EventKind::PromiseRejection)
+        },
     ),
 ];
 
@@ -157,15 +220,74 @@ const CUSTOM_MEMBERS: &[IntrinsicDef] = &[
         IntrinsicKey::new("CustomEvent", Slot::PrototypeGetter, "detail"),
         0,
         |vm, _, roots, _, receiver| {
-            read_event(vm, roots, receiver, true, |e| {
-                e.detail.as_ref().expect("custom event detail").clone()
-            })
+            read_payload(
+                vm,
+                roots,
+                receiver,
+                "Incompatible CustomEvent receiver",
+                |payload| match payload {
+                    EventPayload::CustomEvent { detail } => Some(detail.clone()),
+                    _ => None,
+                },
+            )
         },
     ),
     IntrinsicDef::call(
         IntrinsicKey::new("CustomEvent", Slot::Prototype, "initCustomEvent"),
         1,
         |vm, host, roots, args, receiver| init_event(vm, host, roots, args, receiver, true),
+    ),
+];
+
+macro_rules! payload_getter {
+    ($owner:literal, $variant:ident, $field:ident, $read:expr) => {
+        IntrinsicDef::call(
+            IntrinsicKey::new($owner, Slot::PrototypeGetter, stringify!($field)),
+            0,
+            |vm, _, roots, _, receiver| {
+                read_payload(
+                    vm,
+                    roots,
+                    receiver,
+                    concat!("Incompatible ", $owner, " receiver"),
+                    |payload| match payload {
+                        EventPayload::$variant { $field, .. } => Some(($read)($field)),
+                        _ => None,
+                    },
+                )
+            },
+        )
+    };
+}
+
+const ERROR_MEMBERS: &[IntrinsicDef] = &[
+    payload_getter!("ErrorEvent", ErrorEvent, message, |v: &JsString| {
+        Value::string(v.clone())
+    }),
+    payload_getter!("ErrorEvent", ErrorEvent, filename, |v: &JsString| {
+        Value::string(v.clone())
+    }),
+    payload_getter!("ErrorEvent", ErrorEvent, lineno, |&v: &u32| Value::number(
+        f64::from(v)
+    )),
+    payload_getter!("ErrorEvent", ErrorEvent, colno, |&v: &u32| Value::number(
+        f64::from(v)
+    )),
+    payload_getter!("ErrorEvent", ErrorEvent, error, Value::clone),
+];
+
+const PROMISE_REJECTION_MEMBERS: &[IntrinsicDef] = &[
+    payload_getter!(
+        "PromiseRejectionEvent",
+        PromiseRejectionEvent,
+        promise,
+        |&v: &ObjectId| Value::object(v)
+    ),
+    payload_getter!(
+        "PromiseRejectionEvent",
+        PromiseRejectionEvent,
+        reason,
+        Value::clone
     ),
 ];
 
@@ -203,6 +325,8 @@ pub(crate) const OWNER: Owner = Owner::new(
         CONSTRUCTORS,
         EVENT_MEMBERS,
         CUSTOM_MEMBERS,
+        ERROR_MEMBERS,
+        PROMISE_REJECTION_MEMBERS,
         TARGET_MEMBERS,
         INTERNAL,
     ],
@@ -214,6 +338,13 @@ fn install(vm: &mut Vm, _: &Value) {
         (EVENT_ROOT, EVENT_PROTOTYPE, EVENT.owner, EVENT_MEMBERS),
         (CUSTOM_ROOT, CUSTOM_PROTOTYPE, CUSTOM.owner, CUSTOM_MEMBERS),
         (TARGET_ROOT, TARGET_PROTOTYPE, TARGET.owner, TARGET_MEMBERS),
+        (ERROR_ROOT, ERROR_PROTOTYPE, ERROR.owner, ERROR_MEMBERS),
+        (
+            PROMISE_REJECTION_ROOT,
+            PROMISE_REJECTION_PROTOTYPE,
+            PROMISE_REJECTION.owner,
+            PROMISE_REJECTION_MEMBERS,
+        ),
     ] {
         let ctor = vm.builtins.get(root);
         let proto = vm.builtins.get(proto);
@@ -321,10 +452,26 @@ fn read_event(
     incompatible_receiver(vm, roots, custom)
 }
 
+fn read_payload(
+    vm: &mut Vm,
+    roots: &ActiveRoots<'_>,
+    receiver: &Value,
+    incompatible_message: &str,
+    read: impl FnOnce(&EventPayload) -> Option<Value>,
+) -> Result<Invocation, VmError> {
+    if let ValueRef::Object(id) = receiver.view()
+        && let Object::Event { event, .. } = vm.heap.get(id)?
+        && let Some(value) = read(&event.payload)
+    {
+        return Ok(Invocation::Value(value));
+    }
+    vm.throw_type_error(roots, incompatible_message)
+}
+
 fn event_receiver(vm: &Vm, receiver: &Value, custom: bool) -> Result<Option<ObjectId>, VmError> {
     if let ValueRef::Object(id) = receiver.view()
         && let Object::Event { event, .. } = vm.heap.get(id)?
-        && (!custom || event.detail.is_some())
+        && (!custom || matches!(event.payload, EventPayload::CustomEvent { .. }))
     {
         return Ok(Some(id));
     }
@@ -425,7 +572,9 @@ fn init_event(
         event.bubbles = args.get(1).is_some_and(Value::truthy);
         event.cancelable = args.get(2).is_some_and(Value::truthy);
         if custom {
-            event.detail = Some(detail_or_null(args.get(3).unwrap_or(&Value::UNDEFINED)));
+            event.payload = EventPayload::CustomEvent {
+                detail: detail_or_null(args.get(3).unwrap_or(&Value::UNDEFINED)),
+            };
         }
     }
     Ok(Invocation::Value(Value::UNDEFINED))
@@ -463,11 +612,14 @@ fn construct_event(
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
-    custom: bool,
+    kind: EventKind,
 ) -> Result<Invocation, VmError> {
     let Some(ty) = args.first() else {
         return vm.throw_type_error(roots, "Event type is required");
     };
+    if matches!(kind, EventKind::PromiseRejection) && args.len() < 2 {
+        return vm.throw_type_error(roots, "PromiseRejectionEvent options are required");
+    }
     let live = (&args, new_target);
     let roots = &roots.with(&live);
     let ty = match vm.coerce_string(host, roots, ty)? {
@@ -476,51 +628,90 @@ fn construct_event(
     };
     let undefined = Value::UNDEFINED;
     let options = args.get(1).unwrap_or(&undefined);
-    let mut bubbles = false;
-    let mut cancelable = false;
-    let mut composed = false;
-    let mut detail = custom.then_some(Value::NULL);
-    match options.view() {
-        ValueRef::Undefined | ValueRef::Null => {}
-        ValueRef::Object(_) => {
-            // Web IDL reads base dictionary members first, in lexicographic order.
-            for (key, flag) in [
-                ("bubbles", &mut bubbles),
-                ("cancelable", &mut cancelable),
-                ("composed", &mut composed),
-            ] {
-                match vm.read_property(host, roots, options, PropertyKeyRef::String(key))? {
-                    Invocation::Value(value) => *flag = value.truthy(),
+    let has_options = match options.view() {
+        ValueRef::Undefined | ValueRef::Null => false,
+        ValueRef::Object(_) => true,
+        _ => return vm.throw_type_error(roots, "Event options must be an object"),
+    };
+    macro_rules! try_guest {
+        ($result:expr) => {
+            match $result? {
+                Ok(value) => value,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        };
+    }
+    macro_rules! member {
+        ($roots:expr, $key:literal) => {
+            if has_options {
+                match vm.read_property(host, $roots, options, PropertyKeyRef::String($key))? {
+                    Invocation::Value(value) => value,
                     thrown @ Invocation::Thrown(_) => return Ok(thrown),
                 }
+            } else {
+                Value::UNDEFINED
             }
-            if custom {
-                detail = match vm.read_property(
-                    host,
-                    roots,
-                    options,
-                    PropertyKeyRef::String("detail"),
-                )? {
-                    Invocation::Value(value) => Some(detail_or_null(&value)),
-                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
-                };
+        };
+    }
+    macro_rules! converted_member {
+        ($roots:expr, $key:literal, $convert:ident, $default:expr) => {{
+            let value = member!($roots, $key);
+            if matches!(value.view(), ValueRef::Undefined) {
+                $default
+            } else {
+                try_guest!(vm.$convert(host, $roots, &value))
+            }
+        }};
+    }
+
+    // Web IDL reads inherited members first, then derived members, each in lexical order.
+    let bubbles = member!(roots, "bubbles").truthy();
+    let cancelable = member!(roots, "cancelable").truthy();
+    let composed = member!(roots, "composed").truthy();
+    let payload = match kind {
+        EventKind::Event => EventPayload::Event,
+        EventKind::Custom => EventPayload::CustomEvent {
+            detail: detail_or_null(&member!(roots, "detail")),
+        },
+        EventKind::Error => {
+            let colno = converted_member!(roots, "colno", coerce_number, 0.0);
+            let error = member!(roots, "error");
+            let roots = &roots.with(&error);
+            let filename = converted_member!(roots, "filename", coerce_string, JsString::default());
+            let lineno = converted_member!(roots, "lineno", coerce_number, 0.0);
+            let message = converted_member!(roots, "message", coerce_string, JsString::default());
+            EventPayload::ErrorEvent {
+                message,
+                filename,
+                lineno: crate::ops::number_to_uint32(lineno),
+                colno: crate::ops::number_to_uint32(colno),
+                error,
             }
         }
-        _ => return vm.throw_type_error(roots, "Event options must be an object"),
-    }
-    let roots = &roots.with(&detail);
-    let fallback = if custom {
-        CUSTOM_PROTOTYPE
-    } else {
-        EVENT_PROTOTYPE
+        EventKind::PromiseRejection => {
+            let ValueRef::Object(promise) = member!(roots, "promise").view() else {
+                return vm
+                    .throw_type_error(roots, "PromiseRejectionEvent promise must be an object");
+            };
+            let roots = &roots.with(&promise);
+            let reason = member!(roots, "reason");
+            EventPayload::PromiseRejectionEvent { promise, reason }
+        }
     };
-    let prototype = match new_target_prototype(vm, host, roots, new_target, fallback)? {
+    let payload_roots = match &payload {
+        EventPayload::Event => (None, None),
+        EventPayload::CustomEvent { detail } => (Some(detail), None),
+        EventPayload::ErrorEvent { error, .. } => (Some(error), None),
+        EventPayload::PromiseRejectionEvent { promise, reason } => (Some(reason), Some(*promise)),
+    };
+    let roots = &roots.with(&payload_roots);
+    let prototype = match new_target_prototype(vm, host, roots, new_target, kind.prototype())? {
         Ok(prototype) => prototype,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
     let event = EventState {
         ty,
-        detail,
+        payload,
         bubbles,
         cancelable,
         composed,
@@ -542,7 +733,7 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let event = EventState {
             ty,
-            detail: Some(detail),
+            payload: EventPayload::CustomEvent { detail },
             bubbles,
             cancelable,
             time_stamp: self.clock.elapsed_ms() as f64,
@@ -553,17 +744,27 @@ impl Vm {
     }
 
     /// Allocate an event without consulting the corresponding global constructor.
+    /// `None` selects the intrinsic prototype matching the payload. The caller
+    /// supplies initialization, timestamp, and trust flags in the event state.
     pub(crate) fn alloc_event(
         &mut self,
         prototype: Option<ObjectId>,
-        event: EventState,
+        mut event: EventState,
     ) -> Result<Value, VmError> {
+        if let EventPayload::ErrorEvent { filename, .. } = &mut event.payload
+            && !filename.is_latin1()
+            && char::decode_utf16(filename.units()).any(|unit| unit.is_err())
+        {
+            *filename = String::from_utf16_lossy(&filename.to_utf16()).into();
+        }
         let prototype = prototype.unwrap_or_else(|| {
-            self.builtins.get(if event.detail.is_some() {
-                CUSTOM_PROTOTYPE
-            } else {
-                EVENT_PROTOTYPE
-            })
+            let kind = match &event.payload {
+                EventPayload::Event => EventKind::Event,
+                EventPayload::CustomEvent { .. } => EventKind::Custom,
+                EventPayload::ErrorEvent { .. } => EventKind::Error,
+                EventPayload::PromiseRejectionEvent { .. } => EventKind::PromiseRejection,
+            };
+            self.builtins.get(kind.prototype())
         });
         let id = self.heap.alloc(Object::Event {
             object: PlainObject::new(Some(prototype)),

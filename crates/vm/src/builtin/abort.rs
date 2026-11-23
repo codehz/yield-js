@@ -293,6 +293,7 @@ fn set_onabort(
                 capture: false,
                 once: false,
                 passive: false,
+                global_handler: false,
                 signal: None,
             });
             vm.abort_signal_state_mut(id)?

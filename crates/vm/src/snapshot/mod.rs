@@ -3,7 +3,7 @@ mod record;
 
 pub use record::{
     ContinuationRecord, ContinuationTargetRecord, DeliveryTarget, HostInstanceRecord,
-    HostSlotRecord, HostTaskRecord, ModuleStateRecord, ObjectRecord, PayloadRecord,
+    HostSlotRecord, HostTaskRecord, ModuleStateRecord, ObjectRecord, OrdinaryTask, PayloadRecord,
     PendingOperationRecord, SNAPSHOT_BINARY_VERSION, SNAPSHOT_FORMAT_VERSION, Snapshot,
 };
 pub(crate) use record::{

@@ -10,6 +10,7 @@ use super::Lowerer;
 use super::expr::PropertyRef;
 use crate::emit::Reg;
 use crate::error::{CompileError, unsupported};
+use crate::names::is_dynamic_global;
 
 enum Pattern<'ast> {
     Binding(&'ast BindingPattern<'ast>),
@@ -54,7 +55,7 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn assignment_binding(
-        &self,
+        &mut self,
         id: &IdentifierReference<'_>,
     ) -> Result<Destination<'ast>, CompileError> {
         let name = id.name.as_str();
@@ -63,6 +64,8 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             Ok(Destination::AssignmentBinding(binding))
         } else if self.names().read_only(name).is_some() {
             Ok(Destination::AssignmentReadOnly)
+        } else if is_dynamic_global(name) {
+            Ok(Destination::Member(self.global_property(name)?))
         } else if self.probed_missing(name) {
             Ok(Destination::MissingGlobal(name.to_owned()))
         } else if self.is_probe() {

@@ -3,6 +3,7 @@
 use super::support::{RUN, Suspended, json_round_trip};
 use yield_harness::{RejectionEvent, TestHost, build};
 use yield_vm::heap::PromiseCallback;
+use yield_vm::snapshot::OrdinaryTask;
 use yield_vm::{Completion, JsValue, Object, ObjectId, PromiseState, Value, ValueRef, Vm, VmError};
 
 #[test]
@@ -185,6 +186,9 @@ fn assert_host_identity(handle: &JsValue, value: &Value) {
 fn passthrough_reports_only_the_child_and_late_catches_notify_once() {
     let source = r#"
 let child;
+export let handled;
+export let handledCount = 0;
+onrejectionhandled = e => { handled = e.promise; handledCount++; };
 export function run() {
   child = Promise.reject('pass through').then();
   return child;
@@ -219,17 +223,9 @@ export function catchTwice() {
     assert_eq!(host.rejection_events().len(), 1);
     vm.run_until_idle(&mut host).expect("late catch checkpoint");
     vm.run_until_idle(&mut host).expect("empty checkpoint");
-    let [
-        RejectionEvent::Unhandled { .. },
-        RejectionEvent::Handled { promise },
-    ] = host.rejection_events()
-    else {
-        panic!(
-            "expected exactly one handled event: {:?}",
-            host.rejection_events()
-        );
-    };
-    assert_host_identity(promise, &child);
+    assert_eq!(host.rejection_events().len(), 1);
+    assert_eq!(vm.get_export("handled").unwrap(), child);
+    assert_eq!(vm.get_export("handledCount").unwrap(), Value::number(1.0));
 }
 
 #[test]
@@ -252,6 +248,9 @@ fn rejection_queue_survives_gc_and_json_restore_without_replaying_reports() {
 export function enqueue() { return Promise.reject({}); }
 export function catchReported() { reported.catch(() => {}); }
 let reported;
+export let handled;
+export let handledCount = 0;
+onrejectionhandled = e => { handled = e.promise; handledCount++; };
 export function run() {
   reported = Promise.reject('already reported');
   return reported;
@@ -295,9 +294,7 @@ export function run() {
     for (event, (expected_promise, expected_reason)) in
         restored_host.rejection_events().iter().zip(&queued)
     {
-        let RejectionEvent::Unhandled { promise, reason } = event else {
-            panic!("expected an unhandled rejection, got {event:?}");
-        };
+        let RejectionEvent::Unhandled { promise, reason } = event;
         assert_host_identity(promise, expected_promise);
         assert_host_identity(reason, expected_reason);
     }
@@ -306,12 +303,9 @@ export function run() {
         .expect("attach late catch");
     vm.run_until_idle(&mut restored_host)
         .expect("late catch checkpoint");
-    assert_eq!(restored_host.rejection_events().len(), queued.len() + 1);
-    let RejectionEvent::Handled { promise } = &restored_host.rejection_events()[queued.len()]
-    else {
-        panic!("expected a handled notification for the already-reported promise");
-    };
-    assert_host_identity(promise, &reported);
+    assert_eq!(restored_host.rejection_events().len(), queued.len());
+    assert_eq!(vm.get_export("handled").unwrap(), reported);
+    assert_eq!(vm.get_export("handledCount").unwrap(), Value::number(1.0));
 }
 
 #[test]
@@ -381,4 +375,128 @@ fn restore_rejects_duplicate_omitted_and_dangling_pending_notification_ids() {
             "accepted {corruption}"
         );
     }
+}
+
+#[test]
+fn rejection_tasks_survive_fault_cut_points_without_replay() {
+    let build = build(
+        r#"
+        let reported;
+        export let handled;
+        export let handledCount = 0;
+        export let seen = '';
+        onunhandledrejection = e => {
+          seen += e.reason;
+          if (e.reason === 'A') AbortSignal.timeout(1);
+        };
+        onrejectionhandled = e => { handled = e.promise; handledCount++; };
+        export function run() { return reported = Promise.reject('R'); }
+        export function batch() {
+          Promise.reject('A');
+          return Promise.reject('B');
+        }
+        export function observe() {
+          reported.catch(() => {});
+          reported = null;
+          queueMicrotask(() => AbortSignal.timeout(1));
+        }
+    "#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let reported = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(host.rejection_events().len(), 1);
+    let image = json_round_trip(&vm.snapshot(&[]).unwrap());
+    host = TestHost::default();
+    vm = Vm::restore_validated(image, build.clone(), &mut host).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert!(host.rejection_events().is_empty());
+
+    host.clock().set_fail_start(true);
+    let b = vm.start(&mut host, "batch", vec![]).unwrap();
+    assert!(matches!(
+        vm.run_until_idle(&mut host),
+        Err(VmError::HostFault(_))
+    ));
+    let b_id = object_id(&b);
+    vm.collect_garbage(&[]).unwrap();
+    let image = vm.snapshot(&[]).unwrap();
+    assert!(image.pending_rejection_notifications.is_empty());
+    assert_eq!(
+        image.ordinary_tasks,
+        [OrdinaryTask::UnhandledBatch(vec![b_id])]
+    );
+    for task in [
+        OrdinaryTask::UnhandledBatch(vec![b_id, b_id]),
+        OrdinaryTask::UnhandledBatch(vec![]),
+        OrdinaryTask::RejectionHandled(b_id),
+    ] {
+        let mut invalid = image.clone();
+        invalid.ordinary_tasks[0] = task;
+        assert!(matches!(
+            Vm::restore_validated(invalid, build.clone(), &mut host),
+            Err(VmError::InvalidSnapshot(_))
+        ));
+    }
+    vm = Vm::restore_validated(json_round_trip(&image), build.clone(), &mut host).unwrap();
+    assert_eq!(vm.get_export("seen").unwrap(), Value::string("RA".into()));
+    assert!(host.rejection_events().is_empty());
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(vm.get_export("seen").unwrap(), Value::string("RAB".into()));
+    let [RejectionEvent::Unhandled { promise, reason }] = host.rejection_events() else {
+        panic!("expected only B's default report");
+    };
+    assert_host_identity(promise, &b);
+    assert_eq!(*reason, JsValue::string("B"));
+
+    vm.start(&mut host, "observe", vec![]).unwrap();
+    assert!(
+        vm.snapshot(&[]).is_err(),
+        "a queued reaction still forbids snapshotting"
+    );
+    assert!(matches!(
+        vm.run_until_idle(&mut host),
+        Err(VmError::HostFault(_))
+    ));
+    vm.collect_garbage(&[]).unwrap();
+    let image = vm.snapshot(&[]).unwrap();
+    assert_eq!(
+        image.ordinary_tasks,
+        [OrdinaryTask::RejectionHandled(object_id(&reported))]
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::restore_validated(json_round_trip(&image), build, &mut host).unwrap();
+    assert_eq!(vm.get_export("handledCount").unwrap(), Value::number(0.0));
+    for _ in 0..2 {
+        vm.run_until_idle(&mut host).unwrap();
+    }
+    assert_eq!(vm.get_export("handled").unwrap(), reported);
+    assert_eq!(vm.get_export("handledCount").unwrap(), Value::number(1.0));
+    assert!(host.rejection_events().is_empty());
+    assert!(host.errors().is_empty());
+}
+
+#[test]
+fn canceled_unhandled_report_still_delivers_handled_once() {
+    let source = r#"
+        const reason = {};
+        let promise;
+        export let checked = 0;
+        onunhandledrejection = () => false;
+        onrejectionhandled = e => {
+          if (e.promise === promise && e.reason === reason && !e.cancelable) checked++;
+        };
+        export function run() { promise = Promise.reject(reason); }
+        export function observe() { promise.catch(() => {}); promise.catch(() => {}); }
+    "#;
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build(source), &mut host).unwrap();
+    vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert!(host.rejection_events().is_empty());
+    vm.start(&mut host, "observe", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(vm.get_export("checked").unwrap(), Value::number(1.0));
+    assert!(host.rejection_events().is_empty());
 }

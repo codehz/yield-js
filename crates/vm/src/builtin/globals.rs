@@ -148,6 +148,9 @@ builtin_globals! {
     "EventTarget" => Global::Root(super::event::TARGET_ROOT),
     "AbortController" => Global::Owner(super::abort::CONTROLLER_OWNER),
     "AbortSignal" => Global::Owner(super::abort::SIGNAL_OWNER),
+    "ErrorEvent" => Global::Root(super::event::ERROR_ROOT),
+    "PromiseRejectionEvent" => Global::Root(super::event::PROMISE_REJECTION_ROOT),
+    "reportError" => Global::Function(global_functions::REPORT_ERROR),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -167,6 +170,7 @@ pub(crate) fn intrinsic_groups() -> impl Iterator<Item = &'static [IntrinsicDef]
             generator::INTRINSICS,
             async_generator::INTRINSICS,
             super::disposal::SCOPE_INTRINSICS.as_slice(),
+            super::global_handlers::INTRINSICS,
         ])
 }
 
@@ -306,5 +310,6 @@ impl Vm {
                 Attributes::ORDINARY,
             )
             .expect("global undefined property");
+        super::global_handlers::install(self);
     }
 }
