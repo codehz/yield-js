@@ -270,12 +270,15 @@ impl Vm {
             }
         }
         for (class, _) in bindings.classes() {
-            if let Some(parent) = bindings.class_parent(class) {
-                self.heap.set_prototype(
-                    self.host_classes[class].prototype,
-                    Some(self.host_classes[parent].prototype),
-                )?;
-            }
+            let parent = if let Some(parent) = bindings.class_parent(class) {
+                self.host_classes[parent].prototype
+            } else if bindings.class_is_event_target(class) {
+                self.builtins.get(crate::builtin::event::TARGET_PROTOTYPE)
+            } else {
+                continue;
+            };
+            self.heap
+                .set_prototype(self.host_classes[class].prototype, Some(parent))?;
         }
         Ok(())
     }

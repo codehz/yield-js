@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt;
 
 use crate::gc::ActiveRoots;
-use crate::heap::{Attributes, Object, Property};
+use crate::heap::{Attributes, EventTargetState, Object, PlainObject, Property};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::Vm;
 
@@ -265,6 +265,65 @@ impl<'a> CallCx<'a> {
     pub fn is_callable(&self, value: &JsValue) -> JsResult<bool> {
         self.check_value(value)?;
         Ok(self.vm.is_callable(&value.value))
+    }
+
+    /// Creates a CustomEvent without consulting mutable guest constructors.
+    pub fn custom_event(
+        &mut self,
+        ty: &str,
+        detail: JsValue,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> JsResult<JsValue> {
+        let detail = self.unpack(detail)?;
+        let event = self
+            .vm
+            .alloc_custom_event(ty.into(), detail, bubbles, cancelable)
+            .map_err(|error| JsError::Fault(self.fault(error.to_string())))?;
+        Ok(self.js_value(event))
+    }
+
+    /// Dispatch after leaving the native binding stack, then resume with the
+    /// cancellation boolean (or the guest exception).
+    pub fn request_dispatch_event(
+        &self,
+        target: JsValue,
+        event: JsValue,
+        saved: Vec<JsValue>,
+        resume: fn(&mut CallCx<'_>, GuestOutcome) -> JsResult<HostStep>,
+    ) -> JsResult<HostStep> {
+        self.request_call(
+            self.event_dispatch_intrinsic(),
+            target,
+            vec![event],
+            saved,
+            resume,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn __linked_dispatch_event(
+        &self,
+        target: JsValue,
+        event: JsValue,
+        saved: Vec<JsValue>,
+        stage: u32,
+    ) -> JsResult<HostStep> {
+        self.__linked_call(
+            self.event_dispatch_intrinsic(),
+            target,
+            vec![event],
+            saved,
+            stage,
+        )
+    }
+
+    fn event_dispatch_intrinsic(&self) -> JsValue {
+        let id = self
+            .vm
+            .builtins
+            .get(crate::builtin::event::TRUSTED_DISPATCH_ROOT);
+        self.js_value(Value::object(id))
     }
 
     /// Request a script call after this context ends. The resume context has
@@ -591,7 +650,14 @@ impl<'a> CallCx<'a> {
                 T::TAG
             ))));
         }
-        let object = self.vm.heap.alloc_plain_with(Some(prototype));
+        let object = if self.bindings.class_is_event_target(class) {
+            self.vm.heap.alloc(Object::EventTarget {
+                object: PlainObject::new(Some(prototype)),
+                target: EventTargetState::default(),
+            })
+        } else {
+            self.vm.heap.alloc_plain_with(Some(prototype))
+        };
         let slots = self
             .bindings
             .class_slots(class)

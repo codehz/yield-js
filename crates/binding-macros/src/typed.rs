@@ -1240,7 +1240,16 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     generics(&item.generics)?;
     let opts = options(
         args,
-        &["tag", "methods", "parent", "schema", "encode", "decode"],
+        &[
+            "tag",
+            "methods",
+            "parent",
+            "schema",
+            "encode",
+            "decode",
+            "event_target",
+            "event_parent",
+        ],
     )?;
     let span = item.ident.span();
     let tag = string(required(&opts, "tag", span)?)?;
@@ -1285,6 +1294,37 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         }
     };
     let slots = extract_slots(&mut item)?;
+    let event_target = match opts.get("event_target") {
+        Some(Meta::Path(_)) => true,
+        Some(other) => {
+            return Err(Error::new_spanned(
+                other,
+                "expected bare `event_target` marker",
+            ));
+        }
+        None => false,
+    };
+    let event_parent = if let Some(meta) = opts.get("event_parent") {
+        let field = path(meta)?;
+        let field = field
+            .get_ident()
+            .ok_or_else(|| Error::new_spanned(meta, "expected an own `js_slot` field name"))?;
+        let name = plain_ident(field);
+        let index = slots
+            .iter()
+            .position(|slot| !slot.list && plain_ident(&slot.name) == name)
+            .ok_or_else(|| {
+                Error::new_spanned(field, "event parent must name an own `js_slot` field")
+            })?;
+        Some(quote!(const EVENT_PARENT: Option<usize> = Some(#index);))
+    } else {
+        None
+    };
+    let event_target = (event_target || event_parent.is_some()).then(|| {
+        quote!(
+            const EVENT_TARGET: bool = true;
+        )
+    });
     let declarations = slot_decls(&slots);
     let helpers = slot_trait(&item, &slots)?;
     let class = &item.ident;
@@ -1295,6 +1335,8 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
             const TAG: &'static str = #tag;
             const SLOTS: &'static [::yield_vm::binding::SlotDecl] = #declarations;
             #parent
+            #event_target
+            #event_parent
             #tables
             #payload
         }

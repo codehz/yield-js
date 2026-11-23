@@ -3,9 +3,10 @@ use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{EventListener, EventState, EventTargetState, Object};
 use crate::host::Host;
-use crate::runtime::{Arguments, Invocation};
-use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
+use crate::runtime::{Arguments, HostSlot, Invocation};
+use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
+use std::collections::BTreeSet;
 
 pub(super) fn add_listener(
     vm: &mut Vm,
@@ -152,11 +153,53 @@ fn target_receiver(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> 
     Ok(None)
 }
 
-fn dispatch_path(target: ObjectId) -> Vec<ObjectId> {
-    vec![target]
+struct ListenerPass<'a> {
+    ty: &'a JsString,
+    phase: u8,
+    capture: bool,
 }
 
 impl Vm {
+    // Read only the VM-managed parent slot; never consult JS properties.
+    fn dispatch_path(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        target: ObjectId,
+    ) -> Result<Result<Vec<ObjectId>, Value>, VmError> {
+        let mut path = vec![target];
+        let mut seen = BTreeSet::new();
+        let mut current = target;
+        while let Some(instance) = self.host_instances.get(&current) {
+            let Some(slot) = self.bindings.class_event_parent(instance.class) else {
+                break;
+            };
+            let Some(HostSlot::Js(parent)) = instance.slots.get(slot) else {
+                return Err(VmError::InvalidState(
+                    "Invalid EventTarget parent slot".into(),
+                ));
+            };
+            let parent = match parent.view() {
+                ValueRef::Undefined | ValueRef::Null => break,
+                ValueRef::Object(parent) if self.event_target(parent)?.is_some() => parent,
+                _ => {
+                    let roots = &roots.with(&path);
+                    return Ok(Err(
+                        self.type_error(roots, "EventTarget parent must be an EventTarget")?
+                    ));
+                }
+            };
+            if parent == target || !seen.insert(parent) {
+                return Ok(Err(self.alloc_dom_exception(
+                    "HierarchyRequestError".into(),
+                    "EventTarget parent chain contains a cycle".into(),
+                )));
+            }
+            path.push(parent);
+            current = parent;
+        }
+        Ok(Ok(path))
+    }
+
     pub(crate) fn event_target(&self, id: ObjectId) -> Result<Option<&EventTargetState>, VmError> {
         Ok(match self.heap.get(id)? {
             Object::EventTarget { target, .. } => Some(target),
@@ -198,7 +241,10 @@ impl Vm {
             )));
         }
 
-        let path = dispatch_path(target);
+        let path = match self.dispatch_path(roots, target)? {
+            Ok(path) => path,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
         let roots = &roots.with(&path);
         let state = self.dispatch_state(event)?;
         state.dispatching = true;
@@ -211,11 +257,21 @@ impl Vm {
         let result = (|| {
             for &current in path.iter().rev() {
                 let phase = if current == target { 2 } else { 1 };
-                self.invoke_event_listeners(host, roots, event, current, &ty, phase, true)?;
+                let pass = ListenerPass {
+                    ty: &ty,
+                    phase,
+                    capture: true,
+                };
+                self.invoke_event_listeners(host, roots, event, current, pass)?;
             }
             for &current in path.iter().take(if bubbles { path.len() } else { 1 }) {
                 let phase = if current == target { 2 } else { 3 };
-                self.invoke_event_listeners(host, roots, event, current, &ty, phase, false)?;
+                let pass = ListenerPass {
+                    ty: &ty,
+                    phase,
+                    capture: false,
+                };
+                self.invoke_event_listeners(host, roots, event, current, pass)?;
             }
             Ok::<(), VmError>(())
         })();
@@ -246,22 +302,20 @@ impl Vm {
         roots: &ActiveRoots<'_>,
         event: ObjectId,
         current: ObjectId,
-        ty: &crate::value::JsString,
-        phase: u8,
-        capture: bool,
+        pass: ListenerPass<'_>,
     ) -> Result<(), VmError> {
         let state = self.dispatch_state(event)?;
         if state.stop {
             return Ok(());
         }
-        state.phase = phase;
+        state.phase = pass.phase;
         state.current_target = Some(current);
         let ids: Vec<_> = self
             .event_target(current)?
             .expect("branded dispatch path")
             .listeners
             .iter()
-            .filter(|listener| &listener.ty == ty && listener.capture == capture)
+            .filter(|listener| &listener.ty == pass.ty && listener.capture == pass.capture)
             .map(|listener| listener.id)
             .collect();
 

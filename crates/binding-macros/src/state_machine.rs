@@ -467,6 +467,16 @@ impl Render<'_, '_> {
                 };
                 quote!({ let #f = #callee; let #this = #receiver; let #argv = #args; #call })
             }
+            Effect::Dispatch([target, event]) => {
+                let to = generated("target", stage);
+                let ev = generated("event", stage);
+                let call = if linked {
+                    quote!(#cx.__linked_dispatch_event(#to, #ev, #saved, #index))
+                } else {
+                    quote!(#cx.request_dispatch_event(#to, #ev, #saved, #resume))
+                };
+                quote!({ let #to = #target; let #ev = #event; #call })
+            }
             Effect::Gc if linked => quote!(#cx.__linked_gc(#saved, #index)),
             Effect::Gc => quote!(#cx.request_gc(#saved, #resume)),
             Effect::External(op) => {
@@ -505,6 +515,7 @@ enum Kind<'a> {
 
 enum Effect<'a> {
     Call([Fragment<'a>; 3]),
+    Dispatch([Fragment<'a>; 2]),
     Gc,
     External(Fragment<'a>),
 }
@@ -967,6 +978,12 @@ impl<'a> Graph<'a> {
                 }
                 "Call"
             }
+            Effect::Dispatch(args) => {
+                for arg in args {
+                    self.scan_expr(node, env, arg.as_ref())?;
+                }
+                "Dispatch"
+            }
             Effect::Gc => "Gc",
             Effect::External(op) => {
                 if !self.spawn {
@@ -982,6 +999,7 @@ impl<'a> Graph<'a> {
         let mut rewrite = JumpRewrite::new(&self.loops);
         let args: &mut [Fragment<'_>] = match &mut effect {
             Effect::Call(args) => args.as_mut(),
+            Effect::Dispatch(args) => args.as_mut(),
             Effect::External(op) => std::slice::from_mut(op),
             Effect::Gc => &mut [],
         };
@@ -1770,16 +1788,18 @@ fn effect<'a>(expr: &'a Expr, cx: &str) -> syn::Result<Option<(Effect<'a>, bool)
     let Expr::MethodCall(call) = ungroup(&awaited.base) else {
         return Err(Error::new_spanned(
             awaited,
-            "expected `.await` on the CallCx parameter's `.call`, `.gc`, or `.effect` method",
+            "expected `.await` on the CallCx parameter's `.call`, `.dispatch_event`, `.gc`, or `.effect` method",
         ));
     };
-    if !matches!(call.method.to_string().as_str(), "call" | "gc" | "effect")
-        || !is_cx(ungroup(&call.receiver), cx)
+    if !matches!(
+        call.method.to_string().as_str(),
+        "call" | "dispatch_event" | "gc" | "effect"
+    ) || !is_cx(ungroup(&call.receiver), cx)
         || call.turbofish.is_some()
     {
         return Err(Error::new_spanned(
             awaited,
-            "expected `.await` on the CallCx parameter's `.call`, `.gc`, or `.effect` method",
+            "expected `.await` on the CallCx parameter's `.call`, `.dispatch_event`, `.gc`, or `.effect` method",
         ));
     }
     let effect = if call.method == "gc" {
@@ -1796,6 +1816,15 @@ fn effect<'a>(expr: &'a Expr, cx: &str) -> syn::Result<Option<(Effect<'a>, bool)
             ));
         };
         Effect::External(Fragment::Source(op))
+    } else if call.method == "dispatch_event" {
+        let mut args = call.args.iter();
+        let (Some(target), Some(event), None) = (args.next(), args.next(), args.next()) else {
+            return Err(Error::new_spanned(
+                call,
+                "`cx.dispatch_event` requires a target and an event",
+            ));
+        };
+        Effect::Dispatch([target, event].map(Fragment::Source))
     } else {
         let mut args = call.args.iter();
         let (Some(callee), Some(receiver), Some(argv), None) =

@@ -465,6 +465,14 @@ pub trait HostClass: Sized + 'static {
     /// A derived instance is accepted by base-class methods, and base slots
     /// occupy the leading part of its slot layout.
     const PARENT: Option<&'static str> = None;
+    /// Opt into the EventTarget brand. Host subclasses inherit the brand.
+    /// An opted-in class with a host parent requires that parent to carry
+    /// the brand, so the ordinary host prototype chain is preserved.
+    const EVENT_TARGET: bool = false;
+    /// Index of a single-JS slot declared by this class, not a flattened
+    /// index. `None` inherits the host parent's event parent source, if any.
+    /// An explicit slot requires an explicit or inherited EventTarget brand.
+    const EVENT_PARENT: Option<usize> = None;
     const SLOTS: &'static [SlotDecl] = &[];
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
@@ -609,6 +617,10 @@ struct ClassDecl {
     tag: String,
     parent_tag: Option<&'static str>,
     parent: Option<ClassId>,
+    declares_event_target: bool,
+    declared_event_parent: Option<usize>,
+    event_target: bool,
+    event_parent: Option<usize>,
     /// Leading slots inherited from the parent chain, followed by this
     /// class's own declarations. `slot_base` is the first own slot.
     slots: Vec<SlotDecl>,
@@ -947,6 +959,16 @@ impl Bindings {
         self.inner.classes[class].parent
     }
 
+    /// Whether instances of this class carry the EventTarget brand.
+    pub fn class_is_event_target(&self, class: ClassId) -> bool {
+        self.inner.classes[class].event_target
+    }
+
+    /// Absolute index of the event parent source in the flattened slot layout.
+    pub fn class_event_parent(&self, class: ClassId) -> Option<usize> {
+        self.inner.classes[class].event_parent
+    }
+
     /// Whether `class` is `base` or inherits from it.
     pub fn class_is_a(&self, class: ClassId, base: ClassId) -> bool {
         let mut current = Some(class);
@@ -1163,6 +1185,10 @@ impl ClassDecl {
             tag: T::TAG.to_owned(),
             parent_tag: T::PARENT,
             parent: None,
+            declares_event_target: T::EVENT_TARGET,
+            declared_event_parent: T::EVENT_PARENT,
+            event_target: false,
+            event_parent: None,
             slot_base: 0,
             slots: T::SLOTS.to_vec(),
             methods: T::METHODS.to_vec(),
@@ -1370,11 +1396,41 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
             .map(|parent| classes[parent].slots.clone())
             .unwrap_or_default();
         let slot_base = inherited.len();
-        let own = std::mem::take(&mut classes[index].slots);
+        let inherited_event_target = parent.is_some_and(|parent| classes[parent].event_target);
+        let inherited_event_parent = parent.and_then(|parent| classes[parent].event_parent);
+        let class = &mut classes[index];
+        if parent.is_some() && class.declares_event_target && !inherited_event_target {
+            return Err(format!(
+                "class {:?} opts into EventTarget but its host parent is not an EventTarget",
+                class.tag
+            ));
+        }
+        let own = std::mem::take(&mut class.slots);
+        let event_target = class.declares_event_target || inherited_event_target;
+        let event_parent = if let Some(slot) = class.declared_event_parent {
+            let tag = &class.tag;
+            if !event_target {
+                return Err(format!(
+                    "class {tag:?} declares an event parent without EventTarget branding"
+                ));
+            }
+            if !own
+                .get(slot)
+                .is_some_and(|slot| matches!(slot.kind, SlotKind::Js))
+            {
+                return Err(format!(
+                    "class {tag:?} event parent index {slot} must name an own single-JS slot"
+                ));
+            }
+            Some(slot_base + slot)
+        } else {
+            inherited_event_parent
+        };
         let mut slots = inherited;
         slots.extend(own);
-        let class = &mut classes[index];
         class.parent = parent;
+        class.event_target = event_target;
+        class.event_parent = event_parent;
         class.slot_base = slot_base;
         class.slots = slots;
     }
@@ -1473,6 +1529,15 @@ fn fingerprint(
             &mut hasher,
             format!("class {} parent={:?}", class.tag, class.parent_tag),
         );
+        if class.declares_event_target || class.declared_event_parent.is_some() {
+            hash_line(
+                &mut hasher,
+                format!(
+                    "event-target={} own-parent-slot={:?}",
+                    class.declares_event_target, class.declared_event_parent
+                ),
+            );
+        }
         for slot in &class.slots {
             hash_line(&mut hasher, format!("slot {} {:?}", slot.name, slot.kind));
         }

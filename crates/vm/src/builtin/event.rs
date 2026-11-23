@@ -12,7 +12,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
-use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
+use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::Vm;
 
 pub(crate) const EVENT_ROOT: &str = "event";
@@ -21,6 +21,7 @@ pub(crate) const CUSTOM_ROOT: &str = "customEvent";
 const CUSTOM_PROTOTYPE: &str = "customEvent.prototype";
 pub(crate) const TARGET_ROOT: &str = "eventTarget";
 pub(crate) const TARGET_PROTOTYPE: &str = "eventTarget.prototype";
+pub(crate) const TRUSTED_DISPATCH_ROOT: &str = "eventTarget.trustedDispatch";
 
 const EVENT: IntrinsicKey = IntrinsicKey::new("Event", Slot::Global, "");
 const CUSTOM: IntrinsicKey = IntrinsicKey::new("CustomEvent", Slot::Global, "");
@@ -47,6 +48,11 @@ pub(crate) const ROOTS: &[RootSpec] = &[
         .backlink(Some(Attributes::METHOD)),
     RootSpec::new(TARGET_PROTOTYPE, RootKind::Plain, OBJECT_PARENT),
     RootSpec::new(TRUSTED_ROOT, RootKind::Native(TRUSTED), FUNCTION_PARENT),
+    RootSpec::new(
+        TRUSTED_DISPATCH_ROOT,
+        RootKind::Native(TRUSTED_DISPATCH_KEY),
+        FUNCTION_PARENT,
+    ),
 ];
 
 const CONSTRUCTORS: &[IntrinsicDef] = &[
@@ -519,6 +525,26 @@ fn construct_event(
 }
 
 impl Vm {
+    /// Allocate an initialized CustomEvent for a host binding.
+    pub(crate) fn alloc_custom_event(
+        &mut self,
+        ty: JsString,
+        detail: Value,
+        bubbles: bool,
+        cancelable: bool,
+    ) -> Result<Value, VmError> {
+        let event = EventState {
+            ty,
+            detail: Some(detail),
+            bubbles,
+            cancelable,
+            time_stamp: self.clock.elapsed_ms() as f64,
+            initialized: true,
+            ..EventState::default()
+        };
+        self.alloc_event(None, event)
+    }
+
     /// Allocate an event without consulting the corresponding global constructor.
     pub(crate) fn alloc_event(
         &mut self,

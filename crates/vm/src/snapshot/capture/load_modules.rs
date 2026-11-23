@@ -61,11 +61,21 @@ pub(super) fn load_host_instances(
                 record.object
             )));
         }
+        let class = bindings.class_by_tag(&record.class).ok_or_else(|| {
+            VmError::InvalidSnapshot(format!("unknown host class {:?}", record.class))
+        })?;
+        let is_event_target = bindings.class_is_event_target(class);
         match heap.get(record.object) {
-            Ok(Object::Plain(_)) => {}
+            Ok(Object::EventTarget { .. }) if is_event_target => {}
+            Ok(Object::Plain(_)) if !is_event_target => {}
             Ok(_) => {
+                let expected = if is_event_target {
+                    "an EventTarget"
+                } else {
+                    "a plain object"
+                };
                 return Err(VmError::InvalidSnapshot(format!(
-                    "host instance {} is not a plain object",
+                    "host instance {} is not {expected}",
                     record.object
                 )));
             }
@@ -76,9 +86,6 @@ pub(super) fn load_host_instances(
                 )));
             }
         }
-        let class = bindings.class_by_tag(&record.class).ok_or_else(|| {
-            VmError::InvalidSnapshot(format!("unknown host class {:?}", record.class))
-        })?;
         let expected_slots = bindings.class_slots(class);
         if record.slots.len() != expected_slots.len() {
             return Err(VmError::InvalidSnapshot(format!(
