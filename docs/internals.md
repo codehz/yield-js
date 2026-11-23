@@ -32,14 +32,15 @@ yield-harness  →  yield-compiler  →  yield-vm
 公共入口：
 
 - `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
-- `Vm::new(build, &mut host)` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
-- `Vm::new_with_base_url(build, host, base_url)` 在任何模块求值之前设置默认基准。快照是恢复时唯一的基准来源；活动的 `URL`、`URLSearchParams` 及迭代器由普通堆强边追踪。
+- `Vm::new(build, &mut host, VmOptions::default())` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
+- `VmOptions::default()` 不设置基准 URL 或测试时钟。用 `VmOptions { base_url: Some("https://example.com/"), ..Default::default() }` 可在任何模块求值之前设置默认基准。构造和恢复的选项都可通过 `test_clock` 注入 `Arc<dyn TestClock>`，默认使用正常时钟。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
 - `Vm::start(host, "run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量，随后宿主自行调用 `Vm::run_until_idle(host)`。
 - `Vm::snapshot(&[roots])` 仅在微任务队列为空时可用。
 - `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
-- `Vm::restore(snapshot, same_build, host)` 恢复由 VM 捕获、未经篡改的有效镜像；来源和完整性由调用方保证。默认入口不重查堆图。开发、测试和诊断用 `Vm::restore_validated` 执行完整校验；它也不适用于不可信输入。
-- `VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表。线程内可克隆句柄传给 `Vm::new_verified` / `Vm::restore_verified`；每个 VM 仍独立链接宿主、持有堆和缓存，恢复仍要求精确匹配构建身份与绑定指纹。
+- `Vm::restore(snapshot, same_build, &mut host, RestoreOptions::default())` 不重新求值模块。恢复的基准 URL（包括没有基准的情况）只来自快照；`RestoreOptions` 没有 `base_url` 字段，不能覆盖存档的基准。活动的 `URL`、`URLSearchParams` 及迭代器由普通堆强边追踪。
+- `RestoreOptions::default()` 使用 `SnapshotValidation::Trusted`，只接收由 VM 捕获、未经篡改的有效镜像，不重查堆图。开发、测试和诊断可传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }` 执行完整不变量审计。两种模式都要求调用方保证来源和完整性并限制读入大小；完整审计并不使不可信输入变得安全。
+- `Vm::new` 和 `Vm::restore` 都直接接受 `Build` 或 `VerifiedBuild`。传入 `Build` 时当次完整校验；`VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表，可在线程内克隆复用。两种输入都为每个 VM 独立链接宿主、持有堆和缓存；恢复仍要求精确匹配构建身份与绑定指纹。
 - `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
 
 ## 2. 挂起、恢复与快照不变量（不得弱化）
@@ -128,8 +129,8 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `crates/vm/src/bytecode.rs` — `Instr`（再导出）、`ResumeEntry`、`GeneratorEntry`、`ExceptionHandler`、`Build::to_bytes` / `Build::from_bytes`
 - `crates/vm/src/bytecode/validate.rs` — `Build::validate`，检查模块、函数、指令与续体表
 - `crates/vm/src/vm.rs` — `get_export`、`start`、`run_until_idle`、`complete_operation`、`collect_garbage`
-- `crates/vm/src/init.rs` — VM 构造与模块初始化：`Vm::new*`、`prepare`、导入链接（`resolve_imports` / `install_imports` / `restore_imports`）与模块图实例化、求值
-- `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、JSON codec
+- `crates/vm/src/init.rs` — VM 构造与模块初始化：`Vm::new`、`VmOptions`、`prepare`、导入链接（`resolve_imports` / `install_imports` / `restore_imports`）与模块图实例化、求值
+- `crates/vm/src/snapshot/` — `Vm::snapshot`、`Vm::restore`、恢复选项与快照编解码
 - `crates/vm/src/gc.rs` — tracing GC 的根与可达性遍历；堆边统一由 `Heap::write_edges` 提供
 - `crates/harness/src/case.rs` — `// @` 指令运行器
 - `crates/harness/build.rs` — 生成 `OUT_DIR/cases.rs`

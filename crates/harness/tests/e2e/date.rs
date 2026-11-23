@@ -3,7 +3,10 @@
 use std::{cell::Cell, sync::Arc};
 
 use yield_harness::{TestHost, build};
-use yield_vm::{Bindings, Host, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
+use yield_vm::{
+    Bindings, Host, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
+    VmError,
+};
 
 struct CountingHost {
     bindings: Arc<Bindings>,
@@ -62,6 +65,7 @@ fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
             "#,
         ),
         &mut host,
+        Default::default(),
     )
     .unwrap();
     assert_eq!(host.clock_reads.get(), 0);
@@ -127,6 +131,7 @@ fn date_new_york_gap_overlap_and_seasonal_offsets() {
             "#,
         ),
         &mut host,
+        Default::default(),
     )
     .unwrap();
     for (entry, expected) in [
@@ -177,6 +182,7 @@ fn date_new_york_far_future_rules_and_historical_subminute_offset() {
             "#,
         ),
         &mut host,
+        Default::default(),
     )
     .unwrap();
     for (entry, expected) in [
@@ -215,6 +221,7 @@ fn date_invalid_host_zone_faults_only_when_local_rules_are_needed() {
             "#,
         ),
         &mut host,
+        Default::default(),
     )
     .unwrap();
     for entry in ["formatLocal", "getLocal", "constructLocal", "parseLocal"] {
@@ -248,7 +255,7 @@ const WAIT_WITH_DATES: &str = r#"
 fn date_snapshot_preserves_slots_and_properties_but_uses_restored_host() {
     let program = build(WAIT_WITH_DATES);
     let mut old_host = TestHost::new();
-    let mut vm = Vm::new(program.clone(), &mut old_host).unwrap();
+    let mut vm = Vm::new(program.clone(), &mut old_host, Default::default()).unwrap();
     let result = vm.start(&mut old_host, "run", vec![]).unwrap();
     old_host.advance(&mut vm, 5).unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
@@ -263,7 +270,13 @@ fn date_snapshot_preserves_slots_and_properties_but_uses_restored_host() {
     let mut new_host = TestHost::new();
     new_host.clock().set_time(10_000).unwrap();
     new_host.set_time_zone("America/New_York");
-    let mut vm = Vm::restore(Snapshot::from_json(&json).unwrap(), program, &mut new_host).unwrap();
+    let mut vm = Vm::restore(
+        Snapshot::from_json(&json).unwrap(),
+        program,
+        &mut new_host,
+        Default::default(),
+    )
+    .unwrap();
     vm.start_recovered_operations().unwrap();
     assert_eq!(
         vm.start(&mut new_host, "readClock", vec![]).unwrap(),
@@ -286,7 +299,7 @@ fn date_restore_rejects_out_of_range_serialized_time_slot() {
     const OUT_OF_RANGE: i64 = 8_640_000_000_000_001;
     let program = build("export function run() { return new Date(123); }");
     let mut host = TestHost::new();
-    let mut vm = Vm::new(program.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(program.clone(), &mut host, Default::default()).unwrap();
     let date = vm.start(&mut host, "run", vec![]).unwrap();
     let snapshot = vm.snapshot(&[date]).unwrap();
     let mut json = serde_json::to_value(&snapshot).unwrap();
@@ -303,7 +316,15 @@ fn date_restore_rejects_out_of_range_serialized_time_slot() {
     *slot = serde_json::json!(OUT_OF_RANGE);
     let corrupt = Snapshot::from_json(&json.to_string()).unwrap();
     assert!(matches!(
-        Vm::restore_validated(corrupt, program, &mut host),
+        Vm::restore(
+            corrupt,
+            program,
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("TimeClip")
     ));
 }

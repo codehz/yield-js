@@ -3,7 +3,7 @@
 use yield_harness::TestHost;
 use yield_vm::heap::GeneratorStatus;
 use yield_vm::snapshot::ContinuationTargetRecord;
-use yield_vm::{Completion, PromiseState, Value, Vm, VmError};
+use yield_vm::{Completion, PromiseState, RestoreOptions, SnapshotValidation, Value, Vm, VmError};
 
 use super::support::{Suspended, TEST_DECLARATIONS, declared, json_round_trip};
 
@@ -263,7 +263,15 @@ fn restore_rejects_an_out_of_range_generator_resume() {
         .expect("generator frame");
     record.status = GeneratorStatus::Suspended(7);
     assert!(matches!(
-        Vm::restore_validated(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Vm::restore(
+            captured,
+            suspended.vm.build().clone(),
+            &mut TestHost::default(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("invalid resume index")
     ));
 }
@@ -279,7 +287,15 @@ fn restore_rejects_a_generator_missing_a_saved_value() {
         .expect("generator frame");
     record.values.pop();
     assert!(matches!(
-        Vm::restore_validated(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Vm::restore(
+            captured,
+            suspended.vm.build().clone(),
+            &mut TestHost::default(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("wrong number of saved values")
     ));
 }
@@ -295,7 +311,15 @@ fn restore_rejects_a_generator_that_was_captured_while_executing() {
         .expect("generator frame");
     record.status = GeneratorStatus::Executing;
     assert!(matches!(
-        Vm::restore_validated(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Vm::restore(
+            captured,
+            suspended.vm.build().clone(),
+            &mut TestHost::default(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("captured while executing")
     ));
 }
@@ -332,7 +356,15 @@ fn restore_rejects_a_duplicate_async_request_promise() {
     let first = record.requests[0].promise;
     record.requests[1].promise = first;
     assert!(matches!(
-        Vm::restore_validated(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Vm::restore(
+            captured,
+            suspended.vm.build().clone(),
+            &mut TestHost::default(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("two requests for one Promise")
     ));
 }
@@ -369,7 +401,15 @@ fn restore_rejects_a_continuation_targeting_another_generator() {
     let continuation = captured.continuations.first_mut().expect("continuation");
     continuation.target = ContinuationTargetRecord::Generator(unstarted);
     assert!(matches!(
-        Vm::restore_validated(captured, suspended.vm.build().clone(), &mut TestHost::default()),
+        Vm::restore(
+            captured,
+            suspended.vm.build().clone(),
+            &mut TestHost::default(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("is not awaiting")
     ));
 }

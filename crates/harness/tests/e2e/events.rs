@@ -3,8 +3,8 @@ use std::sync::Arc;
 use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
 use yield_vm::{
-    Bindings, Host, Instance, JsResult, JsValue, This, Value, Vm, host_bindings, host_class,
-    host_module, methods,
+    Bindings, Host, Instance, JsResult, JsValue, RestoreOptions, SnapshotValidation, This, Value,
+    Vm, host_bindings, host_class, host_module, methods,
 };
 
 #[test]
@@ -28,7 +28,7 @@ fn abort_gc_keeps_only_observable_dependents() {
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
     let mut host = EventHost::new();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     vm.start(&mut host, "setup", vec![]).unwrap();
     assert!(vm.collect_garbage(&[]).unwrap() > 0);
     let image = vm.snapshot(&[]).unwrap();
@@ -39,7 +39,16 @@ fn abort_gc_keeps_only_observable_dependents() {
     assert!(!image.objects.iter().any(|record| {
         matches!(&record.object, yield_vm::Object::EventTarget { target, .. } if !target.listeners.is_empty())
     }));
-    let mut restored = Vm::restore_validated(image, build, &mut host).unwrap();
+    let mut restored = Vm::restore(
+        image,
+        build,
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         restored.start(&mut host, "run", vec![]).unwrap(),
         Value::number(1.0)
@@ -131,7 +140,7 @@ fn missing_timer_service_only_disables_timeout() {
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
     let mut host = EventHost::new();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::boolean(true)
@@ -176,10 +185,19 @@ fn host_events_keep_identity_and_freeze_parent_path_across_callbacks_and_restore
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
     let mut host = EventHost::new();
-    let vm = Vm::new(build.clone(), &mut host).unwrap();
+    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let image = vm.snapshot(&[]).unwrap();
     let mut new_host = EventHost::new();
-    let mut restored = Vm::restore_validated(image, build, &mut new_host).unwrap();
+    let mut restored = Vm::restore(
+        image,
+        build,
+        &mut new_host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(
         restored.start(&mut new_host, "run", vec![]).unwrap(),
         Value::boolean(true)
@@ -213,7 +231,7 @@ fn global_events_and_handler_order_survive_binary_restore() {
     "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let promise = vm.start(&mut host, "makeEvents", vec![]).unwrap();
     vm.run_until_idle(&mut host).unwrap();
     let error = vm.start(&mut host, "errorValue", vec![]).unwrap();
@@ -250,15 +268,40 @@ fn global_events_and_handler_order_survive_binary_restore() {
         .unwrap();
     *event = u32::MAX;
     assert!(matches!(
-        Vm::restore_validated(invalid_payload, build.clone(), &mut host),
+        Vm::restore(
+            invalid_payload,
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut host = TestHost::default();
     assert!(matches!(
-        Vm::restore_validated(invalid_handler, build.clone(), &mut host),
+        Vm::restore(
+            invalid_handler,
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
-    let mut vm = Vm::restore_validated(decoded, build, &mut host).unwrap();
+    let mut vm = Vm::restore(
+        decoded,
+        build,
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(vm.get_export("order").unwrap(), Value::string("abc".into()));
     for (name, expected) in [
         ("errorValue", error),

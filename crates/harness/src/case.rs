@@ -1,4 +1,7 @@
-use yield_vm::{Completion, Host, JsString, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
+use yield_vm::{
+    Completion, Host, JsString, JsValue, PromiseState, RestoreOptions, Snapshot, Value, ValueRef,
+    Vm, VmOptions,
+};
 
 use crate::{TestHost, compile_source};
 
@@ -26,8 +29,15 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let build = compile_source(source).map_err(|error| format!("{name}: compile: {error}"))?;
     let mut host = TestHost::default();
     let clock = host.clock().clone();
-    let mut vm = Vm::new_with_test_clock(build.clone(), &mut host, clock)
-        .map_err(|error| format!("{name}: vm: {error}"))?;
+    let mut vm = Vm::new(
+        build.clone(),
+        &mut host,
+        VmOptions {
+            test_clock: Some(clock),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| format!("{name}: vm: {error}"))?;
     let result = vm
         .start(&mut host, "run", args)
         .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
@@ -464,8 +474,16 @@ fn restore(
     let snapshot =
         Snapshot::from_json(&json).map_err(|error| located(name, line, "@restore", error))?;
     let clock = host.clock().clone();
-    *vm = Vm::restore_with_test_clock(snapshot, build.clone(), host, clock)
-        .map_err(|error| located(name, line, "@restore", error))?;
+    *vm = Vm::restore(
+        snapshot,
+        build.clone(),
+        host,
+        RestoreOptions {
+            test_clock: Some(clock),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| located(name, line, "@restore", error))?;
     // The snapshot includes the host's root graph and restore preserves its
     // object and symbol IDs, so the retained values now refer to that graph.
     vm.start_recovered_operations()

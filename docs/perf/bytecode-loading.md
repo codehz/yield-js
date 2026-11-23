@@ -4,7 +4,7 @@
 
 ## 启动准备分项
 
-计时点在 `Vm::new_profiled` 的启动路径读取；普通构造和恢复不采集。逐样本核对三个子项之和等于 `startup_prepare`。React 首提交中位数：
+计时点在内部基准入口 `Vm::new_profiled` 的启动路径读取；普通 `Vm::new` 和 `Vm::restore` 不采集。选项式 API 不改变该计时入口。逐样本核对三个子项之和等于 `startup_prepare`。React 首提交中位数：
 
 | 阶段 | A | B |
 | --- | ---: | ---: |
@@ -38,7 +38,7 @@
 
 ## 复用已验证的构建
 
-`VerifiedBuild::new` 完整校验 `Build` 并派生函数索引和调用元数据；`Vm::new_verified` / `Vm::restore_verified` 共享不可变的线程内句柄，不共享堆、缓存或宿主状态。普通入口仍每次校验；复用入口不省略新 VM 的宿主链接、模块初始化或快照校验。
+`Vm::new` 和 `Vm::restore` 都接受 `Build` 或 `VerifiedBuild`，选项与构建输入类型无关。传入 `Build` 仍每次校验；`VerifiedBuild::new` 一次性完整校验 `Build` 并派生函数索引和调用元数据，然后可在线程内克隆复用不可变句柄，不共享堆、缓存或宿主状态。复用只省掉重复构建校验和派生，不省略每个 VM 的宿主链接、启动时的模块初始化，或恢复时按选项执行的镜像校验。
 
 ```sh
 env -u YIELD_VM_BENCH_DIAGNOSTICS cargo bench --locked -p yield-harness --bench baseline -- --verified-reuse --samples 11
@@ -63,7 +63,7 @@ React 构建约 752 KB，一次校验和派生约 1.42 ms；调用方已持有�
 env -u YIELD_VM_BENCH_DIAGNOSTICS cargo bench --locked -p yield-harness --bench baseline -- --snapshot-codecs --samples 15
 ```
 
-三批独立进程，15 个配对样本，交替两格式顺序；对同一捕获记录分别计编码、解码和 `Vm::restore_verified`，已验证构建计时外共享。[原始 CSV](bytecode-loading/snapshot-codecs/)。
+三批独立进程，15 个配对样本，交替两格式顺序；对同一捕获记录分别计编码、解码和恢复，已验证构建计时外共享（现在直接传给 `Vm::restore`）。[原始 CSV](bytecode-loading/snapshot-codecs/)。
 
 | 工作负载 | JSON → 二进制（字节） | 编码降幅 | 解码降幅 | 解码 + 恢复降幅 |
 | --- | ---: | ---: | ---: | ---: |
@@ -81,7 +81,7 @@ env -u YIELD_VM_BENCH_DIAGNOSTICS cargo bench --locked -p yield-harness --bench 
 env -u YIELD_VM_BENCH_DIAGNOSTICS cargo bench --locked -p yield-harness --bench baseline -- --restore-profile --samples 15
 ```
 
-对同一镜像和已验证构建交替跑带计时点入口和普通恢复入口；二进制解码、构建校验、宿主重挂和续跑不计入恢复。各阶段占比先按样本计算再取中位数。[原始 CSV](bytecode-loading/restore-profile/)。
+对同一镜像和已验证构建交替跑内部基准入口 `Vm::restore_profiled`（仍对完整校验路径分项计时）和不采集计时的完整校验恢复；普通入口通过 `RestoreOptions::validation` 选择 `SnapshotValidation::Full` 来对齐工作量。二进制解码、构建校验、宿主重挂和续跑不计入恢复。各阶段占比先按样本计算再取中位数。[原始 CSV](bytecode-loading/restore-profile/)。
 
 | 阶段 | React 首提交后（2,195 对象，2.19–2.21 ms） | 四个挂起负载（517–524 对象，0.47–0.48 ms） |
 | --- | ---: | ---: |
@@ -98,7 +98,7 @@ env -u YIELD_VM_BENCH_DIAGNOSTICS cargo bench --locked -p yield-harness --bench 
 
 ## 可信恢复与诊断审计分离
 
-默认 `Vm::restore` / `Vm::restore_verified` 只接收可信、未经篡改的 VM 镜像，不重查堆图、模块根与 getter、Symbol 表、拒绝通知队列、续体值引用及 Promise 关系；格式、Build ID、绑定指纹和宿主重链接仍检查，重建过程中的局部检查和宿主 codec 仍执行。开发和诊断使用 `Vm::restore_validated`；镜像编码不变。
+`Vm::restore` 默认使用 `SnapshotValidation::Trusted`，只接收可信、未经篡改的 VM 镜像，不重查堆图、模块根与 getter、Symbol 表、拒绝通知队列、续体值引用及 Promise 关系；格式、Build ID、绑定指纹和宿主重链接仍检查，重建过程中的局部检查和宿主 codec 仍执行。开发和诊断可用 `RestoreOptions::validation` 选择 `SnapshotValidation::Full`，无论传入哪种构建都可以选择任一模式。完整审计不扩大信任边界：两种模式都由调用方负责镜像来源、完整性和读入大小。选项式 API 不改变镜像编码或两条路径的工作量；下列数字为既有对照数据，而非 API 变更后的重新测量。
 
 同一 release 进程内用同一构建和快照交替对照完整校验与可信路径，三批各 15 个配对样本，均验证续跑结果。[原始 CSV](bytecode-loading/trusted-restore/)。
 

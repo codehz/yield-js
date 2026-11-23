@@ -21,3 +21,9 @@ pub enum VmError {
     #[error("script threw: {0:?}")]
     Thrown(Value),
 }
+
+impl From<std::convert::Infallible> for VmError {
+    fn from(error: std::convert::Infallible) -> Self {
+        match error {}
+    }
+}

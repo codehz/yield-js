@@ -5,7 +5,10 @@ use yield_compiler::{CompileError, MemoryResolver, compile};
 use yield_harness::TestHost;
 use yield_vm::bytecode::ModuleTarget;
 use yield_vm::heap::Property;
-use yield_vm::{Build, Completion, JsString, JsValue, Object, PromiseState, Value, Vm, VmError};
+use yield_vm::{
+    Build, Completion, JsString, JsValue, Object, PromiseState, RestoreOptions, SnapshotValidation,
+    Value, Vm, VmError,
+};
 
 fn link<'a>(
     files: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -19,7 +22,7 @@ fn link<'a>(
 fn run(files: &[(&str, &str)], expected: f64) {
     let build = link(files.iter().copied(), None).unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(expected)
@@ -161,7 +164,7 @@ fn distinct_targets_are_omitted_unless_explicitly_shadowed() {
     )
     .unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert!(vm.get_export("same").is_err());
     assert_eq!(vm.get_export("left").unwrap(), Value::number(3.0));
     assert_eq!(
@@ -223,7 +226,7 @@ fn preload_and_entry_share_state_and_only_entry_exports_are_public() {
     assert_eq!(build.build_id, reversed.build_id);
 
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(1.0)
@@ -284,7 +287,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
         .position(|module| module.id == "counter.js")
         .unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let result = vm.start(&mut host, "run", vec![]).unwrap();
     vm.run_until_idle(&mut host).unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
@@ -298,7 +301,15 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     assert!(bad_env.module_envs[counter].is_some());
     bad_env.module_envs[counter] = Some(bad_env.module_namespaces[counter]);
     assert!(matches!(
-        Vm::restore_validated(bad_env, build.clone(), &mut host),
+        Vm::restore(
+            bad_env,
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
 
@@ -327,7 +338,15 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     assert_ne!(*get, Some(wrong_getter));
     *get = Some(wrong_getter);
     assert!(matches!(
-        Vm::restore_validated(bad_getter, build.clone(), &mut host),
+        Vm::restore(
+            bad_getter,
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
 
@@ -343,11 +362,11 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     *module = u32::MAX;
     bad_build.finalize();
     assert!(matches!(
-        Vm::new(bad_build, &mut host),
+        Vm::new(bad_build, &mut host, Default::default()),
         Err(VmError::InvalidBuild(_))
     ));
 
-    let mut vm = Vm::restore(snapshot, build, &mut host).unwrap();
+    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     host.complete(
         &mut vm,
@@ -370,7 +389,7 @@ fn shared_root_is_evaluated_once_before_installing_its_getters() {
         export function run() { return !installedEarly && globalThis.count === 1 && globalThis.executions === 1; }
     "#)], Some("./main.js")).unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::boolean(true)
@@ -391,11 +410,12 @@ fn restores_captured_block_bindings_created_during_evaluation() {
     )
     .unwrap();
     let mut host = TestHost::default();
-    let vm = Vm::new(build.clone(), &mut host).unwrap();
+    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let mut vm = Vm::restore(
         json_round_trip(&vm.snapshot(&[]).unwrap()),
         build,
         &mut host,
+        Default::default(),
     )
     .unwrap();
     assert_eq!(

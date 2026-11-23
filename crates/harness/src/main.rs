@@ -236,7 +236,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut vm = Vm::new(build.clone(), &mut host)?;
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default())?;
     let result = vm.start(&mut host, "run", vec![JsValue::string("input")])?;
     vm.run_until_idle(&mut host)?;
     println!(
@@ -251,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     drop(vm);
 
-    let mut vm = Vm::restore(first, build.clone(), &mut host)?;
+    let mut vm = Vm::restore(first, build.clone(), &mut host, Default::default())?;
     vm.start_recovered_operations()?;
     println!(
         "restored snapshot 1; inspect/seed calls = {}/{}",
@@ -272,7 +272,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     drop(vm);
 
-    let mut vm = Vm::restore(second, build, &mut host)?;
+    let mut vm = Vm::restore(second, build, &mut host, Default::default())?;
     vm.start_recovered_operations()?;
     host.complete(&mut vm, "b", JsValue::number(3.0))?;
     vm.run_until_idle(&mut host)?;

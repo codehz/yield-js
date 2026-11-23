@@ -32,7 +32,7 @@ fn build_stack(options: &CompileOptions, import: &str, alias: &str) -> Build {
 
 fn stack_text(build: Build, entry: &str) -> String {
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     let stack = vm.start(&mut host, entry, vec![]).unwrap();
     text(&stack)
 }
@@ -91,7 +91,7 @@ fn retains_creation_stack_across_snapshot_restore() {
     options.framework_modules.insert("lib/vendor.js".into());
     let build = build_stack(&options, "./lib/vendor.js", "relay");
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let result = vm.start(&mut host, "run", Vec::<JsValue>::new()).unwrap();
     vm.run_until_idle(&mut host).unwrap();
     let snapshot = vm.snapshot(std::slice::from_ref(&result)).unwrap();
@@ -107,7 +107,7 @@ fn retains_creation_stack_across_snapshot_restore() {
     };
     let original = finish(vm, &mut host);
     let mut restored_host = TestHost::default();
-    let mut restored = Vm::restore(decoded, build, &mut restored_host).unwrap();
+    let mut restored = Vm::restore(decoded, build, &mut restored_host, Default::default()).unwrap();
     restored.start_recovered_operations().unwrap();
     assert_eq!(finish(restored, &mut restored_host), original);
     assert_eq!(

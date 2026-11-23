@@ -7,7 +7,8 @@ use yield_harness::{LabelService, Wait};
 use yield_vm::binding::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::{
-    Bindings, Completion, GuestOutcome, Host, HostStep, JsResult, JsValue, Value, Vm, VmError,
+    Bindings, Completion, GuestOutcome, Host, HostStep, JsResult, JsValue, RestoreOptions,
+    SnapshotValidation, Value, Vm, VmError,
 };
 
 struct TaskHost {
@@ -144,7 +145,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         &declared(include_str!("../dts/task.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let result = vm.start(&mut host, "run", vec![]).unwrap();
     let yield_vm::ValueRef::Number(handle) = result.view() else {
         panic!("expected numeric handle");
@@ -183,7 +184,15 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         mutate(&mut image);
         assert!(
             matches!(
-                Vm::restore_validated(image, build.clone(), &mut host),
+                Vm::restore(
+                    image,
+                    build.clone(),
+                    &mut host,
+                    RestoreOptions {
+                        validation: SnapshotValidation::Full,
+                        ..Default::default()
+                    },
+                ),
                 Err(VmError::InvalidSnapshot(_))
             ),
             "accepted {label}"
@@ -192,7 +201,13 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 
     for cancel in [true, false] {
-        let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
+        let mut vm = Vm::restore(
+            snapshot.clone(),
+            build.clone(),
+            &mut host,
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(host.labels.token("wait:task"), None);
         vm.start_recovered_operations().unwrap();
         let token = host.labels.token("wait:task").unwrap();
@@ -447,7 +462,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         &declared(include_str!("../dts/branch.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "immediate", vec![JsValue::number(2.0)])
             .unwrap(),
@@ -477,7 +492,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(host.labels.pending_labels(), ["wait:one"]);
     let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
-    vm = Vm::restore(snapshot, build.clone(), &mut host).unwrap();
+    vm = Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     let first = host.labels.token("wait:one").unwrap();
     vm.complete_operation(first, Completion::Fulfilled(JsValue::number(5.0)))
@@ -492,7 +507,13 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(Value::number(snapshot.host_tasks[0].id as f64), handle);
     for cancel in [true, false] {
-        let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host).unwrap();
+        let mut vm = Vm::restore(
+            snapshot.clone(),
+            build.clone(),
+            &mut host,
+            Default::default(),
+        )
+        .unwrap();
         vm.start_recovered_operations().unwrap();
         let token = host.labels.token("wait:again").unwrap();
         if cancel {
@@ -559,7 +580,7 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     "#,
         &["repeat"],
     );
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let handle = vm.start(&mut host, "run", vec![]).unwrap();
     let first = host.labels.token("wait:repeat").unwrap();
     let first_snapshot = vm.snapshot(&[]).unwrap();
@@ -586,7 +607,7 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
         Err(VmError::UnknownOperation(_))
     ));
 
-    vm = Vm::restore(second_snapshot, build, &mut host).unwrap();
+    vm = Vm::restore(second_snapshot, build, &mut host, Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     let recovered = host.labels.token("wait:repeat").unwrap();
     assert!(matches!(
@@ -640,7 +661,7 @@ fn while_evaluates_once_per_test_and_while_let_preserves_both_bindings() {
     "#,
         &["countWhile", "countWhileLet"],
     );
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![JsValue::number(0.0)])
             .unwrap(),
@@ -673,7 +694,7 @@ fn labeled_jumps_skip_the_tail_and_native_for_can_exit_the_graph_loop() {
     "#,
         &["labeled", "nativeFor", "selectorJump", "countWhile"],
     );
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(2.0)

@@ -4,7 +4,10 @@ use super::support::{RUN, Suspended, json_round_trip};
 use yield_harness::{RejectionEvent, TestHost, build};
 use yield_vm::heap::PromiseCallback;
 use yield_vm::snapshot::OrdinaryTask;
-use yield_vm::{Completion, JsValue, Object, ObjectId, PromiseState, Value, ValueRef, Vm, VmError};
+use yield_vm::{
+    Completion, JsValue, Object, ObjectId, PromiseState, RestoreOptions, SnapshotValidation, Value,
+    ValueRef, Vm, VmError,
+};
 
 #[test]
 fn script_reaction_survives_restore_and_runs_on_fulfill() {
@@ -45,7 +48,7 @@ export async function run() {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host, Default::default()).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     vm.run_until_idle(&mut host).expect("await");
     let error = vm.snapshot(&[result]).expect_err("unrooted resolve");
@@ -199,7 +202,7 @@ export function catchTwice() {
 }
 "#;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
     let child = vm.start(&mut host, "run", vec![]).expect("start");
     assert!(host.rejection_events().is_empty());
     vm.run_until_idle(&mut host).expect("first checkpoint");
@@ -257,7 +260,7 @@ export function run() {
 }
 "#;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
     let reported = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host)
         .expect("report the first rejection");
@@ -286,7 +289,13 @@ export function run() {
         queued.each_ref().map(|(promise, _)| object_id(promise)),
     );
     let mut restored_host = TestHost::default();
-    let mut vm = Vm::restore(snapshot, vm.build().clone(), &mut restored_host).expect("restore");
+    let mut vm = Vm::restore(
+        snapshot,
+        vm.build().clone(),
+        &mut restored_host,
+        Default::default(),
+    )
+    .expect("restore");
     assert!(restored_host.rejection_events().is_empty());
     vm.run_until_idle(&mut restored_host)
         .expect("first restored checkpoint");
@@ -315,7 +324,7 @@ import { rejectAfterRestore } from 'test';
 export function run() { return rejectAfterRestore('a'); }
 "#;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+    let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
     let promise = vm.start(&mut host, "run", vec![]).expect("start operation");
     vm.run_until_idle(&mut host).expect("drain before snapshot");
     assert_eq!(
@@ -326,7 +335,13 @@ export function run() { return rejectAfterRestore('a'); }
         .snapshot(std::slice::from_ref(&promise))
         .expect("snapshot operation");
     let mut restored_host = TestHost::default();
-    let mut vm = Vm::restore(snapshot, vm.build().clone(), &mut restored_host).expect("restore");
+    let mut vm = Vm::restore(
+        snapshot,
+        vm.build().clone(),
+        &mut restored_host,
+        Default::default(),
+    )
+    .expect("restore");
     vm.start_recovered_operations()
         .expect("start recovered operations");
     assert!(restored_host.rejection_events().is_empty());
@@ -355,6 +370,7 @@ fn restore_rejects_duplicate_omitted_and_dangling_pending_notification_ids() {
     let mut vm = Vm::new(
         build("export function run() { return Promise.reject('pending report'); }"),
         &mut host,
+        Default::default(),
     )
     .expect("create VM");
     let promise = vm.start(&mut host, "run", vec![]).expect("reject");
@@ -369,7 +385,15 @@ fn restore_rejects_duplicate_omitted_and_dangling_pending_notification_ids() {
             "dangling ID" => snapshot.objects.retain(|record| record.id != id),
             _ => unreachable!(),
         }
-        let result = Vm::restore_validated(snapshot, vm.build().clone(), &mut host);
+        let result = Vm::restore(
+            snapshot,
+            vm.build().clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        );
         assert!(
             matches!(result, Err(VmError::InvalidSnapshot(_))),
             "accepted {corruption}"
@@ -403,13 +427,22 @@ fn rejection_tasks_survive_fault_cut_points_without_replay() {
     "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let reported = vm.start(&mut host, "run", vec![]).unwrap();
     vm.run_until_idle(&mut host).unwrap();
     assert_eq!(host.rejection_events().len(), 1);
     let image = json_round_trip(&vm.snapshot(&[]).unwrap());
     host = TestHost::default();
-    vm = Vm::restore_validated(image, build.clone(), &mut host).unwrap();
+    vm = Vm::restore(
+        image,
+        build.clone(),
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     vm.run_until_idle(&mut host).unwrap();
     assert!(host.rejection_events().is_empty());
 
@@ -435,11 +468,28 @@ fn rejection_tasks_survive_fault_cut_points_without_replay() {
         let mut invalid = image.clone();
         invalid.ordinary_tasks[0] = task;
         assert!(matches!(
-            Vm::restore_validated(invalid, build.clone(), &mut host),
+            Vm::restore(
+                invalid,
+                build.clone(),
+                &mut host,
+                RestoreOptions {
+                    validation: SnapshotValidation::Full,
+                    ..Default::default()
+                },
+            ),
             Err(VmError::InvalidSnapshot(_))
         ));
     }
-    vm = Vm::restore_validated(json_round_trip(&image), build.clone(), &mut host).unwrap();
+    vm = Vm::restore(
+        json_round_trip(&image),
+        build.clone(),
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(vm.get_export("seen").unwrap(), Value::string("RA".into()));
     assert!(host.rejection_events().is_empty());
     vm.run_until_idle(&mut host).unwrap();
@@ -466,7 +516,16 @@ fn rejection_tasks_survive_fault_cut_points_without_replay() {
         [OrdinaryTask::RejectionHandled(object_id(&reported))]
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::restore_validated(json_round_trip(&image), build, &mut host).unwrap();
+    let mut vm = Vm::restore(
+        json_round_trip(&image),
+        build,
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(vm.get_export("handledCount").unwrap(), Value::number(0.0));
     for _ in 0..2 {
         vm.run_until_idle(&mut host).unwrap();
@@ -491,7 +550,7 @@ fn canceled_unhandled_report_still_delivers_handled_once() {
         export function observe() { promise.catch(() => {}); promise.catch(() => {}); }
     "#;
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &mut host).unwrap();
+    let mut vm = Vm::new(build(source), &mut host, Default::default()).unwrap();
     vm.start(&mut host, "run", vec![]).unwrap();
     vm.run_until_idle(&mut host).unwrap();
     assert!(host.rejection_events().is_empty());

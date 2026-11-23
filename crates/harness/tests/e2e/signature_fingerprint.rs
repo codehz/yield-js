@@ -137,7 +137,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     )
     .expect("compile");
     let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host).expect("create VM");
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
     assert!(labels.token("wait:pending").is_some());
@@ -159,8 +159,13 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
         let bindings = bind(&labels).expect("compatible export shape");
         assert_probe_arity(&bindings);
         let mut changed_host = StrategyHost::new(bindings);
-        let error = Vm::restore(snapshot.clone(), build.clone(), &mut changed_host)
-            .expect_err("signature change must invalidate the snapshot");
+        let error = Vm::restore(
+            snapshot.clone(),
+            build.clone(),
+            &mut changed_host,
+            Default::default(),
+        )
+        .expect_err("signature change must invalidate the snapshot");
         assert!(
             matches!(&error, VmError::InvalidSnapshot(message) if message.contains("binding fingerprint")),
             "{change}: {error:?}"
@@ -178,7 +183,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     let labels = Arc::new(LabelService::default());
     let mut reordered_host =
         StrategyHost::new(reordered::bindings(&labels).expect("reordered bindings"));
-    let mut restored = Vm::restore(snapshot, build, &mut reordered_host)
+    let mut restored = Vm::restore(snapshot, build, &mut reordered_host, Default::default())
         .expect("restore with renamed and reordered declarations");
     assert!(labels.pending_labels().is_empty());
     restored

@@ -2,10 +2,10 @@
 
 use crate::binding::Recovery;
 use crate::builtin::roots::BuiltinRoots;
-use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::heap::{Heap, Object};
 use crate::host::Host;
+use crate::init::{RestoreOptions, SnapshotValidation};
 use crate::regexp::compile_pattern;
 use crate::runtime::{ContinuationTarget, HostSlot, HostTaskState, Settlement};
 use crate::value::Value;
@@ -321,73 +321,30 @@ impl Vm {
 
     /// Restore a trusted, unmodified snapshot produced by [`Vm::snapshot`].
     ///
-    /// The caller must ensure provenance and integrity. This checks format,
-    /// build and host compatibility, but does not audit the snapshot graph.
-    /// Use [`Vm::restore_validated`] to diagnose invalid snapshot state.
-    pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
-        check_snapshot_header(&snapshot)?;
-        Self::restore_image::<false>(snapshot, VerifiedBuild::new(build)?, host, None, |_| {})
-    }
-
-    #[doc(hidden)]
-    pub fn restore_with_test_clock(
+    /// The caller must ensure provenance and integrity. Both validation modes
+    /// check format, build and host compatibility. Select
+    /// [`SnapshotValidation::Full`] for an additional graph audit.
+    pub fn restore(
         snapshot: Snapshot,
-        build: Build,
+        build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
         host: &mut dyn Host,
-        clock: std::sync::Arc<dyn crate::TestClock>,
+        options: RestoreOptions,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_image::<false>(
-            snapshot,
-            VerifiedBuild::new(build)?,
-            host,
-            Some(clock),
-            |_| {},
-        )
-    }
-
-    /// Restore a trusted snapshot with an already validated program.
-    /// The same snapshot requirements as [`Vm::restore`] apply.
-    pub fn restore_verified(
-        snapshot: Snapshot,
-        build: VerifiedBuild,
-        host: &mut dyn Host,
-    ) -> Result<Self, VmError> {
-        check_snapshot_header(&snapshot)?;
-        Self::restore_image::<false>(snapshot, build, host, None, |_| {})
-    }
-
-    /// Restore with full snapshot validation for development and diagnostics.
-    /// This is not a sandbox or a resource limit for untrusted input.
-    pub fn restore_validated(
-        snapshot: Snapshot,
-        build: Build,
-        host: &mut dyn Host,
-    ) -> Result<Self, VmError> {
-        check_snapshot_header(&snapshot)?;
-        Self::restore_image::<true>(snapshot, VerifiedBuild::new(build)?, host, None, |_| {})
-    }
-
-    #[doc(hidden)]
-    pub fn restore_validated_with_test_clock(
-        snapshot: Snapshot,
-        build: Build,
-        host: &mut dyn Host,
-        clock: std::sync::Arc<dyn crate::TestClock>,
-    ) -> Result<Self, VmError> {
-        check_snapshot_header(&snapshot)?;
-        Self::restore_image::<true>(
-            snapshot,
-            VerifiedBuild::new(build)?,
-            host,
-            Some(clock),
-            |_| {},
-        )
+        let build = build.try_into().map_err(Into::into)?;
+        match options.validation {
+            SnapshotValidation::Trusted => {
+                Self::restore_image::<false>(snapshot, build, host, options.test_clock, |_| {})
+            }
+            SnapshotValidation::Full => {
+                Self::restore_image::<true>(snapshot, build, host, options.test_clock, |_| {})
+            }
+        }
     }
 
     /// Restore with full snapshot validation and time its phases.
     #[doc(hidden)]
-    pub fn restore_verified_profiled(
+    pub fn restore_profiled(
         snapshot: Snapshot,
         build: VerifiedBuild,
         host: &mut dyn Host,

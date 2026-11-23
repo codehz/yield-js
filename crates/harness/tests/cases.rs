@@ -7,7 +7,8 @@ fn private_run_is_not_a_case_entrypoint() {
     assert!(error.contains("unknown export \"run\""), "{error}");
 
     let mut host = yield_harness::TestHost::default();
-    let vm = yield_vm::Vm::new(yield_harness::build(source), &mut host).unwrap();
+    let vm =
+        yield_vm::Vm::new(yield_harness::build(source), &mut host, Default::default()).unwrap();
     assert!(
         matches!(vm.get_export("run"), Err(yield_vm::VmError::InvalidState(message)) if message == "unknown export \"run\"")
     );

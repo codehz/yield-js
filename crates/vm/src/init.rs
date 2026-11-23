@@ -19,6 +19,35 @@ use crate::{JsString, builtin::BuiltinRoots};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
+/// Settings applied before evaluating the preload and entry modules.
+#[derive(Default)]
+pub struct VmOptions<'a> {
+    /// Default absolute base for relative URL construction.
+    pub base_url: Option<&'a str>,
+    #[doc(hidden)]
+    pub test_clock: Option<Arc<dyn crate::TestClock>>,
+}
+
+/// Settings for restoring a VM. The base URL comes from the snapshot.
+#[derive(Default)]
+pub struct RestoreOptions {
+    /// Additional graph checks to run after the snapshot compatibility checks.
+    /// Defaults to [`SnapshotValidation::Trusted`].
+    pub validation: SnapshotValidation,
+    #[doc(hidden)]
+    pub test_clock: Option<Arc<dyn crate::TestClock>>,
+}
+
+/// Controls the additional snapshot graph audit performed during restore.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SnapshotValidation {
+    /// Check compatibility without auditing the entire graph.
+    #[default]
+    Trusted,
+    /// Audit internal invariants for diagnostics, not for untrusted input.
+    Full,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModuleEvaluation {
     Pending,
@@ -27,42 +56,20 @@ enum ModuleEvaluation {
 }
 
 impl Vm {
-    pub fn new(build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
-        Self::new_verified(VerifiedBuild::new(build)?, host)
-    }
-
     /// Start a fresh VM, linking this host and running module initialization.
-    pub fn new_verified(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
-        Self::new_with_anchor(build, host, None, None)
-    }
-
-    /// Creates a VM with a default absolute URL for relative URL parsing.
-    pub fn new_with_base_url(
-        build: Build,
+    /// A raw [`Build`] is validated; a [`VerifiedBuild`] reuses its validation.
+    pub fn new(
+        build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
         host: &mut dyn Host,
-        base_url: &str,
+        options: VmOptions<'_>,
     ) -> Result<Self, VmError> {
-        let base = url::Url::parse(base_url)
+        let base_url = options
+            .base_url
+            .map(url::Url::parse)
+            .transpose()
             .map_err(|error| VmError::InvalidState(format!("invalid base URL: {error}")))?;
-        Self::new_with_anchor(VerifiedBuild::new(build)?, host, None, Some(base))
-    }
-
-    #[doc(hidden)]
-    pub fn new_with_test_clock(
-        build: Build,
-        host: &mut dyn Host,
-        clock: Arc<dyn crate::TestClock>,
-    ) -> Result<Self, VmError> {
-        Self::new_with_anchor(VerifiedBuild::new(build)?, host, Some(clock), None)
-    }
-
-    fn new_with_anchor(
-        build: VerifiedBuild,
-        host: &mut dyn Host,
-        clock: Option<Arc<dyn crate::TestClock>>,
-        base_url: Option<url::Url>,
-    ) -> Result<Self, VmError> {
-        let mut vm = Self::prepare(build, host, clock)?;
+        let build = build.try_into().map_err(Into::into)?;
+        let mut vm = Self::prepare(build, host, options.test_clock)?;
         vm.base_url = base_url;
         vm.initialize_modules(host)?;
         Ok(vm)

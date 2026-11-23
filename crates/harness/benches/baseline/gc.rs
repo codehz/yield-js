@@ -59,7 +59,7 @@ pub(super) fn run(workload: &str, policy: &str) {
         None => build(include_str!("gc-buffer.js")),
     };
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("start GC workload");
+    let mut vm = Vm::new(build, &mut host, Default::default()).expect("start GC workload");
     let mut pauses = Vec::with_capacity(match &trigger {
         Trigger::None => 0,
         Trigger::Every(n) => (ROUNDS / n) as usize,

@@ -29,7 +29,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
     );
     let image = {
         let mut host = TestHost::new();
-        let mut vm = Vm::new(program.clone(), &mut host).unwrap();
+        let mut vm = Vm::new(program.clone(), &mut host, Default::default()).unwrap();
         assert_eq!(
             vm.start(&mut host, "run", vec![]).unwrap(),
             Value::UNDEFINED
@@ -68,7 +68,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         }));
 
         let mut host = TestHost::new();
-        let mut vm = Vm::restore(snapshot, program.clone(), &mut host).unwrap();
+        let mut vm = Vm::restore(snapshot, program.clone(), &mut host, Default::default()).unwrap();
         assert!(host.clock().registrations().is_empty());
         vm.collect_garbage(&[]).unwrap();
         let recaptured = vm.snapshot(&[]).unwrap().to_json().unwrap();
@@ -76,6 +76,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
             Snapshot::from_json(&recaptured).unwrap(),
             program.clone(),
             &mut host,
+            Default::default(),
         )
         .unwrap();
         assert_eq!(host.clock().arm_count(), 0);
@@ -142,6 +143,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
         "#,
         ),
         &mut host,
+        Default::default(),
     )
     .unwrap();
     vm.start(&mut host, "run", vec![]).unwrap();
@@ -239,7 +241,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         &declared(include_str!("../dts/repeat_timer.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(program, &mut host).unwrap();
+    let mut vm = Vm::new(program, &mut host, Default::default()).unwrap();
     vm.start(&mut host, "run", vec![]).unwrap();
     let registrations = clock.registrations();
     let [(token, 10)] = registrations.as_slice() else {

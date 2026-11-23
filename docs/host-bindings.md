@@ -357,7 +357,7 @@ flowchart TB
     J --> K[排空恢复产生的微任务]
 ```
 
-默认恢复只接收受信、未经篡改的 VM 镜像，仍匹配当前绑定声明、解码 payload、重建宿主记录；不重复遍历堆图审计镜像内部关系。开发和诊断使用 `Vm::restore_validated`，两种入口都不负责认证存档来源或完整性。
+`Vm::restore` 默认使用 `SnapshotValidation::Trusted`，只接收受信、未经篡改的 VM 镜像，仍匹配当前绑定声明、解码 payload、重建宿主记录；不重复遍历堆图审计镜像内部关系。开发和诊断可将 `RestoreOptions::validation` 设为 `SnapshotValidation::Full`；两种模式都不负责认证存档来源或完整性，也不适用于不可信输入。
 
 阶段规则：
 

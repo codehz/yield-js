@@ -9,7 +9,7 @@ use yield_vm::{Value, Vm, VmError};
 
 fn vm_of(source: &str, options: &CompileOptions) -> Vm {
     let build = compile_main(source, options).unwrap();
-    Vm::new(build, &mut TestHost::default()).unwrap()
+    Vm::new(build, &mut TestHost::default(), Default::default()).unwrap()
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn preload_default_name_is_default() {
         )
         .unwrap();
         let mut host = TestHost::default();
-        let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+        let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
         assert_eq!(
             vm.start(&mut host, "run", vec![]).unwrap(),
             Value::string("default".into()),
@@ -96,7 +96,7 @@ fn preload_default_name_is_default() {
         // The host reads the main module's own default, not the preload's.
         let build =
             compile_preloaded("export default 9;", preload, &CompileOptions::default()).unwrap();
-        let vm = Vm::new(build, &mut TestHost::default()).unwrap();
+        let vm = Vm::new(build, &mut TestHost::default(), Default::default()).unwrap();
         assert_eq!(vm.get_export("default").unwrap(), Value::number(9.0));
     }
 }
@@ -110,13 +110,13 @@ fn preload_default_alias_survives_restore() {
     )
     .unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(2.0)
     );
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
-    let mut vm = Vm::restore(snapshot, build, &mut host).unwrap();
+    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(3.0)
@@ -133,7 +133,7 @@ export function run(){
     )
     .unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::boolean(true)

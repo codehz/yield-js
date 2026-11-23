@@ -5,8 +5,8 @@ use yield_harness::{FakeClock, TestHost, Timer, build};
 use yield_vm::binding::{CallCx, NativeTarget};
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{
-    Bindings, Host, JsResult, JsValue, PromiseState, Snapshot, Value, Vm, VmError, host_bindings,
-    host_module,
+    Bindings, Host, JsResult, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation,
+    Value, Vm, VmError, host_bindings, host_module,
 };
 
 const TIMERS: &str = r#"
@@ -20,7 +20,7 @@ const TIMERS: &str = r#"
 fn malformed_timer_snapshots_never_arm_a_timer() {
     let build = build(TIMERS);
     let mut source = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut source).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
     vm.start(&mut source, "schedule", vec![]).unwrap();
     vm.start(&mut source, "schedule", vec![]).unwrap();
     let promise = vm.start(&mut source, "wait", vec![]).unwrap();
@@ -50,7 +50,15 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
 
     let mut target = TestHost::new();
     // The same image, unmodified, must get through validation without registering.
-    drop(Vm::restore(snapshot.clone(), build.clone(), &mut target).unwrap());
+    drop(
+        Vm::restore(
+            snapshot.clone(),
+            build.clone(),
+            &mut target,
+            Default::default(),
+        )
+        .unwrap(),
+    );
     let assert_rejected = |label: &str, message: &str, error: VmError, target: &TestHost| {
         assert!(
             matches!(&error, VmError::InvalidSnapshot(detail) if detail.contains(message)),
@@ -64,7 +72,8 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     for length in [3, 5] {
         let mut image = snapshot.clone();
         image.operations[first_op].state.resize(length, 0);
-        let error = Vm::restore(image, build.clone(), &mut target).expect_err("timer codec length");
+        let error = Vm::restore(image, build.clone(), &mut target, Default::default())
+            .expect_err("timer codec length");
         assert_rejected(
             "timer codec length",
             "timer state must be four bytes",
@@ -73,7 +82,16 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
         );
     }
     let mut reject = |label: &str, message: &str, image: Snapshot| {
-        let error = Vm::restore_validated(image, build.clone(), &mut target).expect_err(label);
+        let error = Vm::restore(
+            image,
+            build.clone(),
+            &mut target,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        )
+        .expect_err(label);
         assert_rejected(label, message, error, &target);
     };
     let mut image = snapshot.clone();
@@ -134,7 +152,7 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
 #[test]
 fn timer_start_fault_leaves_no_pending_work() {
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build(TIMERS), &mut host).unwrap();
+    let mut vm = Vm::new(build(TIMERS), &mut host, Default::default()).unwrap();
     host.clock().set_fail_start(true);
     for entry in ["schedule", "wait"] {
         let error = vm.start(&mut host, entry, vec![]).unwrap_err();
@@ -153,7 +171,7 @@ fn timer_start_fault_leaves_no_pending_work() {
 #[test]
 fn timer_checkpoint_fault_does_not_disarm_the_source() {
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build(TIMERS), &mut host).unwrap();
+    let mut vm = Vm::new(build(TIMERS), &mut host, Default::default()).unwrap();
     vm.start(&mut host, "schedule", vec![]).unwrap();
     let registrations = host.clock().registrations();
     assert_eq!(registrations.len(), 1);
@@ -177,7 +195,7 @@ fn timer_checkpoint_fault_does_not_disarm_the_source() {
 fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
     let build = build(TIMERS);
     let mut source = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut source).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
     vm.start(&mut source, "schedule", vec![]).unwrap();
     let promise = vm.start(&mut source, "wait", vec![]).unwrap();
     let snapshot = json_round_trip(&vm.snapshot(std::slice::from_ref(&promise)).unwrap());
@@ -185,7 +203,7 @@ fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
 
     let mut host = TestHost::new();
     host.clock().set_fail_resume(true);
-    let mut vm = Vm::restore(snapshot, build, &mut host).unwrap();
+    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
     assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
     vm.start_recovered_operations().unwrap();
     assert!(
@@ -227,7 +245,7 @@ fn a_throwing_timer_callback_does_not_block_the_next_timer() {
     "#,
     );
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build, &mut host).unwrap();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     vm.start(&mut host, "run", vec![]).unwrap();
     host.advance(&mut vm, 2).unwrap();
     let [error] = host.errors() else {
@@ -333,7 +351,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         &declared(include_str!("../dts/contract.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut source).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
     vm.start(&mut source, "run", vec![]).unwrap();
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
@@ -345,7 +363,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         changed_clock,
     );
     // Establish that the alternate binding really saves the extra argument.
-    let mut alternate = Vm::new(build.clone(), &mut changed).unwrap();
+    let mut alternate = Vm::new(build.clone(), &mut changed, Default::default()).unwrap();
     alternate.start(&mut changed, "run", vec![]).unwrap();
     let alternate_image = alternate.snapshot(&[]).unwrap();
     assert_eq!(alternate_image.host_tasks[0].saved.len(), 2);
@@ -357,7 +375,13 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         Arc::new(extra_slot::bindings(&rejected_clock)),
         Arc::clone(&rejected_clock),
     );
-    let error = Vm::restore(snapshot.clone(), build.clone(), &mut rejected).unwrap_err();
+    let error = Vm::restore(
+        snapshot.clone(),
+        build.clone(),
+        &mut rejected,
+        Default::default(),
+    )
+    .unwrap_err();
     assert!(
         matches!(&error, VmError::InvalidSnapshot(message) if message.contains("binding fingerprint mismatch")),
         "{error}"
@@ -371,7 +395,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         Arc::clone(&restored_clock),
     );
     assert_eq!(reordered.0.fingerprint(), snapshot.binding_fingerprint);
-    let mut restored = Vm::restore(snapshot, build, &mut reordered).unwrap();
+    let mut restored = Vm::restore(snapshot, build, &mut reordered, Default::default()).unwrap();
     assert!(restored_clock.registrations().is_empty());
     restored.start_recovered_operations().unwrap();
     assert_eq!(restored_clock.arm_count(), 1);

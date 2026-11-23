@@ -96,6 +96,7 @@ pub use bytecode::{
 pub use error::VmError;
 pub use heap::{Object, PromiseState};
 pub use host::{Completion, Host};
+pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};
 #[doc(hidden)]
 pub use runtime::TestClock;

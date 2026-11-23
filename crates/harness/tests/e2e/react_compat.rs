@@ -10,7 +10,7 @@
 use super::support::{TEST_DECLARATIONS, compile_preloaded, declared};
 use yield_compiler::{MemoryResolver, compile};
 use yield_harness::TestHost;
-use yield_vm::{Value, Vm};
+use yield_vm::{RestoreOptions, Value, Vm, VmOptions};
 
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
 // esm.sh's inlined node:events polyfill references a missing private symbol.
@@ -109,8 +109,15 @@ fn react_reconciler_custom_renderer_headless_smoke() {
 
     let mut host = TestHost::default();
     let clock = host.clock().clone();
-    let mut vm =
-        Vm::new_with_test_clock(build, &mut host, clock).expect("React headless VM initialization");
+    let mut vm = Vm::new(
+        build,
+        &mut host,
+        VmOptions {
+            test_clock: Some(clock),
+            ..Default::default()
+        },
+    )
+    .expect("React headless VM initialization");
     vm.start(&mut host, "run", Vec::new())
         .expect("React headless smoke run");
     host.advance(&mut vm, 10)
@@ -162,7 +169,15 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
     .unwrap();
     let mut host = TestHost::new();
     let clock = host.clock().clone();
-    let mut source = Vm::new_with_test_clock(build.clone(), &mut host, clock).unwrap();
+    let mut source = Vm::new(
+        build.clone(),
+        &mut host,
+        VmOptions {
+            test_clock: Some(clock),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     source.start(&mut host, "run", vec![]).unwrap();
     let image = source.snapshot(&[]).unwrap();
     assert_eq!(host.clock().registrations().len(), 1);
@@ -171,8 +186,16 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
         let mut host = TestHost::new();
         host.clock().set_time(1000).unwrap();
         let clock = host.clock().clone();
-        let mut vm =
-            Vm::restore_with_test_clock(image.clone(), build.clone(), &mut host, clock).unwrap();
+        let mut vm = Vm::restore(
+            image.clone(),
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                test_clock: Some(clock),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         vm.start_recovered_operations().unwrap();
         if cancel {
             vm.start(&mut host, "cancel", vec![]).unwrap();

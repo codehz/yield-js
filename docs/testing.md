@@ -13,14 +13,14 @@
 
 需要堆身份、槽表或拒绝恢复的断言写进 `e2e.rs`；可观察的 JS 行为写 `.js` 用例，不要新增 Rust harness。
 
-手动破坏镜像以检查内部不变量时调用 `Vm::restore_validated`；可信镜像的日常往返，以及生产入口必须保留的构建、宿主兼容性检查，使用普通恢复入口。
+手动破坏镜像以检查内部不变量时，为 `Vm::restore` 传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }`。可信镜像的日常往返，以及生产入口必须保留的构建、宿主兼容性检查，使用 `RestoreOptions::default()`（`Trusted`）。
 
 ## 用例契约（`yield_harness::run_case`）
 
 - 文件头是前导空行与 `// @` 指令。整份文件（含头部）一起编译，因此诊断保留文件行号。
 - 正文必须显式导出一个可调用绑定，公开名为 `run`；运行器总是启动 `"run"`。未导出的 `run` 报 `unknown export "run"`。
 - `@args` 是 JSON 数组，只能作为第一条指令。
-- `@pending ["wait:a"]` 断言当前 pending operation 集合；`@restore` 做 JSON 往返再 `Vm::restore`；`@fulfill ["wait:a", 2]`、`@reject ["wait:a", "boom"]` 交付完成。
+- `@pending ["wait:a"]` 断言当前 pending operation 集合；`@restore` 做 JSON 往返再用 `Vm::restore` 恢复，沿用测试时钟（通过 `RestoreOptions::test_clock` 注入）和默认的 `Trusted` 校验模式；`@fulfill ["wait:a", 2]`、`@reject ["wait:a", "boom"]` 交付完成。
 - `@advance <u64>` 按十进制毫秒推进测试时钟，并在每个到期 timer 之后排空工作。负数、小数、`+1`、超出 `u64` 或超出 ECMAScript Date 范围的推进都带位置报错。
 - 最后一条指令必须是 `@returns`、`@fulfilled`、`@rejected` 或 `@uncaught`。标量仅限 number、bool、string、`null`、`undefined`。`@uncaught` 接收数组，按顺序精确比对报告给宿主的错误列表。
 - 用例从 `test` 显式导入宿主导出。`gc()` 同步回收且不排空微任务；`spawnDelayedTask` 返回可取消的宿主任务句柄，`cancelDelayedTask` 取消它，`sleep` 返回原生 Promise。VM 定时器用裸全局测试。

@@ -318,6 +318,14 @@ impl VerifiedBuild {
     }
 }
 
+impl TryFrom<Build> for VerifiedBuild {
+    type Error = VmError;
+
+    fn try_from(build: Build) -> Result<Self, Self::Error> {
+        Self::new(build)
+    }
+}
+
 impl std::ops::Deref for VerifiedBuild {
     type Target = Build;
 

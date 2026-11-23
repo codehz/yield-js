@@ -1,7 +1,7 @@
 //! Synchronous execution checks do not require a suspension harness.
 
 use yield_harness::{TestHost, build};
-use yield_vm::{JsValue, Value, Vm, VmError};
+use yield_vm::{JsValue, RestoreOptions, SnapshotValidation, Value, Vm, VmError};
 
 #[test]
 fn finally_completion_overrides_return_and_throw() {
@@ -18,7 +18,7 @@ export function run() {
 "#;
     let build_return = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build_return, &mut host).expect("bindings");
+    let mut vm = Vm::new(build_return, &mut host, Default::default()).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     assert_eq!(result, Value::number(5.0));
 
@@ -32,7 +32,7 @@ export function run() {
 }
 "#;
     let build_override = build(source);
-    let mut vm = Vm::new(build_override, &mut host).expect("bindings");
+    let mut vm = Vm::new(build_override, &mut host, Default::default()).expect("bindings");
     let result = vm.start(&mut host, "run", Vec::new()).expect("start");
     assert_eq!(result, Value::number(2.0));
 
@@ -46,7 +46,7 @@ export function run() {
 }
 "#;
     let build_throw = build(source);
-    let mut vm = Vm::new(build_throw, &mut host).expect("bindings");
+    let mut vm = Vm::new(build_throw, &mut host, Default::default()).expect("bindings");
     let error = vm
         .start(&mut host, "run", Vec::new())
         .expect_err("finally throw wins");
@@ -68,7 +68,7 @@ export function run(n) {
 "#;
     let build = build(source);
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("bindings");
+    let mut vm = Vm::new(build, &mut host, Default::default()).expect("bindings");
     let result = vm
         .start(&mut host, "run", vec![JsValue::number(5.0)])
         .expect("start");
@@ -83,13 +83,13 @@ export function run(n) {
 fn math_random_continues_after_snapshot_restore() {
     let build = build("export function run() { return Math.random(); }");
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let first = vm.start(&mut host, "run", vec![]).unwrap();
     let snapshot = vm.snapshot(&[]).unwrap();
     let expected = vm.start(&mut host, "run", vec![]).unwrap();
     assert_ne!(first, expected);
     let decoded = yield_vm::Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
-    let mut restored = Vm::restore(decoded, build.clone(), &mut host).unwrap();
+    let mut restored = Vm::restore(decoded, build.clone(), &mut host, Default::default()).unwrap();
     assert_eq!(restored.start(&mut host, "run", vec![]).unwrap(), expected);
     assert_eq!(
         restored.start(&mut host, "run", vec![]).unwrap(),
@@ -99,13 +99,29 @@ fn math_random_continues_after_snapshot_restore() {
     let mut missing_root = snapshot.clone();
     missing_root.roots.remove("math");
     assert!(matches!(
-        Vm::restore_validated(missing_root, build.clone(), &mut host),
+        Vm::restore(
+            missing_root,
+            build.clone(),
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
     let mut zero_state = snapshot;
     zero_state.random_state = 0;
     assert!(matches!(
-        Vm::restore_validated(zero_state, build, &mut host),
+        Vm::restore(
+            zero_state,
+            build,
+            &mut host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
         Err(VmError::InvalidSnapshot(_))
     ));
 }

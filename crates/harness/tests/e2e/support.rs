@@ -2,7 +2,10 @@
 
 use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_harness::{TestHost, build};
-use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm, VmError};
+use yield_vm::{
+    Completion, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
+    VmError,
+};
 
 pub(super) fn compile_main(
     source: &str,
@@ -52,7 +55,7 @@ impl Suspended {
     #[track_caller]
     pub(super) fn start(source: &str, args: Vec<JsValue>) -> Self {
         let mut host = TestHost::default();
-        let mut vm = Vm::new(build(source), &mut host).expect("create VM");
+        let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
         let result = vm.start(&mut host, "run", args).expect("start run");
         vm.run_until_idle(&mut host).expect("drain after start");
         Self { vm, host, result }
@@ -73,14 +76,27 @@ impl Suspended {
 
     #[track_caller]
     pub(super) fn restore(&mut self, snapshot: Snapshot) -> Result<(), VmError> {
-        self.vm = Vm::restore(snapshot, self.vm.build().clone(), &mut self.host)?;
+        self.vm = Vm::restore(
+            snapshot,
+            self.vm.build().clone(),
+            &mut self.host,
+            Default::default(),
+        )?;
         self.vm.start_recovered_operations()?;
         Ok(())
     }
 
     #[track_caller]
     pub(super) fn restore_validated(&mut self, snapshot: Snapshot) -> Result<(), VmError> {
-        self.vm = Vm::restore_validated(snapshot, self.vm.build().clone(), &mut self.host)?;
+        self.vm = Vm::restore(
+            snapshot,
+            self.vm.build().clone(),
+            &mut self.host,
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        )?;
         self.vm.start_recovered_operations()?;
         Ok(())
     }
