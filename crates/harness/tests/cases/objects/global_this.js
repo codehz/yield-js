@@ -2,12 +2,13 @@
 
 export async function run() {
   if (typeof globalThis !== "object" || globalThis.globalThis !== globalThis ||
-      Object.getPrototypeOf(globalThis) !== Object.prototype) return "identity or type";
+      Object.getPrototypeOf(globalThis) !== EventTarget.prototype) return "identity or type";
 
   const globals = {
     Promise, queueMicrotask, Error, TypeError, Symbol, Reflect, Object, Array, String,
     RangeError, ReferenceError, SyntaxError, EvalError, URIError, AggregateError,
-    Number, Math, JSON, Map, Set, WeakMap, Proxy, Boolean, Infinity, undefined, globalThis, Function
+    Number, Math, JSON, Map, Set, WeakMap, Proxy, Boolean, Infinity, undefined, globalThis, Function,
+    Event, CustomEvent, EventTarget
   };
   for (const name of Object.keys(globals)) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);

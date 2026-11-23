@@ -352,6 +352,7 @@ pub struct Vm {
     /// Frozen tagged-template objects, indexed by `Instr::GetTemplate`.
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) random_state: u64,
+    pub(crate) clock: crate::runtime::VmClock,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
     /// Per-function, per-PC monomorphic property cache. Never serialized.
@@ -359,6 +360,10 @@ pub struct Vm {
 }
 
 impl Vm {
+    pub(crate) fn monotonic_millis(&self, _: &dyn Host) -> f64 {
+        self.clock.elapsed_ms() as f64
+    }
+
     pub(crate) fn call_host(
         &mut self,
         host: &mut dyn Host,
@@ -1416,6 +1421,7 @@ impl Vm {
             builtins,
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,
+            clock: crate::runtime::VmClock::new(None, 0),
             module_envs,
             module_namespaces,
         }

@@ -695,6 +695,56 @@ fn restore_rejects_missing_or_mismatched_global_this_root() {
 }
 
 #[test]
+fn event_listener_snapshot_rejects_internal_callback_and_reused_identity() {
+    let source = r#"
+        import { wait } from "test";
+        const target = new EventTarget();
+        const callback = () => {};
+        target.addEventListener("probe", callback);
+        target.addEventListener("probe", callback, true);
+        export async function run() {
+            await wait("event");
+            return target.dispatchEvent(new Event("probe"));
+        }
+    "#;
+    let mut suspended = Suspended::start(source, vec![]);
+    let snapshot = suspended.snapshot();
+    let environment = snapshot
+        .module_envs
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .unwrap();
+    let index = snapshot.objects.iter().position(|record| {
+        matches!(&record.object, Object::EventTarget { target, .. } if !target.listeners.is_empty())
+    }).expect("listener target");
+    for internal_callback in [true, false] {
+        let mut invalid = snapshot.clone();
+        let Object::EventTarget { target, .. } = &mut invalid.objects[index].object else {
+            unreachable!();
+        };
+        if internal_callback {
+            target.listeners[0].callback = environment;
+        } else {
+            target.listeners[1].id = target.listeners[0].id;
+        }
+        assert!(matches!(
+            suspended.restore_validated(invalid),
+            Err(VmError::InvalidSnapshot(message)) if message.contains("listener")
+        ));
+    }
+    suspended
+        .restore_validated(json_round_trip(&snapshot))
+        .unwrap();
+    suspended.complete("wait:event", Completion::Fulfilled(JsValue::undefined()));
+    assert_eq!(
+        suspended.state(),
+        PromiseState::Fulfilled(Value::boolean(true))
+    );
+}
+
+#[test]
 fn array_iterator_snapshot_tampering_is_rejected() {
     let source = include_str!("../cases/arrays/iterator_restore.js");
     let mut s = Suspended::start(source, vec![]);

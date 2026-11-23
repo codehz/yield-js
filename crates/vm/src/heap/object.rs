@@ -100,6 +100,8 @@ macro_rules! map_object_storage {
             | Object::Map { object: $storage, .. }
             | Object::Date { object: $storage, .. }
             | Object::DomException { object: $storage, .. }
+            | Object::Event { object: $storage, .. }
+            | Object::EventTarget { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
             | Object::TypedArray(TypedArrayObject { object: $storage, .. })
             | Object::DataView(DataViewObject { object: $storage, .. })
@@ -383,6 +385,14 @@ impl Object {
             Self::ProxyRevoker {
                 proxy: Some(proxy), ..
             } => out.push(OwnedEdge::Object(*proxy)),
+            Self::Event { event, .. } => {
+                if let Some(detail) = &event.detail {
+                    push_value(out, detail);
+                }
+                if let Some(target) = event.target {
+                    out.push(OwnedEdge::Object(target));
+                }
+            }
             Self::Promise(promise) => {
                 if let PromiseState::Fulfilled(value) | PromiseState::Rejected(value) =
                     &promise.state
@@ -441,6 +451,11 @@ impl Object {
             Self::Boxed { primitive, .. } => {
                 if let BoxedPrimitive::Symbol(symbol) = primitive {
                     out.push(OwnedEdge::Symbol(*symbol));
+                }
+            }
+            Self::EventTarget { target, .. } => {
+                for listener in &target.listeners {
+                    out.push(OwnedEdge::Object(listener.callback));
                 }
             }
             Self::Native(_)

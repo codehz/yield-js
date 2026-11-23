@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// DOMException instance records and builtin roots.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 68;
+// Event objects, event target roots and VM-relative time.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 69;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -218,6 +218,7 @@ pub struct Snapshot {
     /// Suspended generator frames, keyed by their ordinary generator object.
     pub generators: BTreeMap<ObjectId, GeneratorObject>,
     pub random_state: u64,
+    pub(crate) elapsed_ms: u64,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
     pub symbols: BTreeMap<SymbolId, Option<JsString>>,
     /// `Symbol.for` registry entries kept alive by the snapshot.
@@ -253,6 +254,7 @@ impl Snapshot {
             combines: BTreeMap::new(),
             generators: BTreeMap::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
+            elapsed_ms: 0,
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: 0,

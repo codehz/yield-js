@@ -84,6 +84,7 @@ mod disposable_stack;
 mod disposal;
 pub(crate) mod dom_exception;
 pub(super) mod error_family;
+pub(crate) mod event;
 pub(crate) mod generator;
 mod global_functions;
 pub(crate) mod globals;

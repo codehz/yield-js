@@ -768,6 +768,8 @@ impl Heap {
             | Object::Map { object: plain, .. }
             | Object::Date { object: plain, .. }
             | Object::DomException { object: plain, .. }
+            | Object::Event { object: plain, .. }
+            | Object::EventTarget { object: plain, .. }
             | Object::DisposableStack { object: plain, .. }
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }

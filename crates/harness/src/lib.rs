@@ -555,6 +555,10 @@ impl Host for TestHost {
         self.clock.now_ms()
     }
 
+    fn monotonic_clock(&self) -> Option<Arc<dyn yield_vm::host::MonotonicClock>> {
+        Some(self.clock.clone())
+    }
+
     fn time_zone(&self) -> &str {
         &self.time_zone
     }

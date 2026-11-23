@@ -81,6 +81,7 @@ impl Vm {
         checkpoint(|profile| &mut profile.trace);
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
+        snapshot.elapsed_ms = self.clock.elapsed_ms();
         snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
@@ -477,6 +478,7 @@ impl Vm {
                 module_namespaces: snapshot.module_namespaces,
             },
         );
+        vm.clock = crate::runtime::VmClock::new(host.monotonic_clock(), snapshot.elapsed_ms);
         // Recovery can append new notifications; the captured ones must stay first.
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications.into();
         vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;

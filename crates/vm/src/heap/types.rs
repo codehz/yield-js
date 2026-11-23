@@ -1432,6 +1432,45 @@ impl<'de> Deserialize<'de> for WeakKey {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EventState {
+    pub ty: JsString,
+    pub detail: Option<Value>,
+    pub bubbles: bool,
+    pub cancelable: bool,
+    pub composed: bool,
+    pub time_stamp: f64,
+    pub initialized: bool,
+    pub trusted: bool,
+    pub canceled: bool,
+    pub stop: bool,
+    pub stop_immediate: bool,
+    pub dispatching: bool,
+    pub in_passive: bool,
+    pub target: Option<ObjectId>,
+    pub current_target: Option<ObjectId>,
+    pub phase: u8,
+    // Dispatch keeps this path alive through execution roots, not through the heap.
+    #[serde(skip)]
+    pub path: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventListener {
+    pub id: u64,
+    pub ty: JsString,
+    pub callback: ObjectId,
+    pub capture: bool,
+    pub once: bool,
+    pub passive: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventTargetState {
+    pub listeners: Vec<EventListener>,
+    pub next_id: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Object {
@@ -1556,6 +1595,14 @@ pub enum Object {
         name: JsString,
         message: JsString,
     },
+    Event {
+        object: PlainObject,
+        event: EventState,
+    },
+    EventTarget {
+        object: PlainObject,
+        target: EventTargetState,
+    },
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -1621,6 +1668,26 @@ impl PartialEq for Object {
             ) => a == b && x == y && p == q && r == s,
             (Native(a), Native(b)) => a == b,
             (Plain(a), Plain(b)) => a == b,
+            (
+                Event {
+                    object: a,
+                    event: x,
+                },
+                Event {
+                    object: b,
+                    event: y,
+                },
+            ) => a == b && x == y,
+            (
+                EventTarget {
+                    object: a,
+                    target: x,
+                },
+                EventTarget {
+                    object: b,
+                    target: y,
+                },
+            ) => a == b && x == y,
             (
                 DomException {
                     object: a,

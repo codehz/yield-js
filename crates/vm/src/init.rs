@@ -73,6 +73,7 @@ impl Vm {
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, &bindings)?;
         let mut vm = Self::empty(build, bindings.clone());
+        vm.clock = crate::runtime::VmClock::new(host.monotonic_clock(), 0);
         vm.init_builtins();
         vm.install_templates();
         vm.install_classes(&bindings)?;
@@ -128,6 +129,7 @@ impl Vm {
             builtins: BuiltinRoots::default(),
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
+            clock: crate::runtime::VmClock::new(None, 0),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
         }

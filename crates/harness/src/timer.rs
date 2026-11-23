@@ -10,10 +10,10 @@ use yield_vm::{Host, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct FakeClock(Mutex<ClockState>);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ClockState {
     now_ms: u64,
     deadlines: BTreeMap<OperationToken, u64>,
@@ -21,6 +21,12 @@ struct ClockState {
     fail_start: bool,
     fail_resume: bool,
     fail_checkpoint: bool,
+}
+
+impl yield_vm::host::MonotonicClock for FakeClock {
+    fn millis(&self) -> u64 {
+        self.0.lock().unwrap().now_ms
+    }
 }
 
 impl FakeClock {

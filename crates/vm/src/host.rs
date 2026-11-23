@@ -3,6 +3,11 @@ use std::sync::Arc;
 use crate::binding::{Bindings, JsValue};
 use crate::value::Value;
 
+/// An optional monotonic clock shared with the VM, in an arbitrary time domain.
+pub trait MonotonicClock: std::fmt::Debug + Send + Sync {
+    fn millis(&self) -> u64;
+}
+
 /// How a host operation completed. Values are produced outside a call, so
 /// they must be constants; host code cannot mint object handles after the
 /// call that created them.
@@ -21,6 +26,10 @@ pub trait Host {
 
     /// Current Unix epoch milliseconds, within the ECMAScript Date range.
     fn now_ms(&self) -> i64;
+
+    fn monotonic_clock(&self) -> Option<Arc<dyn MonotonicClock>> {
+        None
+    }
 
     /// The host's local time zone as a valid IANA identifier.
     fn time_zone(&self) -> &str;

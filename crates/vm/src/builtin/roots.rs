@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::VmError;
-use crate::heap::{Attributes, Heap, NativeObject, Object, Property};
+use crate::heap::{
+    Attributes, EventTargetState, Heap, NativeObject, Object, PlainObject, Property,
+};
 use crate::intrinsic::IntrinsicKey;
 use crate::value::{ObjectId, PropertyKeyRef, Value};
 use crate::vm::Vm;
@@ -11,6 +13,7 @@ use crate::vm::Vm;
 pub(crate) enum RootKind {
     Plain,
     Array,
+    EventTarget,
     Native(IntrinsicKey),
 }
 
@@ -92,6 +95,7 @@ impl BuiltinRoots {
                 .ok_or_else(|| VmError::InvalidSnapshot(format!("missing builtin root {name}")))?;
             let valid = match (&spec.kind, heap.get(id)?) {
                 (RootKind::Plain, Object::Plain(_)) | (RootKind::Array, Object::Array(_)) => true,
+                (RootKind::EventTarget, Object::EventTarget { .. }) => true,
                 (
                     RootKind::Native(key),
                     Object::Native(NativeObject::Intrinsic { intrinsic, .. }),
@@ -178,6 +182,10 @@ impl Vm {
             let id = match spec.kind {
                 RootKind::Plain => self.heap.alloc_plain_with(None),
                 RootKind::Array => self.heap.alloc_array(Vec::new()),
+                RootKind::EventTarget => self.heap.alloc(Object::EventTarget {
+                    object: PlainObject::new(None),
+                    target: EventTargetState::default(),
+                }),
                 RootKind::Native(key) => self.alloc_intrinsic(key),
             };
             assert!(

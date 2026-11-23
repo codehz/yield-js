@@ -76,8 +76,8 @@ const ITERATOR_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
 const GLOBAL_THIS: &str = "globalThis";
 const GLOBAL_THIS_ROOTS: &[RootSpec] = &[RootSpec::new(
     GLOBAL_THIS,
-    RootKind::Plain,
-    Some("object.prototype"),
+    RootKind::EventTarget,
+    Some(super::event::TARGET_PROTOTYPE),
 )];
 
 builtin_globals! {
@@ -143,6 +143,9 @@ builtin_globals! {
     "Iterator" => Global::Function(super::iterator::OWNER),
     "DOMException" => Global::Owner(super::dom_exception::OWNER),
     "structuredClone" => Global::Function(super::structured_clone::OWNER),
+    "Event" => Global::Owner(super::event::OWNER),
+    "CustomEvent" => Global::Root(super::event::CUSTOM_ROOT),
+    "EventTarget" => Global::Root(super::event::TARGET_ROOT),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -176,11 +179,14 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
         generator::ROOTS,
         async_generator::ROOTS,
         super::disposal::SCOPE_ROOTS,
+        super::event::ROOTS,
     ]
     .into_iter()
     .chain(owners().map(move |owner| {
         if owner.root == object_members::ROOT {
             object_rest
+        } else if owner.root == super::event::EVENT_ROOT {
+            &[]
         } else {
             owner.roots
         }

@@ -14,6 +14,47 @@ use crate::heap::PromiseState;
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 
+#[derive(Debug)]
+pub(crate) struct VmClock {
+    anchor: ClockAnchor,
+    accumulated_ms: u64,
+}
+
+#[derive(Debug)]
+enum ClockAnchor {
+    System(std::time::Instant),
+    Host(std::sync::Arc<dyn crate::host::MonotonicClock>, u64),
+}
+
+impl VmClock {
+    pub(crate) fn new(
+        clock: Option<std::sync::Arc<dyn crate::host::MonotonicClock>>,
+        accumulated_ms: u64,
+    ) -> Self {
+        let anchor = match clock {
+            Some(clock) => {
+                let origin = clock.millis();
+                ClockAnchor::Host(clock, origin)
+            }
+            None => ClockAnchor::System(std::time::Instant::now()),
+        };
+        Self {
+            anchor,
+            accumulated_ms,
+        }
+    }
+
+    pub(crate) fn elapsed_ms(&self) -> u64 {
+        let offset = match &self.anchor {
+            ClockAnchor::System(start) => {
+                u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+            }
+            ClockAnchor::Host(clock, origin) => clock.millis().saturating_sub(*origin),
+        };
+        self.accumulated_ms.saturating_add(offset)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum HostSlot {
     Js(Value),

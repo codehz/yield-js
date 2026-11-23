@@ -320,6 +320,57 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                 "for-in iterator {id} has invalid cursor state"
             )));
         }
+        if let Object::Event { event, .. } = object {
+            if event.phase != 0
+                || event.dispatching
+                || event.in_passive
+                || event.current_target.is_some()
+                || !event.path.is_empty()
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "event {id} has active dispatch state"
+                )));
+            }
+            if let Some(target) = event.target
+                && !matches!(heap.get(target), Ok(Object::EventTarget { .. }))
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "event {id} has invalid target {target}"
+                )));
+            }
+        }
+        if let Object::EventTarget { target, .. } = object {
+            let mut previous_id = None;
+            let mut registrations = BTreeSet::new();
+            for listener in &target.listeners {
+                if listener.id >= target.next_id
+                    || previous_id.is_some_and(|previous| previous >= listener.id)
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has invalid listener id {}",
+                        listener.id
+                    )));
+                }
+                previous_id = Some(listener.id);
+                if matches!(
+                    heap.get(listener.callback),
+                    Err(_)
+                        | Ok(Object::Environment(_)
+                            | Object::ForInIterator { .. }
+                            | Object::DisposeState(_))
+                ) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has invalid listener callback {}",
+                        listener.callback
+                    )));
+                }
+                if !registrations.insert((&listener.ty, listener.callback, listener.capture)) {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has duplicate listener registrations"
+                    )));
+                }
+            }
+        }
         heap.write_edges(id, object, &mut edges);
         match object {
             Object::WeakMap { entries, .. } => {
@@ -402,6 +453,8 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                     | Object::Boxed { .. }
                     | Object::Date { .. }
                     | Object::DomException { .. }
+                    | Object::Event { .. }
+                    | Object::EventTarget { .. }
                     | Object::ArrayBuffer(_)
                     | Object::TypedArray(_)
                     | Object::DataView(_)

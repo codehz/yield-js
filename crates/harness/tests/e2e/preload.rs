@@ -61,8 +61,8 @@ export function run() {
         .find(|record| record.id == global)
         .unwrap()
         .object;
-    let Object::Plain(global) = object else {
-        panic!("expected plain global")
+    let Object::EventTarget { object: global, .. } = object else {
+        panic!("expected event target global")
     };
     let alias = global.props.get(&JsString::from("bump")).unwrap().clone();
     let n = global.props.get_mut(&JsString::from("n")).unwrap();

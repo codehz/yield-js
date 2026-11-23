@@ -154,6 +154,8 @@ impl Vm {
                 | Object::Boxed { .. }
                 | Object::Date { .. }
                 | Object::DomException { .. }
+                | Object::Event { .. }
+                | Object::EventTarget { .. }
                 | Object::ArrayBuffer(_)
                 | Object::TypedArray(_)
                 | Object::DataView(_)
