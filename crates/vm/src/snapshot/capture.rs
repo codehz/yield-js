@@ -105,7 +105,7 @@ impl Vm {
         snapshot.module_envs = self.module_envs.clone();
         snapshot.module_namespaces = self.module_namespaces.clone();
         for id in &live.objects {
-            let object = match self.heap.get(*id)? {
+            let mut object = match self.heap.get(*id)? {
                 object if !valid_date_time(object) => {
                     return Err(VmError::InvalidState(format!(
                         "Date {id} has a time outside the TimeClip range"
@@ -144,6 +144,7 @@ impl Vm {
                 }
                 object => object.clone(),
             };
+            object.prune_weak_abort_edges(&live.objects);
             snapshot.objects.push(ObjectRecord { id: *id, object });
             if let Some(generator) = self.heap.generator(*id) {
                 snapshot.generators.insert(*id, generator.clone());
@@ -284,6 +285,7 @@ impl Vm {
                     .checkpoint()
                     .map_err(|error| VmError::HostFault(error.0))?,
                 target: operation.target,
+                signal: operation.signal,
             });
         }
         checkpoint(|profile| &mut profile.host_records);
@@ -503,12 +505,14 @@ impl Vm {
         for (id, operation) in pending {
             match operation.recovery {
                 Recovery::Pause => {
+                    self.unlink_operation_signal(id, operation.signal);
                     self.deliver_operation(
                         operation.target,
                         Settlement::Fulfilled(Value::UNDEFINED),
                     )?;
                 }
                 Recovery::Reject => {
+                    self.unlink_operation_signal(id, operation.signal);
                     self.deliver_operation(
                         operation.target,
                         Settlement::Rejected(Value::string(operation.rejection.into())),

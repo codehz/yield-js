@@ -284,7 +284,7 @@ fn install_members(vm: &mut Vm, prototype: ObjectId, members: &[IntrinsicDef]) {
     }
 }
 
-fn install_accessor(
+pub(super) fn install_accessor(
     vm: &mut Vm,
     target: ObjectId,
     name: &str,
@@ -432,7 +432,7 @@ fn detail_or_null(value: &Value) -> Value {
     }
 }
 
-fn new_target_prototype(
+pub(super) fn new_target_prototype(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,

@@ -288,7 +288,10 @@ impl Graph {
             return rejected(vm);
         }
         let target = match vm.heap.get(source)? {
-            Object::Event { .. } | Object::EventTarget { .. } => return rejected(vm),
+            Object::Event { .. }
+            | Object::EventTarget { .. }
+            | Object::AbortController { .. }
+            | Object::AbortSignal { .. } => return rejected(vm),
             Object::Plain(object) if object.is_raw_json || object.module_namespace.is_some() => {
                 return rejected(vm);
             }

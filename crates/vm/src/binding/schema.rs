@@ -82,6 +82,8 @@ impl fmt::Display for HostFault {
 pub enum JsError {
     /// Catchable by script `try`/`catch`.
     Throw(JsValue),
+    /// Catchable TypeError whose object is allocated when crossing into script.
+    TypeError(String),
     /// Invalid host use; terminates the VM instead of the script.
     Fault(HostFault),
 }

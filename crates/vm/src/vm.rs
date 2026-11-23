@@ -517,6 +517,13 @@ impl Vm {
                         .map(Some)
                         .map_err(|error| VmError::Host(error.0));
                 }
+                Err(JsError::TypeError(message)) => {
+                    return cx
+                        .vm
+                        .type_error(cx.roots, &message)
+                        .map(Invocation::Thrown)
+                        .map(Some);
+                }
                 Err(JsError::Fault(fault)) => return Err(VmError::HostFault(fault.0)),
                 Ok(HostStep::Suspend(request)) => request,
             };
@@ -605,6 +612,7 @@ impl Vm {
                             decl,
                             state,
                             DeliveryTarget::Task(id),
+                            None,
                             |token, bindings, bytes| {
                                 bindings.start_encoded_operation(decl, bytes, token)
                             },
@@ -671,8 +679,7 @@ impl Vm {
         if let Some(frame) = self.host_tasks.remove(&id)
             && let HostTaskState::Waiting(operation) = frame.state
         {
-            self.recovered_operations.remove(&operation);
-            self.operations.remove(&operation);
+            self.remove_operation(operation);
         }
     }
 
@@ -919,11 +926,9 @@ impl Vm {
                 token.id()
             )));
         }
-        let std::collections::btree_map::Entry::Occupied(operation) =
-            self.operations.entry(token.id)
-        else {
+        if !self.operations.contains_key(&token.id) {
             return Err(VmError::UnknownOperation(token.id().to_string()));
-        };
+        }
         let (value, rejected) = match completion {
             Completion::Fulfilled(value) => (value, false),
             Completion::Rejected(value) => (value, true),
@@ -931,9 +936,8 @@ impl Vm {
         let value = value
             .into_constant()
             .map_err(|error| VmError::Host(error.0))?;
-        let operation = operation.remove();
+        let operation = self.remove_operation(token.id).expect("operation exists");
         let target = operation.target;
-        self.recovered_operations.remove(&token.id);
         drop(operation);
         let settlement = if rejected {
             Settlement::Rejected(value)
@@ -941,6 +945,34 @@ impl Vm {
             Settlement::Fulfilled(value)
         };
         self.deliver_operation(target, settlement)
+    }
+
+    pub(crate) fn abort_operation(&mut self, id: u64, reason: Value) -> Result<(), VmError> {
+        let Some(operation) = self.remove_operation(id) else {
+            return Ok(());
+        };
+        let target = operation.target;
+        drop(operation);
+        self.deliver_operation(target, Settlement::Rejected(reason))
+    }
+
+    fn remove_operation(&mut self, id: u64) -> Option<PendingOperation> {
+        let operation = self.operations.remove(&id)?;
+        self.recovered_operations.remove(&id);
+        self.unlink_operation_signal(id, operation.signal);
+        Some(operation)
+    }
+
+    pub(crate) fn unlink_operation_signal(&mut self, id: u64, signal: Option<ObjectId>) {
+        if let Some(signal) = signal {
+            self.abort_signal_state_mut(signal)
+                .expect("operation signal exists")
+                .expect("operation signal has AbortSignal brand")
+                .steps
+                .retain(|step| {
+                    !matches!(step, crate::heap::AbortStep::Operation(linked) if *linked == id)
+                });
+        }
     }
 
     pub(crate) fn deliver_operation(
@@ -1003,7 +1035,7 @@ impl Vm {
             } else {
                 let target = operation.target;
                 let rejection = operation.rejection;
-                self.operations.remove(&id);
+                self.remove_operation(id);
                 self.deliver_operation(
                     target,
                     Settlement::Rejected(Value::string(rejection.into())),
@@ -1018,6 +1050,7 @@ impl Vm {
         decl: usize,
         state: Vec<u8>,
         target: DeliveryTarget,
+        signal: Option<ObjectId>,
         arm: impl FnOnce(
             OperationToken,
             &Bindings,
@@ -1043,10 +1076,18 @@ impl Vm {
                 rejection,
                 state,
                 target,
+                signal,
                 declaration: decl,
                 live: None,
             },
         );
+        if let Some(signal) = signal {
+            self.abort_signal_state_mut(signal)
+                .expect("operation signal exists")
+                .expect("operation signal has AbortSignal brand")
+                .steps
+                .push(crate::heap::AbortStep::Operation(id));
+        }
         let operation = self.operations.get_mut(&id).expect("operation inserted");
         match arm(token, &self.bindings, &operation.state) {
             Ok(live) => {
@@ -1054,7 +1095,7 @@ impl Vm {
                 Ok(token)
             }
             Err(fault) => {
-                self.operations.remove(&id);
+                self.remove_operation(id);
                 Err(fault)
             }
         }

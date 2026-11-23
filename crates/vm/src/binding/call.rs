@@ -722,6 +722,54 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn promise<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue> {
+        self.start_operation_promise(state, None)
+    }
+
+    fn signal_state(
+        &self,
+        signal: &JsValue,
+    ) -> JsResult<(ObjectId, &crate::heap::AbortSignalState)> {
+        self.check_value(signal)?;
+        if let ValueRef::Object(id) = signal.value.view()
+            && let Some(state) = self
+                .vm
+                .abort_signal_state(id)
+                .map_err(|error| JsError::fault(error.to_string()))?
+        {
+            return Ok((id, state));
+        }
+        Err(JsError::TypeError("expected an AbortSignal".into()))
+    }
+
+    /// Returns the original abort reason, or `None` if the signal is active.
+    pub fn abort_reason(&self, signal: &JsValue) -> JsResult<Option<JsValue>> {
+        let (_, state) = self.signal_state(signal)?;
+        Ok(state.reason.clone().map(|reason| self.js_value(reason)))
+    }
+
+    /// Starts an operation whose promise is rejected when `signal` aborts.
+    /// If already aborted, the original reason rejects the promise without starting the driver.
+    pub fn promise_with_signal<O: OperationDriver>(
+        &mut self,
+        state: O,
+        signal: &JsValue,
+    ) -> JsResult<JsValue> {
+        let (id, signal) = self.signal_state(signal)?;
+        if let Some(reason) = signal.reason.clone() {
+            let promise = self.vm.heap.alloc_promise();
+            self.vm
+                .settle(promise, crate::runtime::Settlement::Rejected(reason))
+                .map_err(|error| JsError::fault(error.to_string()))?;
+            return Ok(self.js_value(Value::object(promise)));
+        }
+        self.start_operation_promise(state, Some(id))
+    }
+
+    fn start_operation_promise<O: OperationDriver>(
+        &mut self,
+        state: O,
+        signal: Option<ObjectId>,
+    ) -> JsResult<JsValue> {
         let (declaration, bytes) = self.encode_operation(&state)?;
         let promise = self.vm.heap.alloc_promise();
         self.vm
@@ -729,6 +777,7 @@ impl<'a> CallCx<'a> {
                 declaration,
                 bytes,
                 crate::snapshot::DeliveryTarget::Promise(promise),
+                signal,
                 |token, bindings, _| {
                     Ok(Box::new(TypedRegistration::<O>(
                         state.start(token, bindings)?,

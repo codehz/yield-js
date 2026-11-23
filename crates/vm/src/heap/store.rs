@@ -112,6 +112,7 @@ impl Heap {
             if !live.objects.contains(id) {
                 return false;
             }
+            object.prune_weak_abort_edges(&live.objects);
             match object {
                 Object::WeakMap { entries, .. } => {
                     entries.retain(|key, _| live.contains_weak_key(*key));
@@ -770,6 +771,8 @@ impl Heap {
             | Object::DomException { object: plain, .. }
             | Object::Event { object: plain, .. }
             | Object::EventTarget { object: plain, .. }
+            | Object::AbortController { object: plain, .. }
+            | Object::AbortSignal { object: plain, .. }
             | Object::DisposableStack { object: plain, .. }
             | Object::Set { object: plain, .. }
             | Object::WeakMap { object: plain, .. }

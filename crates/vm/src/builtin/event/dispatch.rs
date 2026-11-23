@@ -1,7 +1,7 @@
 use super::event_receiver;
 use crate::VmError;
 use crate::gc::ActiveRoots;
-use crate::heap::{EventListener, EventState, EventTargetState, Object};
+use crate::heap::{AbortStep, EventListener, EventState, EventTargetState, Object};
 use crate::host::Host;
 use crate::runtime::{Arguments, HostSlot, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -57,6 +57,7 @@ fn change_listener(
     let undefined = Value::UNDEFINED;
     let options = args.get(2).unwrap_or(&undefined);
     let (mut capture, mut once, mut passive) = (false, false, false);
+    let mut signal = None;
     if matches!(options.view(), ValueRef::Object(_)) {
         // Read dictionary members in Web IDL order, even for a null callback.
         for (key, flag) in [
@@ -72,16 +73,45 @@ fn change_listener(
                 break;
             }
         }
+        if add {
+            signal =
+                match vm.read_property(host, roots, options, PropertyKeyRef::String("signal"))? {
+                    Invocation::Value(value) => match value.view() {
+                        ValueRef::Undefined | ValueRef::Null => None,
+                        ValueRef::Object(id) if vm.abort_signal_state(id)?.is_some() => Some(id),
+                        _ => {
+                            return vm
+                                .throw_type_error(roots, "Listener signal must be an AbortSignal");
+                        }
+                    },
+                    thrown @ Invocation::Thrown(_) => return Ok(thrown),
+                };
+        }
     } else {
         capture = options.truthy();
     }
 
     if let Some(callback) = callback {
+        if let Some(signal) = signal
+            && vm
+                .abort_signal_state(signal)?
+                .expect("checked signal")
+                .reason
+                .is_some()
+        {
+            return Ok(Invocation::Value(Value::UNDEFINED));
+        }
+        let onabort = vm
+            .abort_signal_state(target)?
+            .and_then(|state| state.onabort);
         let state = vm
             .event_target_mut(target)?
             .expect("checked EventTarget receiver");
         let existing = state.listeners.iter().position(|listener| {
-            listener.ty == ty && listener.callback == callback && listener.capture == capture
+            Some(listener.id) != onabort
+                && listener.ty == ty
+                && listener.callback == callback
+                && listener.capture == capture
         });
         match (add, existing) {
             (true, None) => {
@@ -96,10 +126,18 @@ fn change_listener(
                     capture,
                     once,
                     passive,
+                    signal,
                 });
+                if let Some(signal) = signal {
+                    vm.abort_signal_state_mut(signal)?
+                        .expect("checked signal")
+                        .steps
+                        .push(AbortStep::Listener { target, id });
+                }
             }
             (false, Some(index)) => {
-                state.listeners.remove(index);
+                let id = state.listeners[index].id;
+                vm.remove_listener_id(target, id)?;
             }
             _ => {}
         }
@@ -202,7 +240,7 @@ impl Vm {
 
     pub(crate) fn event_target(&self, id: ObjectId) -> Result<Option<&EventTargetState>, VmError> {
         Ok(match self.heap.get(id)? {
-            Object::EventTarget { target, .. } => Some(target),
+            Object::EventTarget { target, .. } | Object::AbortSignal { target, .. } => Some(target),
             _ => None,
         })
     }
@@ -212,9 +250,30 @@ impl Vm {
         id: ObjectId,
     ) -> Result<Option<&mut EventTargetState>, VmError> {
         Ok(match self.heap.get_mut(id)? {
-            Object::EventTarget { target, .. } => Some(target),
+            Object::EventTarget { target, .. } | Object::AbortSignal { target, .. } => Some(target),
             _ => None,
         })
+    }
+
+    pub(crate) fn remove_listener_id(&mut self, target: ObjectId, id: u64) -> Result<(), VmError> {
+        if !self.heap.contains(target) {
+            return Ok(()); // An abort step may point to a collected target.
+        }
+        let Some(state) = self.event_target_mut(target)? else {
+            return Ok(());
+        };
+        let Ok(index) = state
+            .listeners
+            .binary_search_by_key(&id, |listener| listener.id)
+        else {
+            return Ok(());
+        };
+        if let Some(signal) = state.listeners.remove(index).signal
+            && let Some(signal) = self.abort_signal_state_mut(signal)?
+        {
+            signal.steps.retain(|step| !matches!(step, AbortStep::Listener { target: to, id: listener } if *to == target && *listener == id));
+        }
+        Ok(())
     }
 
     /// Dispatch by internal brand, without consulting public methods on the target.
@@ -338,13 +397,26 @@ impl Vm {
             let callback = Value::object(listener.callback);
             let passive = listener.passive;
             if listener.once {
-                listeners.remove(index);
+                self.remove_listener_id(current, id)?;
+            }
+            let is_handler = self
+                .abort_signal_state(current)?
+                .and_then(|signal| signal.onabort)
+                == Some(id);
+            if is_handler && !self.is_callable(&callback) {
+                continue;
             }
             let roots = &roots.with(&callback);
             self.dispatch_state(event)?.in_passive = passive;
             let result = self.invoke_event_listener(host, roots, &callback, &receiver, &args);
             self.dispatch_state(event)?.in_passive = false;
             match result {
+                Ok(Invocation::Value(value))
+                    if is_handler && matches!(value.view(), ValueRef::Bool(false)) =>
+                {
+                    let state = self.dispatch_state(event)?;
+                    state.canceled |= state.cancelable;
+                }
                 Ok(Invocation::Value(_)) => {}
                 Ok(Invocation::Thrown(error)) | Err(VmError::Thrown(error)) => {
                     host.report_error(self.host_value(error));

@@ -98,6 +98,8 @@ pub(crate) struct PendingOperation {
     pub(crate) rejection: &'static str,
     pub(crate) state: Vec<u8>,
     pub(crate) target: DeliveryTarget,
+    /// Paired with exactly one `AbortStep::Operation` on an active signal.
+    pub(crate) signal: Option<ObjectId>,
     pub(crate) declaration: usize,
     pub(crate) live: Option<Box<dyn LiveRegistration>>,
 }

@@ -5,16 +5,105 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::builtin::is_callable_object;
 use crate::bytecode::Build;
 use crate::error::VmError;
+use crate::heap::{AbortStep, Heap, Object, OwnProperty, OwnedEdge, PrivateMemberKind, Property};
 use crate::heap::{CollectionIteration, CollectionKind, push_value};
-use crate::heap::{Heap, Object, OwnProperty, OwnedEdge, PrivateMemberKind, Property};
-use crate::value::{PropertyKeyRef, Value, ValueRef};
+use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 
 use crate::snapshot::record::valid_string_position;
+
+fn check_abort_state(
+    heap: &Heap,
+    id: ObjectId,
+    object: &Object,
+    controller_signals: &mut BTreeSet<ObjectId>,
+) -> Result<Option<u64>, VmError> {
+    let Object::AbortSignal { signal, target, .. } = object else {
+        if let Object::AbortController { signal, .. } = object
+            && (!matches!(heap.get(*signal), Ok(Object::AbortSignal { signal, .. }) if !signal.dependent)
+                || !controller_signals.insert(*signal))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "abort controller {id} has invalid signal {signal}"
+            )));
+        }
+        return Ok(None);
+    };
+
+    let invalid = |detail| VmError::InvalidSnapshot(format!("abort signal {id} has {detail}"));
+    if matches!(
+        signal.reason.as_ref().map(Value::view),
+        Some(ValueRef::Undefined)
+    ) || (signal.reason.is_some() && !signal.steps.is_empty())
+    {
+        return Err(invalid("invalid aborted state"));
+    }
+    if (!signal.dependent && !signal.sources.is_empty())
+        || (signal.dependent && !signal.dependents.is_empty())
+    {
+        return Err(invalid("invalid dependency direction"));
+    }
+    let mut seen = BTreeSet::new();
+    for &source in &signal.sources {
+        if !seen.insert(source)
+            || !matches!(heap.get(source), Ok(Object::AbortSignal { signal: source, .. })
+                if !source.dependent
+                    && source.dependents.contains(&id)
+                    && (source.reason.is_none() || signal.reason.is_some()))
+        {
+            return Err(invalid("invalid source link"));
+        }
+    }
+    seen.clear();
+    for &dependent in &signal.dependents {
+        if !seen.insert(dependent)
+            || !matches!(heap.get(dependent), Ok(Object::AbortSignal { signal, .. })
+                if signal.dependent && signal.sources.contains(&id))
+        {
+            return Err(invalid("invalid dependent link"));
+        }
+    }
+    let mut listener_steps = BTreeSet::new();
+    for step in &signal.steps {
+        if let AbortStep::Listener {
+            target,
+            id: listener,
+        } = *step
+            && (!listener_steps.insert((target, listener))
+                || !heap
+                    .get(target)
+                    .ok()
+                    .and_then(Object::event_target_state)
+                    .is_some_and(|target| {
+                        target
+                            .listeners
+                            .iter()
+                            .any(|entry| entry.id == listener && entry.signal == Some(id))
+                    }))
+        {
+            return Err(invalid("invalid listener step"));
+        }
+    }
+    if let Some(listener) = signal.onabort
+        && !target.listeners.iter().any(|entry| {
+            entry.id == listener
+                && entry.ty == "abort"
+                && !entry.capture
+                && !entry.passive
+                && !entry.once
+                && entry.signal.is_none()
+                && heap.get(entry.callback).is_ok_and(is_callable_object)
+        })
+    {
+        return Err(invalid("invalid onabort listener"));
+    }
+    Ok(signal.onabort)
+}
 
 pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError> {
     let mut edges = Vec::new();
     let mut prototypes = BTreeMap::new();
     let mut revocable = BTreeSet::new();
+    let mut controller_signals = BTreeSet::new();
     use crate::bytecode::Instr;
     let definitions = build
         .functions
@@ -332,14 +421,17 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                 )));
             }
             if let Some(target) = event.target
-                && !matches!(heap.get(target), Ok(Object::EventTarget { .. }))
+                && !heap
+                    .get(target)
+                    .is_ok_and(|object| object.event_target_state().is_some())
             {
                 return Err(VmError::InvalidSnapshot(format!(
                     "event {id} has invalid target {target}"
                 )));
             }
         }
-        if let Object::EventTarget { target, .. } = object {
+        let onabort = check_abort_state(heap, id, object, &mut controller_signals)?;
+        if let Some(target) = object.event_target_state() {
             let mut previous_id = None;
             let mut registrations = BTreeSet::new();
             for listener in &target.listeners {
@@ -364,7 +456,19 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                         listener.callback
                     )));
                 }
-                if !registrations.insert((&listener.ty, listener.callback, listener.capture)) {
+                if let Some(signal) = listener.signal
+                    && !matches!(heap.get(signal), Ok(Object::AbortSignal { signal, .. })
+                        if signal.reason.is_none()
+                            && signal.steps.contains(&AbortStep::Listener { target: id, id: listener.id }))
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "event target {id} has invalid listener signal for {}",
+                        listener.id
+                    )));
+                }
+                if Some(listener.id) != onabort
+                    && !registrations.insert((&listener.ty, listener.callback, listener.capture))
+                {
                     return Err(VmError::InvalidSnapshot(format!(
                         "event target {id} has duplicate listener registrations"
                     )));
@@ -455,6 +559,8 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                     | Object::DomException { .. }
                     | Object::Event { .. }
                     | Object::EventTarget { .. }
+                    | Object::AbortController { .. }
+                    | Object::AbortSignal { .. }
                     | Object::ArrayBuffer(_)
                     | Object::TypedArray(_)
                     | Object::DataView(_)

@@ -29,10 +29,11 @@ pub(crate) use types::{
     UNSCOPABLES_DESCRIPTION, UNSCOPABLES_SYMBOL,
 };
 pub use types::{
-    ArrayBufferObject, ArrayIterationKind, ArrayObject, AsyncCompletion, AsyncRequest, BoundObject,
-    BoxedPrimitive, CollectionIteration, CollectionKind, CombineKind, CombineState, DataViewObject,
-    DisposableResource, DisposeHint, DisposeState, ElementKind, EnvironmentObject, EventListener,
-    EventState, EventTargetState, FunctionObject, GeneratorObject, GeneratorStatus, NativeObject,
-    Object, PlainObject, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable,
-    RejectionStatus, Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
+    AbortSignalState, AbortStep, ArrayBufferObject, ArrayIterationKind, ArrayObject,
+    AsyncCompletion, AsyncRequest, BoundObject, BoxedPrimitive, CollectionIteration,
+    CollectionKind, CombineKind, CombineState, DataViewObject, DisposableResource, DisposeHint,
+    DisposeState, ElementKind, EnvironmentObject, EventListener, EventState, EventTargetState,
+    FunctionObject, GeneratorObject, GeneratorStatus, NativeObject, Object, PlainObject,
+    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTable, RejectionStatus,
+    Resolution, TextDecoderObject, TypedArrayObject, WeakKey,
 };

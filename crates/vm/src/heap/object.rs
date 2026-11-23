@@ -1,9 +1,12 @@
+use std::collections::BTreeSet;
+
 use super::store::lookup_tables;
 use super::types::{
-    ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, DisposableResource,
-    EnvironmentObject, FunctionObject, IntegrityLevel, NativeObject, Object, OwnProperty,
-    PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables, PropertyTablesMut,
-    Resolution, TextDecoderObject, TypedArrayObject, array_index, collect_own_keys,
+    AbortStep, ArrayBufferObject, BoundObject, BoxedPrimitive, DataViewObject, DisposableResource,
+    EnvironmentObject, EventTargetState, FunctionObject, IntegrityLevel, NativeObject, Object,
+    OwnProperty, PromiseCallback, PromiseObject, PromiseState, Property, PropertyTables,
+    PropertyTablesMut, Resolution, TextDecoderObject, TypedArrayObject, array_index,
+    collect_own_keys,
 };
 use crate::ops::canonical_index_key;
 use crate::value::{
@@ -102,6 +105,8 @@ macro_rules! map_object_storage {
             | Object::DomException { object: $storage, .. }
             | Object::Event { object: $storage, .. }
             | Object::EventTarget { object: $storage, .. }
+            | Object::AbortController { object: $storage, .. }
+            | Object::AbortSignal { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
             | Object::TypedArray(TypedArrayObject { object: $storage, .. })
             | Object::DataView(DataViewObject { object: $storage, .. })
@@ -133,6 +138,24 @@ macro_rules! map_object_storage {
 }
 
 impl Object {
+    pub(crate) fn event_target_state(&self) -> Option<&EventTargetState> {
+        match self {
+            Self::EventTarget { target, .. } | Self::AbortSignal { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn prune_weak_abort_edges(&mut self, live: &BTreeSet<ObjectId>) {
+        if let Self::AbortSignal { signal, .. } = self {
+            signal.sources.retain(|id| live.contains(id));
+            signal.dependents.retain(|id| live.contains(id));
+            signal.steps.retain(|step| match step {
+                AbortStep::Listener { target, .. } => live.contains(target),
+                AbortStep::Operation(_) => true,
+            });
+        }
+    }
+
     pub(crate) fn has_error_brand(&self) -> bool {
         matches!(self, Self::DomException { .. })
             || matches!(self, Self::Plain(object) if object.is_error)
@@ -453,11 +476,20 @@ impl Object {
                     out.push(OwnedEdge::Symbol(*symbol));
                 }
             }
-            Self::EventTarget { target, .. } => {
+            Self::EventTarget { target, .. } | Self::AbortSignal { target, .. } => {
                 for listener in &target.listeners {
                     out.push(OwnedEdge::Object(listener.callback));
+                    if let Some(signal) = listener.signal {
+                        out.push(OwnedEdge::Object(signal));
+                    }
+                }
+                if let Self::AbortSignal { signal, .. } = self
+                    && let Some(reason) = &signal.reason
+                {
+                    push_value(out, reason);
                 }
             }
+            Self::AbortController { signal, .. } => out.push(OwnedEdge::Object(*signal)),
             Self::Native(_)
             | Self::Plain(_)
             | Self::Proxy { slots: None, .. }

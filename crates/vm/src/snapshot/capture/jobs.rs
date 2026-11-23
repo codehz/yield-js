@@ -6,7 +6,9 @@ use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget};
 use crate::builtin::is_callable_object;
 use crate::error::VmError;
 use crate::heap::GeneratorStatus;
-use crate::heap::{CombineKind, Heap, Object, PromiseCallback, PromiseState, ReactionJob};
+use crate::heap::{
+    AbortStep, CombineKind, Heap, Object, PromiseCallback, PromiseState, ReactionJob,
+};
 use crate::runtime::{HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, PendingOperation};
 use crate::value::{ObjectId, ValueRef};
 
@@ -321,10 +323,40 @@ pub(super) fn load_operations(
                 rejection,
                 state: record.state,
                 target: record.target,
+                signal: record.signal,
                 declaration,
                 live: None,
             },
         );
+    }
+    let mut linked = BTreeSet::new();
+    for (signal_id, object) in heap.iter() {
+        let Object::AbortSignal { signal, .. } = object else {
+            continue;
+        };
+        for step in &signal.steps {
+            let AbortStep::Operation(id) = step else {
+                continue;
+            };
+            if signal.reason.is_some()
+                || !linked.insert(*id)
+                || !operations.get(id).is_some_and(|operation| {
+                    operation.signal == Some(signal_id)
+                        && matches!(operation.target, DeliveryTarget::Promise(_))
+                })
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "AbortSignal {signal_id} has invalid operation link {id}"
+                )));
+            }
+        }
+    }
+    for (id, operation) in &operations {
+        if operation.signal.is_some() && !linked.contains(id) {
+            return Err(VmError::InvalidSnapshot(format!(
+                "operation {id} is missing its reciprocal AbortSignal link"
+            )));
+        }
     }
     Ok(operations)
 }

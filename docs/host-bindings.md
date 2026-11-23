@@ -105,6 +105,8 @@ impl Matcher {
 
 同步绑定可用 `cx.custom_event(type, detail, bubbles, cancelable)` 创建事件；CPS 绑定用 `cx.dispatch_event(target, event).await?` 通过固定 intrinsic 派发，并收到表示未取消的 JS 布尔值。外部输入在 VM 线程用导出入口发起独立轮次，再排空微任务。平台回调不得持有 `JsValue`。
 
+`cx.abort_reason(&signal)` 检查信号品牌并返回已有原因。`cx.promise_with_signal(op, &signal)` 对已取消信号直接拒绝原生 Promise，不启动 driver；否则将登记绑定到信号。取消先删除 pending 记录并释放登记，再以同一原因拒绝 Promise。完成和恢复失败也解除关联。
+
 ### 4.3 稳定标识与契约指纹
 
 绑定声明在链接期计算**指纹**，写入快照头部；恢复时用本进程的声明重新计算并比对。指纹只覆盖语义字段：

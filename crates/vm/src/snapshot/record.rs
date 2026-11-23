@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Event objects, event target roots and VM-relative time.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 69;
+// Abort signal graphs and operation associations.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 70;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -135,6 +135,7 @@ pub struct PendingOperationRecord {
     pub recovery: Recovery,
     pub state: Vec<u8>,
     pub target: DeliveryTarget,
+    pub signal: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

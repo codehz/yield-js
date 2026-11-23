@@ -244,6 +244,9 @@ impl Vm {
             tracer.mark_object(import.namespace)?;
         }
         for operation in self.operations.values() {
+            if let Some(signal) = operation.signal {
+                tracer.mark_object(signal)?;
+            }
             if let crate::snapshot::DeliveryTarget::Promise(promise) = operation.target {
                 tracer.mark_object(promise)?;
             }
@@ -434,6 +437,26 @@ impl<'a> Tracer<'a> {
     fn walk_object(&mut self, id: ObjectId, object: &'a Object) -> Result<(), VmError> {
         if let Object::WeakMap { entries, .. } = object {
             self.weak_maps.push(entries);
+        }
+        // Only a live, unaborted source can keep an otherwise unreachable
+        // dependent alive. Walking these here also closes over WeakMap values:
+        // either kind of conditional edge may discover a new live source.
+        if let Object::AbortSignal { signal, .. } = object
+            && signal.reason.is_none()
+        {
+            for &dependent in &signal.dependents {
+                if let Ok(Object::AbortSignal { target, signal, .. }) = self.heap.get(dependent)
+                    && signal.dependent
+                    && signal.reason.is_none()
+                    && (!signal.steps.is_empty()
+                        || target
+                            .listeners
+                            .iter()
+                            .any(|listener| listener.ty == "abort"))
+                {
+                    self.mark_object(dependent)?;
+                }
+            }
         }
         let mut edges = std::mem::take(&mut self.edges);
         self.heap.write_edges(id, object, &mut edges);

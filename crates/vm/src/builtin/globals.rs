@@ -146,6 +146,8 @@ builtin_globals! {
     "Event" => Global::Owner(super::event::OWNER),
     "CustomEvent" => Global::Root(super::event::CUSTOM_ROOT),
     "EventTarget" => Global::Root(super::event::TARGET_ROOT),
+    "AbortController" => Global::Owner(super::abort::CONTROLLER_OWNER),
+    "AbortSignal" => Global::Owner(super::abort::SIGNAL_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

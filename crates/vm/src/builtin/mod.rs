@@ -70,6 +70,7 @@ pub(crate) const ROOT_PROXY: &str = "proxy";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
 pub(crate) const ROOT_FUNCTION_PROTOTYPE: &str = "function.prototype";
 
+pub(crate) mod abort;
 pub(crate) mod array;
 pub(crate) mod async_generator;
 mod bigint;

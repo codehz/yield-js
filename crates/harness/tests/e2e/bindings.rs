@@ -125,6 +125,16 @@ mod strategy_fixture {
             cx.promise(ResumeOperation)
         }
 
+        #[function(name = "withSignal")]
+        fn with_signal(cx: &mut CallCx<'_>, signal: JsValue) -> JsResult<JsValue> {
+            cx.promise_with_signal(ResumeOperation, &signal)
+        }
+
+        #[function(name = "abortReason")]
+        fn abort_reason(cx: &mut CallCx<'_>, signal: JsValue) -> JsResult<JsValue> {
+            Ok(cx.abort_reason(&signal)?.unwrap_or_else(JsValue::undefined))
+        }
+
         #[function(name = "reissue")]
         fn reissue(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
             cx.promise(ReissueOperation)
@@ -147,6 +157,105 @@ mod strategy_fixture {
         }
         .expect("strategy bindings")
     }
+}
+
+#[test]
+fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
+    let source = r#"
+        import { withSignal, abortReason } from "ops";
+        const source = new AbortController();
+        const dependent = AbortSignal.any([source.signal]);
+        const reason = {};
+        const target = new EventTarget();
+        let valid = true;
+        target.addEventListener("x", () => { valid = false; }, {signal: dependent});
+        source.signal.addEventListener("abort", event => {
+            valid = dependent.aborted && abortReason(dependent) === reason;
+            event.stopImmediatePropagation();
+        });
+        export async function run() {
+            try { await withSignal(dependent); }
+            catch (error) { return error === reason && valid; }
+            return false;
+        }
+        export function cancel() {
+            source.abort(reason);
+            target.dispatchEvent(new Event("x"));
+        }
+        export async function already() {
+            try { await withSignal(AbortSignal.abort(reason)); }
+            catch (error) { return error === reason; }
+            return false;
+        }
+        export function badSignal() {
+            try { abortReason({}); }
+            catch (error) { return error instanceof TypeError; }
+            return false;
+        }
+    "#;
+    let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).unwrap();
+    let labels = Arc::new(LabelService::default());
+    let mut host = StrategyHost::new(strategy_fixture::bindings(&labels));
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let old = labels.token("resume").unwrap();
+    let image = vm.snapshot(std::slice::from_ref(&result)).unwrap();
+    let restored_labels = Arc::new(LabelService::default());
+    let mut restored_host = StrategyHost::new(strategy_fixture::bindings(&restored_labels));
+    let mut no_backlink = image.clone();
+    no_backlink.operations[0].signal = None;
+    assert!(matches!(
+        Vm::restore_validated(no_backlink, build.clone(), &mut restored_host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut wrong_signal = image.clone();
+    let global = wrong_signal.roots["globalThis"];
+    let controller = wrong_signal
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            yield_vm::Object::AbortController { signal, .. } => Some(signal),
+            _ => None,
+        })
+        .expect("controller record");
+    *controller = global;
+    assert!(matches!(
+        Vm::restore_validated(wrong_signal, build.clone(), &mut restored_host),
+        Err(VmError::InvalidSnapshot(_))
+    ));
+    let mut restored = Vm::restore_validated(image, build, &mut restored_host).unwrap();
+    assert!(restored_labels.pending_labels().is_empty());
+    restored.start_recovered_operations().unwrap();
+    assert_eq!(restored_labels.resume_log(), ["resume"]);
+    let current = restored_labels.token("resume").unwrap();
+    restored
+        .start(&mut restored_host, "cancel", vec![])
+        .unwrap();
+    assert!(restored_labels.pending_labels().is_empty());
+    for token in [old, current] {
+        assert!(matches!(
+            restored.complete_operation(token, Completion::Fulfilled(JsValue::null())),
+            Err(VmError::UnknownOperation(_))
+        ));
+    }
+    let already = restored
+        .start(&mut restored_host, "already", vec![])
+        .unwrap();
+    assert!(restored_labels.pending_labels().is_empty());
+    assert_eq!(
+        restored
+            .start(&mut restored_host, "badSignal", vec![])
+            .unwrap(),
+        Value::boolean(true)
+    );
+    restored.run_until_idle(&mut restored_host).unwrap();
+    for promise in [result, already] {
+        assert_eq!(
+            restored.promise_state(&promise).unwrap(),
+            PromiseState::Fulfilled(Value::boolean(true))
+        );
+    }
+    assert_eq!(labels.token("resume"), Some(old));
 }
 
 #[test]

@@ -1463,12 +1463,32 @@ pub struct EventListener {
     pub capture: bool,
     pub once: bool,
     pub passive: bool,
+    // The registration retains its signal, but the signal's step is weak.
+    pub signal: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventTargetState {
     pub listeners: Vec<EventListener>,
     pub next_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbortStep {
+    Listener { target: ObjectId, id: u64 },
+    Operation(u64),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AbortSignalState {
+    pub reason: Option<Value>,
+    pub dependent: bool,
+    // Weak links in registration order, flattened to independent sources.
+    pub sources: Vec<ObjectId>,
+    pub dependents: Vec<ObjectId>,
+    pub steps: Vec<AbortStep>,
+    // Stable registration ID of the event handler, not a callback identity.
+    pub onabort: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1603,6 +1623,15 @@ pub enum Object {
         object: PlainObject,
         target: EventTargetState,
     },
+    AbortController {
+        object: PlainObject,
+        signal: ObjectId,
+    },
+    AbortSignal {
+        object: PlainObject,
+        target: EventTargetState,
+        signal: AbortSignalState,
+    },
 }
 
 fn serialize_regexp<S: serde::Serializer>(
@@ -1688,6 +1717,28 @@ impl PartialEq for Object {
                     target: y,
                 },
             ) => a == b && x == y,
+            (
+                AbortController {
+                    object: a,
+                    signal: x,
+                },
+                AbortController {
+                    object: b,
+                    signal: y,
+                },
+            ) => a == b && x == y,
+            (
+                AbortSignal {
+                    object: a,
+                    target: x,
+                    signal: s,
+                },
+                AbortSignal {
+                    object: b,
+                    target: y,
+                    signal: t,
+                },
+            ) => a == b && x == y && s == t,
             (
                 DomException {
                     object: a,
