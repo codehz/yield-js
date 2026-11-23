@@ -438,7 +438,7 @@ impl Vm {
         })
     }
 
-    fn alloc_abort_signal(&mut self, signal: AbortSignalState) -> ObjectId {
+    pub(crate) fn alloc_abort_signal(&mut self, signal: AbortSignalState) -> ObjectId {
         self.heap.alloc(Object::AbortSignal {
             object: PlainObject::new(Some(self.builtins.get(SIGNAL_PROTOTYPE))),
             target: EventTargetState::default(),

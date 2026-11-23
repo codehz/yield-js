@@ -46,6 +46,7 @@ macro_rules! interface {
         };
     };
 }
+pub(super) use interface;
 
 interface!(STREAM_OWNER, "readableStream", "ReadableStream", STREAM_PROTO,
     KEY => IntrinsicDef::constructor_with_target(KEY, 0, illegal_constructor, construct_stream),
@@ -68,7 +69,7 @@ interface!(CONTROLLER_OWNER, "readableStreamDefaultController", "ReadableStreamD
     Prototype "error" 0 => controller_error,
 );
 
-fn illegal_constructor(
+pub(super) fn illegal_constructor(
     vm: &mut Vm,
     _: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -78,12 +79,12 @@ fn illegal_constructor(
     vm.throw_type_error(roots, "Illegal stream constructor call")
 }
 
-fn arg(args: &[Value], index: usize) -> &Value {
+pub(super) fn arg(args: &[Value], index: usize) -> &Value {
     static UNDEFINED: Value = Value::UNDEFINED;
     args.get(index).unwrap_or(&UNDEFINED)
 }
 
-fn is_undefined(value: &Value) -> bool {
+pub(super) fn is_undefined(value: &Value) -> bool {
     matches!(value.view(), ValueRef::Undefined)
 }
 
@@ -96,12 +97,13 @@ macro_rules! converted {
         }
     };
 }
+pub(super) use converted;
 
 mod bytes;
 pub(in crate::builtin) use bytes::{BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_CONTROLLER_OWNER};
 use bytes::{BYOB_READER_PROTO, BYTE_CONTROLLER_PROTO, enforce_unsigned};
 
-fn member(
+pub(super) fn member(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -114,7 +116,7 @@ fn member(
     })
 }
 
-fn callback_member(
+pub(super) fn callback_member(
     vm: &mut Vm,
     host: &mut dyn Host,
     roots: &ActiveRoots<'_>,
@@ -996,6 +998,7 @@ impl Vm {
                     Settlement::Rejected(error) => Settlement::Rejected(error.clone()),
                 },
             ),
+            _ => unreachable!("writable stream job dispatched to readable streams"),
         }
     }
 }

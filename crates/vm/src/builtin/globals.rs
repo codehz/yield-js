@@ -171,6 +171,9 @@ builtin_globals! {
     "ReadableByteStreamController" => Global::Owner(super::streams::BYTE_CONTROLLER_OWNER),
     "ReadableStreamBYOBRequest" => Global::Owner(super::streams::BYOB_REQUEST_OWNER),
     "ReadableStreamBYOBReader" => Global::Owner(super::streams::BYOB_READER_OWNER),
+    "WritableStream" => Global::Owner(super::streams::WRITABLE_OWNER),
+    "WritableStreamDefaultWriter" => Global::Owner(super::streams::WRITER_OWNER),
+    "WritableStreamDefaultController" => Global::Owner(super::streams::WRITABLE_CONTROLLER_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

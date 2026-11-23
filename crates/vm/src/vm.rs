@@ -931,7 +931,7 @@ impl Vm {
                 }
                 Microtask::Streams { .. } => {
                     if let Microtask::Streams { job, settlement } = &task {
-                        self.resume_readable_job(host, roots, *job, settlement)?;
+                        self.resume_stream_job(host, roots, *job, settlement)?;
                     }
                 }
                 Microtask::Call {

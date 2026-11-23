@@ -39,3 +39,7 @@ pub use types::{
     ReadableState, ReadableStreamObject, RejectionStatus, Resolution, TextDecoderObject,
     TextEncoding, TypedArrayObject, WeakKey,
 };
+pub use types::{
+    WritableAbort, WritableFlight, WritableRequest, WritableSink, WritableState,
+    WritableStreamObject, WritableWriterObject,
+};

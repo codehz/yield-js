@@ -24,6 +24,12 @@ pub(crate) fn validate_job(heap: &Heap, source: ObjectId, job: StreamJob) -> boo
             matches!(heap.get(id), Ok(Object::ReadableStream(s)) if s.pull_wait == Some(source))
         }
         StreamJob::ReadableCancel(id) => pending_dependency(heap, id, source),
+        StreamJob::WritableStart(id) => {
+            matches!(heap.get(id), Ok(Object::WritableStream(s)) if s.start_wait == Some(source))
+        }
+        StreamJob::WritableFlight(id) => {
+            matches!(heap.get(id), Ok(Object::WritableStream(s)) if s.flight_wait == Some(source))
+        }
     }
 }
 
@@ -164,8 +170,104 @@ fn validate_bytes(heap: &Heap, stream: &ReadableStreamObject) -> bool {
     })
 }
 
+fn validate_writable(heap: &Heap, id: ObjectId, s: &crate::heap::WritableStreamObject) -> bool {
+    use crate::heap::{WritableFlight, WritableState};
+    let active = matches!(
+        s.state,
+        WritableState::Writable | WritableState::Erroring(_)
+    );
+    let abort_flight = match s.flight {
+        Some(WritableFlight::Abort(p)) => Some(p),
+        _ => None,
+    };
+    let mut requests = std::collections::BTreeSet::new();
+    let mut request = |p| requests.insert(p) && pending_dependency(heap, p, id);
+    matches!(heap.get(s.controller), Ok(Object::WritableController { stream, .. }) if *stream == id)
+        && matches!(heap.get(s.signal), Ok(Object::AbortSignal { signal, .. }) if !signal.dependent)
+        && s.writer.is_none_or(|writer| matches!(heap.get(writer), Ok(Object::WritableWriter(w)) if w.stream == Some(id)))
+        && !s.high_water_mark.is_nan() && s.high_water_mark >= 0.0
+        && !s.total_size.is_nan() && s.total_size >= 0.0
+        && (active || s.queue.is_empty())
+        && (!matches!(s.state, WritableState::Errored(_)) || s.total_size == 0.0)
+        && (!matches!(s.state, WritableState::Writable) || s.close.is_some()
+            || s.backpressure == (s.high_water_mark - s.total_size <= 0.0))
+        && s.queue.iter().all(|r| r.size.is_finite() && r.size >= 0.0 && request(r.promise))
+        && s.close.is_none_or(|p| (active || abort_flight.is_some()) && request(p))
+        && s.abort.as_ref().is_none_or(|a| matches!(s.state, WritableState::Erroring(_)) && request(a.promise))
+        && abort_flight.is_none_or(|p| request(p))
+        && match s.flight {
+            Some(WritableFlight::Write) => active && !s.queue.is_empty(),
+            Some(WritableFlight::Close) => active && s.close.is_some() && s.queue.is_empty(),
+            Some(WritableFlight::Abort(_)) => matches!(s.state, WritableState::Errored(_)),
+            None => !s.started || (!matches!(s.state, WritableState::Erroring(_)) && (!active || (s.queue.is_empty() && s.close.is_none()))),
+        }
+        && (!s.started || s.start_wait.is_none())
+        && (s.started || (active && s.flight.is_none()))
+        && s.start_wait.is_none_or(|source| has_job(heap, source, StreamJob::WritableStart(id)))
+        && (s.flight.is_some() == s.flight_wait.is_some())
+        && s.flight_wait.is_none_or(|source| has_job(heap, source, StreamJob::WritableFlight(id)))
+        && (active && !matches!(s.flight, Some(WritableFlight::Close)) || s.sink == Default::default())
+        && [&s.sink.write, &s.sink.close, &s.sink.abort, &s.sink.size].into_iter().flatten()
+            .all(|v| matches!(v.view(), ValueRef::Object(f) if heap.get(f).is_ok_and(is_callable_object)))
+}
+
+fn validate_writable_writer(
+    heap: &Heap,
+    id: ObjectId,
+    w: &crate::heap::WritableWriterObject,
+) -> bool {
+    use crate::heap::{RejectionStatus, WritableFlight, WritableState};
+    use crate::value::Value;
+    let fulfilled = |p| {
+        heap.promise(p).is_ok_and(|p| matches!(&p.state, PromiseState::Fulfilled(v) if matches!(v.view(), ValueRef::Undefined)))
+    };
+    let rejected = |p, reason: Option<&Value>| {
+        heap.promise(p).is_ok_and(|p| {
+        p.rejection_status == RejectionStatus::Handled
+            && matches!(&p.state, PromiseState::Rejected(v) if reason.is_none_or(|reason| v == reason))
+    })
+    };
+    if w.ready == w.closed {
+        return false;
+    }
+    let Some(stream) = w.stream else {
+        return rejected(w.ready, None) && rejected(w.closed, None);
+    };
+    let Ok(Object::WritableStream(s)) = heap.get(stream) else {
+        return false;
+    };
+    if s.writer != Some(id) {
+        return false;
+    }
+    let pending = |p| pending_dependency(heap, p, id);
+    match &s.state {
+        WritableState::Writable => {
+            pending(w.closed)
+                && if s.backpressure && s.close.is_none() {
+                    pending(w.ready)
+                } else {
+                    fulfilled(w.ready)
+                }
+        }
+        WritableState::Erroring(e) => rejected(w.ready, Some(e)) && pending(w.closed),
+        WritableState::Errored(e) => {
+            rejected(w.ready, Some(e))
+                && (rejected(w.closed, Some(e))
+                    || (matches!(s.flight, Some(WritableFlight::Abort(_))) && pending(w.closed)))
+        }
+        WritableState::Closed => {
+            fulfilled(w.closed) && (fulfilled(w.ready) || rejected(w.ready, None))
+        }
+    }
+}
+
 pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Result<(), VmError> {
     let valid = match object {
+        Object::WritableStream(s) => validate_writable(heap, id, s),
+        Object::WritableWriter(w) => validate_writable_writer(heap, id, w),
+        Object::WritableController { stream, .. } => {
+            matches!(heap.get(*stream), Ok(Object::WritableStream(s)) if s.controller == id)
+        }
         Object::ReadableStream(s) => {
             matches!(heap.get(s.controller), Ok(Object::ReadableController { stream, .. }) if *stream == id)
                 && s.reader.is_none_or(|reader| matches!(heap.get(reader), Ok(Object::ReadableReader(r)) if r.stream == Some(id)))
@@ -222,6 +324,11 @@ pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Res
             pending_dependency(heap, id, dependency)
                 && match heap.get(dependency) {
                     Ok(Object::ReadableReader(r)) => r.closed == id || r.requests.contains(&id),
+                    Ok(Object::WritableWriter(w)) => w.ready == id || w.closed == id,
+                    Ok(Object::WritableStream(s)) => s.close == Some(id)
+                        || s.abort.as_ref().is_some_and(|a| a.promise == id)
+                        || s.flight == Some(crate::heap::WritableFlight::Abort(id))
+                        || s.queue.iter().any(|r| r.promise == id),
                     Ok(Object::Promise(_)) => {
                         has_job(heap, dependency, StreamJob::ReadableCancel(id))
                     }
@@ -234,7 +341,7 @@ pub(crate) fn validate_record(heap: &Heap, id: ObjectId, object: &Object) -> Res
         Ok(())
     } else {
         Err(VmError::InvalidSnapshot(format!(
-            "invalid readable stream record {id}"
+            "invalid stream record {id}"
         )))
     }
 }

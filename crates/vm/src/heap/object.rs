@@ -117,6 +117,9 @@ macro_rules! map_object_storage {
             | Object::QueuingStrategy { object: $storage, .. }
             | Object::ReadableStream(super::types::ReadableStreamObject { object: $storage, .. })
             | Object::ReadableReader(super::types::ReadableReaderObject { object: $storage, .. })
+            | Object::WritableStream(super::types::WritableStreamObject { object: $storage, .. })
+            | Object::WritableWriter(super::types::WritableWriterObject { object: $storage, .. })
+            | Object::WritableController { object: $storage, .. }
             | Object::ReadableController { object: $storage, .. }
             | Object::ReadableByobRequest { object: $storage, .. }
             | Object::Url { object: $storage, .. }
@@ -521,6 +524,50 @@ impl Object {
             }
             Self::UrlSearchParamsIterator { params, .. } => out.push(OwnedEdge::Object(*params)),
             Self::ReadableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::WritableController { stream, .. } => out.push(OwnedEdge::Object(*stream)),
+            Self::WritableWriter(writer) => {
+                out.extend(
+                    [Some(writer.ready), Some(writer.closed), writer.stream]
+                        .into_iter()
+                        .flatten()
+                        .map(OwnedEdge::Object),
+                );
+            }
+            Self::WritableStream(s) => {
+                use super::types::{WritableFlight, WritableState};
+                out.extend(
+                    [
+                        Some(s.controller),
+                        Some(s.signal),
+                        s.writer,
+                        s.close,
+                        s.abort.as_ref().map(|a| a.promise),
+                        s.start_wait,
+                        s.flight_wait,
+                        match s.flight {
+                            Some(WritableFlight::Abort(p)) => Some(p),
+                            _ => None,
+                        },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(OwnedEdge::Object),
+                );
+                if let WritableState::Erroring(reason) | WritableState::Errored(reason) = &s.state {
+                    push_value(out, reason);
+                }
+                for request in &s.queue {
+                    out.push(OwnedEdge::Object(request.promise));
+                    push_value(out, &request.chunk);
+                }
+                push_value(out, &s.sink.receiver);
+                for value in [&s.sink.write, &s.sink.close, &s.sink.abort, &s.sink.size]
+                    .into_iter()
+                    .flatten()
+                {
+                    push_value(out, value);
+                }
+            }
             Self::ReadableByobRequest {
                 controller, view, ..
             } => {

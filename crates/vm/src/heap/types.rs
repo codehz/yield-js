@@ -1607,6 +1607,87 @@ pub struct ReadableReaderObject {
     pub requests: VecDeque<ObjectId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritableState {
+    Writable,
+    Erroring(Value),
+    Errored(Value),
+    Closed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WritableRequest {
+    pub promise: ObjectId,
+    pub chunk: Value,
+    pub size: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WritableAbort {
+    pub promise: ObjectId,
+    pub already_erroring: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritableFlight {
+    Write,
+    Close,
+    Abort(ObjectId),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WritableSink {
+    pub receiver: Value,
+    pub write: Option<Value>,
+    pub close: Option<Value>,
+    pub abort: Option<Value>,
+    pub size: Option<Value>,
+}
+
+impl Default for WritableSink {
+    fn default() -> Self {
+        Self {
+            receiver: Value::UNDEFINED,
+            write: None,
+            close: None,
+            abort: None,
+            size: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WritableStreamObject {
+    pub object: PlainObject,
+    pub controller: ObjectId,
+    pub signal: ObjectId,
+    pub writer: Option<ObjectId>,
+    pub state: WritableState,
+    pub sink: WritableSink,
+    pub queue: VecDeque<WritableRequest>,
+    #[serde(with = "stream_number")]
+    pub total_size: f64,
+    #[serde(with = "stream_number")]
+    pub high_water_mark: f64,
+    pub backpressure: bool,
+    pub close: Option<ObjectId>,
+    pub abort: Option<WritableAbort>,
+    pub started: bool,
+    pub start_wait: Option<ObjectId>,
+    pub flight: Option<WritableFlight>,
+    pub flight_wait: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WritableWriterObject {
+    pub object: PlainObject,
+    pub stream: Option<ObjectId>,
+    pub ready: ObjectId,
+    pub closed: ObjectId,
+}
+
 mod stream_number {
     use super::*;
     use crate::value::ValueRef;
@@ -1665,6 +1746,12 @@ pub enum Object {
     },
     ReadableStream(ReadableStreamObject),
     ReadableReader(ReadableReaderObject),
+    WritableStream(WritableStreamObject),
+    WritableWriter(WritableWriterObject),
+    WritableController {
+        object: PlainObject,
+        stream: ObjectId,
+    },
     ReadableController {
         object: PlainObject,
         stream: ObjectId,
@@ -1859,6 +1946,18 @@ impl PartialEq for Object {
             (Promise(a), Promise(b)) => a == b,
             (ReadableStream(a), ReadableStream(b)) => a == b,
             (ReadableReader(a), ReadableReader(b)) => a == b,
+            (WritableStream(a), WritableStream(b)) => a == b,
+            (WritableWriter(a), WritableWriter(b)) => a == b,
+            (
+                WritableController {
+                    object: a,
+                    stream: x,
+                },
+                WritableController {
+                    object: b,
+                    stream: y,
+                },
+            ) => a == b && x == y,
             (
                 ReadableController {
                     object: a,

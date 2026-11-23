@@ -7,7 +7,9 @@ pub(super) use readable::{
 };
 mod strategy;
 mod validate;
+mod writable;
 pub(crate) use validate::{validate_job, validate_record};
+pub(super) use writable::{WRITABLE_CONTROLLER_OWNER, WRITABLE_OWNER, WRITER_OWNER};
 
 pub(super) use strategy::{BYTE_LENGTH_OWNER, COUNT_OWNER};
 
@@ -32,17 +34,38 @@ pub enum StreamJob {
     ReadableStart(ObjectId),
     ReadablePull(ObjectId),
     ReadableCancel(ObjectId),
+    WritableStart(ObjectId),
+    WritableFlight(ObjectId),
 }
 
 impl StreamJob {
     pub(crate) fn target(self) -> ObjectId {
         match self {
-            Self::ReadableStart(id) | Self::ReadablePull(id) | Self::ReadableCancel(id) => id,
+            Self::ReadableStart(id)
+            | Self::ReadablePull(id)
+            | Self::ReadableCancel(id)
+            | Self::WritableStart(id)
+            | Self::WritableFlight(id) => id,
         }
     }
 }
 
 impl Vm {
+    pub(crate) fn resume_stream_job(
+        &mut self,
+        host: &mut dyn Host,
+        roots: &ActiveRoots<'_>,
+        job: StreamJob,
+        settlement: &Settlement,
+    ) -> Result<(), VmError> {
+        match job {
+            StreamJob::WritableStart(_) | StreamJob::WritableFlight(_) => {
+                self.resume_writable_job(host, roots, job, settlement)
+            }
+            _ => self.resume_readable_job(host, roots, job, settlement),
+        }
+    }
+
     fn observe_stream_job(&mut self, promise: ObjectId, job: StreamJob) -> Result<(), VmError> {
         self.react(promise, ReactionJob::Streams(job))
     }

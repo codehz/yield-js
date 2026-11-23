@@ -1248,9 +1248,9 @@ export function run() {
         })
         .unwrap();
     assert!(stream.reader.take().is_some());
+    let invalid = Vm::restore(malformed, build.clone(), &mut host, full());
     assert!(
-        matches!(Vm::restore(malformed, build.clone(), &mut host, full()),
-        Err(VmError::InvalidSnapshot(message)) if message.contains("invalid readable stream record"))
+        matches!(invalid, Err(VmError::InvalidSnapshot(message)) if message.contains("invalid stream record"))
     );
 
     let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
@@ -1321,5 +1321,74 @@ export async function run() {
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         yield_vm::PromiseState::Fulfilled(Value::boolean(true))
+    );
+}
+
+#[test]
+fn stream_writable_full_restore_keeps_inflight_request() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Completion, JsValue, PromiseState, Snapshot, Value, Vm};
+
+    let build = build(
+        r#"
+import { wait } from "test";
+let count = 0;
+const stream = new WritableStream({
+    write(chunk) {
+        count = count * 10 + chunk;
+        if (chunk === 1) return wait("write");
+    },
+    close() { count = count * 10 + 3; }
+});
+const writer = stream.getWriter();
+let original;
+export function enqueue() {
+    original = writer.write(1);
+    writer.write(2);
+    writer.close();
+    return original;
+}
+export async function run() {
+    await original;
+    await writer.closed;
+    return count;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let first = vm.start(&mut host, "enqueue", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    let roots = std::slice::from_ref(&first);
+    vm.collect_garbage(roots).unwrap();
+    let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
+    let mut vm = Vm::restore(
+        snapshot,
+        build,
+        &mut host,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    vm.start_recovered_operations().unwrap();
+    assert_eq!(vm.promise_state(&first).unwrap(), PromiseState::Pending);
+    host.complete(
+        &mut vm,
+        "wait:write",
+        Completion::Fulfilled(JsValue::undefined()),
+    )
+    .unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.promise_state(&first).unwrap(),
+        PromiseState::Fulfilled(Value::UNDEFINED)
+    );
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.promise_state(&result).unwrap(),
+        PromiseState::Fulfilled(Value::number(123.0))
     );
 }
