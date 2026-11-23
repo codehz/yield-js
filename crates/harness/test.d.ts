@@ -3,9 +3,9 @@
 
 declare module "test" {
     /** Starts a timer that calls `cb` after `ms` milliseconds; returns a task handle. */
-    export function setTimeout(cb: unknown, ms: unknown): unknown;
-    /** Cancels a timer handle returned by `setTimeout`. */
-    export function clearTimeout(handle?: unknown): void;
+    export function spawnDelayedTask(cb: unknown, ms: unknown): unknown;
+    /** Cancels a timer handle returned by `spawnDelayedTask`. */
+    export function cancelDelayedTask(handle?: unknown): void;
     /** Resolves after `ms` milliseconds. */
     export function sleep(ms: unknown): Promise<unknown>;
     /** Collects unreachable heap state without draining microtasks. */

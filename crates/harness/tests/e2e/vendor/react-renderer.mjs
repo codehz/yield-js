@@ -1,5 +1,5 @@
 import ReactReconciler from "react-reconciler-0.31.0.mjs";
-import { clearTimeout, inspect, setTimeout } from "test";
+import { inspect } from "test";
 import * as console from "console";
 
 

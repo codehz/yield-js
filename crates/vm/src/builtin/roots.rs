@@ -14,6 +14,7 @@ pub(crate) enum RootKind {
     Plain,
     Array,
     EventTarget,
+    Performance,
     Native(IntrinsicKey),
 }
 
@@ -95,7 +96,8 @@ impl BuiltinRoots {
                 .ok_or_else(|| VmError::InvalidSnapshot(format!("missing builtin root {name}")))?;
             let valid = match (&spec.kind, heap.get(id)?) {
                 (RootKind::Plain, Object::Plain(_)) | (RootKind::Array, Object::Array(_)) => true,
-                (RootKind::EventTarget, Object::EventTarget { .. }) => true,
+                (RootKind::EventTarget, Object::EventTarget { .. })
+                | (RootKind::Performance, Object::Performance { .. }) => true,
                 (
                     RootKind::Native(key),
                     Object::Native(NativeObject::Intrinsic { intrinsic, .. }),
@@ -183,6 +185,10 @@ impl Vm {
                 RootKind::Plain => self.heap.alloc_plain_with(None),
                 RootKind::Array => self.heap.alloc_array(Vec::new()),
                 RootKind::EventTarget => self.heap.alloc(Object::EventTarget {
+                    object: PlainObject::new(None),
+                    target: EventTargetState::default(),
+                }),
+                RootKind::Performance => self.heap.alloc(Object::Performance {
                     object: PlainObject::new(None),
                     target: EventTargetState::default(),
                 }),

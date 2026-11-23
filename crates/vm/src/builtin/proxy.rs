@@ -156,6 +156,7 @@ impl Vm {
                 | Object::DomException { .. }
                 | Object::Event { .. }
                 | Object::EventTarget { .. }
+                | Object::Performance { .. }
                 | Object::AbortController { .. }
                 | Object::AbortSignal { .. }
                 | Object::ArrayBuffer(_)

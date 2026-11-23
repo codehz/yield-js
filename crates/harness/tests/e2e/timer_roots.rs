@@ -8,13 +8,13 @@ use yield_vm::{Completion, JsValue, Object, Snapshot, Value, Vm};
 fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
     let program = build(
         r#"
-        import { clearTimeout, setTimeout, sleep } from 'test';
+        import { cancelDelayedTask, spawnDelayedTask, sleep } from 'test';
         export let callbackResult = 0;
         export let reactionResult = 0;
         let handle;
         function scheduleCallback() {
             const box = { n: 40 };
-            handle = setTimeout(() => { callbackResult = box.n; }, 100);
+            handle = spawnDelayedTask(() => { callbackResult = box.n; }, 100);
         }
         function scheduleReaction() {
             const box = { n: 2 };
@@ -24,7 +24,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
             scheduleCallback();
             scheduleReaction();
         }
-        export function cancel() { clearTimeout(handle); }
+        export function cancel() { cancelDelayedTask(handle); }
     "#,
     );
     let image = {
@@ -113,7 +113,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
     let mut vm = Vm::new(
         build(
             r#"
-            import { gc, setTimeout } from 'test';
+            import { gc, spawnDelayedTask } from 'test';
             export let result = 0;
             function collectThroughGetter() {
                 return ({ get value() { return gc(); } }).value;
@@ -125,7 +125,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
             }
             function scheduleFirst() {
                 const box = { n: 40 };
-                setTimeout(() => {
+                spawnDelayedTask(() => {
                     gc();
                     const extra = nested();
                     result = box.n + extra;
@@ -133,7 +133,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
             }
             function scheduleSecond() {
                 const box = { n: 7 };
-                setTimeout(() => { result = 10 * result + box.n; }, 100);
+                spawnDelayedTask(() => { result = 10 * result + box.n; }, 100);
             }
             export function run() {
                 scheduleFirst();
@@ -184,8 +184,8 @@ mod repeat_timer {
         })
     }
 
-    #[function(name = "clearTimeout")]
-    fn clear_timeout(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
+    #[function(name = "cancelDelayedTask")]
+    fn cancel_delayed_task(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
         cx.cancel_task(&handle)
     }
 }
@@ -226,12 +226,12 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     let mut host = RepeatHost(Arc::new(bindings), Arc::clone(&clock));
     let program = compile_main(
         r#"
-        import { start, clearTimeout } from 'repeat_timer';
+        import { start, cancelDelayedTask } from 'repeat_timer';
         export let result = 0;
         export function run() {
             const handle = start(() => {
                 result = 1;
-                clearTimeout(handle);
+                cancelDelayedTask(handle);
                 result = 2;
             });
         }

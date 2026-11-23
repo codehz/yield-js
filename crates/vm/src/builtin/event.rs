@@ -736,7 +736,7 @@ impl Vm {
             payload: EventPayload::CustomEvent { detail },
             bubbles,
             cancelable,
-            time_stamp: self.clock.elapsed_ms() as f64,
+            time_stamp: self.clock.now(),
             initialized: true,
             ..EventState::default()
         };

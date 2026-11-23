@@ -242,7 +242,9 @@ impl Vm {
 
     pub(crate) fn event_target(&self, id: ObjectId) -> Result<Option<&EventTargetState>, VmError> {
         Ok(match self.heap.get(id)? {
-            Object::EventTarget { target, .. } | Object::AbortSignal { target, .. } => Some(target),
+            Object::EventTarget { target, .. }
+            | Object::AbortSignal { target, .. }
+            | Object::Performance { target, .. } => Some(target),
             _ => None,
         })
     }
@@ -252,7 +254,9 @@ impl Vm {
         id: ObjectId,
     ) -> Result<Option<&mut EventTargetState>, VmError> {
         Ok(match self.heap.get_mut(id)? {
-            Object::EventTarget { target, .. } | Object::AbortSignal { target, .. } => Some(target),
+            Object::EventTarget { target, .. }
+            | Object::AbortSignal { target, .. }
+            | Object::Performance { target, .. } => Some(target),
             _ => None,
         })
     }

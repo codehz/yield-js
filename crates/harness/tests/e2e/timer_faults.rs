@@ -10,9 +10,9 @@ use yield_vm::{
 };
 
 const TIMERS: &str = r#"
-    import { setTimeout, sleep } from 'test';
+    import { spawnDelayedTask, sleep } from 'test';
     export let calls = 0;
-    export function schedule() { setTimeout(() => { calls += 1; }, 10); }
+    export function schedule() { spawnDelayedTask(() => { calls += 1; }, 10); }
     export function wait() { return sleep(10); }
 "#;
 
@@ -81,7 +81,7 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     reject("owner has no CPS layout", "stage is not an external", image);
 
     let mut image = snapshot.clone();
-    // setTimeout awaits the external timer first, then calls the guest callback.
+    // spawnDelayedTask awaits the external timer first, then calls the guest callback.
     image.host_tasks[0].stage = 1;
     reject("guest call stage", "stage is not an external", image);
 
@@ -218,11 +218,11 @@ fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
 fn a_throwing_timer_callback_does_not_block_the_next_timer() {
     let build = build(
         r#"
-        import { setTimeout } from 'test';
+        import { spawnDelayedTask } from 'test';
         export let calls = 0;
         export function run() {
-            setTimeout(() => { throw 'callback failed'; }, 1);
-            setTimeout(() => { calls += 1; }, 2);
+            spawnDelayedTask(() => { throw 'callback failed'; }, 1);
+            spawnDelayedTask(() => { calls += 1; }, 2);
         }
     "#,
     );

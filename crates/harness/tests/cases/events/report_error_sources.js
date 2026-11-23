@@ -1,8 +1,6 @@
 // @advance 1
 // @uncaught ["listener", "microtask", "timer"]
 
-import { setTimeout } from 'test';
-
 export function run() {
   globalThis.addEventListener('error', e => {
     if (!e.isTrusted || e.message !== e.error) throw 'bad error event';

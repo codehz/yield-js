@@ -1642,6 +1642,10 @@ pub enum Object {
         object: PlainObject,
         target: EventTargetState,
     },
+    Performance {
+        object: PlainObject,
+        target: EventTargetState,
+    },
     AbortController {
         object: PlainObject,
         signal: ObjectId,
@@ -1732,6 +1736,16 @@ impl PartialEq for Object {
                     target: x,
                 },
                 EventTarget {
+                    object: b,
+                    target: y,
+                },
+            ) => a == b && x == y,
+            (
+                Performance {
+                    object: a,
+                    target: x,
+                },
+                Performance {
                     object: b,
                     target: y,
                 },

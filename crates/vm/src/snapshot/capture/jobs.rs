@@ -269,12 +269,11 @@ pub(super) fn require_promise(heap: &Heap, id: ObjectId, what: &str) -> Result<(
 pub(super) fn load_operations(
     bindings: &Bindings,
     heap: &Heap,
-    elapsed_ms: u64,
+    elapsed: std::time::Duration,
     records: Vec<PendingOperationRecord>,
 ) -> Result<BTreeMap<u64, PendingOperation>, VmError> {
     let mut operations = BTreeMap::new();
     let mut operation_promises = BTreeSet::new();
-    let mut timeout_signals = BTreeSet::new();
     for record in records {
         if record.id == 0 || record.id == u64::MAX || operations.contains_key(&record.id) {
             return Err(VmError::InvalidSnapshot(format!(
@@ -282,58 +281,47 @@ pub(super) fn load_operations(
                 record.id
             )));
         }
-        let (declaration, recovery, rejection) = if let DeliveryTarget::Timeout {
-            signal,
-            deadline_ms,
-        } = record.target
-        {
-            if record.name != TIMEOUT_OPERATION_NAME
+        let (declaration, recovery, rejection) =
+            if let DeliveryTarget::Timeout { deadline, .. } = record.target {
+                if record.name != TIMEOUT_OPERATION_NAME
                 || record.schema != TIMEOUT_OPERATION_SCHEMA
                 || record.recovery != Recovery::Reissue
                 || !record.state.is_empty()
                 || record.signal.is_some()
                 // A timeout is created at or before the snapshot cut with a u64 delay.
-                || deadline_ms > u128::from(elapsed_ms) + u128::from(u64::MAX)
-            {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "timeout operation {} has invalid metadata",
-                    record.id
-                )));
-            }
-            if !matches!(heap.get(signal), Ok(Object::AbortSignal { signal, .. }) if signal.reason.is_none() && !signal.dependent)
-                || !timeout_signals.insert(signal)
-            {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "timeout operation {} has invalid or duplicate AbortSignal {signal}",
-                    record.id
-                )));
-            }
-            (None, Recovery::Reissue, TIMEOUT_OPERATION_REJECTION)
-        } else {
-            let (declaration, recovery, rejection) = bindings
-                .operation(&record.name, record.schema)
-                .ok_or_else(|| {
-                    VmError::InvalidSnapshot(format!(
-                        "operation {} schema {} is not declared",
+                || deadline.saturating_sub(elapsed) > std::time::Duration::from_millis(u64::MAX)
+                {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "timeout operation {} has invalid metadata",
+                        record.id
+                    )));
+                }
+                (None, Recovery::Reissue, TIMEOUT_OPERATION_REJECTION)
+            } else {
+                let (declaration, recovery, rejection) = bindings
+                    .operation(&record.name, record.schema)
+                    .ok_or_else(|| {
+                        VmError::InvalidSnapshot(format!(
+                            "operation {} schema {} is not declared",
+                            record.name, record.schema
+                        ))
+                    })?;
+                if recovery != record.recovery {
+                    return Err(VmError::InvalidSnapshot(format!(
+                        "operation {} schema {} recovery mismatch",
                         record.name, record.schema
-                    ))
-                })?;
-            if recovery != record.recovery {
-                return Err(VmError::InvalidSnapshot(format!(
-                    "operation {} schema {} recovery mismatch",
-                    record.name, record.schema
-                )));
-            }
-            bindings
-                .decode_operation(&record.name, record.schema, &record.state)
-                .map_err(|error| {
-                    VmError::InvalidSnapshot(format!(
-                        "operation {} schema {} state: {error}",
-                        record.name, record.schema
-                    ))
-                })?;
-            (Some(declaration), recovery, rejection)
-        };
+                    )));
+                }
+                bindings
+                    .decode_operation(&record.name, record.schema, &record.state)
+                    .map_err(|error| {
+                        VmError::InvalidSnapshot(format!(
+                            "operation {} schema {} state: {error}",
+                            record.name, record.schema
+                        ))
+                    })?;
+                (Some(declaration), recovery, rejection)
+            };
         if let DeliveryTarget::Promise(promise) = record.target {
             let pending = matches!(heap.get(promise), Ok(Object::Promise(p)) if matches!(p.state, PromiseState::Pending));
             if !pending {
@@ -392,7 +380,9 @@ pub(super) fn load_operations(
             )));
         }
     }
-    if !timeout_signals.is_empty()
+    if operations
+        .values()
+        .any(|op| matches!(op.target, DeliveryTarget::Timeout { .. }))
         && bindings
             .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
             .is_none()
@@ -402,6 +392,122 @@ pub(super) fn load_operations(
         ));
     }
     Ok(operations)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn validate_timers(
+    bindings: &Bindings,
+    heap: &Heap,
+    timers: &BTreeMap<i32, ScriptTimer>,
+    tasks: &[OrdinaryTask],
+    elapsed: std::time::Duration,
+    next_timer_id: i32,
+    next_operation_id: u64,
+    operations: &BTreeMap<u64, PendingOperation>,
+) -> Result<(), VmError> {
+    fn invalid() -> VmError {
+        VmError::InvalidSnapshot("inconsistent timer records, registrations, or tasks".into())
+    }
+    fn valid_signal(heap: &Heap, id: ObjectId) -> bool {
+        matches!(heap.get(id), Ok(Object::AbortSignal { signal, .. }) if signal.reason.is_none() && !signal.dependent)
+    }
+    if next_timer_id <= 0
+        || next_operation_id == 0
+        || operations
+            .last_key_value()
+            .is_some_and(|(&id, _)| id >= next_operation_id)
+    {
+        return Err(invalid());
+    }
+    let mut signals = BTreeSet::new();
+    let mut sequences = BTreeSet::new();
+    let mut matched = BTreeSet::new();
+    for (&id, timer) in timers {
+        if id <= 0
+            || timer.sequence == 0
+            || timer.sequence >= next_operation_id
+            || !sequences.insert(timer.sequence)
+            || timer.nesting == 0
+            || timer.period > i32::MAX as u32
+            || !matches!(timer.callback.view(), ValueRef::Object(id) if heap.get(id).is_ok_and(is_callable_object))
+            || timer.arguments.iter().any(|value| match value.view() {
+                ValueRef::Object(id) => heap.get(id).is_err(),
+                ValueRef::Symbol(id) => !heap.symbols.contains_key(&id),
+                _ => false,
+            })
+        {
+            return Err(invalid());
+        }
+    }
+    for (&id, op) in operations {
+        let DeliveryTarget::Timeout {
+            target,
+            deadline,
+            sequence,
+        } = op.target
+        else {
+            continue;
+        };
+        if sequence == 0 || sequence > id {
+            return Err(invalid());
+        }
+        match target {
+            TimerTarget::Abort(signal) => {
+                if !valid_signal(heap, signal)
+                    || !signals.insert(signal)
+                    || !sequences.insert(sequence)
+                {
+                    return Err(invalid());
+                }
+            }
+            TimerTarget::Script(key) => {
+                let Some(timer) = timers.get(&key.id) else {
+                    return Err(invalid());
+                };
+                let delay = if timer.nesting > 6 {
+                    timer.period.max(4)
+                } else {
+                    timer.period
+                };
+                if key.sequence != sequence
+                    || timer.sequence != sequence
+                    || timer.state != TimerState::Armed(id)
+                    || !matched.insert(key.id)
+                    || deadline.saturating_sub(elapsed)
+                        > std::time::Duration::from_millis(u64::from(delay))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
+    for task in tasks {
+        let valid = match *task {
+            OrdinaryTask::AbortTimeout(id) => valid_signal(heap, id) && signals.insert(id),
+            OrdinaryTask::ScriptTimer(key) => {
+                timers.get(&key.id).is_some_and(|timer| {
+                    timer.sequence == key.sequence && timer.state == TimerState::Queued
+                }) && matched.insert(key.id)
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(invalid());
+        }
+    }
+    if matched.len() != timers.len() {
+        return Err(invalid());
+    }
+    if timers.values().any(|timer| timer.repeat)
+        && bindings
+            .service::<Arc<dyn TimerService>>(TIMER_SERVICE)
+            .is_none()
+    {
+        return Err(VmError::InvalidSnapshot(
+            "restored intervals require the wintertc.timer service".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn load_host_tasks(

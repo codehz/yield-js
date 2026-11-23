@@ -720,13 +720,23 @@ pub mod __macro_support {
             service_ids: Default::default(),
         };
         for Service(id, version, value) in services {
+            let is_timer = id == crate::host::TIMER_SERVICE;
+            if is_timer && (version != 1 || !value.is::<Arc<dyn crate::host::TimerService>>()) {
+                return Err(format!(
+                    "incompatible service {id:?}: expected TimerService version 1"
+                ));
+            }
             match table.services.values.entry(id.to_owned()) {
                 Entry::Vacant(entry) => {
                     entry.insert(value);
                 }
                 Entry::Occupied(_) => return Err(format!("duplicate host service {id:?}")),
             }
-            table.service_ids.insert(format!("{id}:{version}"));
+            // Timer compatibility is checked by the VM against the saved work.
+            // A queued one-shot task needs no platform service to run.
+            if !is_timer {
+                table.service_ids.insert(format!("{id}:{version}"));
+            }
         }
         table.build()
     }

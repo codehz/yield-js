@@ -198,7 +198,7 @@ trait PayloadCodec<T> {
 - **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
 - 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
 
-平台服务不是快照的一部分，但它的**稳定 ID**进入声明指纹。缺少服务或服务版本不匹配时，恢复整体拒绝，而不是在首次调用时失败。
+平台服务不是快照的一部分，但它的**稳定 ID**进入声明指纹。缺少服务或服务版本不匹配时，恢复整体拒绝，而不是在首次调用时失败。 VM 专用的 `wintertc.timer` 例外：链接时校验版本 `1` 和类型 `Arc<dyn TimerService>`，不计入通用服务指纹；恢复按定时器记录检查是否需要该能力。
 
 ### 5.5 模块状态
 
@@ -252,7 +252,7 @@ impl CallCx {
 ### 6.4 重入与执行线程
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
-- 异步结果只能通过 operation 交付，或在 VM 空闲后由宿主以新的任务轮次投递。原生 timer、网络回调、UI 事件都属于后者。
+- 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `wintertc.timer`（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
 - `loop`、`while` 和 `while let` 的循环体可使用受支持的 `await`；条件必须同步，`for` 不可挂起。回边不会主动让出执行权；后台循环再次到达同一个外部 `await` 时复用任务 ID 和恢复阶段，但登记新的 operation，必须用新的令牌投递。
 

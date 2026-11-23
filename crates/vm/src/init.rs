@@ -13,7 +13,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, HostClassRecord, IntegrityLevel, Object};
 use crate::host::Host;
-use crate::runtime::Arguments;
+use crate::runtime::{Arguments, VmClock};
 use crate::value::{ObjectId, PropertyKey, Value};
 use crate::{JsString, builtin::BuiltinRoots};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -33,7 +33,24 @@ impl Vm {
 
     /// Start a fresh VM, linking this host and running module initialization.
     pub fn new_verified(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
-        let mut vm = Self::prepare(build, host)?;
+        Self::new_with_anchor(build, host, None)
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_test_clock(
+        build: Build,
+        host: &mut dyn Host,
+        clock: Arc<dyn crate::TestClock>,
+    ) -> Result<Self, VmError> {
+        Self::new_with_anchor(VerifiedBuild::new(build)?, host, Some(clock))
+    }
+
+    fn new_with_anchor(
+        build: VerifiedBuild,
+        host: &mut dyn Host,
+        clock: Option<Arc<dyn crate::TestClock>>,
+    ) -> Result<Self, VmError> {
+        let mut vm = Self::prepare(build, host, clock)?;
         vm.initialize_modules(host)?;
         Ok(vm)
     }
@@ -52,7 +69,7 @@ impl Vm {
             })
             .map_err(VmError::InvalidBuild)?;
         let validated = std::time::Instant::now();
-        let mut vm = Self::prepare(VerifiedBuild::from_validated(build), host)?;
+        let mut vm = Self::prepare(VerifiedBuild::from_validated(build), host, None)?;
         let initializing = std::time::Instant::now();
         vm.initialize_modules(host)?;
         let (digest_checked, digest_timing) = digest_checked.expect("recorded digest timing");
@@ -69,11 +86,15 @@ impl Vm {
         ))
     }
 
-    fn prepare(build: VerifiedBuild, host: &mut dyn Host) -> Result<Self, VmError> {
+    fn prepare(
+        build: VerifiedBuild,
+        host: &mut dyn Host,
+        clock: Option<Arc<dyn crate::TestClock>>,
+    ) -> Result<Self, VmError> {
         let bindings = host.bindings();
         let resolved = Self::resolve_imports(&build, &bindings)?;
-        let mut vm = Self::empty(build, bindings.clone());
-        vm.clock = crate::runtime::VmClock::new(host.monotonic_clock(), 0);
+        let clock = VmClock::new(clock, std::time::Duration::ZERO);
+        let mut vm = Self::empty(build, bindings.clone(), clock);
         vm.init_builtins();
         vm.install_templates();
         vm.install_classes(&bindings)?;
@@ -100,7 +121,7 @@ impl Vm {
         self.run_until_idle(host)
     }
 
-    fn empty(build: VerifiedBuild, bindings: Arc<Bindings>) -> Self {
+    fn empty(build: VerifiedBuild, bindings: Arc<Bindings>, clock: VmClock) -> Self {
         let module_states = (0..bindings.module_count()).map(|_| None).collect();
         let caches = property_caches(&build);
         Self {
@@ -115,6 +136,10 @@ impl Vm {
             operations: BTreeMap::new(),
             recovered_operations: BTreeSet::new(),
             ordinary_tasks: VecDeque::new(),
+            script_timers: BTreeMap::new(),
+            next_timer_id: 1,
+            timer_nesting: 0,
+            timer_deadlines: BTreeMap::new(),
             microtasks: VecDeque::new(),
             stack_registrations: Vec::new(),
             pending_rejection_notifications: Vec::new(),
@@ -132,7 +157,7 @@ impl Vm {
             builtins: BuiltinRoots::default(),
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
-            clock: crate::runtime::VmClock::new(None, 0),
+            clock,
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
         }

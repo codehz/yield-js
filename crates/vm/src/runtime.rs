@@ -2,6 +2,8 @@
 //! [`Settlement`], not a VM failure. [`Invocation`] is the same split for a call.
 
 use std::any::Any;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,44 +16,49 @@ use crate::heap::PromiseState;
 use crate::snapshot::DeliveryTarget;
 use crate::value::{ContinuationId, ObjectId, Value};
 
+/// Deterministic monotonic time source for VM testing, in an arbitrary domain.
+#[doc(hidden)]
+pub trait TestClock: std::fmt::Debug + Send + Sync {
+    fn read(&self) -> Duration;
+}
+
 #[derive(Debug)]
 pub(crate) struct VmClock {
     anchor: ClockAnchor,
-    accumulated_ms: u64,
+    accumulated: Duration,
 }
 
 #[derive(Debug)]
 enum ClockAnchor {
-    System(std::time::Instant),
-    Host(std::sync::Arc<dyn crate::host::MonotonicClock>, u64),
+    System(Instant),
+    Test(Arc<dyn TestClock>, Duration),
 }
 
 impl VmClock {
-    pub(crate) fn new(
-        clock: Option<std::sync::Arc<dyn crate::host::MonotonicClock>>,
-        accumulated_ms: u64,
-    ) -> Self {
+    pub(crate) fn new(clock: Option<Arc<dyn TestClock>>, accumulated: Duration) -> Self {
         let anchor = match clock {
             Some(clock) => {
-                let origin = clock.millis();
-                ClockAnchor::Host(clock, origin)
+                let origin = clock.read();
+                ClockAnchor::Test(clock, origin)
             }
-            None => ClockAnchor::System(std::time::Instant::now()),
+            None => ClockAnchor::System(Instant::now()),
         };
         Self {
             anchor,
-            accumulated_ms,
+            accumulated,
         }
     }
 
-    pub(crate) fn elapsed_ms(&self) -> u64 {
+    pub(crate) fn elapsed(&self) -> Duration {
         let offset = match &self.anchor {
-            ClockAnchor::System(start) => {
-                u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-            }
-            ClockAnchor::Host(clock, origin) => clock.millis().saturating_sub(*origin),
+            ClockAnchor::System(start) => start.elapsed(),
+            ClockAnchor::Test(clock, origin) => clock.read().saturating_sub(*origin),
         };
-        self.accumulated_ms.saturating_add(offset)
+        self.accumulated.saturating_add(offset)
+    }
+
+    pub(crate) fn now(&self) -> f64 {
+        self.elapsed().as_secs_f64() * 1000.0
     }
 }
 

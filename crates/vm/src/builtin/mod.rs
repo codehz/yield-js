@@ -95,6 +95,7 @@ pub(crate) mod json;
 pub(crate) mod math;
 pub(crate) mod number;
 mod object;
+mod performance;
 mod promise;
 pub(crate) mod proxy;
 pub(super) mod queue_family;
@@ -104,6 +105,7 @@ pub(crate) mod roots;
 pub(crate) mod string;
 mod structured_clone;
 pub(super) mod symbol_family;
+mod timers;
 
 pub(crate) use call::is_callable_object;
 pub use globals::BUILTINS;

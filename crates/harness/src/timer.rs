@@ -16,27 +16,41 @@ pub struct FakeClock(Mutex<ClockState>);
 #[derive(Debug, Default)]
 struct ClockState {
     now_ms: u64,
-    deadlines: BTreeMap<OperationToken, u128>,
+    sub_ms: std::time::Duration,
+    deadlines: BTreeMap<OperationToken, (u128, Delivery)>,
     arm_count: usize,
     fail_start: bool,
     fail_resume: bool,
     fail_checkpoint: bool,
 }
 
-impl yield_vm::host::MonotonicClock for FakeClock {
-    fn millis(&self) -> u64 {
-        self.0.lock().unwrap().now_ms
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Delivery {
+    Operation,
+    Wake,
+}
+
+impl yield_vm::TestClock for FakeClock {
+    fn read(&self) -> std::time::Duration {
+        let state = self.0.lock().unwrap();
+        std::time::Duration::from_millis(state.now_ms) + state.sub_ms
     }
 }
 
 impl FakeClock {
+    /// Advances only the monotonic time domain without delivering registrations.
+    pub fn advance_monotonic(&self, delta: std::time::Duration) {
+        let mut state = self.0.lock().unwrap();
+        state.sub_ms = state.sub_ms.saturating_add(delta);
+    }
+
     pub fn registrations(&self) -> Vec<(OperationToken, u128)> {
         self.0
             .lock()
             .unwrap()
             .deadlines
             .iter()
-            .map(|(&token, &deadline)| (token, deadline))
+            .map(|(&token, &(deadline, _))| (token, deadline))
             .collect()
     }
 
@@ -78,9 +92,16 @@ impl FakeClock {
     /// Advances the VM attached to this clock, draining work after each timer.
     pub fn advance(&self, vm: &mut Vm, host: &mut dyn Host, ms: u64) -> Result<(), String> {
         let target = self.advance_target(ms).map_err(|error| error.to_string())?;
-        while let Some(token) = self.take_due(target).map_err(|error| error.to_string())? {
-            vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
-                .map_err(|error| error.to_string())?;
+        while let Some((token, delivery)) =
+            self.take_due(target).map_err(|error| error.to_string())?
+        {
+            match delivery {
+                Delivery::Operation => {
+                    vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
+                }
+                Delivery::Wake => vm.wake_timer(token),
+            }
+            .map_err(|error| error.to_string())?;
             vm.run_until_idle(host).map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -91,6 +112,7 @@ impl FakeClock {
         token: OperationToken,
         delay: u64,
         resuming: bool,
+        delivery: Delivery,
     ) -> Result<ArmedTimer, HostFault> {
         let mut state = self.0.lock().unwrap();
         if resuming && state.fail_resume {
@@ -102,7 +124,7 @@ impl FakeClock {
         let deadline = u128::from(state.now_ms) + u128::from(delay);
         match state.deadlines.entry(token) {
             Entry::Occupied(_) => return Err(HostFault::new("timer already registered")),
-            Entry::Vacant(entry) => entry.insert(deadline),
+            Entry::Vacant(entry) => entry.insert((deadline, delivery)),
         };
         state.arm_count += 1;
         Ok(ArmedTimer {
@@ -120,7 +142,7 @@ impl FakeClock {
             .deadlines
             .get(&token)
             .ok_or_else(|| HostFault::new("timer is not registered"))?;
-        u32::try_from(deadline.saturating_sub(u128::from(state.now_ms)))
+        u32::try_from(deadline.0.saturating_sub(u128::from(state.now_ms)))
             .map_err(|_| HostFault::new("remaining timer delay overflow"))
     }
 
@@ -136,7 +158,7 @@ impl FakeClock {
     }
 
     /// Removes one due registration at a time so its callback can affect the rest.
-    fn take_due(&self, target: u64) -> Result<Option<OperationToken>, HostFault> {
+    fn take_due(&self, target: u64) -> Result<Option<(OperationToken, Delivery)>, HostFault> {
         let mut state = self.0.lock().unwrap();
         if target < state.now_ms {
             return Err(HostFault::new("cannot move clock backwards"));
@@ -144,13 +166,13 @@ impl FakeClock {
         let next = state
             .deadlines
             .iter()
-            .map(|(&token, &deadline)| (deadline, token))
-            .filter(|&(deadline, _)| deadline <= u128::from(target))
+            .map(|(&token, &(deadline, delivery))| (deadline, token, delivery))
+            .filter(|&(deadline, _, _)| deadline <= u128::from(target))
             .min();
-        if let Some((deadline, token)) = next {
+        if let Some((deadline, token, delivery)) = next {
             state.now_ms = state.now_ms.max(deadline as u64);
             state.deadlines.remove(&token);
-            Ok(Some(token))
+            Ok(Some((token, delivery)))
         } else {
             state.now_ms = target;
             Ok(None)
@@ -164,7 +186,13 @@ impl TimerService for FakeClock {
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        Ok(Box::new(FakeClock::arm(&self, token, delay_ms, false)?))
+        Ok(Box::new(FakeClock::arm(
+            &self,
+            token,
+            delay_ms,
+            false,
+            Delivery::Wake,
+        )?))
     }
 }
 
@@ -214,6 +242,7 @@ impl OperationDriver for Timer {
             token,
             u64::from(self.remaining_ms),
             false,
+            Delivery::Operation,
         )
     }
 
@@ -223,6 +252,7 @@ impl OperationDriver for Timer {
             token,
             u64::from(self.remaining_ms),
             true,
+            Delivery::Operation,
         )
     }
 }

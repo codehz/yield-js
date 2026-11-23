@@ -13,15 +13,13 @@ use yield_harness::TestHost;
 use yield_vm::{Value, Vm};
 
 const REACT_19_BUNDLE: &str = include_str!("vendor/react-19.2.0-esm-sh.mjs");
-const REACT_RECONCILER: &str = include_str!("vendor/react-reconciler-0.31.0.mjs");
+// esm.sh's inlined node:events polyfill references a missing private symbol.
+const REACT_RECONCILER: &str = concat!(
+    "const kEvents = Symbol('kEvents');\n",
+    include_str!("vendor/react-reconciler-0.31.0.mjs"),
+);
 const CUSTOM_RENDERER: &str = include_str!("vendor/react-renderer.mjs");
-// The preload supplies environment globals; URI functions are VM builtins.
-
-// esm.sh inlines unenv's node:events polyfill, which reads Node's module-private
-// `kEvents` symbol without declaring it. Supplying it as an environment global
-// keeps the vendor bundle unchanged. `setTimeout` / `clearTimeout` are host
-// functions of the `test` module; re-exporting them makes the reconciler's
-// unenv fallback resolve without inventing a second timer implementation.
+// The preload supplies console; the vendor scheduler uses VM timer globals.
 const PRELOAD: &str = include_str!("../../benches/baseline/react-preload.mjs");
 
 fn preload_source(environment_globals: bool) -> String {
@@ -110,7 +108,9 @@ fn react_reconciler_custom_renderer_headless_smoke() {
     .unwrap_or_else(|error| panic!("React probe stopped compiling: {error}"));
 
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("React headless VM initialization");
+    let clock = host.clock().clone();
+    let mut vm =
+        Vm::new_with_test_clock(build, &mut host, clock).expect("React headless VM initialization");
     vm.start(&mut host, "run", Vec::new())
         .expect("React headless smoke run");
     host.advance(&mut vm, 10)
@@ -128,4 +128,66 @@ fn react_reconciler_custom_renderer_headless_smoke() {
         Value::number(1.0),
         "custom renderer committed one child"
     );
+}
+
+#[test]
+fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
+    // Expose the scheduler already bundled by esm.sh, without replacing its
+    // implementation or the platform globals it reads.
+    let reconciler = format!("{REACT_RECONCILER}\nexport const scheduler = Tf();");
+    let main = r#"
+        import { scheduler } from 'reconciler.mjs';
+        let calls = 0;
+        let scheduled;
+        export function run() {
+            scheduled = scheduler.unstable_scheduleCallback(
+                scheduler.unstable_NormalPriority, () => { ++calls; }, { delay: 5 });
+        }
+        export function cancel() { scheduler.unstable_cancelCallback(scheduled); }
+        export function observe() { return calls; }
+    "#;
+    let resolver = MemoryResolver::new([
+        ("main.js", main),
+        ("reconciler.mjs", &reconciler),
+        ("react.mjs", REACT_19_BUNDLE),
+        ("preload.js", PRELOAD),
+    ])
+    .unwrap();
+    let build = compile(
+        "main.js",
+        Some("preload.js"),
+        &resolver,
+        &declared(TEST_DECLARATIONS),
+    )
+    .unwrap();
+    let mut host = TestHost::new();
+    let clock = host.clock().clone();
+    let mut source = Vm::new_with_test_clock(build.clone(), &mut host, clock).unwrap();
+    source.start(&mut host, "run", vec![]).unwrap();
+    let image = source.snapshot(&[]).unwrap();
+    assert_eq!(host.clock().registrations().len(), 1);
+    assert_eq!(image.script_timers.len(), 1);
+    for cancel in [false, true] {
+        let mut host = TestHost::new();
+        host.clock().set_time(1000).unwrap();
+        let clock = host.clock().clone();
+        let mut vm =
+            Vm::restore_with_test_clock(image.clone(), build.clone(), &mut host, clock).unwrap();
+        vm.start_recovered_operations().unwrap();
+        if cancel {
+            vm.start(&mut host, "cancel", vec![]).unwrap();
+        }
+        host.advance(&mut vm, 4).unwrap();
+        assert_eq!(
+            vm.start(&mut host, "observe", vec![]).unwrap(),
+            Value::number(0.0)
+        );
+        host.advance(&mut vm, 1).unwrap();
+        host.advance(&mut vm, 20).unwrap();
+        assert_eq!(
+            vm.start(&mut host, "observe", vec![]).unwrap(),
+            Value::number(if cancel { 0.0 } else { 1.0 })
+        );
+        assert!(host.errors().is_empty());
+    }
 }

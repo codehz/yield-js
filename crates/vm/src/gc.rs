@@ -249,10 +249,14 @@ impl Vm {
             }
             match operation.target {
                 crate::snapshot::DeliveryTarget::Promise(promise) => tracer.mark_object(promise)?,
-                crate::snapshot::DeliveryTarget::Timeout { signal, .. } => {
+                crate::snapshot::DeliveryTarget::Timeout {
+                    target: crate::snapshot::TimerTarget::Abort(signal),
+                    ..
+                } => {
                     tracer.mark_object(signal)?;
                 }
-                crate::snapshot::DeliveryTarget::Task(_) => {}
+                crate::snapshot::DeliveryTarget::Task(_)
+                | crate::snapshot::DeliveryTarget::Timeout { .. } => {}
             }
         }
         for task in &self.ordinary_tasks {
@@ -260,7 +264,12 @@ impl Vm {
             match task {
                 AbortTimeout(id) | RejectionHandled(id) => id.trace(&mut tracer)?,
                 UnhandledBatch(batch) => batch.trace(&mut tracer)?,
+                ScriptTimer(_) => {}
             }
+        }
+        for timer in self.script_timers.values() {
+            timer.callback.trace(&mut tracer)?;
+            timer.arguments.as_ref().trace(&mut tracer)?;
         }
         for task in self.host_tasks.values() {
             task.trace(&mut tracer)?;

@@ -1,9 +1,9 @@
 // @returns "ok"
 
-import { setTimeout } from "test";
+import { spawnDelayedTask } from "test";
 
 function schedule() {
-  setTimeout(null, 0);
+  spawnDelayedTask(null, 0);
 }
 
 export function run() {

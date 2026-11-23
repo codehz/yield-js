@@ -374,7 +374,8 @@ export async function run() {
 "#;
     let build = yield_harness::build(source);
     let mut host = yield_harness::TestHost::default();
-    let mut vm = Vm::new(build, &mut host).expect("create VM");
+    let clock = host.clock().clone();
+    let mut vm = Vm::new_with_test_clock(build, &mut host, clock).expect("create VM");
     let result = vm.start(&mut host, "run", vec![]).expect("start");
     vm.run_until_idle(&mut host).expect("suspend");
     let first = vm

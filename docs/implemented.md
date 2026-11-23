@@ -19,7 +19,7 @@
 - 模块状态由 `HostModuleState` 声明，每 VM 一份；JS 引用写入状态槽，非 JS 数据经 codec 编码。模块状态是快照的持久根。
 - `test` 宿主模块提供 `expect(actual)` 返回的 `Matcher` 实例、共享原型方法 `toBe` / `toEqual` / `toBeTruthy` / `toThrow`、`value` 访问器，以及 `assert(condition, message?)`、`bind(label)`、`wait(label)`、`inspect(value)`、`seed()`、`setLabel(node, label)`。成功返回 `undefined`；失败作为可捕获的脚本异常抛出。结构比较通过只读 `CallCx::inspect` 视图遍历普通对象/数组的自有可枚举数据属性，不运行 getter。
 `console` 宿主模块提供 `debug`、`error`、`info`、`log`、`warn`；每个方法将首个实参输出到宿主标准错误，不实现浏览器格式化或多参数格式替换。
-- `test` 的 `setTimeout` / `clearTimeout` 使用可取消后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 timer driver，只接受有限非负的 `u32` 整数毫秒。快照写剩余时长，恢复不计离线时间；`@advance` 按截止时间、同截止时按登记顺序投递，每次投递后排空微任务。
+- `test` 的 `spawnDelayedTask` / `cancelDelayedTask` 演示可取消的宿主后台任务；`sleep` 直接返回原生 Promise。两者用同一无墙钟 operation driver，接受有限非负的 `u32` 整数毫秒。宿主 operation codec 保存剩余时长，与全局脚本定时器的记录无关。
 - `Host` 提供有符号 Unix 毫秒与 IANA 时区标识，不纳入绑定指纹；测试宿主读取同一 `FakeClock`，并在超出 ECMAScript 日期范围前拒绝时钟变更。演示宿主使用系统时间与启动时读取的系统时区。
 - `toThrow` 同步调用 thunk 一次；省略模式或传 `undefined` 时接受任意抛出值，字符串按 UTF-16 码元检查子串，RegExp 做无副作用的匹配检查。模式匹配只使用抛出的字符串或对象自有的字符串数据属性 `message`；真正的 Error 缺少该属性时按空串处理。Error 内部标记可快照恢复，不依赖原型链。
 - 同步生成器 `function*` 与 async generator `async function*`（声明、表达式、对象与类的方法）在调用时初始化形参后立即返回生成器对象，正文只在 `next` 时执行；异步生成器的调用不分配结果 Promise。`GeneratorStart` 是独立的调用期边界，只捕获正文入口的活槽；每次 `yield` 生成一个 `GeneratorEntry`，分别给出 `next_pc` / `throw_pc` 的注入槽和 `return_pc`，`LoadGeneratorReturn` 只在该落点读取本次恢复传入的完成值，待完成值不进入全局状态。生成器函数不可构造，其实例原型是函数的 `prototype`（非对象时回退对应的共享生成器原型：同步与异步生成器共用各自的 `generator.prototype` / `asyncGenerator.prototype`，两者不互相继承）。
@@ -139,7 +139,9 @@
 - `EventTarget` 按捕获与非捕获两遍同步调用目标监听器；支持 `once`、`passive` 和动态 `handleEvent`。监听器脚本异常进入 VM 的全局错误报告，不中断后续监听器，也不在监听器之间排空微任务。快照格式 **69** 保存目标、监听器、事件内部状态和 VM 相对时钟；恢复不重新登记监听器。
 - 标记的 Rust 宿主实例直接参与事件传播，不分配代理目标。每次派发先固定父槽路径，再依次捕获、调用目标监听器和冒泡；回调中修改父槽仅影响后续派发。CPS 宿主派发使用固定入口，不读取脚本可覆盖的 `dispatchEvent`。
 - `AbortController` 与 `AbortSignal` 保留取消原因身份；`AbortSignal.any` 先标记受影响信号，再按源、依赖的登记顺序执行取消步骤和可信 `abort` 事件。`{signal}` 依据监听器登记 ID 清理，不受事件传播停止影响。快照格式 **70** 保存取消图及 pending operation 关联。
-- `AbortSignal.timeout` 通过可选的 `wintertc.timer` 唤醒服务在独立轮次触发可信 `abort`，原因是 `TimeoutError`；零延迟也异步。快照格式 **71** 保存 VM 相对截止时间，恢复后按剩余时长重新登记，不累计离线时间；字节码与容器编码不变。
+- `setTimeout` / `setInterval` 共用正整数 ID，接受可调用对象和 Web IDL `long` 延时；`clearTimeout` / `clearInterval` 可交叉取消。回调保留参数身份，以 `globalThis` 为接收者，异常走全局报告；任务间执行微任务检查。interval 从本轮结束重新登记，不补跑。`AbortSignal.timeout` 共用可选的 `wintertc.timer` 唤醒服务，异步触发带 `TimeoutError` 的可信 `abort`。
+- `Performance` 不可直接调用或构造。`performance` 是有独立品牌的 EventTarget 单例，全局属性可替换；`now()` 返回 VM 相对单调毫秒（含小数），`timeOrigin` 恒为 `0`，`toJSON()` 每次返回新的 `{timeOrigin: 0}`。不需要宿主服务，也不读取 Date 墙钟。
+- 快照格式 **73** 以秒、纳秒保存 VM 相对时钟和截止时间，保留定时器记录、分配游标及普通任务队列，不保存平台登记。恢复重新锚定且不计离线时间；到期任务依截止时间和调度序号入队，未到期者按向上取整的剩余毫秒登记。字节码与容器编码不变。
 - 同步全局 `structuredClone(value, { transfer })` 在同一 VM 内创建新对象图，保留循环与共享引用。普通对象复制可枚举自有字符串键，数组保留洞；Map、Set、日期、正则、错误、包装原始值和二进制视图按内部类型重建。转移列表转参和校验先于遍历，遍历成功后按顺序移动 `ArrayBuffer` 后备存储；后项失败不回滚前项。不可克隆值抛出 `DataCloneError`，用户 getter 或转参抛出的值原样传播。快照格式 **68** 同时登记该函数的固有根。
 - `SuppressedError(error, suppressed, message?)` 不读取 `cause` 选项，前两个值存为可写、可配置、不可枚举的自有属性。快照格式 **62** 保存新增的固有根并保留两个释放协议 Symbol。
 - `DisposableStack` / `AsyncDisposableStack` 在登记时捕获方法，按 LIFO 释放；`move` 只转移记录。释放先标为 disposed，重入不重复调用。异步栈每次释放返回新的原生 Promise，区分真正异步方法、同步回退和空记录的等待边界。快照格式 **63** 保存可达记录、异常与待继续的释放反应；恢复从尚未调用的记录继续，不重新执行已经弹出的记录，GC 不代为释放。

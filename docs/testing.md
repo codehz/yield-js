@@ -23,7 +23,8 @@
 - `@pending ["wait:a"]` 断言当前 pending operation 集合；`@restore` 做 JSON 往返再 `Vm::restore`；`@fulfill ["wait:a", 2]`、`@reject ["wait:a", "boom"]` 交付完成。
 - `@advance <u64>` 按十进制毫秒推进测试时钟，并在每个到期 timer 之后排空工作。负数、小数、`+1`、超出 `u64` 或超出 ECMAScript Date 范围的推进都带位置报错。
 - 最后一条指令必须是 `@returns`、`@fulfilled`、`@rejected` 或 `@uncaught`。标量仅限 number、bool、string、`null`、`undefined`。`@uncaught` 接收数组，按顺序精确比对报告给宿主的错误列表。
-- 用例从 `test` 显式导入宿主导出。`gc()` 同步回收且不排空微任务；`setTimeout` 返回可取消的任务句柄，`clearTimeout` 取消它，`sleep` 返回原生 Promise。
+- 用例从 `test` 显式导入宿主导出。`gc()` 同步回收且不排空微任务；`spawnDelayedTask` 返回可取消的宿主任务句柄，`cancelDelayedTask` 取消它，`sleep` 返回原生 Promise。VM 定时器用裸全局测试。
+- 用例运行器通过显式测试时钟入口创建与恢复 VM。需要亚毫秒、部分投递或无唤醒服务的定时器断言放在 e2e；不等待真实时间。
 
 ```js
 // @pending ["wait:a"]
@@ -38,7 +39,7 @@ export async function run() {
 
 ## 用例目录
 
-新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`。不要在 `tests/cases/` 顶层新增用例。
+新用例放进 `crates/harness/tests/cases/` 下匹配类别的子目录：`abort`、`arrays`、`async`、`bigint`、`binary`、`closures`、`coercion`、`collections`、`const`、`control`、`date`、`descriptors`、`destructuring`、`errors`、`events`、`finally`、`functions`、`gc`、`host`、`json`、`loops`、`math`、`numbers`、`objects`、`optional_chain`、`performance`、`promise`、`prototypes`、`proxy`、`reflect`、`regexp`、`strings`、`switch`、`symbols`、`timers`。不要在 `tests/cases/` 顶层新增用例。
 
 `build.rs` 递归遍历目录，文件名用 `snake_case.js`；stem 与类别名都必须匹配 `[a-z][a-z0-9_]*`；生成的测试名为 `case_<category>_<stem>`（顶层为 `case_<stem>`）。每个目录都登记 `cargo:rerun-if-changed`，目录为空或缺失会 panic。指令解析器自身的失败用例放在 `crates/harness/tests/cases.rs`，夹具源码在 `crates/harness/tests/failing_cases/`。
 

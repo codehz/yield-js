@@ -105,6 +105,7 @@ macro_rules! map_object_storage {
             | Object::DomException { object: $storage, .. }
             | Object::Event { object: $storage, .. }
             | Object::EventTarget { object: $storage, .. }
+            | Object::Performance { object: $storage, .. }
             | Object::AbortController { object: $storage, .. }
             | Object::AbortSignal { object: $storage, .. }
             | Object::ArrayBuffer(ArrayBufferObject { object: $storage, .. })
@@ -140,7 +141,9 @@ macro_rules! map_object_storage {
 impl Object {
     pub(crate) fn event_target_state(&self) -> Option<&EventTargetState> {
         match self {
-            Self::EventTarget { target, .. } | Self::AbortSignal { target, .. } => Some(target),
+            Self::EventTarget { target, .. }
+            | Self::AbortSignal { target, .. }
+            | Self::Performance { target, .. } => Some(target),
             _ => None,
         }
     }
@@ -482,7 +485,9 @@ impl Object {
                     out.push(OwnedEdge::Symbol(*symbol));
                 }
             }
-            Self::EventTarget { target, .. } | Self::AbortSignal { target, .. } => {
+            Self::EventTarget { target, .. }
+            | Self::AbortSignal { target, .. }
+            | Self::Performance { target, .. } => {
                 for listener in &target.listeners {
                     out.push(OwnedEdge::Object(listener.callback));
                     if let Some(signal) = listener.signal {

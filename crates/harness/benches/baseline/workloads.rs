@@ -227,7 +227,10 @@ pub(super) fn build_react_with_options(options: &CompileOptions) -> Build {
         ),
         (
             "react-reconciler-0.31.0.mjs",
-            include_str!("../../tests/e2e/vendor/react-reconciler-0.31.0.mjs"),
+            concat!(
+                "const kEvents = Symbol('kEvents');\n",
+                include_str!("../../tests/e2e/vendor/react-reconciler-0.31.0.mjs"),
+            ),
         ),
         (
             "renderer.mjs",

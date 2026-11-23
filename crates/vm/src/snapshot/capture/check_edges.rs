@@ -624,6 +624,7 @@ pub(super) fn check_heap_edges(
                     | Object::DomException { .. }
                     | Object::Event { .. }
                     | Object::EventTarget { .. }
+                    | Object::Performance { .. }
                     | Object::AbortController { .. }
                     | Object::AbortSignal { .. }
                     | Object::ArrayBuffer(_)

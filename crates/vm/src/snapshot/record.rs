@@ -10,7 +10,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Global event payloads and handlers, and ordinary rejection notification tasks.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 72;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 73;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -20,6 +20,7 @@ const SNAPSHOT_HEADER_LEN: usize = SNAPSHOT_MAGIC.len() + 2 * size_of::<u32>();
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrdinaryTask {
     AbortTimeout(ObjectId),
+    ScriptTimer(TimerKey),
     UnhandledBatch(Vec<ObjectId>),
     RejectionHandled(ObjectId),
 }
@@ -132,7 +133,41 @@ pub enum ContinuationTargetRecord {
 pub enum DeliveryTarget {
     Promise(ObjectId),
     Task(u64),
-    Timeout { signal: ObjectId, deadline_ms: u128 },
+    Timeout {
+        target: TimerTarget,
+        deadline: std::time::Duration,
+        sequence: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TimerKey {
+    pub id: i32,
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerTarget {
+    Abort(ObjectId),
+    Script(TimerKey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimerState {
+    Armed(u64),
+    Queued,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScriptTimer {
+    pub sequence: u64,
+    pub callback: Value,
+    pub arguments: std::sync::Arc<Vec<Value>>,
+    pub repeat: bool,
+    pub period: u32,
+    pub nesting: u32,
+    pub state: TimerState,
 }
 
 pub(crate) const TIMEOUT_OPERATION_NAME: &str = "wintertc.timeout";
@@ -214,6 +249,10 @@ pub struct Snapshot {
     pub pending_rejection_notifications: Vec<ObjectId>,
     pub ordinary_tasks: Vec<OrdinaryTask>,
     #[serde(with = "ordered_pairs")]
+    pub script_timers: BTreeMap<i32, ScriptTimer>,
+    pub next_timer_id: i32,
+    pub next_operation_id: u64,
+    #[serde(with = "ordered_pairs")]
     pub globals: BTreeMap<JsString, Value>,
     pub roots: BTreeMap<String, ObjectId>,
     /// Frozen template objects aligned with the build's template call sites.
@@ -232,7 +271,7 @@ pub struct Snapshot {
     /// Suspended generator frames, keyed by their ordinary generator object.
     pub generators: BTreeMap<ObjectId, GeneratorObject>,
     pub random_state: u64,
-    pub(crate) elapsed_ms: u64,
+    pub(crate) elapsed: std::time::Duration,
     /// Descriptions of the symbols the snapshot keeps alive, keyed by id.
     pub symbols: BTreeMap<SymbolId, Option<JsString>>,
     /// `Symbol.for` registry entries kept alive by the snapshot.
@@ -257,6 +296,9 @@ impl Snapshot {
             next_host_task_id: 1,
             pending_rejection_notifications: Vec::new(),
             ordinary_tasks: Vec::new(),
+            script_timers: BTreeMap::new(),
+            next_timer_id: 1,
+            next_operation_id: 1,
             imports: Vec::new(),
             class_prototypes: BTreeMap::new(),
             host_instances: Vec::new(),
@@ -269,7 +311,7 @@ impl Snapshot {
             combines: BTreeMap::new(),
             generators: BTreeMap::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
-            elapsed_ms: 0,
+            elapsed: std::time::Duration::ZERO,
             symbols: BTreeMap::new(),
             symbol_registry: BTreeMap::new(),
             next_symbol_id: 0,

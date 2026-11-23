@@ -17,15 +17,16 @@ use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
-use crate::snapshot::{
-    DeliveryTarget, OrdinaryTask, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION,
-    TIMEOUT_OPERATION_SCHEMA,
-};
+use crate::snapshot::{DeliveryTarget, OrdinaryTask, ScriptTimer, TimerTarget};
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+#[path = "timer_runtime.rs"]
+mod timer_runtime;
 
 pub(crate) fn host_function_metadata(
     bindings: &Bindings,
@@ -149,6 +150,10 @@ pub(crate) struct RestoredState {
     pub(crate) host_tasks: BTreeMap<u64, HostTask>,
     pub(crate) next_host_task_id: u64,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
+    pub(crate) next_operation_id: u64,
+    pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
+    pub(crate) next_timer_id: i32,
+    pub(crate) clock: crate::runtime::VmClock,
     pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
@@ -333,6 +338,10 @@ pub struct Vm {
     /// been handed to the host yet. Drained by `start_recovered_operations`.
     pub(crate) recovered_operations: BTreeSet<u64>,
     pub(crate) ordinary_tasks: VecDeque<OrdinaryTask>,
+    pub(crate) script_timers: BTreeMap<i32, ScriptTimer>,
+    pub(crate) next_timer_id: i32,
+    pub(crate) timer_nesting: u32,
+    pub(crate) timer_deadlines: BTreeMap<(Duration, u64), u64>,
     pub(crate) microtasks: VecDeque<Microtask>,
     /// Destinations of stack `use` calls currently running a getter. A move
     /// transfers the list; disposal detaches it. These calls never suspend.
@@ -370,7 +379,7 @@ pub struct Vm {
 
 impl Vm {
     pub(crate) fn monotonic_millis(&self, _: &dyn Host) -> f64 {
-        self.clock.elapsed_ms() as f64
+        self.clock.now()
     }
 
     pub(crate) fn call_host(
@@ -849,6 +858,7 @@ impl Vm {
                     );
                     self.abort_signal(host, &ActiveRoots::EMPTY, signal, reason)?;
                 }
+                OrdinaryTask::ScriptTimer(key) => self.run_script_timer(host, key)?,
                 OrdinaryTask::UnhandledBatch(batch) => self.run_unhandled_batch(host, batch)?,
                 OrdinaryTask::RejectionHandled(id) => {
                     self.run_rejection_notification(host, &ActiveRoots::EMPTY, id, true)?
@@ -1014,29 +1024,10 @@ impl Vm {
             .operations
             .get(&token.id)
             .ok_or_else(|| VmError::UnknownOperation(token.id().to_string()))?;
-        if let DeliveryTarget::Timeout {
-            signal,
-            deadline_ms,
-        } = operation.target
-        {
-            if self.recovered_operations.contains(&token.id) {
-                return Err(VmError::UnknownOperation(token.id().to_string()));
-            }
-            // Release the one-shot wakeup before arming a replacement. A duplicate
-            // completion for this token cannot consume the replacement.
-            drop(self.remove_operation(token.id));
-            if matches!(completion, Completion::Rejected(_)) {
-                return Err(VmError::HostFault(TIMEOUT_OPERATION_REJECTION.into()));
-            }
-            let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
-            if remaining == 0 {
-                self.ordinary_tasks
-                    .push_back(OrdinaryTask::AbortTimeout(signal));
-            } else {
-                self.arm_new_timeout(signal, deadline_ms, remaining)
-                    .map_err(|fault| VmError::HostFault(fault.0))?;
-            }
-            return Ok(());
+        if matches!(operation.target, DeliveryTarget::Timeout { .. }) {
+            return Err(VmError::InvalidState(
+                "timer token requires wake_timer".into(),
+            ));
         }
         let (value, rejected) = match completion {
             Completion::Fulfilled(value) => (value, false),
@@ -1068,6 +1059,12 @@ impl Vm {
     fn remove_operation(&mut self, id: u64) -> Option<PendingOperation> {
         let operation = self.operations.remove(&id)?;
         self.recovered_operations.remove(&id);
+        if let DeliveryTarget::Timeout {
+            deadline, sequence, ..
+        } = operation.target
+        {
+            self.timer_deadlines.remove(&(deadline, sequence));
+        }
         self.unlink_operation_signal(id, operation.signal);
         Some(operation)
     }
@@ -1131,6 +1128,11 @@ impl Vm {
     /// Driver failures deliver their declared rejection; a timer service fault
     /// is returned to the host without consuming other recovered operations.
     pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
+        if self.recovered_operations.is_empty() {
+            return Ok(());
+        }
+        let elapsed = self.clock.elapsed();
+        self.queue_due_timers(elapsed);
         while let Some(id) = self.recovered_operations.pop_first() {
             let Some(operation) = self.operations.get_mut(&id) else {
                 continue;
@@ -1140,22 +1142,16 @@ impl Vm {
                 id,
             };
             if let DeliveryTarget::Timeout {
-                signal,
-                deadline_ms,
+                target, deadline, ..
             } = operation.target
             {
-                let remaining = Self::timeout_remaining(deadline_ms, self.clock.elapsed_ms());
-                if remaining == 0 {
-                    self.remove_operation(id);
-                    self.ordinary_tasks
-                        .push_back(OrdinaryTask::AbortTimeout(signal));
-                } else {
-                    match Self::arm_timeout(&self.bindings, token, remaining) {
-                        Ok(live) => operation.live = Some(live),
-                        Err(fault) => {
-                            self.remove_operation(id);
-                            return Err(VmError::HostFault(fault.0));
-                        }
+                let remaining = Self::timeout_remaining(deadline, elapsed);
+                match Self::arm_timeout(&self.bindings, token, remaining) {
+                    Ok(live) => operation.live = Some(live),
+                    Err(fault) => {
+                        self.remove_operation(id);
+                        self.discard_timer(target);
+                        return Err(VmError::HostFault(fault.0));
                     }
                 }
                 continue;
@@ -1186,12 +1182,18 @@ impl Vm {
         signal: ObjectId,
         delay_ms: u64,
     ) -> Result<(), HostFault> {
-        let deadline_ms = u128::from(self.clock.elapsed_ms()) + u128::from(delay_ms);
-        self.arm_new_timeout(signal, deadline_ms, delay_ms)
+        let deadline = self
+            .clock
+            .elapsed()
+            .saturating_add(std::time::Duration::from_millis(delay_ms));
+        let sequence = self.next_operation_id;
+        self.arm_new_timeout(TimerTarget::Abort(signal), deadline, delay_ms, sequence)?;
+        Ok(())
     }
 
-    fn timeout_remaining(deadline_ms: u128, elapsed_ms: u64) -> u64 {
-        u64::try_from(deadline_ms.saturating_sub(u128::from(elapsed_ms)))
+    fn timeout_remaining(deadline: std::time::Duration, elapsed: std::time::Duration) -> u64 {
+        let remaining = deadline.saturating_sub(elapsed);
+        u64::try_from(remaining.as_nanos().div_ceil(1_000_000))
             .expect("timeout remaining delay fits u64")
     }
 
@@ -1205,34 +1207,6 @@ impl Vm {
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
             .clone()
             .arm(token, delay_ms)
-    }
-
-    fn arm_new_timeout(
-        &mut self,
-        signal: ObjectId,
-        deadline_ms: u128,
-        delay_ms: u64,
-    ) -> Result<(), HostFault> {
-        let token = self.allocate_operation_token()?;
-        let live = Self::arm_timeout(&self.bindings, token, delay_ms)?;
-        self.operations.insert(
-            token.id,
-            PendingOperation {
-                name: TIMEOUT_OPERATION_NAME.to_owned(),
-                schema: TIMEOUT_OPERATION_SCHEMA,
-                recovery: crate::binding::Recovery::Reissue,
-                rejection: TIMEOUT_OPERATION_REJECTION,
-                state: Vec::new(),
-                target: DeliveryTarget::Timeout {
-                    signal,
-                    deadline_ms,
-                },
-                signal: None,
-                declaration: None,
-                live: Some(live),
-            },
-        );
-        Ok(())
     }
 
     fn allocate_operation_token(&mut self) -> Result<OperationToken, HostFault> {
@@ -1600,6 +1574,10 @@ impl Vm {
             mut heap,
             continuations,
             operations,
+            next_operation_id,
+            script_timers,
+            next_timer_id,
+            clock,
             host_tasks,
             next_host_task_id,
             host_classes,
@@ -1619,7 +1597,15 @@ impl Vm {
         heap.function_prototype = Some(builtins.get("function.prototype"));
         heap.finish_restore();
         let next_continuation_id = continuations.keys().next_back().map_or(1, |id| id + 1);
-        let next_operation_id = operations.keys().next_back().map_or(1, |id| id + 1);
+        let timer_deadlines = operations
+            .iter()
+            .filter_map(|(&id, op)| match op.target {
+                DeliveryTarget::Timeout {
+                    deadline, sequence, ..
+                } => Some(((deadline, sequence), id)),
+                _ => None,
+            })
+            .collect();
         let recovered_operations = operations
             .iter()
             .filter(|(_, operation)| {
@@ -1642,6 +1628,10 @@ impl Vm {
             next_host_task_id,
             recovered_operations,
             ordinary_tasks: VecDeque::new(),
+            script_timers,
+            next_timer_id,
+            timer_nesting: 0,
+            timer_deadlines,
             microtasks: VecDeque::new(),
             stack_registrations: Vec::new(),
             pending_rejection_notifications: Vec::new(),
@@ -1660,7 +1650,7 @@ impl Vm {
             builtins,
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,
-            clock: crate::runtime::VmClock::new(None, 0),
+            clock,
             module_envs,
             module_namespaces,
         }

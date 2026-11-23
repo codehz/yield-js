@@ -54,6 +54,7 @@ enum Global {
     /// A global whose object is an already allocated builtin root, used for a
     /// family of constructors that share one owner.
     Root(&'static str),
+    AccessorRoot(&'static str),
 }
 
 macro_rules! builtin_globals {
@@ -151,12 +152,18 @@ builtin_globals! {
     "ErrorEvent" => Global::Root(super::event::ERROR_ROOT),
     "PromiseRejectionEvent" => Global::Root(super::event::PROMISE_REJECTION_ROOT),
     "reportError" => Global::Function(global_functions::REPORT_ERROR),
+    "Performance" => Global::Owner(super::performance::OWNER),
+    "performance" => Global::AccessorRoot(super::performance::INSTANCE),
+    "setTimeout" => Global::Owner(super::timers::SET_TIMEOUT),
+    "setInterval" => Global::Owner(super::timers::SET_INTERVAL),
+    "clearTimeout" => Global::Owner(super::timers::CLEAR_TIMEOUT),
+    "clearInterval" => Global::Owner(super::timers::CLEAR_INTERVAL),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
     GLOBALS.iter().filter_map(|global| match global {
         Global::Owner(owner) | Global::Function(owner) => Some(owner),
-        Global::Number(_) | Global::Root(_) => None,
+        Global::Number(_) | Global::Root(_) | Global::AccessorRoot(_) => None,
     })
 }
 
@@ -210,7 +217,9 @@ impl Vm {
                 Ok(Value::object(self.builtins.get(owner.root)))
             }
             Some(Global::Number(number)) => Ok(Value::number(*number)),
-            Some(Global::Root(root)) => Ok(Value::object(self.builtins.get(root))),
+            Some(Global::Root(root) | Global::AccessorRoot(root)) => {
+                Ok(Value::object(self.builtins.get(root)))
+            }
             None => Err(VmError::InvalidState(format!(
                 "builtin {index} does not exist"
             ))),
@@ -291,6 +300,9 @@ impl Vm {
         self.install_async_generator_methods();
         let global_this = self.builtins.get(GLOBAL_THIS);
         for (index, name) in BUILTINS.iter().enumerate() {
+            if matches!(GLOBALS[index], Global::AccessorRoot(_)) {
+                continue;
+            }
             let name: &str = name;
             let value = self.builtin_value(index as u32).expect("global builtin");
             let attributes = if matches!(GLOBALS[index], Global::Function(_)) {

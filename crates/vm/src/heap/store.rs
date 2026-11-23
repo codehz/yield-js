@@ -771,6 +771,7 @@ impl Heap {
             | Object::DomException { object: plain, .. }
             | Object::Event { object: plain, .. }
             | Object::EventTarget { object: plain, .. }
+            | Object::Performance { object: plain, .. }
             | Object::AbortController { object: plain, .. }
             | Object::AbortSignal { object: plain, .. }
             | Object::DisposableStack { object: plain, .. }

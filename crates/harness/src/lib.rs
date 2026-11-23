@@ -470,10 +470,18 @@ impl Default for TestHost {
 
 impl TestHost {
     pub fn new() -> Self {
+        Self::with_timer_service(true)
+    }
+
+    pub fn without_timer_service() -> Self {
+        Self::with_timer_service(false)
+    }
+
+    fn with_timer_service(timers: bool) -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
-        let bindings = test_bindings(Arc::clone(&counters), Arc::clone(&labels), &clock)
+        let bindings = test_bindings(Arc::clone(&counters), Arc::clone(&labels), &clock, timers)
             .expect("test bindings");
         Self {
             bindings: Arc::new(bindings),
@@ -554,10 +562,6 @@ impl Host for TestHost {
         self.clock.now_ms()
     }
 
-    fn monotonic_clock(&self) -> Option<Arc<dyn yield_vm::host::MonotonicClock>> {
-        Some(self.clock.clone())
-    }
-
     fn time_zone(&self) -> &str {
         &self.time_zone
     }
@@ -580,21 +584,31 @@ fn test_bindings(
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
     clock: &Arc<FakeClock>,
+    timers: bool,
 ) -> Result<Bindings, String> {
-    let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-    host_bindings! {
-        dts: "test.d.ts",
-        modules: [test, console],
-        classes: [Node, Matcher],
-        states: [],
-        operations: [Wait, Pause, Reject, Reissue, Timer],
-        services: [
-            ("counters", 1, counters),
-            ("node-factory", 1, NodeFactory),
-            ("labels", 1, labels),
-            ("clock", 1, Arc::clone(clock)),
-            ("wintertc.timer", 1, wakeups),
-        ],
+    macro_rules! link {
+        ($($service:tt)*) => {
+            host_bindings! {
+                dts: "test.d.ts",
+                modules: [test, console],
+                classes: [Node, Matcher],
+                states: [],
+                operations: [Wait, Pause, Reject, Reissue, Timer],
+                services: [
+                    ("counters", 1, counters),
+                    ("node-factory", 1, NodeFactory),
+                    ("labels", 1, labels),
+                    ("clock", 1, Arc::clone(clock)),
+                    $($service)*
+                ],
+            }
+        };
+    }
+    if timers {
+        let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
+        link!(("wintertc.timer", 1, wakeups))
+    } else {
+        link!()
     }
 }
 
@@ -602,8 +616,8 @@ fn test_bindings(
 mod test {
     use super::*;
 
-    #[function(name = "setTimeout")]
-    fn set_timeout(cx: &mut CallCx<'_>, cb: JsValue, ms: JsValue) -> JsResult<JsValue> {
+    #[function(name = "spawnDelayedTask")]
+    fn spawn_delayed_task(cx: &mut CallCx<'_>, cb: JsValue, ms: JsValue) -> JsResult<JsValue> {
         if !cx.is_callable(&cb)? {
             return Err(cx.type_error("expected a callable"));
         }
@@ -615,8 +629,8 @@ mod test {
         })
     }
 
-    #[function(name = "clearTimeout")]
-    fn clear_timeout(cx: &mut CallCx<'_>, handle: Option<JsValue>) -> JsResult<()> {
+    #[function(name = "cancelDelayedTask")]
+    fn cancel_delayed_task(cx: &mut CallCx<'_>, handle: Option<JsValue>) -> JsResult<()> {
         if let Some(h) = handle {
             cx.cancel_task(&h)?;
         }

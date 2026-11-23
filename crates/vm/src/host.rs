@@ -3,16 +3,11 @@ use std::sync::Arc;
 use crate::binding::{Bindings, HostFault, JsValue, LiveRegistration, OperationToken};
 use crate::value::Value;
 
-/// An optional monotonic clock shared with the VM, in an arbitrary time domain.
-pub trait MonotonicClock: std::fmt::Debug + Send + Sync {
-    fn millis(&self) -> u64;
-}
-
-/// Optional one-shot wakeup service used by AbortSignal.timeout.
+/// Optional one-shot wakeup service for script timers and AbortSignal.timeout.
 pub const TIMER_SERVICE: &str = "wintertc.timer";
 
 /// Arms a platform wakeup without carrying any guest values into its callback.
-/// The scheduler delivers the token on the VM thread, then drains the turn.
+/// The scheduler calls [`crate::Vm::wake_timer`] on the VM thread, then drains the turn.
 pub trait TimerService: Send + Sync {
     fn arm(
         self: Arc<Self>,
@@ -39,10 +34,6 @@ pub trait Host {
 
     /// Current Unix epoch milliseconds, within the ECMAScript Date range.
     fn now_ms(&self) -> i64;
-
-    fn monotonic_clock(&self) -> Option<Arc<dyn MonotonicClock>> {
-        None
-    }
 
     /// The host's local time zone as a valid IANA identifier.
     fn time_zone(&self) -> &str;

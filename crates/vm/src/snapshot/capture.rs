@@ -66,15 +66,6 @@ impl Vm {
                 "snapshot requires a drained microtask queue".to_owned(),
             ));
         }
-        if self
-            .ordinary_tasks
-            .iter()
-            .any(|task| matches!(task, OrdinaryTask::AbortTimeout(_)))
-        {
-            return Err(VmError::InvalidState(
-                "snapshot requires a drained timeout queue".to_owned(),
-            ));
-        }
 
         let live = self.trace_roots(roots)?;
         if self
@@ -90,7 +81,10 @@ impl Vm {
         checkpoint(|profile| &mut profile.trace);
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
-        snapshot.elapsed_ms = self.clock.elapsed_ms();
+        snapshot.elapsed = self.clock.elapsed();
+        snapshot.script_timers = self.script_timers.clone();
+        snapshot.next_timer_id = self.next_timer_id;
+        snapshot.next_operation_id = self.next_operation_id;
         snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
@@ -331,7 +325,24 @@ impl Vm {
     /// Use [`Vm::restore_validated`] to diagnose invalid snapshot state.
     pub fn restore(snapshot: Snapshot, build: Build, host: &mut dyn Host) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_image::<false>(snapshot, VerifiedBuild::new(build)?, host, |_| {})
+        Self::restore_image::<false>(snapshot, VerifiedBuild::new(build)?, host, None, |_| {})
+    }
+
+    #[doc(hidden)]
+    pub fn restore_with_test_clock(
+        snapshot: Snapshot,
+        build: Build,
+        host: &mut dyn Host,
+        clock: std::sync::Arc<dyn crate::TestClock>,
+    ) -> Result<Self, VmError> {
+        check_snapshot_header(&snapshot)?;
+        Self::restore_image::<false>(
+            snapshot,
+            VerifiedBuild::new(build)?,
+            host,
+            Some(clock),
+            |_| {},
+        )
     }
 
     /// Restore a trusted snapshot with an already validated program.
@@ -342,7 +353,7 @@ impl Vm {
         host: &mut dyn Host,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_image::<false>(snapshot, build, host, |_| {})
+        Self::restore_image::<false>(snapshot, build, host, None, |_| {})
     }
 
     /// Restore with full snapshot validation for development and diagnostics.
@@ -353,7 +364,24 @@ impl Vm {
         host: &mut dyn Host,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
-        Self::restore_image::<true>(snapshot, VerifiedBuild::new(build)?, host, |_| {})
+        Self::restore_image::<true>(snapshot, VerifiedBuild::new(build)?, host, None, |_| {})
+    }
+
+    #[doc(hidden)]
+    pub fn restore_validated_with_test_clock(
+        snapshot: Snapshot,
+        build: Build,
+        host: &mut dyn Host,
+        clock: std::sync::Arc<dyn crate::TestClock>,
+    ) -> Result<Self, VmError> {
+        check_snapshot_header(&snapshot)?;
+        Self::restore_image::<true>(
+            snapshot,
+            VerifiedBuild::new(build)?,
+            host,
+            Some(clock),
+            |_| {},
+        )
     }
 
     /// Restore with full snapshot validation and time its phases.
@@ -369,7 +397,7 @@ impl Vm {
         let mut last = start;
         let mut profile = crate::perf::Restore::default();
         check_snapshot_header(&snapshot)?;
-        let vm = Self::restore_image::<true>(snapshot, build, host, |field| {
+        let vm = Self::restore_image::<true>(snapshot, build, host, None, |field| {
             let now = Instant::now();
             *field(&mut profile) = now.duration_since(last);
             last = now;
@@ -384,6 +412,7 @@ impl Vm {
         mut snapshot: Snapshot,
         build: VerifiedBuild,
         host: &mut dyn Host,
+        clock: Option<std::sync::Arc<dyn crate::TestClock>>,
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Restore) -> &mut std::time::Duration),
     ) -> Result<Self, VmError> {
         if snapshot.build_id != build.build_id {
@@ -425,15 +454,6 @@ impl Vm {
             heap.insert_restore(id, object)?;
         }
         checkpoint(|profile| &mut profile.heap_insert);
-        if snapshot
-            .ordinary_tasks
-            .iter()
-            .any(|task| matches!(task, OrdinaryTask::AbortTimeout(_)))
-        {
-            return Err(VmError::InvalidSnapshot(
-                "snapshot contains a ready timeout task".into(),
-            ));
-        }
         if AUDIT {
             validate_rejection_notifications(
                 &heap,
@@ -483,8 +503,12 @@ impl Vm {
                 &snapshot.imports,
             )?;
         }
-        let operations =
-            load_operations(&bindings, &heap, snapshot.elapsed_ms, snapshot.operations)?;
+        let operations = load_operations(
+            &bindings,
+            &heap,
+            snapshot.elapsed,
+            std::mem::take(&mut snapshot.operations),
+        )?;
         let host_tasks = load_host_tasks(
             &bindings,
             &heap,
@@ -492,6 +516,16 @@ impl Vm {
             &operations,
             snapshot.host_tasks,
             snapshot.next_host_task_id,
+        )?;
+        validate_timers(
+            &bindings,
+            &heap,
+            &snapshot.script_timers,
+            &snapshot.ordinary_tasks,
+            snapshot.elapsed,
+            snapshot.next_timer_id,
+            snapshot.next_operation_id,
+            &operations,
         )?;
         checkpoint(|profile| &mut profile.state_load);
         let mut vm = Self::restored(
@@ -501,6 +535,10 @@ impl Vm {
                 heap,
                 continuations,
                 operations,
+                next_operation_id: snapshot.next_operation_id,
+                script_timers: snapshot.script_timers,
+                next_timer_id: snapshot.next_timer_id,
+                clock: crate::runtime::VmClock::new(clock, snapshot.elapsed),
                 host_tasks,
                 next_host_task_id: snapshot.next_host_task_id,
                 host_classes,
@@ -513,7 +551,6 @@ impl Vm {
                 module_namespaces: snapshot.module_namespaces,
             },
         );
-        vm.clock = crate::runtime::VmClock::new(host.monotonic_clock(), snapshot.elapsed_ms);
         // Recovery can append new notifications; the captured ones must stay first.
         vm.pending_rejection_notifications = snapshot.pending_rejection_notifications;
         vm.ordinary_tasks = snapshot.ordinary_tasks.into();
