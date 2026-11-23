@@ -80,7 +80,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 - 函数转字符串按设计返回 `function <初始名>() { [native code] }`；共享的 `Function.prototype.toString` 不读取公开 `name`，也不保留或反编译源码。
 - 支持 `Array`/`String` 的常用访问、转换、搜索、切片与迭代，以及 `Array.isArray/from`、`push/pop/shift/unshift/splice`、`map/filter/reduce/forEach/some/every/flat`；提供 `Number`、`BigInt`、`Math`、`RegExp`、`JSON` 和标准 `Error` 类型。具体方法和正则用法以锁定构建和回归用例补齐，不以整个内建对象的存在宣称完整兼容。
 - 二进制数据由 VM 自带实现，不依赖宿主缓冲区：`ArrayBuffer` 持有唯一的字节块（固定或可调整长度，支持 `resize` / `transfer` / `transferToFixedLength` / `slice`），`DataView` 提供全部数值宽度与 BigInt 的带端序访问，`%TypedArray%` 与其 12 个具体构造器都是 VM 自有对象。视图只记录缓冲区、偏移与可选长度，从不复制字节；整数索引访问与诊断校验共用视图判定。快照保存缓冲区字节与视图元组，诊断入口拒绝越界、未对齐和不一致的记录；`SharedArrayBuffer`、`Atomics` 与分离后重新附加不在此基线。
-- `globalThis` 是字节码内建名单中的一个固定根对象（普通对象，原型为 `Object.prototype`），不是对任意宿主全局对象的代理。内建名单里的名字（`Math`、`JSON`、`Symbol` 等）以数据属性挂在该对象上；脚本可以通过 `globalThis` 显式访问它们，但裸名称不做属性查找，而是走静态解析。裸名称解析顺序为：局部绑定 → 显式宿主导入 → preload 导出 → 内建 → `undefined` 字面量；解析不到的名字在编译期报错（读取、赋值和除 `typeof` 外的引用都不可见），`typeof 未知名字` 折叠为 `"undefined"`。运行时动态添加到 `globalThis` 的属性不会反向进入编译期的裸名称解析。
+- `globalThis` 是字节码内建名单中的一个固定根对象，不是对任意宿主全局对象的代理。框架基线可使用原型为 `Object.prototype` 的普通对象；下文 WinterTC 目标将其扩展为 VM 自有的 `EventTarget`。内建名单里的名字（`Math`、`JSON`、`Symbol` 等）以数据属性挂在该对象上；脚本可以通过 `globalThis` 显式访问它们，但裸名称不做属性查找，而是走静态解析。裸名称解析顺序为：局部绑定 → 显式宿主导入 → preload 导出 → 内建 → `undefined` 字面量；解析不到的名字在编译期报错（读取、赋值和除 `typeof` 外的引用都不可见），`typeof 未知名字` 折叠为 `"undefined"`。运行时动态添加到 `globalThis` 的属性不会反向进入编译期的裸名称解析。
 - preload 全局：`Vm::new` 执行 preload 初始化器后，把 preload 的显式导出安装为 `globalThis` 上的可枚举、不可配置、仅 getter 的活绑定——每个名字一个捕获 preload 模块环境的 getter 函数，读值时实时读取 preload 绑定槽，不是安装时复制的快照值。安装只发生在 VM 启动路径；快照恢复不重新安装。诊断入口校验 `globalThis` 上这些 getter 的描述符与 preload 记录一致（名字、环境、函数身份）。preload 名字在静态解析中优先于内建；同名局部绑定仍遮蔽 preload 全局。
 - 支持 `Symbol`（含 `Symbol.for/keyFor`、`Symbol.iterator`、`Symbol.asyncIterator`、`Symbol.dispose`、`Symbol.asyncDispose`）、同步与异步 iterator 协议、生成器与 async generator 的原型、`Map`、`Set`、`WeakMap`。快照保存 symbol 注册表和引用身份、集合条目与顺序；`WeakMap` 遵循弱键/ephemeron 可达性，只存活键所对应的条目，不能把键提升成强根。
 - Solid 响应式 props/store 需要真正的 VM `Proxy`：首版覆盖普通对象/数组（以及 Date、ArrayBuffer、DataView、TypedArray）目标的 `get`、`set`、`has`、`deleteProperty`、`ownKeys`、`getOwnPropertyDescriptor` 陷阱及相应 `Reflect` 操作；遵守属性描述符与不可扩展目标不变量。快照保存代理、目标、handler 及其捕获环境的身份和关系，不执行 trap 来枚举快照。可撤销代理、代理函数/构造器及其他 traps 不在此基线。
@@ -100,32 +100,71 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 ### 非 Web 宿主与验收
 
 - 两套 renderer 均在 VM 内执行 JS，调用同一类宿主树能力：创建节点/文本、设置属性/文本、插入/移动/删除、遍历父子兄弟、分发输入事件。节点以绑定实例表示：节点间和事件回调的引用走 VM 托管槽，重建平台节点所需的非 JS 数据随实例写入快照。可用可观察的内存节点树验收，无需先实现 Apple/Android UI，也不提供 DOM、Node 或 React Native 全局环境。
-- React 的生产 `scheduler` 选用 [`setTimeout` 回退分支](https://unpkg.com/scheduler@0.27.0/cjs/scheduler.production.js)。宿主适配器提供可取消的 timer、`performance.now()` 单调时钟和错误日志出口；恢复须延续同一时钟域，不能从零重新计时。`setTimeout`/`clearTimeout` 包装层与回调在 VM 内；快照中的 timer operation 记录保存到期及取消所需的状态，不保存平台 timer 句柄。到期后宿主在新的 VM 任务轮次结算原 Promise，由 VM 驱动已登记的脚本回调并排空微任务；回调抛错按任务错误报告，不把内部 Promise 拒绝暴露给应用。取消或重复到期投递不执行回调。树事件也在新任务轮次投递，不从原生调用栈同步重入 VM。
+- React 的生产 `scheduler` 选用 [`setTimeout` 回退分支](https://unpkg.com/scheduler@0.27.0/cjs/scheduler.production.js)。框架验收宿主须接入可取消的 timer 唤醒；`performance.now()` 由 VM 提供，恢复延续同一相对时钟。定时器回调由 VM 在独立任务轮次执行并排空微任务，回调抛错走全局错误报告；取消或重复投递不执行回调。树事件也在新任务轮次投递，不从原生调用栈同步重入 VM。此验收要求不等于所有宿主都必须提供定时器。
 - **运行验收**：用冻结版本的真实生产包和实际 JSX 构建产物。Solid 验证 signal/memo、响应式 props、嵌套 store、列表节点重排、事件更新和卸载清理；React 验证函数组件、`useState`、effect 及清理、带 key 的子节点重排、Promise 驱动的 Suspense 恢复和卸载。与参考 JS 引擎以 ESM 模式执行同一产物、遵循同一宿主适配器契约时的节点树和事件日志对照。
 - **恢复验收**：分别在已挂载、等待可恢复 operation 的边界保存快照。用新的宿主从快照重建节点后投递事件或结算原 operation。断言脚本可见的节点和闭包身份延续、挂载副作用不重跑、后续更新和清理正常；React 另验证挂起的 scheduler timer 恢复后只触发一次、已取消 timer 不执行。不能用重新挂载代替恢复。
 
 ## Web API 互操作性设计：WinterTC
 
-以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为对照基线，不随[在线草案](https://min-common-api.proposal.wintertc.org/)滚动。这里记录后续设计范围，不扩大首版 Solid/React 验收要求，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。`globalThis`、`queueMicrotask`、`DOMException` 和 `TextEncoder` 已有 VM 内建；`TextDecoder` 和 `structuredClone` 有下表所列的覆盖限制。宿主模块、测试 preload 和 Rust 回调不等于默认脚本全局。
+以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为固定基线：**除 WebAssembly 外，列出的所有接口、全局方法和属性均为实现目标**。目标包括上游规范定义的成员及可观察行为，不只是同名全局。纯 VM 功能不依赖宿主接入；有外部依赖的功能仍提供 JS 接口，由可选宿主能力承接外部工作。此目标不改变首版 Solid/React 的验收清单，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。
 
-| API 组 | 待补范围与边界 |
+| API 组 | 实现目标与归属 |
 | --- | --- |
-| 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`AbortController`、`AbortSignal`。监听器、取消原因及信号关系由 VM 持有；不引入 DOM 节点或事件树。 |
-| 全局错误与拒绝 | `reportError`、`ErrorEvent`、`PromiseRejectionEvent`，以及 `onerror`、`onunhandledrejection`、`onrejectionhandled` 对应的脚本可见通知。现有宿主错误／拒绝钩子不是全局事件，测试 preload 的空 `reportError` 也不是实现。全局采用 `EventTarget` 还是提供等价的脚本级通知出口，须与全局作用域模型一并确定；不能将宿主日志视为 §6 的替代机制。 |
-| 消息与克隆 | `MessageChannel`、`MessagePort`、`MessageEvent`。先定义 VM 内端口配对、任务投递、关闭和转移；`structuredClone` 目前仅转移 `ArrayBuffer`，随新增可序列化或可转移接口补齐对应类型（如 `Blob`、`File`、`MessagePort`）。消息队列、端口归属及转移后的状态须能恢复，不要求 Worker。 |
-| 定时器与时钟 | 全局 `setTimeout`／`clearTimeout` 目前只有测试宿主实现和 preload 接线；另缺 `setInterval`／`clearInterval`、`Performance` 与 `performance`（含 `now()`、`timeOrigin`）。须定义取消、重复触发和恢复时钟域；字符串 timer handler 与禁止运行时编译的设计冲突，不支持，并作为兼容偏差记录。 |
-| 全局别名与标识 | `self` 与 `navigator.userAgent`。若提供 `self`，其值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
-| 编码与 Base64 | `atob`／`btoa` 是独立的 HTML 字符串 API，现有 `Uint8Array` Base64 方法不能替代；`TextDecoder` 目前仅支持 UTF-8，待补 Encoding Standard 的其余支持标签和增量解码状态。`TextEncoderStream`／`TextDecoderStream` 依赖流。 |
+| 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`DOMException`、`AbortController`、`AbortSignal`。监听器、取消原因与信号关系由 VM 持有；`AbortSignal.timeout()` 复用宿主定时器能力。不引入 DOM 节点或事件树。 |
+| 全局错误与拒绝 | `reportError`、`ErrorEvent`、`PromiseRejectionEvent`、`onerror`、`onunhandledrejection`、`onrejectionhandled`。目标全局对象由 VM 实现 `EventTarget`，支持全局监听及上述处理器属性；遵循异常报告和 Promise 拒绝跟踪的通知时机及取消规则。宿主日志是报告出口，不替代脚本通知。 |
+| 消息与克隆 | `MessageChannel`、`MessagePort`、`MessageEvent`、`structuredClone`。VM 持有端口配对、任务队列、关闭和转移状态；补齐规范所需的克隆与转移类型（如 `Blob`、`File`、`MessagePort`），不要求 Worker。 |
+| 定时器与时钟 | `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval` 由 VM 实现脚本语义，由可选宿主能力唤醒。`Performance`、`performance.now()`、`performance.timeOrigin` 完全由 VM 提供。禁止运行时编译，故字符串 timer handler 不支持。 |
+| 全局别名与标识 | `globalThis`、`self`、`navigator.userAgent`。`self` 初始值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
+| 编码与 Base64 | `atob`／`btoa` 按 HTML 字符串 API 实现；`TextEncoder`、`TextDecoder`、`TextEncoderStream`、`TextDecoderStream` 按 Encoding Standard 实现，含支持标签、增量状态、BOM 和错误处理。 |
 | URL | `URL`、`URLSearchParams`、`URLPattern`。覆盖 URL 解析与序列化、`URL.searchParams` 的双向联动及模式匹配，不依赖浏览器文档提供基准 URL。 |
-| 流与压缩 | `ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 与编解码进度必须有明确的快照表示。 |
-| Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；网络访问走宿主能力，明确基准 URL、origin、凭据及重定向策略。请求和响应体依赖流与取消协议；恢复不得盲目重发可能已产生外部副作用的请求。 |
-| Console | 从现有仅记录首个实参的宿主 `console` 模块补到规范的全局 `console`，涵盖方法集合、参数处理和分组／计时等状态；输出仍由宿主承接，恢复不重放日志。 |
-| Web Crypto | `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`。熵源和密码运算使用显式宿主能力，不复用 `Math.random`。密钥可导出性与快照可恢复性分别定义，不把不可导出密钥转成明文或落盘平台句柄。 |
+| 微任务、流与压缩 | `queueMicrotask`；`ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 和增量编解码进度进入 VM 快照。 |
+| Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；VM 实现 Fetch 算法和 JS 对象，外部网络及环境服务通过可选宿主能力接入，见下文。 |
+| Console | 全局 `console` 的规范方法、参数处理、分组与计时状态由 VM 管理；输出交给可选宿主 sink，恢复不重放日志。 |
+| Web Crypto | `crypto`、`Crypto`、`CryptoKey`、`SubtleCrypto`。VM 实现参数、类型、用法与可导出性约束，熵源及密码操作由可选宿主能力提供，不回退到 `Math.random`。可导出性与快照可恢复性独立；不可导出密钥不以明文或进程句柄落盘，无法安全恢复的可达密钥应使快照失败。 |
 | WebAssembly（范围外） | 缺少整个命名空间，包括 `Global`、`Instance`、`Memory`、`Module`、`Table`、`Tag`、`Exception`、`CompileError`、`LinkError`、`RuntimeError`，以及 `compile`、`compileStreaming`、`instantiate`、`instantiateStreaming`、`JSTag`、`validate`。仅记为标准差异，不纳入当前引擎设计范围。 |
 
-- **全局暴露。** 不引入 `Window` 或 `WorkerGlobalScope`；Worker 本身不是 §5.3 的必选项。非 `[Exposed=*]` 接口的暴露须对照 §6 说明项目的作用域偏差。新增全局须同时审视 `globalThis` 属性和静态裸名解析，保留局部绑定遮蔽规则，不将任意宿主属性动态注入编译器名字表。
-- **快照与宿主边界。** JS 可见身份、监听器关系及待投递的任务数据由 VM 持有；不序列化 OS 句柄、原生调用栈或待执行的 VM 微任务。涉及外部 I/O 的接口先定义中断与恢复策略，再接入宿主 operation；无安全恢复策略的活动状态须明确拒绝捕获，不得静默丢状态、重放副作用或引入第二份存档。
-- **后续验收。** 对照上游 API 行为与适用的 Web Platform Tests，另验收快照前后身份、事件／微任务顺序、取消和恢复不重复交付。记录每项支持的接口和可观察偏差，不以同名全局存在作为验收。
+- **全局暴露。** 不引入 `Window`、`WorkerGlobalScope` 或 Worker。非 `[Exposed=*]` 接口在 VM 自有作用域暴露是相对 §6 的设计偏差。新增全局同步纳入 `globalThis` 和静态裸名解析，保留局部绑定遮蔽规则，不把宿主属性动态注入编译器名字表。
+- **快照边界。** JS 身份、监听器、流状态和已接收但未运行的普通任务数据由 VM 持有，快照不保存 OS 句柄、原生调用栈或待执行的 VM 微任务。外部操作必须定义中断、交付与恢复；无法捕获一致状态时拒绝快照，不得静默丢弃或重放外部副作用。
+- **验收。** 各 API 对照上游规范及适用的 [Web Platform Tests](https://github.com/web-platform-tests/wpt)；另覆盖快照前后身份、任务／微任务顺序、取消、缺失能力和恢复不重复交付。逐项记录实现覆盖与可观察偏差。
+
+### VM 相对时钟
+
+`performance.now()` 返回 VM 内部单调计时器的毫秒数，支持小数；不查询宿主能力，也不依赖系统墙钟。新 VM 从零开始。运行期间（含 VM 等待外部事件）累计本地单调时间；快照只保存在一致切点采样的累计时间，不保存进程单调时钟锚点。恢复以该累计值为基数重新锚定，存档至恢复之间的时间不计入。`performance.timeOrigin` 始终为 `0`；它不是 Unix epoch 或任何绝对坐标，`timeOrigin + now()` 仍只是 VM 内的相对时间，不能用于跨 VM 或跨进程对时。
+
+同一个 VM 计时域也用于 timer 截止时间和 Console 计时。快照恢复不得倒退或重置时钟；宿主唤醒只使用相对延时，不是 JS 时钟的权威。验收使用可控的内部测试时钟，覆盖分数精度、单调性、恢复时间连续性及存档间隔不计入。
+
+### 可选宿主能力
+
+启动 VM 时以独立的类型化服务注册定时器、Fetch、Console 输出和 Crypto 等能力，复用现有 service / operation 生命周期，不要求脚本导入宿主模块、不要求宿主实现全局对象或字符串分派。语言无关的边界传递有类型的记录、字节和代际令牌；宿主不持有脚本函数、`JsValue`、Promise 或流对象，也不从平台回调同步重入 VM。宿主可以在后台线程执行工作，仅在 VM 线程按任务投递；每个脚本任务后进行微任务检查。服务声明、状态 schema 及恢复策略可版本化，活动快照记录声明所需的兼容版本；不保存服务实例。恢复时需重新登记的 operation 缺少匹配能力则在发布前报错；有纯 VM 终结策略的记录不必重连服务。
+
+能力默认关闭，不回退到进程的全局网络客户端、凭据库、文件系统或熵源。全局名字仍存在；需调用外部服务的同步 API 缺能力时抛出可捕获的异常（定时器、Crypto 或 Console 输出默认 `NotSupportedError`），Promise API 按正常时序拒绝（网络 Fetch 为网络错误 `TypeError`，异步 Crypto 为 `NotSupportedError`）。无外部工作时按原 API 行为，例如清除不存在的 timer 是空操作，`new Response()` 和本地 `data:` Fetch 不依赖网络能力。宿主拒绝权限或操作失败由 VM 映射到对应 API 错误；过期令牌、越权投递及协议违约是宿主集成错误，不当作正常结果。
+
+#### 定时器
+
+- 宿主只需实现一次性 `arm(token, relative_delay) → registration` 与可取消登记；到期投递 token，不分配 JS 定时器 ID、不执行回调，也不负责周期运算。VM 实现延时转换、HTML 的嵌套最小时延、`setTimeout` / `setInterval` 共用 ID 表及 `clear*` 交叉取消；`AbortSignal.timeout()` 也通过同一唤醒能力驱动。提前唤醒按 VM 时钟重新登记，已取消或重复唤醒忽略。
+- VM 保存逻辑 ID、回调和参数引用、种类、周期以及同一相对时钟域的下次截止时间和任务顺序；interval 每次执行后仅在未取消时登记下一次，并按本轮调度，不补跑存档期间的 tick。恢复按保存的截止时间及恢复时钟重新计算相对延时，已到期则入普通任务队列。旧平台登记的迟到投递不会触发新代际回调；切点只接受已纳入 VM 状态的任务或仍可由逻辑记录重建的登记。
+
+### Fetch：完整脚本语义与宿主传输契约
+
+目标是实现 [WHATWG Fetch Standard](https://fetch.spec.whatwg.org/) 中适用于该运行时的 Fetch API 和获取算法，不是只提供 buffered HTTP 便捷函数。按以下边界分工；同一适配器可包装平台 HTTP 客户端，不需要实现第二套 JS Fetch。
+
+#### VM：Web IDL、对象与获取算法
+
+- 实现 `Headers`、`Request`、`Response` 及 Body mixin 的完整公开契约：参数转换与验证、header list 的字节和重复项语义、guard 和不可变 header、`getSetCookie()`、请求默认值和方法规则、`Request` 的信号关联、`Response.error/redirect/json`、类型和 URL 元数据。VM 管理 body 的 null／字节流区分、locked／disturbed／`bodyUsed`、clone/tee、`arrayBuffer`、`blob`、`bytes`、`formData`、`json`、`text`，并实现规范的 MIME／编码、multipart 和 `BodyInit` 提取（包括流式上传与 `duplex`）。`Blob`、`File`、`FormData` 和脚本合成的 Request/Response 不依赖网络。
+- VM 驱动 Fetch 算法：解析有效 URL，处理 `about:blank`、`data:` 及规范可解析的 `blob:` 本地资源，缺少资源或不支持的 scheme 走网络错误（不把 `file:` 映射到宿主文件系统）；逐跳处理 `redirect`、URL 列表、重定向上限、方法／请求体变换、不可重放上传和跨 origin header 清理。按规范处理 `mode`、CORS（含预检）、`credentials`、HTTP cache mode、referrer/referrerPolicy、`integrity`、`keepalive` 限制，以及适用的 HTTP 子算法；产生 basic／CORS／opaque／opaqueredirect 过滤结果，不将内部响应泄漏给脚本。HTTP 4xx／5xx 是正常响应；网络、策略与完整性失败按 Fetch 算法映射为网络错误，不伪造 HTTP 状态。
+- Fetch 环境由宿主在创建 VM 时显式配置，包含可选基准 URL、origin、referrer 和网络权限；影响恢复语义的环境参数随 VM 保存并在恢复时核对，不从启动机器猜测。无基准 URL 时不接受相对字符串 URL；未配置 origin 则使用不透明 origin，按相应规范处理同源判断、CORS 和 `Origin` 序列化。按条件使用默认 User-Agent。无 `Window`／导航、Service Worker 或嵌入文档：不模拟这类环境的拦截、文档策略或页面卸载；记录浏览器上下文不适用的路径，不静默忽略本运行时适用的安全检查。`keepalive` 不承诺跨 VM 销毁或快照恢复继续传输。
+
+#### Host：单跳 HTTP、背压与环境服务
+
+- 最小 HTTP 适配器接收 `start(token, HopRequest) → registration`，其中含绝对 URL、方法、保序的 header 字节对、无体／已知长度／未知长度上传描述及本跳的凭据约束；登记提供 `send_upload(bytes)`、`finish_upload()`、`grant_download(bytes_limit)`、`cancel()`。名称仅示意接口方向，不锁定 ABI。单跳指 HTTP 交换，不指整次 Fetch；重定向、预检与后续请求由 VM 另发，平台不得自动重定向、应用浏览器响应过滤、合并 `Set-Cookie` 或擅自重试已可能发送的请求。适配器负责 DNS、连接、代理、TLS、HTTP framing 等平台工作；单跳传输输出去 framing、未自动解压的字节，由 VM 按适用规则解码，避免重复解压或丢失 header 信息。
+- 投递类型限定为上传额度、最终 `ResponseHead { status, status_text, headers }`、响应字节、EOF 或类型化失败；需要观测的中间响应保留为单独事件。上传按宿主额度从原 VM 流读取并送入适配器，下载按 VM 授予的字节额度投递，不能以无界缓冲替代流。额度和字节所有权、单跳事件顺序、唯一终结及取消明确写入协议；最终 headers 可先于上传 EOF，最终响应体按规范在可暴露时交付，不要求提前读完。`AbortSignal` 或 body 取消由 VM 按 Fetch/Streams 算法转成取消，事务终结后忽略迟到结果。普通网络失败在响应交付前拒绝原 Promise，交付后只使相应未结束的体流出错；中止遵循规范的 reason 与阶段，不以宿主错误字符串替代脚本原因。
+- 每个实际出站的 URL（含重定向、预检和连接重试）都受宿主授权及连接层策略约束；不能把 CORS 当作宿主网络权限。平台客户端应禁止隐式共享 cookie、认证和缓存。可按需注入隔离的 cookie／HTTP 认证／缓存服务，并遵循 VM 为每一跳传入的 origin、分区及 credential/cache mode；无可选存储时是空凭据库、缓存 miss 或按模式返回网络错误，不降级 `only-if-cached` 为联网。宿主可配置请求体、响应体和并发资源限制，超限走可诊断的错误，不能截断成成功。平台服务是外部环境，不是保存 VM Fetch 进度的第二份存档。
+
+#### Fetch 快照与验收
+
+在一致切点保存原 VM Promise、Fetch 状态、已接入 VM 的响应和流关系、排队的交付及取消状态；不保存 socket、TLS 会话、平台请求 ID、宿主缓冲或原生回调。捕获快照不取消源 VM 的登记；源 VM 停止时由其宿主释放登记，恢复实例不依赖源 VM。已完整进入 VM 的响应在恢复后继续由 VM 消费；涉及活动外部传输的恢复基线是**中断，不重发**：响应交付前以 `AbortError` 拒绝原 Promise，交付后不改变已兑现结果，使仍依赖传输的流按中断出错，并清理上传源和取消监听。此终结只在恢复发布后按任务顺序发生；若切点有已归入 VM 的终结事件，先按记录顺序消费，不重复结算。旧代际的迟到结果无效；不能取得一致切点则拒绝捕获。请求方法、已发送字节或 host operation ID 均不作为重放安全证明。
+
+先以可控传输验收一次单跳接入，再运行适用的 WPT Fetch 测试及本地 HTTP 测试：覆盖 header guard 与重复值、body 消费／clone、慢速双向流与背压、预检和各重定向模式、凭据和响应过滤、缓存／完整性错误、缺能力及中止竞态。分别在上传中、等待响应头、响应头已交付、读体中和 EOF 后做快照往返；断言原 Promise 或流按阶段终结、已完成的体可读、宿主没有重复请求。文档与测试要区分脚本侧规范语义、宿主未提供能力以及有意的运行时偏差。
 
 ## 总体架构
 
@@ -345,7 +384,7 @@ export async function run(input) {
 
 只在同步执行栈已清空、当前微任务轮次排空后创建快照。同步调用和原生函数执行中的状态不保证可暂停或恢复。此边界避免序列化宿主栈及半途执行的原生调用。生成器只在控制权已返回脚本并挂起于 `yield` 时进入快照；执行中的生成器以及重新进入的 `next` / `throw` / `return` 属于同步执行栈，不提供暂停。
 
-待触发的宿主 timer 不等于已入队的 VM 微任务，可以跨快照存在。宿主的快照切点须协调 timer/事件投递与存档：不接受已从宿主摘下、却尚未进入 VM 处理且未持久化的投递。恢复完成且绑定通过前不得投递；不保存正在运行的框架调度调用栈。
+待触发的宿主 timer 和已进入 VM 的普通任务都不是已入队的 VM 微任务，可以跨快照存在。宿主的切点须协调事件交付与存档：不接受已从宿主摘下、却未写入 VM 且无法由持久记录重建的投递。恢复发布前不得开始外部工作或投递；不保存正在运行的调度调用栈。
 
 ### Operation 的中断与恢复
 
@@ -354,8 +393,8 @@ export async function run(input) {
 | 操作语义 | 恢复后的动作 |
 | --- | --- |
 | `test.wait` 只用来制造暂停点 | 静默成功，以 `undefined` 兑现原 Promise，不再等待一次外部交付。 |
-| timer 或等待外部交付的操作 | 根据快照状态重新登记；到期或收到交付时结算原 Promise。 |
-| `fetch` 等网络请求 | 类型配置可选择用中断错误拒绝原 Promise，或根据保存的请求描述重发并交付结果。有外部副作用的请求不可默认重发。 |
+| timer 或等待外部交付的操作 | 根据快照状态重建登记；到期或收到交付时通知原任务或结算原 Promise。 |
+| `fetch` 的外部传输 | 不恢复旧传输；按 Fetch 所处阶段拒绝原 Promise 或使未结束的体流出错，不重发请求。 |
 
 ID 只用于关联交付与 pending 记录，不是去另一份宿主存档查询数据的键。只有整份快照恢复成功后才能重新登记、重发或结算；旧任务的迟到结果不能再次结算。按策略拒绝 Promise 是有效的恢复结果，经原来的反应和异常路径交付，不是 VM 恢复失败。恢复不重跑发起该 operation 的函数。
 
@@ -369,7 +408,8 @@ ID 只用于关联交付与 pending 记录，不是去另一份宿主存档查�
 - 可达的 VM Promise、挂起续体和等待关系；局部状态只包含当前恢复表指定的持久槽。
 - 可达生成器对象的函数 ID、生命周期状态、挂起恢复入口和该入口的持久槽；async generator 的请求队列按入队顺序保存请求种类、参数、结果 Promise 及下一个待处理位置。生成器对象按普通堆对象保留身份和引用关系，不保存原生迭代器或宿主生成器。
 - 绑定模块状态和可达绑定实例：对象身份、普通属性、实际原型引用、类型标识、JS 值槽与可选 payload 的版本和编码内容。绑定函数对象保存稳定声明标识，调用实现由本进程提供。
-- 每个 pending operation 的类型及版本、实例 ID、恢复策略所需的完整状态（JS 引用或编码后的非 JS 数据），以及它与原 VM Promise 的关联。
+- 每个 pending operation 的类型及版本、实例 ID、恢复策略所需的完整状态（JS 引用或编码后的非 JS 数据），以及原 VM Promise 或任务终点的关联。
+- VM 相对时钟的累计时间、已纳入 VM 的普通任务及顺序，以及其所引用的定时器、流和其他 Web API 状态。排队任务引用 VM 对象或有类型的持久数据，不引用宿主回调。
 
 快照不包含机器码、原生指针、OS 句柄、原生回调或正在执行的任务。JS 回调是 VM 函数对象，其引用和捕获环境仍在对象图中。恢复无需旧 host 内存、实例索引表或第二份 operation/UI 绑定存档。
 
@@ -392,7 +432,7 @@ ID 只用于关联交付与 pending 记录，不是去另一份宿主存档查�
 - 精确版本策略简单可靠，但脚本升级后旧快照不可直接恢复；宿主需实现重新初始化与 UI 重建路径。
 - 实现阶段应为快照往返、挂起 async 帧恢复、对象身份保持、缺失绑定拒绝执行及版本不匹配拒绝恢复设计针对性验证。
 - 销毁原 VM 和宿主后，只用快照、同一 Build、静态绑定和平台服务恢复：保存 `m = expect(obj)`、`obj.matcher = m` 和 `f = m.toEqual.bind(m)`，恢复后经别名修改 `obj` 再调用 `f`。同时验证实例共享方法、裸调抛错、不可达实例不要求解码；另用带 payload 的节点验证上下文解码，不依赖旧节点表。
-- 对每种 operation 策略验证原 Promise 的结果及交付次数：`test.wait` 静默成功；继续等待的操作只接受一次完成；`fetch` 配置为拒绝时不发请求，配置为重发时不重跑发起函数。
+- 对每种 operation 策略验证原目标的结果及交付次数：`test.wait` 静默成功；继续等待的操作只接受一次完成；Fetch 恢复按阶段中断且不发出请求。其他声明为可重发的自定义 operation 不重跑发起函数。
 - 验证无需 `"use strict"` 即按严格 ESM 执行：顶层 `this` 为 `undefined`，顶层声明不成为全局对象属性，且同名模块绑定不会修改原全局值。
 - 验证宿主只能通过公开名读取或调用显式导出，包括别名；未导出的函数不能调用，非可调用导出可以读取但不能调用。脚本更新导出绑定后，宿主读到新值、调用新函数；恢复后仍观察到更新后的绑定，且顶层初始化不重跑。编译器拒绝重复导出名与不存在的局部绑定。
 - 验证生成器跨快照的挂起与恢复：在 `yield` 挂起时保存，恢复后分别执行 `next` / `throw` / `return`，断言结果对象的 `done` / `value`、`finally` 完成状态与生成器身份一致；生成器执行中重入抛出 `TypeError`；`yield*` 委托在恢复后继续向同一迭代器转发。
