@@ -127,6 +127,7 @@ impl Vm {
             next_host_call: 1,
             next_continuation_id: 1,
             active_array_joins: BTreeSet::new(),
+            active_event_paths: Vec::new(),
             builtins: BuiltinRoots::default(),
             templates: Vec::new(),
             random_state: crate::builtin::math::RANDOM_SEED,

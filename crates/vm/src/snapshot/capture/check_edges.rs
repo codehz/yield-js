@@ -414,7 +414,6 @@ pub(super) fn check_heap_edges(build: &Build, heap: &Heap) -> Result<(), VmError
                 || event.dispatching
                 || event.in_passive
                 || event.current_target.is_some()
-                || !event.path.is_empty()
             {
                 return Err(VmError::InvalidSnapshot(format!(
                     "event {id} has active dispatch state"

@@ -375,10 +375,17 @@ fn composed_path(
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
     if let ValueRef::Object(id) = receiver.view()
-        && let Object::Event { event, .. } = vm.heap.get(id)?
+        && matches!(vm.heap.get(id)?, Object::Event { .. })
     {
         // This VM has no shadow trees; every invocation target is visible.
-        let path = event.path.iter().copied().map(Value::object).collect();
+        let path = vm
+            .active_event_paths
+            .iter()
+            .rev()
+            .find(|(event, _)| *event == id)
+            .map_or_else(Vec::new, |(_, path)| {
+                path.iter().copied().map(Value::object).collect()
+            });
         return Ok(Invocation::Value(Value::object(vm.heap.alloc_array(path))));
     }
     incompatible_receiver(vm, roots, false)

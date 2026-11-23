@@ -301,17 +301,17 @@ impl Vm {
         }
 
         let path = match self.dispatch_path(roots, target)? {
-            Ok(path) => path,
+            Ok(path) => std::rc::Rc::new(path),
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        let roots = &roots.with(&path);
+        let roots = &roots.with(path.as_ref());
         let state = self.dispatch_state(event)?;
         state.dispatching = true;
         state.trusted = trusted;
         state.target = Some(target);
-        state.path.clone_from(&path);
         let ty = state.ty.clone();
         let bubbles = state.bubbles;
+        self.active_event_paths.push((event, path.clone()));
 
         let result = (|| {
             for &current in path.iter().rev() {
@@ -336,10 +336,11 @@ impl Vm {
         })();
 
         // Restore the dispatch state even when a listener yields a VM/host fault.
+        let popped = self.active_event_paths.pop();
+        debug_assert_eq!(popped.map(|(id, _)| id), Some(event));
         let state = self.dispatch_state(event)?;
         state.phase = 0;
         state.current_target = None;
-        state.path.clear();
         state.dispatching = false;
         state.stop = false;
         state.stop_immediate = false;

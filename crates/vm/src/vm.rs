@@ -352,6 +352,8 @@ pub struct Vm {
     pub(crate) next_continuation_id: ContinuationId,
     /// Synchronous join recursion guard; never live at a snapshot boundary.
     pub(crate) active_array_joins: BTreeSet<ObjectId>,
+    /// Synchronous dispatch stack; the shared paths are also active GC roots.
+    pub(crate) active_event_paths: Vec<(ObjectId, std::rc::Rc<Vec<ObjectId>>)>,
     pub(crate) builtins: BuiltinRoots,
     /// Frozen tagged-template objects, indexed by `Instr::GetTemplate`.
     pub(crate) templates: Vec<ObjectId>,
@@ -1584,6 +1586,7 @@ impl Vm {
             next_host_call: 1,
             next_continuation_id,
             active_array_joins: BTreeSet::new(),
+            active_event_paths: Vec::new(),
             builtins,
             templates,
             random_state: crate::builtin::math::RANDOM_SEED,

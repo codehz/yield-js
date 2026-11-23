@@ -60,6 +60,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 准备成功后，`Await` 总是经微任务队列恢复，即使是已 settled 的 promise。抛错的 `constructor` getter 直接转入脚本异常处理器，不挂起。
 - 标签模板对象在 VM 启动时按 `Build::templates` 的顺序全部创建，是 GC 与快照根；快照按位置保存对象 ID。恢复要求数量一致、ID 唯一，且每个对象是冻结数组、元素与构建记录一致、`raw` 属性为固定描述符并指向同样冻结的 raw 数组。`Instr::GetTemplate` 只读取该表，不分配。
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、已入队的 Promise 拒绝通知，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。拒绝通知在下一个成功的微任务检查点投递，不由恢复投递。原生指针、宿主回调与已入队的微任务不进快照。
+- 活动事件路径仅存在于同步派发栈，由活动根保护，不进入快照。事件保留上次目标，监听器按登记 ID 保存。取消信号的 source/dependent 与监听器取消步骤中的目标是弱引用；GC 和快照捕获裁剪失活边，并仅在有活源且存在取消步骤或 `abort` 监听器时保活未取消的 dependent。pending timeout 保存信号与 VM 相对截止时间；已就绪的 timeout 任务和微任务一样须先交付再捕获。
 - 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
 - `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
 - `ArrayBuffer` 的二进制编码批量写入后备字节；在当前 bincode 配置下，`serialize_bytes` 与 `Vec<u8>` 序列具有相同的长度前缀和原始字节，解码仍读 `Option<Vec<u8>>`。JSON 仍是字节数组（已分离时为 `null`）。

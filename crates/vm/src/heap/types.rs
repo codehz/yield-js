@@ -1450,9 +1450,6 @@ pub struct EventState {
     pub target: Option<ObjectId>,
     pub current_target: Option<ObjectId>,
     pub phase: u8,
-    // Dispatch keeps this path alive through execution roots, not through the heap.
-    #[serde(skip)]
-    pub path: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

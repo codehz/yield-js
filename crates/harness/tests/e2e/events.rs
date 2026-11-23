@@ -7,6 +7,45 @@ use yield_vm::{
     host_module, methods,
 };
 
+#[test]
+fn abort_gc_keeps_only_observable_dependents() {
+    let source = r#"
+        const controller = new AbortController();
+        let observed = 0;
+        export function setup() {
+            AbortSignal.any([controller.signal]);
+            AbortSignal.any([controller.signal]).onabort = () => { ++observed; };
+            makeCycle();
+        }
+        function makeCycle() {
+            const target = new EventTarget();
+            target.addEventListener("cycle", () => target);
+        }
+        export function run() {
+            controller.abort();
+            return observed;
+        }
+    "#;
+    let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
+    let mut host = EventHost::new();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    vm.start(&mut host, "setup", vec![]).unwrap();
+    assert!(vm.collect_garbage(&[]).unwrap() > 0);
+    let image = vm.snapshot(&[]).unwrap();
+    let dependent_count = image.objects.iter().filter(|record| {
+        matches!(&record.object, yield_vm::Object::AbortSignal { signal, .. } if signal.dependent)
+    }).count();
+    assert_eq!(dependent_count, 1);
+    assert!(!image.objects.iter().any(|record| {
+        matches!(&record.object, yield_vm::Object::EventTarget { target, .. } if !target.listeners.is_empty())
+    }));
+    let mut restored = Vm::restore_validated(image, build, &mut host).unwrap();
+    assert_eq!(
+        restored.start(&mut host, "run", vec![]).unwrap(),
+        Value::number(1.0)
+    );
+}
+
 #[host_class(tag = "EventNode", methods, event_parent = parent)]
 struct EventNode {
     #[js_slot]

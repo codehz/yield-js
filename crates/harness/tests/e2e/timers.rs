@@ -79,6 +79,77 @@ fn timeout_rearms_early_tokens_and_restores_remaining_time() {
 }
 
 #[test]
+fn due_timeout_recovery_delivers_once_without_rearming() {
+    let build = build(
+        r#"
+        const signal = AbortSignal.timeout(0);
+        let observed = 0;
+        signal.onabort = () => { ++observed; };
+        export function run() { return observed; }
+    "#,
+    );
+    let mut host = TestHost::new();
+    let source = Vm::new(build.clone(), &mut host).unwrap();
+    let image = source.snapshot(&[]).unwrap();
+    let mut restored_host = TestHost::new();
+    let mut restored = Vm::restore_validated(image, build, &mut restored_host).unwrap();
+    restored.start_recovered_operations().unwrap();
+    restored.start_recovered_operations().unwrap();
+    assert_eq!(restored_host.clock().arm_count(), 0);
+    assert_eq!(
+        restored.start(&mut restored_host, "run", vec![]).unwrap(),
+        Value::number(0.0)
+    );
+    restored.run_until_idle(&mut restored_host).unwrap();
+    assert_eq!(
+        restored.start(&mut restored_host, "run", vec![]).unwrap(),
+        Value::number(1.0)
+    );
+}
+
+#[test]
+fn timer_arm_failure_is_not_an_abort() {
+    let build = build(
+        r#"
+        export let signal;
+        export function run() { signal = AbortSignal.timeout(10); }
+        export function aborted() { return signal.aborted; }
+    "#,
+    );
+    let mut host = TestHost::new();
+    let mut vm = Vm::new(build.clone(), &mut host).unwrap();
+    host.clock().set_fail_start(true);
+    assert!(matches!(
+        vm.start(&mut host, "run", vec![]),
+        Err(VmError::HostFault(_))
+    ));
+    assert!(vm.pending_operations().is_empty());
+    host.clock().set_fail_start(false);
+    vm.start(&mut host, "run", vec![]).unwrap();
+    let image = vm.snapshot(&[]).unwrap();
+    let mut other_host = TestHost::new();
+    let mut restored = Vm::restore_validated(image, build, &mut other_host).unwrap();
+    other_host.clock().set_fail_start(true);
+    assert!(matches!(
+        restored.start_recovered_operations(),
+        Err(VmError::HostFault(_))
+    ));
+    assert!(restored.pending_operations().is_empty());
+    let token = host.clock().registrations()[0].0;
+    host.clock().set_fail_start(true);
+    assert!(matches!(
+        vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined())),
+        Err(VmError::HostFault(_))
+    ));
+    assert!(host.clock().registrations().is_empty());
+    vm.run_until_idle(&mut host).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "aborted", vec![]).unwrap(),
+        Value::boolean(false)
+    );
+}
+
+#[test]
 fn date_clock_rejects_out_of_range_changes_without_delivering_timers() {
     use yield_vm::Host;
 
