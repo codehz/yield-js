@@ -219,22 +219,22 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-#[yield_vm::host_module(name = "branch", init = Self::new, encode = Self::encode, decode = Self::decode)]
+#[yield_vm::host_module(name = "branch")]
 struct Branch {
     count: u8,
 }
 
-impl Branch {
+impl yield_vm::HostModuleState for Branch {
     fn new() -> Self {
         Self { count: 0 }
     }
 
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), yield_vm::binding::CodecError> {
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), yield_vm::binding::CodecError> {
         out.push(self.count);
         Ok(())
     }
 
-    fn decode(
+    fn decode_payload(
         input: &[u8],
         _: &mut yield_vm::binding::DecodeCx<'_>,
     ) -> Result<Self, yield_vm::binding::CodecError> {
@@ -242,10 +242,6 @@ impl Branch {
             &[count] => Ok(Self { count }),
             _ => Err(yield_vm::binding::CodecError::new("invalid branch payload")),
         }
-    }
-
-    fn increment(cx: &mut yield_vm::ModuleCx<'_, Self>) {
-        cx.state().count += 1;
     }
 }
 
@@ -268,6 +264,10 @@ impl Mirror {
 
 #[yield_vm::module_exports]
 impl Branch {
+    fn increment(cx: &mut yield_vm::ModuleCx<'_, Self>) {
+        cx.state().count += 1;
+    }
+
     #[function(name = "choose")]
     async fn choose(
         cx: &mut yield_vm::ModuleCx<'_, Self>,

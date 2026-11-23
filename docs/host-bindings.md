@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `ModuleExports`、`Operation`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
+> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `HostModuleState` / `ModuleExports`、`Operation`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
 
 ## 1. 目标与范围
 
@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 在 Rust 类型上声明唯一模块名、每台 VM 的状态和 codec；`#[module_exports]` 标注同一类型的一个 inherent impl。`host_bindings!` 按类型一次性链接模块、类、operation 与服务，并读取 `dts` 指定的声明文件。`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
+`#[host_module]` 只接受 `name`，为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`host_bindings!` 按类型一次性链接模块、类、operation 与服务，并读取 `dts` 指定的声明文件。`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
 ```rust
 #[host_module(name = "demo")]
@@ -198,7 +198,7 @@ trait PayloadCodec<T> {
 - **上下文提供能力，快照提供状态。** `EncodeCx` 可提供只读的 VM 元信息；`DecodeCx` 按键借用服务，例如 `cx.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
-- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本；同一 crate 内不同类型的版本互不影响。未知版本拒绝恢复。模块状态的字节没有 schema 版本，恢复时只由声明方的 `decode` 校验自身格式。
+- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本；同一 crate 内不同类型的版本互不影响。未知版本拒绝恢复。模块状态的字节没有 schema 版本，恢复时只由 `HostModuleState::decode_payload` 校验格式。
 - **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
 - 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
 
@@ -232,7 +232,9 @@ host_bindings! {
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
-- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。没有 Rust payload 字段时可省略 `init`、`encode`、`decode` 整组，使用空 payload；有字段时必须显式指定整组。模块状态 payload 不声明 schema 版本：字节按原样保存，恢复时只由 `decode` 校验，编码格式变化必须让旧字节解码失败而不是静默接受。
+- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。
+- 移除 `#[js_slot]` 和 `#[js_list]` 声明后，如果没有剩余的 Rust 字段，宏自动实现 `HostModuleState`：编码不追加字节，解码拒绝非空 payload。如果仍有 Rust 字段，模块作者必须实现 `HostModuleState` 的 `new`、`encode_payload` 和 `decode_payload`，否则无法通过编译。
+- 模块状态 payload 不声明 schema 版本：字节按原样保存，恢复时只由 `decode_payload` 校验，编码格式变化必须让旧字节解码失败而不是静默接受。
 - 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
 ## 6. 调用协议

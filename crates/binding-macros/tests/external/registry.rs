@@ -7,7 +7,7 @@ use yield_vm::{
     host_module, module_exports, operation,
 };
 
-#[host_module(name = "state", init = State::init, encode = State::encode, decode = State::decode)]
+#[host_module(name = "state")]
 struct State {
     #[js_slot]
     current: JsValue,
@@ -16,24 +16,26 @@ struct State {
     count: u8,
 }
 
-#[module_exports]
-impl State {
-    fn init() -> Self {
+impl yield_vm::HostModuleState for State {
+    fn new() -> Self {
         Self { count: 3 }
     }
 
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
+    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
         out.push(self.count);
         Ok(())
     }
 
-    fn decode(input: &[u8], _: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
+    fn decode_payload(input: &[u8], _: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
         match input {
             &[count] => Ok(Self { count }),
             _ => Err(CodecError::new("invalid state payload")),
         }
     }
 }
+
+#[module_exports]
+impl State {}
 
 #[operation(name = "work", schema = 1, recovery = pause, encode = Work::write, decode = Work::read)]
 struct Work;

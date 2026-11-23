@@ -124,13 +124,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let mut item: ItemStruct = syn::parse2(item)?;
     check_struct(&item)?;
     let span = item.ident.span();
-    let (mut module, mut init, mut encode, mut decode) = (None, None, None, None);
+    let mut module = None;
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
-            "init" => set(&mut init, &key, || attribute_value::<Path>(input)),
-            "encode" => set(&mut encode, &key, || attribute_value::<Path>(input)),
-            "decode" => set(&mut decode, &key, || attribute_value::<Path>(input)),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
     })
@@ -142,37 +139,6 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         syn::Fields::Named(fields) if fields.named.is_empty() => Some(quote!(Self {})),
         syn::Fields::Unnamed(fields) if fields.unnamed.is_empty() => Some(quote!(Self())),
         _ => None,
-    };
-    let (new, encode, decode) = if let Some(empty) =
-        empty.filter(|_| init.is_none() && encode.is_none() && decode.is_none())
-    {
-        (
-            empty.clone(),
-            quote!(Ok(())),
-            quote! {
-                if _input.is_empty() { Ok(#empty) } else {
-                    Err(::yield_vm::binding::CodecError("unexpected module payload".into()))
-                }
-            },
-        )
-    } else {
-        let init = required(init, span, "init")?;
-        let encode = required(encode, span, "encode")?;
-        let decode = required(decode, span, "decode")?;
-        (
-            quote! {
-                let callback: fn() -> Self = #init;
-                callback()
-            },
-            quote! {
-                let callback: fn(&Self, &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> = #encode;
-                callback(self, _out)
-            },
-            quote! {
-                let callback: fn(&[u8], &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> = #decode;
-                callback(_input, _cx)
-            },
-        )
     };
     let decls = slot_decls(&slots);
     let ty = &item.ident;
@@ -196,6 +162,25 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         constants.push(quote!(pub const #ident: usize = #index;));
     }
     let constants = (!constants.is_empty()).then(|| quote!(impl #ty { #(#constants)* }));
+    let state = empty.map(|empty| {
+        quote! {
+            impl ::yield_vm::HostModuleState for #ty {
+                fn new() -> Self { #empty }
+
+                fn encode_payload(&self, _out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
+                    Ok(())
+                }
+
+                fn decode_payload(input: &[u8], _cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
+                    if input.is_empty() {
+                        Ok(#empty)
+                    } else {
+                        Err(::yield_vm::binding::CodecError("unexpected module payload".into()))
+                    }
+                }
+            }
+        }
+    });
 
     Ok(quote! {
         #item
@@ -203,13 +188,8 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
-
-            fn new() -> Self { #new }
-
-            fn encode_payload(&self, _out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> { #encode }
-
-            fn decode_payload(_input: &[u8], _cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> { #decode }
         }
+        #state
     })
 }
 
@@ -478,24 +458,25 @@ mod tests {
     }
 
     #[test]
-    fn host_module_reports_missing_init_and_slot_constant_collisions() {
+    fn host_module_rejects_legacy_state_options() {
+        for key in [quote!(init), quote!(encode), quote!(decode)] {
+            diagnostic(
+                host_module(
+                    quote!(name = "counter", #key = callback),
+                    quote!(
+                        struct Counter;
+                    ),
+                ),
+                "unknown host_module option",
+            );
+        }
+    }
+
+    #[test]
+    fn host_module_reports_slot_constant_collisions() {
         diagnostic(
             host_module(
-                quote!(name = "counter", encode = encode, decode = decode),
-                quote!(
-                    struct Counter;
-                ),
-            ),
-            "missing `init`",
-        );
-        diagnostic(
-            host_module(
-                quote!(
-                    name = "counter",
-                    init = init,
-                    encode = encode,
-                    decode = decode
-                ),
+                quote!(name = "counter"),
                 quote!(
                     struct Counter {
                         #[js_slot]

@@ -87,9 +87,9 @@ pub use binding::__macro_support;
 
 pub use binding::{
     Bindings, ClassId, ConstKind, ConstValue, ExportId, GuestOutcome, HostClass, HostFault,
-    HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName, MethodId, ModuleCx,
-    ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken, Recovery,
-    Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
+    HostModule, HostModuleState, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
+    MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
+    Recovery, Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,

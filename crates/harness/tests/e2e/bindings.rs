@@ -753,12 +753,12 @@ mod counter_fixture {
     use super::*;
     use yield_harness::Wait;
 
-    #[host_module(name = "counter", init = Self::new, encode = Self::encode_payload, decode = Self::decode_payload)]
+    #[host_module(name = "counter")]
     struct Counter {
         count: u32,
     }
 
-    impl Counter {
+    impl yield_vm::HostModuleState for Counter {
         fn new() -> Self {
             Self { count: 0 }
         }
