@@ -432,7 +432,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         .insert::<CountersKey>(Arc::clone(&counters))
         .unwrap();
     let bindings = yield_vm::host_bindings! {
-        dts: "tests/dts/branch.d.ts",
+        dts: "../dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: services,
     }
@@ -544,7 +544,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
         .insert::<CountersKey>(Arc::clone(&counters))
         .unwrap();
     let bindings = yield_vm::host_bindings! {
-        dts: "tests/dts/branch.d.ts",
+        dts: "../dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
         services: services,
     }

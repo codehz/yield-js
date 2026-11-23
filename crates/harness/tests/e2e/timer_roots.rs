@@ -216,7 +216,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         .insert::<yield_harness::timer::FakeClockKey>(Arc::clone(&clock))
         .unwrap();
     let bindings = yield_vm::host_bindings! {
-        dts: "tests/dts/repeat_timer.d.ts",
+        dts: "../dts/repeat_timer.d.ts",
         modules: [repeat_timer], classes: [], states: [], operations: [Timer],
         services: services,
     }

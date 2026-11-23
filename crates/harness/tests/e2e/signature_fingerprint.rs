@@ -50,7 +50,7 @@ mod original {
         let mut services = yield_vm::Services::default();
         services.insert::<LabelServiceKey>(Arc::clone(labels))?;
         host_bindings! {
-            dts: "tests/dts/auxiliary-contract.d.ts",
+            dts: "../dts/auxiliary-contract.d.ts",
             modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
             services: services,
         }
@@ -95,7 +95,7 @@ macro_rules! independent_contract {
                 let mut services = yield_vm::Services::default();
                 services.insert::<LabelServiceKey>(Arc::clone(labels))?;
                 host_bindings! {
-                    dts: "tests/dts/auxiliary-contract.d.ts",
+                    dts: "../dts/auxiliary-contract.d.ts",
                     modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
                     services: services,
                 }

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 
 use proc_macro2::{Span as MacroSpan, TokenStream};
 use quote::quote;
@@ -238,7 +238,7 @@ impl Parse for Registry {
     }
 }
 
-pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
+pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenStream> {
     let Registry {
         dts,
         modules,
@@ -247,7 +247,7 @@ pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
         operations,
         services,
     } = syn::parse2(input)?;
-    let (path, declarations) = read_declarations(&dts)?;
+    let (path, declarations) = read_declarations(&dts, origin.as_deref())?;
     let include = LitStr::new(&path.to_string_lossy(), dts.span());
     let checks = declaration_checks(&declarations, &modules);
     Ok(quote! {
@@ -265,11 +265,28 @@ pub(super) fn host_bindings(input: TokenStream) -> Result<TokenStream> {
     })
 }
 
-fn read_declarations(literal: &LitStr) -> Result<(PathBuf, BTreeMap<String, BTreeSet<String>>)> {
-    let root = std::env::var_os("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
+fn resolve_path(literal: &LitStr, origin: Option<&FsPath>) -> PathBuf {
+    let value = literal.value();
+    let declared = FsPath::new(&value);
+    if declared.is_absolute() {
+        return declared.to_path_buf();
+    }
+    let base = origin
+        .and_then(FsPath::parent)
+        .map(FsPath::to_path_buf)
+        .or_else(|| std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
-    let path = root.join(literal.value());
+    let resolved = base.join(declared);
+    // `local_file` can be relative to the compiler's working directory, and
+    // `include_str!` would re-resolve such a path against the invoking file.
+    std::path::absolute(&resolved).unwrap_or(resolved)
+}
+
+fn read_declarations(
+    literal: &LitStr,
+    origin: Option<&FsPath>,
+) -> Result<(PathBuf, BTreeMap<String, BTreeSet<String>>)> {
+    let path = resolve_path(literal, origin);
     let source = std::fs::read_to_string(&path)
         .map_err(|error| Error::new(literal.span(), format!("{}: {error}", path.display())))?;
     let declarations = yield_host_dts::parse(&source).map_err(|error| {
@@ -345,6 +362,10 @@ fn declaration_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_bindings(input: TokenStream) -> Result<TokenStream> {
+        super::host_bindings(input, None)
+    }
 
     fn diagnostic(result: Result<TokenStream>, expected: &str) {
         assert_eq!(result.unwrap_err().to_string(), expected);

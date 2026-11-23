@@ -144,7 +144,7 @@ mod strategy_fixture {
             .insert::<LabelServiceKey>(Arc::clone(labels))
             .unwrap();
         host_bindings! {
-            dts: "tests/dts/ops.d.ts",
+            dts: "../dts/ops.d.ts",
             modules: [ops],
             classes: [],
             states: [],
@@ -466,7 +466,7 @@ mod stale_fixture {
         let mut services = yield_vm::Services::default();
         services.insert::<StashKey>(Stash::default()).unwrap();
         host_bindings! {
-            dts: "tests/dts/stale.d.ts",
+            dts: "../dts/stale.d.ts",
             modules: [stale],
             classes: [Sink],
             states: [],
@@ -632,7 +632,7 @@ mod guest_call_fixture {
         services.insert::<StashKey>(Stash::default()).unwrap();
         services.insert::<RunsKey>(runs.clone()).unwrap();
         let bindings = host_bindings! {
-            dts: "tests/dts/guest.d.ts",
+            dts: "../dts/guest.d.ts",
             modules: [guest],
             classes: [],
             states: [],
@@ -808,7 +808,7 @@ mod counter_fixture {
             .insert::<LabelServiceKey>(Arc::clone(labels))
             .unwrap();
         host_bindings! {
-            dts: "tests/dts/counter-test.d.ts",
+            dts: "../dts/counter-test.d.ts",
             modules: [counter, test],
             classes: [],
             states: [CounterState],
@@ -903,7 +903,7 @@ mod geom_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
-            dts: "tests/dts/geom.d.ts",
+            dts: "../dts/geom.d.ts",
             modules: [geom],
             classes: [Point],
             states: [],
@@ -955,7 +955,7 @@ mod loose_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
-            dts: "tests/dts/loose.d.ts",
+            dts: "../dts/loose.d.ts",
             modules: [loose],
             classes: [Loose],
             states: [],
@@ -1140,7 +1140,7 @@ mod inherit_fixture {
             .insert::<LabelServiceKey>(Arc::clone(labels))
             .unwrap();
         host_bindings! {
-            dts: "tests/dts/inherit.d.ts",
+            dts: "../dts/inherit.d.ts",
             modules: [inherit],
             classes: [Base, Derived],
             states: [],
@@ -1331,7 +1331,7 @@ mod subset_fixture {
 
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
-            dts: "tests/dts/subset.d.ts",
+            dts: "../dts/subset.d.ts",
             modules: [subset],
             classes: [],
             states: [],

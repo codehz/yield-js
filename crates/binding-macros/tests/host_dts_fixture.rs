@@ -121,7 +121,7 @@ impl Drop for Fixture {
 fn declared_exports_are_checked_while_expanding_the_registry() {
     let fixture = Fixture::new("host-dts");
     fixture.write(
-        "host.d.ts",
+        "src/host.d.ts",
         r#"declare module "a" {
     export function used(): unknown;
 }
@@ -148,7 +148,7 @@ declare module "b" {
     );
 
     fixture.write(
-        "host.d.ts",
+        "src/host.d.ts",
         r#"declare module "a" {
     export function used(): unknown;
 }

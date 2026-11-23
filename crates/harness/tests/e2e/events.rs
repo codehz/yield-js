@@ -100,7 +100,7 @@ impl EventHost {
     fn new() -> Self {
         Self(Arc::new(
             host_bindings! {
-                dts: "tests/dts/event-fixture.d.ts",
+                dts: "../dts/event-fixture.d.ts",
                 modules: [fixture], classes: [EventNode],
                 states: [], operations: [], services: ::yield_vm::Services::default(),
             }

@@ -48,7 +48,7 @@ mod example {
 #[test]
 fn links_an_external_module_and_class() -> Result<(), String> {
     let bindings = host_bindings! {
-        dts: "tests/dts/example.d.ts",
+        dts: "dts/example.d.ts",
         modules: [example], classes: [Example], states: [], operations: [],
         services: ::yield_vm::Services::default(),
     }?;

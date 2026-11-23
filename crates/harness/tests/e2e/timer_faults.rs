@@ -292,7 +292,7 @@ macro_rules! timer_contract {
                 let mut services = yield_vm::Services::default();
                 services.insert::<yield_harness::timer::FakeClockKey>(Arc::clone(clock)).unwrap();
                 host_bindings! {
-                    dts: "tests/dts/contract.d.ts",
+                    dts: "../dts/contract.d.ts",
                     modules: [api],
                     classes: [],
                     states: [],

@@ -41,7 +41,12 @@ pub fn host_state(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(registry::host_state(args.into(), item.into()))
 }
 
+/// Links host modules, classes, states, operations and services. The `dts`
+/// path is resolved relative to the file containing the invocation, like
+/// `include_str!`; it falls back to `CARGO_MANIFEST_DIR` when the invocation
+/// file is unknown (for example inside a macro expansion).
 #[proc_macro]
 pub fn host_bindings(input: TokenStream) -> TokenStream {
-    expand(registry::host_bindings(input.into()))
+    let origin = proc_macro::Span::call_site().local_file();
+    expand(registry::host_bindings(input.into(), origin))
 }

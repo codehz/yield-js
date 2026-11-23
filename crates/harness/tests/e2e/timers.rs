@@ -439,7 +439,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
         .insert::<yield_harness::timer::FakeClockKey>(Arc::clone(&clock))
         .unwrap();
     let bindings = yield_vm::host_bindings! {
-        dts: "tests/dts/chain.d.ts",
+        dts: "../dts/chain.d.ts",
         modules: [chain], classes: [], states: [], operations: [Timer],
         services: services,
     }

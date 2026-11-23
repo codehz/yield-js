@@ -108,7 +108,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
 
     let evaluations = Cell::new(0);
     let bindings = host_bindings! {
-        dts: "tests/dts/state.d.ts",
+        dts: "../dts/state.d.ts",
         modules: [state], classes: [], states: [State], operations: [Work],
         services: { evaluations.set(evaluations.get() + 1); services },
     }?;
@@ -130,7 +130,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
 
     let bindings = |services| {
         host_bindings! {
-            dts: "tests/dts/state.d.ts",
+            dts: "../dts/state.d.ts",
             modules: [], classes: [], states: [], operations: [],
             services: services,
         }

@@ -866,7 +866,7 @@ fn test_bindings(
         services.insert::<SubtleCryptoKey>(subtle)?;
     }
     host_bindings! {
-        dts: "test.d.ts",
+        dts: "../test.d.ts",
         modules: [test],
         classes: [Node, Matcher],
         states: [],

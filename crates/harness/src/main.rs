@@ -159,7 +159,7 @@ fn demo_bindings(
         )))
         .map_err(|error| format!("failed to register the time service: {error}"))?;
     host_bindings! {
-        dts: "demo.d.ts",
+        dts: "../demo.d.ts",
         modules: [demo],
         classes: [],
         states: [],
