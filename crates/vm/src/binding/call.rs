@@ -725,7 +725,7 @@ impl<'a> CallCx<'a> {
             .map_err(JsError::Fault)?;
         let mut bytes = Vec::new();
         state
-            .encode(&mut bytes)
+            .encode(&mut bytes, self.bindings)
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
         Ok((declaration, bytes))
     }

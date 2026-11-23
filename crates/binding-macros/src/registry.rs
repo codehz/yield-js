@@ -61,8 +61,7 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     check_struct(&item)?;
     let ty = &item.ident;
     let span = ty.span();
-    let (mut name, mut schema, mut recovery, mut rejection, mut encode, mut decode) =
-        (None, None, None, None, None, None);
+    let (mut name, mut schema, mut recovery, mut rejection) = (None, None, None, None);
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut name, &key, || attribute_value::<LitStr>(input)),
@@ -84,8 +83,6 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
                 Ok(Ident::new(variant, value.span()))
             }),
             "rejection" => set(&mut rejection, &key, || attribute_value::<LitStr>(input)),
-            "encode" => set(&mut encode, &key, || attribute_value::<Path>(input)),
-            "decode" => set(&mut decode, &key, || attribute_value::<Path>(input)),
             _ => Err(Error::new(key.span(), "unknown operation option")),
         })
     })
@@ -93,8 +90,6 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let name = required(name, span, "name")?;
     let schema = required(schema, span, "schema")?;
     let recovery = required(recovery, span, "recovery")?;
-    let encode = required(encode, span, "encode")?;
-    let decode = required(decode, span, "decode")?;
     let rejection = rejection.map(|value| quote!(const REJECTION: &'static str = #value;));
 
     Ok(quote! {
@@ -104,16 +99,6 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
             const SCHEMA: u32 = #schema;
             const RECOVERY: ::yield_vm::Recovery = ::yield_vm::Recovery::#recovery;
             #rejection
-
-            fn encode(&self, out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
-                let callback: fn(&Self, &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> = #encode;
-                callback(self, out)
-            }
-
-            fn decode(input: &[u8], bindings: &::yield_vm::Bindings) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
-                let callback: fn(&[u8], &::yield_vm::Bindings) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> = #decode;
-                callback(input, bindings)
-            }
         }
     })
 }
@@ -162,34 +147,48 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         constants.push(quote!(pub const #ident: usize = #index;));
     }
     let constants = (!constants.is_empty()).then(|| quote!(impl #ty { #(#constants)* }));
-    let state = empty.map(|empty| {
-        quote! {
-            impl ::yield_vm::HostModuleState for #ty {
-                fn new() -> Self { #empty }
-
-                fn encode_payload(&self, _out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
-                    Ok(())
-                }
-
-                fn decode_payload(input: &[u8], _cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
-                    if input.is_empty() {
-                        Ok(#empty)
-                    } else {
-                        Err(::yield_vm::binding::CodecError("unexpected module payload".into()))
-                    }
-                }
+    let (mut default, mut encode, mut decode) = (None, None, None);
+    if let Some(empty) = empty {
+        let mut derives = BTreeSet::new();
+        for attr in &item.attrs {
+            if attr.path().is_ident("derive") {
+                let paths = attr.parse_args_with(
+                    syn::punctuated::Punctuated::<Path, Token![,]>::parse_terminated,
+                )?;
+                derives.extend(paths.iter().filter_map(|path| {
+                    path.segments
+                        .last()
+                        .map(|segment| segment.ident.to_string())
+                }));
             }
         }
-    });
+        default = (!derives.contains("Default")).then(|| quote!(#[derive(Default)]));
+        encode = (!derives.contains("Encode")).then(|| quote! {
+            impl ::yield_vm::Encode for #ty {
+                fn encode(&self, _: &mut ::std::vec::Vec<u8>, _: &::yield_vm::Bindings) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
+                    Ok(())
+                }
+            }
+        });
+        decode = (!derives.contains("Decode")).then(|| quote! {
+            impl ::yield_vm::Decode for #ty {
+                fn decode(_: &mut &[u8], _: &::yield_vm::Bindings) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
+                    Ok(#empty)
+                }
+            }
+        });
+    }
 
     Ok(quote! {
+        #default
         #item
         #constants
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
         }
-        #state
+        #encode
+        #decode
     })
 }
 
@@ -436,15 +435,7 @@ mod tests {
             struct Wait;
         );
         diagnostic(
-            operation(
-                quote!(
-                    name = "wait",
-                    schema = 1,
-                    encode = codec::encode,
-                    decode = codec::decode
-                ),
-                item.clone(),
-            ),
+            operation(quote!(name = "wait", schema = 1), item.clone()),
             "missing `recovery`",
         );
         diagnostic(
@@ -455,6 +446,21 @@ mod tests {
             operation(quote!(recovery = pause, recovery = resume), item),
             "duplicate `recovery`",
         );
+    }
+
+    #[test]
+    fn operation_rejects_legacy_codec_options() {
+        for key in [quote!(encode), quote!(decode)] {
+            diagnostic(
+                operation(
+                    quote!(name = "wait", schema = 1, recovery = pause, #key = callback),
+                    quote!(
+                        struct Wait;
+                    ),
+                ),
+                "unknown operation option",
+            );
+        }
     }
 
     #[test]

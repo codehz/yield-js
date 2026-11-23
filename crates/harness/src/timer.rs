@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::sync::{Arc, Mutex};
 
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, HostFault, JsResult, JsValue, LiveRegistration, OperationDriver,
+    Bindings, CallCx, HostFault, JsResult, JsValue, LiveRegistration, OperationDriver,
     OperationToken, Registration,
 };
 use yield_vm::host::{Completion, TimerService};
-use yield_vm::{Host, Vm, operation};
+use yield_vm::{Decode, Encode, Host, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
 
@@ -204,7 +204,8 @@ impl TimerService for FakeClock {
     }
 }
 
-#[operation(name = "timer", schema = 1, recovery = resume, rejection = "timer unavailable", encode = Timer::encode, decode = Timer::decode)]
+#[operation(name = "timer", schema = 1, recovery = resume, rejection = "timer unavailable")]
+#[derive(Encode, Decode)]
 pub struct Timer {
     remaining_ms: u32,
 }
@@ -217,20 +218,6 @@ impl Timer {
         }
         Ok(Self {
             remaining_ms: ms as u32,
-        })
-    }
-
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(&self.remaining_ms.to_le_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        let bytes = input
-            .try_into()
-            .map_err(|_| CodecError::new("timer state must be four bytes"))?;
-        Ok(Self {
-            remaining_ms: u32::from_le_bytes(bytes),
         })
     }
 

@@ -14,6 +14,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::call::{CallCx, JsValue};
+use super::codec::{Decode, Encode, decode_exact};
 use crate::digest::Digest;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
@@ -500,13 +501,8 @@ pub trait HostClass: Sized + 'static {
     /// object ids; JavaScript references belong in slots.
     const PAYLOAD_SCHEMA: Option<u32> = None;
 
-    fn encode_payload(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
-        Ok(())
-    }
-
-    fn decode_payload(_input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-        Err(CodecError::new("class declaration has no payload decoder"))
-    }
+    #[doc(hidden)]
+    const CODEC: Option<ClassCodec> = None;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,57 +518,19 @@ pub enum Recovery {
     Reject,
 }
 
-/// Per-VM module state. JavaScript references live in slots; the payload is
-/// ordinary Rust data.
-///
-/// `#[host_module]` requires an explicit implementation when Rust fields remain
-/// after removing the VM-managed slot declarations.
-///
-/// ```compile_fail,E0277
-/// use yield_vm::host_module;
-///
-/// #[host_module(name = "counter")]
-/// struct Counter { count: u32 }
-/// ```
-///
-/// All three methods are required in an explicit implementation.
-///
-/// ```compile_fail,E0046
-/// use yield_vm::{HostModuleState, host_module};
-///
-/// #[host_module(name = "counter")]
-/// struct Counter { count: u32 }
-///
-/// impl HostModuleState for Counter {
-///     fn new() -> Self { Self { count: 0 } }
-/// }
-/// ```
-///
-/// With only VM-managed slots, the macro supplies an empty payload codec.
-///
-/// ```
-/// use yield_vm::{HostModuleState, host_module};
-///
-/// #[host_module(name = "cache")]
-/// struct Cache {
-///     #[js_slot]
-///     value: yield_vm::JsValue,
-/// }
-///
-/// let state = <Cache as HostModuleState>::new();
-/// let mut bytes = vec![42];
-/// state.encode_payload(&mut bytes).unwrap();
-/// assert_eq!(bytes, [42]);
-/// ```
-pub trait HostModuleState: Sized + 'static {
-    fn new() -> Self;
+/// Construct fresh host module state using the bindings of the new VM.
+pub trait FromBindings: Sized {
+    fn from_bindings(bindings: &Bindings) -> Self;
+}
 
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError>;
-    fn decode_payload(input: &[u8], cx: &mut DecodeCx<'_>) -> Result<Self, CodecError>;
+impl<T: Default> FromBindings for T {
+    fn from_bindings(_: &Bindings) -> Self {
+        Self::default()
+    }
 }
 
 /// The name and VM-managed slots of a host module.
-pub trait HostModule: HostModuleState {
+pub trait HostModule: FromBindings + Encode + Decode + 'static {
     const NAME: &'static str;
     const SLOTS: &'static [SlotDecl] = &[];
 }
@@ -586,14 +544,11 @@ pub trait ModuleExports: HostModule {
 }
 
 /// One recoverable asynchronous operation type.
-pub trait Operation: Sized + 'static {
+pub trait Operation: Encode + Decode + 'static {
     const NAME: &'static str;
     const SCHEMA: u32;
     const RECOVERY: Recovery;
     const REJECTION: &'static str = "operation rejected during restore";
-
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError>;
-    fn decode(input: &[u8], bindings: &Bindings) -> Result<Self, CodecError>;
 }
 
 /// Capability handed to the host when an operation starts. A restored VM has a
@@ -633,7 +588,12 @@ pub trait Registration<O: Operation>: 'static {
 
 /// Erased platform registration; dropping it cancels the registration.
 pub trait LiveRegistration: 'static {
-    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault> {
+    fn checkpoint(
+        &self,
+        original: &[u8],
+        out: &mut Vec<u8>,
+        _: &Bindings,
+    ) -> Result<(), HostFault> {
         out.extend_from_slice(original);
         Ok(())
     }
@@ -642,9 +602,16 @@ pub trait LiveRegistration: 'static {
 pub(crate) struct TypedRegistration<O: OperationDriver>(pub(crate) O::Live);
 
 impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
-    fn checkpoint(&self, original: &[u8], out: &mut Vec<u8>) -> Result<(), HostFault> {
+    fn checkpoint(
+        &self,
+        original: &[u8],
+        out: &mut Vec<u8>,
+        bindings: &Bindings,
+    ) -> Result<(), HostFault> {
         if let Some(state) = self.0.checkpoint()? {
-            state.encode(out).map_err(|error| HostFault(error.0))?;
+            state
+                .encode(out, bindings)
+                .map_err(|error| HostFault(error.0))?;
         } else {
             out.extend_from_slice(original);
         }
@@ -654,22 +621,6 @@ impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
 
 type ArmOperation =
     fn(&[u8], OperationToken, &Bindings) -> Result<Box<dyn LiveRegistration>, HostFault>;
-
-/// Read-side context for payload decoding. Services are process resources and
-/// are never captured by the snapshot.
-pub struct DecodeCx<'a> {
-    bindings: &'a Bindings,
-}
-
-impl<'a> DecodeCx<'a> {
-    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
-        self.bindings.service::<K>()
-    }
-
-    pub fn bindings(&self) -> &'a Bindings {
-        self.bindings
-    }
-}
 
 /// The stable contract for a host service role, independent of its implementation.
 pub trait ServiceKey: 'static {
@@ -717,8 +668,31 @@ impl Services {
     }
 }
 
-type DecodeFn = fn(&[u8], &mut DecodeCx<'_>) -> Result<Box<dyn Any>, CodecError>;
-type EncodeFn = fn(&dyn Any, &mut Vec<u8>) -> Result<(), CodecError>;
+type DecodeFn = fn(&[u8], &Bindings) -> Result<Box<dyn Any>, CodecError>;
+type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Bindings) -> Result<(), CodecError>;
+
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct ClassCodec {
+    decode: DecodeFn,
+    encode: EncodeFn,
+}
+
+impl ClassCodec {
+    #[doc(hidden)]
+    pub const fn of<T: Encode + Decode + 'static>() -> Self {
+        Self {
+            decode: |input, bindings| Ok(Box::new(decode_exact::<T>(input, bindings)?)),
+            encode: |payload, out, bindings| {
+                let payload = payload
+                    .downcast_ref::<T>()
+                    .ok_or_else(|| CodecError::new("payload type mismatch"))?;
+                payload.encode(out, bindings)
+            },
+        }
+    }
+}
+
 type EmptyFn = fn(&dyn Any) -> bool;
 
 struct ClassDecl {
@@ -736,15 +710,14 @@ struct ClassDecl {
     methods: Vec<MethodDecl>,
     accessors: Vec<AccessorDecl>,
     payload_schema: Option<u32>,
-    decode: DecodeFn,
-    encode: EncodeFn,
+    codec: Option<ClassCodec>,
     empty: EmptyFn,
 }
 
 struct StateDecl {
     rust_type: TypeId,
     slots: &'static [SlotDecl],
-    new: fn() -> Box<dyn Any>,
+    new: fn(&Bindings) -> Box<dyn Any>,
     decode: DecodeFn,
     encode: EncodeFn,
 }
@@ -836,31 +809,11 @@ pub mod __macro_support {
         }
     }
 
+    #[derive(Default, crate::Encode, crate::Decode)]
     struct RawModule;
 
     impl super::HostModule for RawModule {
         const NAME: &'static str = "";
-    }
-
-    impl super::HostModuleState for RawModule {
-        fn new() -> Self {
-            Self
-        }
-
-        fn encode_payload(&self, _: &mut Vec<u8>) -> Result<(), super::CodecError> {
-            Ok(())
-        }
-
-        fn decode_payload(
-            input: &[u8],
-            _: &mut super::DecodeCx<'_>,
-        ) -> Result<Self, super::CodecError> {
-            if input.is_empty() {
-                Ok(Self)
-            } else {
-                Err(super::CodecError::new("unexpected module payload"))
-            }
-        }
     }
 
     pub fn function(
@@ -1243,7 +1196,7 @@ impl Bindings {
     }
 
     pub(crate) fn state_new(&self, module: usize) -> Box<dyn Any> {
-        (self.inner.modules[module].state.new)()
+        (self.inner.modules[module].state.new)(self)
     }
 
     pub(crate) fn state_decode(
@@ -1251,7 +1204,7 @@ impl Bindings {
         module: usize,
         input: &[u8],
     ) -> Result<Box<dyn Any>, CodecError> {
-        (self.inner.modules[module].state.decode)(input, &mut self.decode_cx())
+        (self.inner.modules[module].state.decode)(input, self)
     }
 
     pub(crate) fn state_encode(
@@ -1260,15 +1213,11 @@ impl Bindings {
         payload: &dyn Any,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        (self.inner.modules[module].state.encode)(payload, out)
+        (self.inner.modules[module].state.encode)(payload, out, self)
     }
 
     pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
         self.inner.services.get::<K>()
-    }
-
-    pub(crate) fn decode_cx(&self) -> DecodeCx<'_> {
-        DecodeCx { bindings: self }
     }
 
     pub(crate) fn class_decode(
@@ -1277,8 +1226,11 @@ impl Bindings {
         input: &[u8],
     ) -> Result<Box<dyn Any>, CodecError> {
         let declaration = &self.inner.classes[class];
-        let mut cx = self.decode_cx();
-        (declaration.decode)(input, &mut cx)
+        let codec = declaration
+            .codec
+            .ok_or_else(|| CodecError::new("class declaration has no payload decoder"))?;
+        (codec.decode)(input, self)
+            .map_err(|error| CodecError::new(format!("{}: {error}", declaration.tag)))
     }
 
     pub(crate) fn class_encode(
@@ -1287,7 +1239,10 @@ impl Bindings {
         payload: &dyn Any,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        (self.inner.classes[class].encode)(payload, out)
+        let codec = self.inner.classes[class]
+            .codec
+            .ok_or_else(|| CodecError::new("class declaration has no payload encoder"))?;
+        (codec.encode)(payload, out, self)
     }
 
     pub(crate) fn classes_len(&self) -> usize {
@@ -1317,17 +1272,7 @@ impl ClassDecl {
             methods: T::METHODS.to_vec(),
             accessors: T::ACCESSORS.to_vec(),
             payload_schema: T::PAYLOAD_SCHEMA,
-            decode: |input, cx| {
-                Ok(Box::new(T::decode_payload(input, cx).map_err(|error| {
-                    CodecError::new(format!("{}: {error}", T::TAG))
-                })?))
-            },
-            encode: |payload, out| {
-                let payload = payload
-                    .downcast_ref::<T>()
-                    .ok_or_else(|| CodecError::new("payload type mismatch"))?;
-                T::encode_payload(payload, out)
-            },
+            codec: T::CODEC,
             empty: |payload| {
                 payload
                     .downcast_ref::<T>()
@@ -1342,13 +1287,13 @@ impl StateDecl {
         Self {
             rust_type: TypeId::of::<S>(),
             slots: S::SLOTS,
-            new: || Box::new(S::new()),
-            decode: |input, cx| Ok(Box::new(S::decode_payload(input, cx)?)),
-            encode: |payload, out| {
+            new: |bindings| Box::new(S::from_bindings(bindings)),
+            decode: |input, bindings| Ok(Box::new(decode_exact::<S>(input, bindings)?)),
+            encode: |payload, out, bindings| {
                 let payload = payload
                     .downcast_ref::<S>()
                     .ok_or_else(|| CodecError::new("module state payload type mismatch"))?;
-                S::encode_payload(payload, out)
+                payload.encode(out, bindings)
             },
         }
     }
@@ -1361,15 +1306,17 @@ impl OperationDecl {
             schema: O::SCHEMA,
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
-            decode: |input, bindings| O::decode(input, bindings).map(|_| ()),
+            decode: |input, bindings| decode_exact::<O>(input, bindings).map(|_| ()),
             rust_type: TypeId::of::<O>(),
             start: |bytes, token, bindings| {
-                let state = O::decode(bytes, bindings).map_err(|error| HostFault(error.0))?;
+                let state =
+                    decode_exact::<O>(bytes, bindings).map_err(|error| HostFault(error.0))?;
                 let live = state.start(token, bindings)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },
             resume: |bytes, token, bindings| {
-                let state = O::decode(bytes, bindings).map_err(|error| HostFault(error.0))?;
+                let state =
+                    decode_exact::<O>(bytes, bindings).map_err(|error| HostFault(error.0))?;
                 let live = state.resume(token, bindings)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },

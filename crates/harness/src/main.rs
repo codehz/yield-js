@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::{CompileOptions, MemoryResolver, compile};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
-use yield_vm::binding::{Bindings, CodecError, JsResult, JsValue, OperationDriver, OperationToken};
+use yield_vm::binding::{Bindings, JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
-use yield_vm::{host_bindings, host_module, module_exports, operation};
+use yield_vm::{Decode, Encode, host_bindings, host_module, module_exports, operation};
 
 const SOURCE: &str = r#"
 import { inspect, seed, wait } from 'demo';
@@ -52,24 +52,10 @@ impl DemoCounters {
     }
 }
 
-#[operation(name = "wait", schema = 1, recovery = resume, encode = Wait::encode, decode = Wait::decode)]
+#[operation(name = "wait", schema = 2, recovery = resume)]
+#[derive(Encode, Decode)]
 struct Wait {
     label: String,
-}
-
-impl Wait {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        Ok(Self {
-            label: std::str::from_utf8(input)
-                .map_err(|_| CodecError::new("wait label is not UTF-8"))?
-                .to_owned(),
-        })
-    }
 }
 
 impl OperationDriver for Wait {

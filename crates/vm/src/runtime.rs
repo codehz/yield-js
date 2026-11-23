@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
+use crate::binding::{Bindings, ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
 use crate::bytecode::Slot;
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -113,7 +113,7 @@ pub(crate) struct PendingOperation {
 }
 
 impl PendingOperation {
-    pub(crate) fn checkpoint(&self) -> Result<Vec<u8>, HostFault> {
+    pub(crate) fn checkpoint(&self, bindings: &Bindings) -> Result<Vec<u8>, HostFault> {
         if self.declaration.is_none() {
             // Only the VM deadline is durable; the timer registration is a wakeup.
             return Ok(Vec::new());
@@ -122,7 +122,7 @@ impl PendingOperation {
             return Ok(self.state.clone());
         };
         let mut state = Vec::new();
-        live.checkpoint(&self.state, &mut state)?;
+        live.checkpoint(&self.state, &mut state, bindings)?;
         Ok(state)
     }
 }

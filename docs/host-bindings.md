@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `HostModuleState` / `ModuleExports`、`Operation`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
+> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `FromBindings` / `ModuleExports`、`Operation`；`binding/codec.rs` 提供共享的 `Encode` / `Decode`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`。VM 持有原型、实例槽、payload、模块状态和 operation 记录。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
 
 ## 1. 目标与范围
 
@@ -185,24 +185,23 @@ this.pending(cx).push(callback);              // JsList 槽
 ### 5.4 非 JS payload 与 codec
 
 ```rust
-trait PayloadCodec<T> {
-    fn encode(&self, value: &T, cx: &EncodeCx, out: &mut PayloadWriter)
-        -> Result<(), CodecError>;
-    fn decode(&self, cx: &mut DecodeCx, input: &mut PayloadReader)
-        -> Result<T, CodecError>;
+pub trait Encode {
+    fn encode(&self, out: &mut Vec<u8>, bindings: &Bindings) -> Result<(), CodecError>;
+}
+pub trait Decode: Sized {
+    fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError>;
 }
 ```
 
 规则：
 
-- **上下文提供能力，快照提供状态。** `EncodeCx` 可提供只读的 VM 元信息；`DecodeCx` 按键借用服务，例如 `cx.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
+- **上下文提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Bindings` 按键读取服务，例如 `bindings.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
-- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本；同一 crate 内不同类型的版本互不影响。未知版本拒绝恢复。模块状态的字节没有 schema 版本，恢复时只由 `HostModuleState::decode_payload` 校验格式。
-- **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
-- 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
+- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本。未知版本拒绝恢复；模块 payload 不声明 schema。顶层解码必须消费全部字节。
+- **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
-服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings`、`CallCx` 和 `DecodeCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings` 和 `CallCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
 ```rust
 host_bindings! {
@@ -233,8 +232,8 @@ host_bindings! {
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
 - 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。
-- 移除 `#[js_slot]` 和 `#[js_list]` 声明后，如果没有剩余的 Rust 字段，宏自动实现 `HostModuleState`：编码不追加字节，解码拒绝非空 payload。如果仍有 Rust 字段，模块作者必须实现 `HostModuleState` 的 `new`、`encode_payload` 和 `decode_payload`，否则无法通过编译。
-- 模块状态 payload 不声明 schema 版本：字节按原样保存，恢复时只由 `decode_payload` 校验，编码格式变化必须让旧字节解码失败而不是静默接受。
+- 新 VM 通过 `FromBindings` 初始化模块；恢复只调用 `Decode`。实现 `Default` 的类型自动获得 `FromBindings`。需要服务的模块直接实现 `FromBindings`，不同时实现 `Default`。
+- `#[host_module]` 和 `#[host_class]` 应放在 codec derive 之前，使 `#[js_slot]` / `#[js_list]` 不参与编码。没有剩余 Rust 字段的模块自动补齐缺省的 `Default` derive 和空 codec；非空模块必须明确选择初始化和 codec 实现。类只有声明 `schema` 才使用 Rust payload codec。
 - 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
 ## 6. 调用协议
@@ -292,7 +291,8 @@ impl CallCx {
 ### 7.1 声明
 
 ```rust
-#[operation(name = "wait", recovery = pause)]
+#[operation(name = "wait", schema = 2, recovery = pause)]
+#[derive(Encode, Decode)]
 struct Wait {
     label: String,              // 持久状态，编码进快照
 }

@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, DecodeCx, HostFault, InspectKey, InspectValue, Instance,
-    JsResult, JsValue, Operation, OperationDriver, OperationToken, Registration, This,
+    Bindings, CallCx, CodecError, HostFault, InspectKey, InspectValue, Instance, JsResult, JsValue,
+    Operation, OperationDriver, OperationToken, Registration, This,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
@@ -13,7 +13,9 @@ use yield_vm::{
     ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, FetchKey, GuestOutcome, Host,
     HostStep, JsString, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
 };
-use yield_vm::{host_bindings, host_class, host_module, methods, module_exports, operation};
+use yield_vm::{
+    Decode, Encode, host_bindings, host_class, host_module, methods, module_exports, operation,
+};
 
 mod case;
 pub mod fetch;
@@ -64,7 +66,8 @@ impl yield_vm::ServiceKey for NodeFactoryKey {
     const VERSION: u32 = 1;
 }
 
-#[host_class(tag = "Node", methods, schema = 1, encode = Node::encode_payload, decode = Node::decode_payload)]
+#[host_class(tag = "Node", methods, schema = 2)]
+#[derive(Encode)]
 pub struct Node {
     pub label: String,
 }
@@ -96,19 +99,15 @@ impl Node {
         let label = this.instance().payload(cx)?.label.clone();
         cx.promise(Wait { label })
     }
+}
 
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode_payload(input: &[u8], cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-        if cx.service::<NodeFactoryKey>().is_none() {
+impl Decode for Node {
+    fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError> {
+        if bindings.service::<NodeFactoryKey>().is_none() {
             return Err(CodecError::new("node factory service is unavailable"));
         }
-        let label = std::str::from_utf8(input)
-            .map_err(|_| CodecError::new("node label is not UTF-8"))?
-            .to_owned();
+        let label = String::decode(input, bindings)
+            .map_err(|error| CodecError::new(format!("field label: {error}")))?;
         Ok(Self { label })
     }
 }
@@ -287,77 +286,28 @@ fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
     equal(cx, left.clone(), right.clone(), &mut BTreeSet::new())
 }
 
-#[operation(name = "wait", schema = 1, recovery = resume, rejection = "wait rejected", encode = Wait::encode, decode = Wait::decode)]
+#[operation(name = "wait", schema = 2, recovery = resume, rejection = "wait rejected")]
+#[derive(Encode, Decode)]
 pub struct Wait {
     pub label: String,
 }
 
-impl Wait {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        let label = std::str::from_utf8(input)
-            .map_err(|_| CodecError::new("wait label is not UTF-8"))?
-            .to_owned();
-        Ok(Self { label })
-    }
-}
-
-#[operation(name = "pause", schema = 1, recovery = pause, rejection = "pause rejected", encode = Pause::encode, decode = Pause::decode)]
+#[operation(name = "pause", schema = 2, recovery = pause, rejection = "pause rejected")]
+#[derive(Encode, Decode)]
 pub struct Pause {
     pub label: String,
 }
 
-impl Pause {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        decode_operation_label(input).map(|label| Self { label })
-    }
-}
-
-#[operation(name = "reject", schema = 1, recovery = reject, rejection = "reject rejected during restore", encode = Reject::encode, decode = Reject::decode)]
+#[operation(name = "reject", schema = 2, recovery = reject, rejection = "reject rejected during restore")]
+#[derive(Encode, Decode)]
 pub struct Reject {
     pub label: String,
 }
 
-impl Reject {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        decode_operation_label(input).map(|label| Self { label })
-    }
-}
-
-#[operation(name = "reissue", schema = 1, recovery = reissue, rejection = "reissue rejected", encode = Reissue::encode, decode = Reissue::decode)]
+#[operation(name = "reissue", schema = 2, recovery = reissue, rejection = "reissue rejected")]
+#[derive(Encode, Decode)]
 pub struct Reissue {
     pub label: String,
-}
-
-impl Reissue {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.extend_from_slice(self.label.as_bytes());
-        Ok(())
-    }
-
-    fn decode(input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-        decode_operation_label(input).map(|label| Self { label })
-    }
-}
-
-fn decode_operation_label(input: &[u8]) -> Result<String, CodecError> {
-    std::str::from_utf8(input)
-        .map(str::to_owned)
-        .map_err(|_| CodecError::new("operation label is not UTF-8"))
 }
 
 #[derive(Default)]

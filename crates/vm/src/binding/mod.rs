@@ -7,7 +7,9 @@
 //! are the only way to retain a value across calls.
 
 mod call;
+mod codec;
 mod schema;
 
 pub use call::*;
+pub use codec::{Decode, Encode};
 pub use schema::*;

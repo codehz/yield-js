@@ -2,12 +2,23 @@
 
 use proc_macro::TokenStream;
 
+mod codec;
 mod registry;
 mod state_machine;
 mod typed;
 
 fn expand(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
     result.unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+#[proc_macro_derive(Encode)]
+pub fn encode(item: TokenStream) -> TokenStream {
+    expand(syn::parse(item).and_then(|input| codec::derive(input, true)))
+}
+
+#[proc_macro_derive(Decode)]
+pub fn decode(item: TokenStream) -> TokenStream {
+    expand(syn::parse(item).and_then(|input| codec::derive(input, false)))
 }
 
 #[proc_macro_attribute]

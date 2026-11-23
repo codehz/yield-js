@@ -76,7 +76,11 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
             .expect_err("timer codec length");
         assert_rejected(
             "timer codec length",
-            "timer state must be four bytes",
+            if length == 3 {
+                "field remaining_ms: truncated payload"
+            } else {
+                "trailing payload bytes"
+            },
             error,
             &target,
         );

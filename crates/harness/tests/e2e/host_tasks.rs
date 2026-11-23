@@ -220,29 +220,9 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
 }
 
 #[yield_vm::host_module(name = "branch")]
+#[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
     count: u8,
-}
-
-impl yield_vm::HostModuleState for Branch {
-    fn new() -> Self {
-        Self { count: 0 }
-    }
-
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), yield_vm::binding::CodecError> {
-        out.push(self.count);
-        Ok(())
-    }
-
-    fn decode_payload(
-        input: &[u8],
-        _: &mut yield_vm::binding::DecodeCx<'_>,
-    ) -> Result<Self, yield_vm::binding::CodecError> {
-        match input {
-            &[count] => Ok(Self { count }),
-            _ => Err(yield_vm::binding::CodecError::new("invalid branch payload")),
-        }
-    }
 }
 
 #[yield_vm::host_module(name = "mirror")]

@@ -308,7 +308,7 @@ impl Vm {
                 schema: operation.schema,
                 recovery: operation.recovery,
                 state: operation
-                    .checkpoint()
+                    .checkpoint(&self.bindings)
                     .map_err(|error| VmError::HostFault(error.0))?,
                 target: operation.target,
                 signal: operation.signal,

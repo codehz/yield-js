@@ -61,3 +61,94 @@ fn links_an_external_module_and_class() -> Result<(), String> {
     assert_eq!(Example::SLOTS.len(), 2);
     Ok(())
 }
+
+#[derive(Debug, PartialEq, yield_vm::Encode, yield_vm::Decode)]
+struct Pair<T>(T, T)
+where
+    T: PartialEq;
+
+#[host_class(tag = "Mixed", schema = 1)]
+#[derive(Debug, PartialEq, yield_vm::Encode, yield_vm::Decode)]
+struct Mixed {
+    #[js_slot]
+    item: JsValue,
+    strings: Pair<String>,
+    #[js_list]
+    history: Vec<JsValue>,
+}
+
+#[host_module(name = "implicit")]
+struct Implicit {
+    #[js_slot]
+    item: JsValue,
+}
+
+#[module_exports]
+impl Implicit {}
+
+#[host_module(name = "explicit")]
+#[derive(::core::default::Default, ::yield_vm::Encode)]
+struct Explicit {
+    #[js_list]
+    history: Vec<JsValue>,
+}
+
+#[module_exports]
+impl Explicit {}
+
+#[yield_vm::operation(name = "mixed", schema = 1, recovery = pause)]
+#[derive(yield_vm::Decode, yield_vm::Encode)]
+struct MixedWork(Mixed);
+
+impl yield_vm::Registration<MixedWork> for () {}
+
+impl yield_vm::OperationDriver for MixedWork {
+    type Live = ();
+
+    fn start(
+        &self,
+        _: yield_vm::OperationToken,
+        _: &yield_vm::Bindings,
+    ) -> Result<(), yield_vm::HostFault> {
+        Ok(())
+    }
+}
+
+#[test]
+fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -> Result<(), String>
+{
+    use yield_vm::{Decode, Encode};
+
+    let bindings = host_bindings! {
+        dts: "dts/state.d.ts",
+        modules: [Implicit, Explicit], classes: [Mixed], operations: [MixedWork],
+        services: {},
+    }?;
+    let value = MixedWork(Mixed {
+        strings: Pair(String::new(), "é".into()),
+    });
+    let mut bytes = Vec::new();
+    value.encode(&mut bytes, &bindings).unwrap();
+    assert_eq!(&bytes[..4], &0u32.to_le_bytes());
+    assert_eq!(&bytes[4..8], &2u32.to_le_bytes());
+    assert_eq!(&bytes[8..], "é".as_bytes());
+    let mut cursor = bytes.as_slice();
+    assert_eq!(
+        MixedWork::decode(&mut cursor, &bindings).unwrap().0,
+        value.0
+    );
+    assert!(cursor.is_empty());
+    let truncated = bindings
+        .decode_operation("mixed", 1, &bytes[..bytes.len() - 1])
+        .unwrap_err();
+    assert!(
+        truncated
+            .0
+            .contains("field strings: field 1: truncated payload"),
+        "{truncated}"
+    );
+    bytes.push(0);
+    let trailing = bindings.decode_operation("mixed", 1, &bytes).unwrap_err();
+    assert_eq!(trailing.0, "trailing payload bytes");
+    Ok(())
+}

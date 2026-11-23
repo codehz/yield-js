@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use super::support::{compile_main, declared};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
-use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken};
+use yield_vm::binding::{CallCx, CodecError, HostFault, OperationToken};
 use yield_vm::{
-    Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
-    OperationDriver, PromiseState, RestoreOptions, SnapshotValidation, This, Value, Vm, VmError,
-    VmOptions, host_bindings, host_class, host_module, methods, module_exports, operation,
+    Bindings, Completion, Decode, Encode, FromBindings, GuestOutcome, Host, HostStep, Instance,
+    JsError, JsResult, JsValue, OperationDriver, PromiseState, RestoreOptions, SnapshotValidation,
+    This, Value, Vm, VmError, VmOptions, host_bindings, host_class, host_module, methods,
+    module_exports, operation,
 };
 
 #[path = "signature_fingerprint.rs"]
@@ -81,18 +82,9 @@ mod strategy_fixture {
 
     macro_rules! strategy_operation {
         ($name:ident, $wire:tt, $recovery:ident, $message:tt) => {
-            #[operation(name = $wire, schema = 1, recovery = $recovery, rejection = $message, encode = $name::encode, decode = $name::decode)]
+            #[operation(name = $wire, schema = 1, recovery = $recovery, rejection = $message)]
+            #[derive(Encode, Decode)]
             struct $name;
-
-            impl $name {
-                fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
-                    Ok(())
-                }
-
-                fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-                    Ok(Self)
-                }
-            }
 
             label_driver!($name, $wire);
         };
@@ -754,28 +746,9 @@ mod counter_fixture {
     use yield_harness::Wait;
 
     #[host_module(name = "counter")]
+    #[derive(Default, Encode, Decode)]
     struct Counter {
         count: u32,
-    }
-
-    impl yield_vm::HostModuleState for Counter {
-        fn new() -> Self {
-            Self { count: 0 }
-        }
-
-        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-            out.extend_from_slice(&self.count.to_le_bytes());
-            Ok(())
-        }
-
-        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-            let bytes: [u8; 4] = input
-                .try_into()
-                .map_err(|_| CodecError::new("counter state must be four bytes"))?;
-            Ok(Self {
-                count: u32::from_le_bytes(bytes),
-            })
-        }
     }
 
     #[module_exports]
@@ -819,6 +792,117 @@ mod counter_fixture {
         }
         .expect("counter bindings")
     }
+
+    pub(super) struct PayloadService {
+        pub(super) initial: u32,
+        pub(super) offset: u32,
+        pub(super) initialized: AtomicUsize,
+    }
+
+    struct PayloadKey;
+
+    impl yield_vm::ServiceKey for PayloadKey {
+        type Value = Arc<PayloadService>;
+        const ID: &'static str = "payload-service";
+        const VERSION: u32 = 1;
+    }
+
+    struct ServiceField(u32);
+
+    impl Encode for ServiceField {
+        fn encode(&self, out: &mut Vec<u8>, bindings: &Bindings) -> Result<(), CodecError> {
+            let service = bindings.service::<PayloadKey>().unwrap();
+            (self.0 + service.offset).encode(out, bindings)
+        }
+    }
+
+    impl Decode for ServiceField {
+        fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError> {
+            let service = bindings.service::<PayloadKey>().unwrap();
+            Ok(Self(u32::decode(input, bindings)? + service.offset))
+        }
+    }
+
+    #[host_module(name = "counter")]
+    #[derive(Encode, Decode)]
+    struct ServiceCounter {
+        count: ServiceField,
+        #[js_slot]
+        saved: JsValue,
+    }
+
+    impl FromBindings for ServiceCounter {
+        fn from_bindings(bindings: &Bindings) -> Self {
+            let service = bindings.service::<PayloadKey>().unwrap();
+            service.initialized.fetch_add(1, Ordering::Relaxed);
+            Self {
+                count: ServiceField(service.initial),
+            }
+        }
+    }
+
+    #[module_exports]
+    impl ServiceCounter {
+        #[function(name = "bump")]
+        fn bump(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
+            cx.set_state_slot(Self::SLOT_SAVED, JsValue::number(7.0))
+        }
+
+        #[function(name = "value")]
+        fn value(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
+            let count = cx.state().count.0;
+            let saved = cx.state_slot(Self::SLOT_SAVED)?;
+            Ok(JsValue::number(f64::from(count) + cx.number(&saved)?))
+        }
+    }
+
+    pub(super) fn service_bindings(service: Arc<PayloadService>) -> Bindings {
+        host_bindings! {
+            dts: "../dts/counter-test.d.ts",
+            modules: [ServiceCounter, TestModule], classes: [], operations: [],
+            services: { PayloadKey => service },
+        }
+        .unwrap()
+    }
+}
+
+#[test]
+fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
+    use counter_fixture::{PayloadService, service_bindings};
+
+    let a = Arc::new(PayloadService {
+        initial: 3,
+        offset: 10,
+        initialized: AtomicUsize::new(0),
+    });
+    let b = Arc::new(PayloadService {
+        initial: 100,
+        offset: 20,
+        initialized: AtomicUsize::new(0),
+    });
+    let mut source = StrategyHost::new(service_bindings(a.clone()));
+    let mut target = StrategyHost::new(service_bindings(b.clone()));
+    let build = compile_main(
+        r#"import { bump, value } from 'counter';
+           export function save() { bump(); return value(); }
+           export function read() { return value(); }"#,
+        &declared(include_str!("../dts/counter-test.d.ts")),
+    )
+    .unwrap();
+    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
+    assert_eq!(
+        vm.start(&mut source, "save", vec![]).unwrap(),
+        Value::number(10.0)
+    );
+    let snapshot = vm.snapshot(&[]).unwrap();
+    assert_eq!(snapshot.module_states[0].bytes, 13u32.to_le_bytes());
+    let mut vm = Vm::restore(snapshot, build, &mut target, Default::default()).unwrap();
+    assert_eq!(
+        vm.start(&mut target, "read", vec![]).unwrap(),
+        Value::number(40.0)
+    );
+    assert_eq!(a.initialized.load(Ordering::Relaxed), 1);
+    assert_eq!(b.initialized.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -868,8 +952,14 @@ export async function run() {
     nonempty.module_states[1].bytes.push(0);
     for (invalid, expected) in [
         (missing, "module state count mismatch"),
-        (truncated, "counter state must be four bytes"),
-        (nonempty, "unexpected module payload"),
+        (
+            truncated,
+            "module counter state payload: field count: truncated payload",
+        ),
+        (
+            nonempty,
+            "module test state payload: trailing payload bytes",
+        ),
     ] {
         let options = RestoreOptions {
             validation: SnapshotValidation::Full,
@@ -901,7 +991,8 @@ export async function run() {
 mod geom_fixture {
     use super::*;
 
-    #[host_class(tag = "Point", methods, schema = 1, encode = Point::encode_payload, decode = Point::decode_payload)]
+    #[host_class(tag = "Point", methods, schema = 1)]
+    #[derive(Encode, Decode)]
     struct Point {
         x: f64,
     }
@@ -911,20 +1002,6 @@ mod geom_fixture {
         #[method(name = "x")]
         fn x(cx: &mut CallCx<'_>, this: This<Point>) -> JsResult<JsValue> {
             Ok(JsValue::number(this.instance().payload(cx)?.x))
-        }
-
-        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-            out.extend_from_slice(&self.x.to_le_bytes());
-            Ok(())
-        }
-
-        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-            let bytes: [u8; 8] = input
-                .try_into()
-                .map_err(|_| CodecError::new("point payload must be eight bytes"))?;
-            Ok(Self {
-                x: f64::from_le_bytes(bytes),
-            })
         }
     }
 
@@ -1053,56 +1130,65 @@ export async function run() {
         .find(|record| record.class == "Node")
         .and_then(|record| record.payload.as_mut())
         .expect("node payload");
-    payload.bytes = vec![0xff, 0xfe];
-    let error =
-        Vm::restore(snapshot, build, &mut host, Default::default()).expect_err("invalid payload");
+    assert_eq!(payload.schema, 2);
+    payload.schema = 1;
+    payload.bytes = b"payload".to_vec();
+    let options = || RestoreOptions {
+        validation: SnapshotValidation::Full,
+        ..Default::default()
+    };
+    let error = Vm::restore(snapshot.clone(), build.clone(), &mut host, options())
+        .expect_err("legacy schema");
     assert!(
-        matches!(&error, VmError::InvalidSnapshot(message) if message.contains("payload")),
+        matches!(&error, VmError::InvalidSnapshot(message) if message.contains("class Node payload schema mismatch")),
         "{error:?}"
+    );
+
+    let payload = snapshot
+        .host_instances
+        .iter_mut()
+        .find(|record| record.class == "Node")
+        .and_then(|record| record.payload.as_mut())
+        .unwrap();
+    payload.schema = 2;
+    payload.bytes = vec![2, 0, 0, 0, 0xff, 0xfe];
+    let error = Vm::restore(snapshot, build, &mut host, options()).expect_err("invalid payload");
+    assert!(
+        matches!(&error, VmError::InvalidSnapshot(message) if message.contains("class Node payload") && message.contains("field label: invalid UTF-8")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn node_payload_decode_requires_factory_service() {
+    let bindings = loose_fixture::bindings();
+    let mut payload = [0u8; 4].as_slice();
+    let error = yield_harness::Node::decode(&mut payload, &bindings)
+        .err()
+        .expect("missing factory");
+    assert!(
+        error.0.contains("node factory service is unavailable"),
+        "{error}"
     );
 }
 
 mod inherit_fixture {
     use super::*;
 
-    #[operation(name = "inherit-wait", schema = 1, recovery = resume, encode = InheritWait::encode, decode = InheritWait::decode)]
+    #[operation(name = "inherit-wait", schema = 1, recovery = resume)]
+    #[derive(Encode, Decode)]
     struct InheritWait;
-
-    impl InheritWait {
-        fn encode(&self, _out: &mut Vec<u8>) -> Result<(), CodecError> {
-            Ok(())
-        }
-
-        fn decode(_input: &[u8], _bindings: &Bindings) -> Result<Self, CodecError> {
-            Ok(Self)
-        }
-    }
 
     label_driver!(InheritWait, "inherit-wait");
 
-    #[host_class(tag = "Base", methods, schema = 1, encode = Base::encode_payload, decode = Base::decode_payload)]
+    #[host_class(tag = "Base", methods, schema = 1)]
+    #[derive(Encode, Decode)]
     struct Base {
         payload_value: u8,
         #[js_slot]
         base: JsValue,
         #[js_slot]
         sidecar: JsValue,
-    }
-
-    impl Base {
-        fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-            out.push(self.payload_value);
-            Ok(())
-        }
-
-        fn decode_payload(input: &[u8], _cx: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-            let [payload_value] = input else {
-                return Err(CodecError::new("invalid Base payload"));
-            };
-            Ok(Self {
-                payload_value: *payload_value,
-            })
-        }
     }
 
     #[methods(Base)]

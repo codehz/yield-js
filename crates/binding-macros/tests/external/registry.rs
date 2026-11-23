@@ -1,13 +1,13 @@
 use std::cell::Cell;
 use std::sync::Arc;
-use yield_vm::binding::{CodecError, DecodeCx};
 use yield_vm::{
-    Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, HostFault, HostModule, Operation,
-    OperationDriver, OperationToken, Recovery, Registration, ServiceKey, Services, host_bindings,
-    host_module, module_exports, operation,
+    Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, Decode, Encode, FromBindings, HostFault,
+    HostModule, Operation, OperationDriver, OperationToken, Recovery, Registration, ServiceKey,
+    Services, host_bindings, host_module, module_exports, operation,
 };
 
 #[host_module(name = "state")]
+#[derive(Encode, Decode)]
 struct State {
     #[js_slot]
     current: JsValue,
@@ -16,43 +16,18 @@ struct State {
     count: u8,
 }
 
-impl yield_vm::HostModuleState for State {
-    fn new() -> Self {
+impl Default for State {
+    fn default() -> Self {
         Self { count: 3 }
-    }
-
-    fn encode_payload(&self, out: &mut Vec<u8>) -> Result<(), CodecError> {
-        out.push(self.count);
-        Ok(())
-    }
-
-    fn decode_payload(input: &[u8], _: &mut DecodeCx<'_>) -> Result<Self, CodecError> {
-        match input {
-            &[count] => Ok(Self { count }),
-            _ => Err(CodecError::new("invalid state payload")),
-        }
     }
 }
 
 #[module_exports]
 impl State {}
 
-#[operation(name = "work", schema = 1, recovery = pause, encode = Work::write, decode = Work::read)]
+#[operation(name = "work", schema = 1, recovery = pause)]
+#[derive(Encode, Decode)]
 struct Work;
-
-impl Work {
-    fn write(&self, _: &mut Vec<u8>) -> Result<(), CodecError> {
-        Ok(())
-    }
-
-    fn read(input: &[u8], _: &Bindings) -> Result<Self, CodecError> {
-        if input.is_empty() {
-            Ok(Work)
-        } else {
-            Err(CodecError::new("invalid work payload"))
-        }
-    }
-}
 
 struct Live;
 
@@ -115,6 +90,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
         },
     }?;
     assert_eq!(evaluations.get(), 1);
+    assert_eq!(<State as FromBindings>::from_bindings(&bindings).count, 3);
     assert_eq!(bindings.service::<ClockV2>(), Some(&17));
     assert_eq!(bindings.service::<OtherClock>(), None);
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");

@@ -40,12 +40,10 @@
 //! Operations must declare a recovery strategy:
 //!
 //! ```compile_fail
-//! use yield_vm::{Bindings, operation};
-//! use yield_vm::binding::CodecError;
-//! #[operation(name = "wait", schema = 1, encode = write, decode = read)]
+//! use yield_vm::{Decode, Encode, operation};
+//! #[operation(name = "wait", schema = 1)]
+//! #[derive(Encode, Decode)]
 //! struct Wait;
-//! fn write(_: &Wait, _: &mut Vec<u8>) -> Result<(), CodecError> { Ok(()) }
-//! fn read(_: &[u8], _: &Bindings) -> Result<Wait, CodecError> { Ok(Wait) }
 //! ```
 //!
 //! Register bindings with [`host_bindings!`]; there is no public builder:
@@ -86,8 +84,8 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    Bindings, ClassId, ConstKind, ConstValue, ExportId, GuestOutcome, HostClass, HostFault,
-    HostModule, HostModuleState, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
+    Bindings, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromBindings, GuestOutcome,
+    HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
     MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
     Recovery, Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
 };
@@ -115,5 +113,5 @@ pub use snapshot::{SNAPSHOT_BINARY_VERSION, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, ValueRef};
 pub use vm::{PendingOperationInfo, VerifiedBuild, Vm};
 pub use yield_binding_macros::{
-    host_bindings, host_class, host_module, methods, module_exports, operation,
+    Decode, Encode, host_bindings, host_class, host_module, methods, module_exports, operation,
 };

@@ -1262,8 +1262,6 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
             "methods",
             "parent",
             "schema",
-            "encode",
-            "decode",
             "event_target",
             "event_parent",
         ],
@@ -1283,33 +1281,13 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         Some(other) => return Err(Error::new_spanned(other, "expected bare `methods` marker")),
         None => None,
     };
-    let payload = match (opts.get("schema"), opts.get("encode"), opts.get("decode")) {
-        (None, None, None) => None,
-        (Some(schema_opt), Some(encode), Some(decode)) => {
-            let schema = schema(schema_opt)?;
-            let encode = path(encode)?;
-            let decode = path(decode)?;
-            Some(quote! {
-                const PAYLOAD_SCHEMA: Option<u32> = Some(#schema);
-
-                fn encode_payload(&self, out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
-                    let codec: fn(&Self, &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> = #encode;
-                    codec(self, out)
-                }
-
-                fn decode_payload(input: &[u8], cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
-                    let codec: fn(&[u8], &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> = #decode;
-                    codec(input, cx)
-                }
-            })
+    let payload = opts.get("schema").map(schema).transpose()?.map(|schema| {
+        quote! {
+            const PAYLOAD_SCHEMA: Option<u32> = Some(#schema);
+            const CODEC: Option<::yield_vm::binding::ClassCodec> =
+                Some(::yield_vm::binding::ClassCodec::of::<Self>());
         }
-        _ => {
-            return Err(Error::new(
-                span,
-                "`schema`, `encode`, and `decode` must be specified together",
-            ));
-        }
-    };
+    });
     let slots = extract_slots(&mut item)?;
     let event_target = match opts.get("event_target") {
         Some(Meta::Path(_)) => true,
@@ -2374,15 +2352,17 @@ mod tests {
 
     #[test]
     fn slot_and_payload_errors() {
-        diagnostic(
-            host_class(
-                quote!(tag = "C", schema = 1),
-                quote!(
-                    struct C;
+        for key in [quote!(encode), quote!(decode)] {
+            diagnostic(
+                host_class(
+                    quote!(tag = "C", schema = 1, #key = callback),
+                    quote!(
+                        struct C;
+                    ),
                 ),
-            ),
-            "must be specified together",
-        );
+                "unknown attribute option",
+            );
+        }
         diagnostic(
             host_class(
                 quote!(tag = "C"),
