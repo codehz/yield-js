@@ -497,11 +497,8 @@ pub trait HostClass: Sized + 'static {
     const SLOTS: &'static [SlotDecl] = &[];
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
-    /// `None` when the class has no payload. Payload bytes never contain VM
-    /// object ids; JavaScript references belong in slots.
-    const PAYLOAD_SCHEMA: Option<u32> = None;
-
     #[doc(hidden)]
+    // Payload bytes never contain VM object ids; JavaScript references belong in slots.
     const CODEC: Option<ClassCodec> = None;
 }
 
@@ -546,7 +543,6 @@ pub trait ModuleExports: HostModule {
 /// One recoverable asynchronous operation type.
 pub trait Operation: Encode + Decode + 'static {
     const NAME: &'static str;
-    const SCHEMA: u32;
     const RECOVERY: Recovery;
     const REJECTION: &'static str = "operation rejected during restore";
 }
@@ -709,7 +705,6 @@ struct ClassDecl {
     slot_base: usize,
     methods: Vec<MethodDecl>,
     accessors: Vec<AccessorDecl>,
-    payload_schema: Option<u32>,
     codec: Option<ClassCodec>,
     empty: EmptyFn,
 }
@@ -724,7 +719,6 @@ struct StateDecl {
 
 struct OperationDecl {
     name: String,
-    schema: u32,
     recovery: Recovery,
     rejection: &'static str,
     decode: fn(&[u8], &Bindings) -> Result<(), CodecError>,
@@ -1083,8 +1077,8 @@ impl Bindings {
         false
     }
 
-    pub fn class_payload_schema(&self, class: ClassId) -> Option<u32> {
-        self.inner.classes[class].payload_schema
+    pub(crate) fn class_has_payload_codec(&self, class: ClassId) -> bool {
+        self.inner.classes[class].codec.is_some()
     }
 
     pub(crate) fn class_payload_is_empty(&self, class: ClassId, payload: &dyn Any) -> bool {
@@ -1115,38 +1109,29 @@ impl Bindings {
         self.inner.operations.len()
     }
 
-    pub fn operation(&self, name: &str, schema: u32) -> Option<(usize, Recovery, &'static str)> {
+    pub fn operation(&self, name: &str) -> Option<(usize, Recovery, &'static str)> {
         self.inner
             .operations
             .iter()
             .enumerate()
-            .find(|(_, operation)| operation.name == name && operation.schema == schema)
+            .find(|(_, operation)| operation.name == name)
             .map(|(index, operation)| (index, operation.recovery, operation.rejection))
     }
 
-    pub fn decode_operation(
-        &self,
-        name: &str,
-        schema: u32,
-        state: &[u8],
-    ) -> Result<(), CodecError> {
+    pub fn decode_operation(&self, name: &str, state: &[u8]) -> Result<(), CodecError> {
         let operation = self
             .inner
             .operations
             .iter()
-            .find(|operation| operation.name == name && operation.schema == schema)
-            .ok_or_else(|| CodecError::new(format!("unknown operation {name} schema {schema}")))?;
+            .find(|operation| operation.name == name)
+            .ok_or_else(|| CodecError::new(format!("unknown operation {name}")))?;
         (operation.decode)(state, self)
     }
 
     pub(crate) fn operation_index<O: OperationDriver>(&self) -> Result<usize, HostFault> {
-        let (index, _, _) = self.operation(O::NAME, O::SCHEMA).ok_or_else(|| {
-            HostFault::new(format!(
-                "operation {} schema {} is not declared",
-                O::NAME,
-                O::SCHEMA
-            ))
-        })?;
+        let (index, _, _) = self
+            .operation(O::NAME)
+            .ok_or_else(|| HostFault::new(format!("operation {} is not declared", O::NAME)))?;
         if self.inner.operations[index].rust_type != TypeId::of::<O>() {
             return Err(HostFault::new(format!(
                 "operation {} has the wrong Rust type",
@@ -1156,14 +1141,9 @@ impl Bindings {
         Ok(index)
     }
 
-    pub(crate) fn operation_metadata(&self, decl: usize) -> (&str, u32, Recovery, &'static str) {
+    pub(crate) fn operation_metadata(&self, decl: usize) -> (&str, Recovery, &'static str) {
         let operation = &self.inner.operations[decl];
-        (
-            &operation.name,
-            operation.schema,
-            operation.recovery,
-            operation.rejection,
-        )
+        (&operation.name, operation.recovery, operation.rejection)
     }
 
     pub(crate) fn start_encoded_operation(
@@ -1271,7 +1251,6 @@ impl ClassDecl {
             slots: T::SLOTS.to_vec(),
             methods: T::METHODS.to_vec(),
             accessors: T::ACCESSORS.to_vec(),
-            payload_schema: T::PAYLOAD_SCHEMA,
             codec: T::CODEC,
             empty: |payload| {
                 payload
@@ -1303,7 +1282,6 @@ impl OperationDecl {
     fn of<O: OperationDriver>() -> Self {
         Self {
             name: O::NAME.to_owned(),
-            schema: O::SCHEMA,
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
             decode: |input, bindings| decode_exact::<O>(input, bindings).map(|_| ()),
@@ -1590,8 +1568,8 @@ fn fingerprint(
         for slot in &class.slots {
             hash_line(&mut hasher, format!("slot {} {:?}", slot.name, slot.kind));
         }
-        if let Some(schema) = class.payload_schema {
-            hash_line(&mut hasher, format!("payload {schema}"));
+        if class.codec.is_some() {
+            hasher.update(b"payload\n");
         }
         for method in &class.methods {
             hash_line(
@@ -1623,8 +1601,8 @@ fn fingerprint(
         hash_line(
             &mut hasher,
             format!(
-                "operation {} schema={} recovery={:?}",
-                operation.name, operation.schema, operation.recovery
+                "operation {} recovery={:?}",
+                operation.name, operation.recovery
             ),
         );
     }

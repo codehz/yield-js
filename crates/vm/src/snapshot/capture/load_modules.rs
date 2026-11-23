@@ -119,40 +119,25 @@ pub(super) fn load_host_instances(
             }
             slots.push(slot);
         }
-        let payload = match bindings.class_payload_schema(class) {
-            Some(schema) => {
-                let payload = record.payload.as_ref().ok_or_else(|| {
-                    VmError::InvalidSnapshot(format!(
-                        "class {} is missing its payload",
-                        record.class
-                    ))
-                })?;
-                if payload.schema != schema {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "class {} payload schema mismatch: snapshot {}, bindings {}",
-                        record.class, payload.schema, schema
-                    )));
-                }
-                Some(
-                    bindings
-                        .class_decode(class, &payload.bytes)
-                        .map_err(|error| {
-                            VmError::InvalidSnapshot(format!(
-                                "class {} payload: {error}",
-                                record.class
-                            ))
-                        })?,
-                )
+        let payload = if bindings.class_has_payload_codec(class) {
+            let payload = record.payload.as_ref().ok_or_else(|| {
+                VmError::InvalidSnapshot(format!("class {} is missing its payload", record.class))
+            })?;
+            Some(
+                bindings
+                    .class_decode(class, &payload.bytes)
+                    .map_err(|error| {
+                        VmError::InvalidSnapshot(format!("class {} payload: {error}", record.class))
+                    })?,
+            )
+        } else {
+            if record.payload.is_some() {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "class {} has no payload codec",
+                    record.class
+                )));
             }
-            None => {
-                if record.payload.is_some() {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "class {} has no payload declaration",
-                        record.class
-                    )));
-                }
-                None
-            }
+            None
         };
         instances.insert(
             record.object,

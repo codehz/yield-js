@@ -57,16 +57,6 @@ fn path(meta: &Meta) -> Result<Path> {
     Err(Error::new_spanned(meta, "expected a Rust path"))
 }
 
-fn schema(meta: &Meta) -> Result<LitInt> {
-    if let Expr::Lit(expr) = value(meta)?
-        && let Lit::Int(lit) = &expr.lit
-    {
-        lit.base10_parse::<u32>()?;
-        return Ok(lit.clone());
-    }
-    Err(Error::new_spanned(meta, "expected a u32 schema literal"))
-}
-
 fn required<'a>(opts: &'a HashMap<String, Meta>, key: &str, span: Span) -> Result<&'a Meta> {
     opts.get(key)
         .ok_or_else(|| Error::new(span, format!("missing `{key}` option")))
@@ -1257,14 +1247,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     generics(&item.generics)?;
     let opts = options(
         args,
-        &[
-            "tag",
-            "methods",
-            "parent",
-            "schema",
-            "event_target",
-            "event_parent",
-        ],
+        &["tag", "methods", "parent", "event_target", "event_parent"],
     )?;
     let span = item.ident.span();
     let tag = string(required(&opts, "tag", span)?)?;
@@ -1281,14 +1264,13 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         Some(other) => return Err(Error::new_spanned(other, "expected bare `methods` marker")),
         None => None,
     };
-    let payload = opts.get("schema").map(schema).transpose()?.map(|schema| {
+    let slots = extract_slots(&mut item)?;
+    let codec = (!item.fields.is_empty()).then(|| {
         quote! {
-            const PAYLOAD_SCHEMA: Option<u32> = Some(#schema);
             const CODEC: Option<::yield_vm::binding::ClassCodec> =
                 Some(::yield_vm::binding::ClassCodec::of::<Self>());
         }
     });
-    let slots = extract_slots(&mut item)?;
     let event_target = match opts.get("event_target") {
         Some(Meta::Path(_)) => true,
         Some(other) => {
@@ -1333,7 +1315,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
             #event_target
             #event_parent
             #tables
-            #payload
+            #codec
         }
     })
 }
@@ -2355,7 +2337,7 @@ mod tests {
         for key in [quote!(encode), quote!(decode)] {
             diagnostic(
                 host_class(
-                    quote!(tag = "C", schema = 1, #key = callback),
+                    quote!(tag = "C", #key = callback),
                     quote!(
                         struct C;
                     ),

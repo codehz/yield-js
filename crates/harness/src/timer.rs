@@ -204,7 +204,7 @@ impl TimerService for FakeClock {
     }
 }
 
-#[operation(name = "timer", schema = 1, recovery = resume, rejection = "timer unavailable")]
+#[operation(name = "timer", recovery = resume, rejection = "timer unavailable")]
 #[derive(Encode, Decode)]
 pub struct Timer {
     remaining_ms: u32,

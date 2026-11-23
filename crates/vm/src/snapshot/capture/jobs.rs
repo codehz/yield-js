@@ -324,47 +324,41 @@ pub(super) fn load_operations(
                 record.id
             )));
         }
-        let (declaration, recovery, rejection) =
-            if let DeliveryTarget::Timeout { deadline, .. } = record.target {
-                if record.name != TIMEOUT_OPERATION_NAME
-                || record.schema != TIMEOUT_OPERATION_SCHEMA
+        let (declaration, recovery, rejection) = if let DeliveryTarget::Timeout {
+            deadline, ..
+        } = record.target
+        {
+            if record.name != TIMEOUT_OPERATION_NAME
                 || record.recovery != Recovery::Reissue
                 || !record.state.is_empty()
                 || record.signal.is_some()
                 // A timeout is created at or before the snapshot cut with a u64 delay.
                 || deadline.saturating_sub(elapsed) > std::time::Duration::from_millis(u64::MAX)
-                {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "timeout operation {} has invalid metadata",
-                        record.id
-                    )));
-                }
-                (None, Recovery::Reissue, TIMEOUT_OPERATION_REJECTION)
-            } else {
-                let (declaration, recovery, rejection) = bindings
-                    .operation(&record.name, record.schema)
-                    .ok_or_else(|| {
-                        VmError::InvalidSnapshot(format!(
-                            "operation {} schema {} is not declared",
-                            record.name, record.schema
-                        ))
-                    })?;
-                if recovery != record.recovery {
-                    return Err(VmError::InvalidSnapshot(format!(
-                        "operation {} schema {} recovery mismatch",
-                        record.name, record.schema
-                    )));
-                }
-                bindings
-                    .decode_operation(&record.name, record.schema, &record.state)
-                    .map_err(|error| {
-                        VmError::InvalidSnapshot(format!(
-                            "operation {} schema {} state: {error}",
-                            record.name, record.schema
-                        ))
-                    })?;
-                (Some(declaration), recovery, rejection)
-            };
+            {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "timeout operation {} has invalid metadata",
+                    record.id
+                )));
+            }
+            (None, Recovery::Reissue, TIMEOUT_OPERATION_REJECTION)
+        } else {
+            let (declaration, recovery, rejection) =
+                bindings.operation(&record.name).ok_or_else(|| {
+                    VmError::InvalidSnapshot(format!("operation {} is not declared", record.name))
+                })?;
+            if recovery != record.recovery {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "operation {} recovery mismatch",
+                    record.name
+                )));
+            }
+            bindings
+                .decode_operation(&record.name, &record.state)
+                .map_err(|error| {
+                    VmError::InvalidSnapshot(format!("operation {} state: {error}", record.name))
+                })?;
+            (Some(declaration), recovery, rejection)
+        };
         if let DeliveryTarget::Promise(promise) = record.target {
             let pending = matches!(heap.get(promise), Ok(Object::Promise(p)) if matches!(p.state, PromiseState::Pending));
             if !pending {
@@ -383,7 +377,6 @@ pub(super) fn load_operations(
             record.id,
             PendingOperation {
                 name: record.name,
-                schema: record.schema,
                 recovery,
                 rejection,
                 state: record.state,

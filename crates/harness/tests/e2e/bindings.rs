@@ -82,7 +82,7 @@ mod strategy_fixture {
 
     macro_rules! strategy_operation {
         ($name:ident, $wire:tt, $recovery:ident, $message:tt) => {
-            #[operation(name = $wire, schema = 1, recovery = $recovery, rejection = $message)]
+            #[operation(name = $wire, recovery = $recovery, rejection = $message)]
             #[derive(Encode, Decode)]
             struct $name;
 
@@ -991,7 +991,7 @@ export async function run() {
 mod geom_fixture {
     use super::*;
 
-    #[host_class(tag = "Point", methods, schema = 1)]
+    #[host_class(tag = "Point", methods)]
     #[derive(Encode, Decode)]
     struct Point {
         x: f64,
@@ -1053,59 +1053,6 @@ export function run() {
     );
 }
 
-mod loose_fixture {
-    use super::*;
-
-    #[host_class(tag = "Loose")]
-    struct Loose {
-        _n: u32,
-    }
-
-    #[host_module(name = "loose")]
-    struct LooseModule;
-
-    #[module_exports]
-    impl LooseModule {
-        #[function(name = "make")]
-        fn make(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Loose>> {
-            cx.alloc(Loose { _n: 1 })
-        }
-    }
-
-    pub(super) fn bindings() -> Bindings {
-        host_bindings! {
-            dts: "../dts/loose.d.ts",
-            modules: [LooseModule],
-            classes: [Loose],
-            operations: [],
-            services: {},
-        }
-        .expect("loose bindings")
-    }
-}
-
-#[test]
-fn class_data_requires_a_declared_payload_schema() {
-    let bindings = loose_fixture::bindings();
-    let source = r#"
-import { make } from "loose";
-export function run() {
-  return make();
-}
-"#;
-    let build =
-        compile_main(source, &declared(include_str!("../dts/loose.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
-    let error = vm
-        .start(&mut host, "run", vec![])
-        .expect_err("payload without a schema is a host fault");
-    assert!(
-        matches!(&error, VmError::HostFault(message) if message.contains("no payload schema")),
-        "{error:?}"
-    );
-}
-
 #[test]
 fn corrupt_instance_payload_rejects_restore() {
     let source = r#"
@@ -1130,29 +1077,12 @@ export async function run() {
         .find(|record| record.class == "Node")
         .and_then(|record| record.payload.as_mut())
         .expect("node payload");
-    assert_eq!(payload.schema, 2);
-    payload.schema = 1;
-    payload.bytes = b"payload".to_vec();
-    let options = || RestoreOptions {
+    let options = RestoreOptions {
         validation: SnapshotValidation::Full,
         ..Default::default()
     };
-    let error = Vm::restore(snapshot.clone(), build.clone(), &mut host, options())
-        .expect_err("legacy schema");
-    assert!(
-        matches!(&error, VmError::InvalidSnapshot(message) if message.contains("class Node payload schema mismatch")),
-        "{error:?}"
-    );
-
-    let payload = snapshot
-        .host_instances
-        .iter_mut()
-        .find(|record| record.class == "Node")
-        .and_then(|record| record.payload.as_mut())
-        .unwrap();
-    payload.schema = 2;
     payload.bytes = vec![2, 0, 0, 0, 0xff, 0xfe];
-    let error = Vm::restore(snapshot, build, &mut host, options()).expect_err("invalid payload");
+    let error = Vm::restore(snapshot, build, &mut host, options).expect_err("invalid payload");
     assert!(
         matches!(&error, VmError::InvalidSnapshot(message) if message.contains("class Node payload") && message.contains("field label: invalid UTF-8")),
         "{error:?}"
@@ -1161,7 +1091,7 @@ export async function run() {
 
 #[test]
 fn node_payload_decode_requires_factory_service() {
-    let bindings = loose_fixture::bindings();
+    let bindings = geom_fixture::bindings();
     let mut payload = [0u8; 4].as_slice();
     let error = yield_harness::Node::decode(&mut payload, &bindings)
         .err()
@@ -1175,13 +1105,13 @@ fn node_payload_decode_requires_factory_service() {
 mod inherit_fixture {
     use super::*;
 
-    #[operation(name = "inherit-wait", schema = 1, recovery = resume)]
+    #[operation(name = "inherit-wait", recovery = resume)]
     #[derive(Encode, Decode)]
     struct InheritWait;
 
     label_driver!(InheritWait, "inherit-wait");
 
-    #[host_class(tag = "Base", methods, schema = 1)]
+    #[host_class(tag = "Base", methods)]
     #[derive(Encode, Decode)]
     struct Base {
         payload_value: u8,

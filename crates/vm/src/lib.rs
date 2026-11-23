@@ -41,7 +41,7 @@
 //!
 //! ```compile_fail
 //! use yield_vm::{Decode, Encode, operation};
-//! #[operation(name = "wait", schema = 1)]
+//! #[operation(name = "wait")]
 //! #[derive(Encode, Decode)]
 //! struct Wait;
 //! ```

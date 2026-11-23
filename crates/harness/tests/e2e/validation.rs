@@ -1167,25 +1167,10 @@ fn restore_rejects_a_pending_operation_with_a_different_import_binding() {
     let mut s = Suspended::start(RUN, vec![]);
     let mut snapshot = s.snapshot();
     assert_eq!(snapshot.operations[0].name, "wait");
-    assert_eq!(snapshot.operations[0].schema, 2);
     snapshot.operations[0].name = "inspect".to_owned();
     assert!(matches!(
         s.restore_validated(snapshot),
         Err(VmError::InvalidSnapshot(message)) if message.contains("is not declared")
-    ));
-}
-
-#[test]
-fn restore_rejects_legacy_wait_schema() {
-    let mut suspended = Suspended::start(RUN, vec![]);
-    let mut snapshot = suspended.snapshot();
-    let record = &mut snapshot.operations[0];
-    assert_eq!(record.name, "wait");
-    record.schema = 1;
-    record.state = b"a".to_vec();
-    assert!(matches!(
-        suspended.restore_validated(snapshot),
-        Err(VmError::InvalidSnapshot(message)) if message.contains("operation wait schema 1 is not declared")
     ));
 }
 

@@ -25,7 +25,7 @@ impl Default for State {
 #[module_exports]
 impl State {}
 
-#[operation(name = "work", schema = 1, recovery = pause)]
+#[operation(name = "work", recovery = pause)]
 #[derive(Encode, Decode)]
 struct Work;
 

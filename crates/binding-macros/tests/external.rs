@@ -67,7 +67,7 @@ struct Pair<T>(T, T)
 where
     T: PartialEq;
 
-#[host_class(tag = "Mixed", schema = 1)]
+#[host_class(tag = "Mixed")]
 #[derive(Debug, PartialEq, yield_vm::Encode, yield_vm::Decode)]
 struct Mixed {
     #[js_slot]
@@ -96,7 +96,7 @@ struct Explicit {
 #[module_exports]
 impl Explicit {}
 
-#[yield_vm::operation(name = "mixed", schema = 1, recovery = pause)]
+#[yield_vm::operation(name = "mixed", recovery = pause)]
 #[derive(yield_vm::Decode, yield_vm::Encode)]
 struct MixedWork(Mixed);
 
@@ -139,7 +139,7 @@ fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -
     );
     assert!(cursor.is_empty());
     let truncated = bindings
-        .decode_operation("mixed", 1, &bytes[..bytes.len() - 1])
+        .decode_operation("mixed", &bytes[..bytes.len() - 1])
         .unwrap_err();
     assert!(
         truncated
@@ -148,7 +148,7 @@ fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -
         "{truncated}"
     );
     bytes.push(0);
-    let trailing = bindings.decode_operation("mixed", 1, &bytes).unwrap_err();
+    let trailing = bindings.decode_operation("mixed", &bytes).unwrap_err();
     assert_eq!(trailing.0, "trailing payload bytes");
     Ok(())
 }

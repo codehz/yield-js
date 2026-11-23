@@ -66,7 +66,7 @@ impl yield_vm::ServiceKey for NodeFactoryKey {
     const VERSION: u32 = 1;
 }
 
-#[host_class(tag = "Node", methods, schema = 2)]
+#[host_class(tag = "Node", methods)]
 #[derive(Encode)]
 pub struct Node {
     pub label: String,
@@ -286,25 +286,25 @@ fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
     equal(cx, left.clone(), right.clone(), &mut BTreeSet::new())
 }
 
-#[operation(name = "wait", schema = 2, recovery = resume, rejection = "wait rejected")]
+#[operation(name = "wait", recovery = resume, rejection = "wait rejected")]
 #[derive(Encode, Decode)]
 pub struct Wait {
     pub label: String,
 }
 
-#[operation(name = "pause", schema = 2, recovery = pause, rejection = "pause rejected")]
+#[operation(name = "pause", recovery = pause, rejection = "pause rejected")]
 #[derive(Encode, Decode)]
 pub struct Pause {
     pub label: String,
 }
 
-#[operation(name = "reject", schema = 2, recovery = reject, rejection = "reject rejected during restore")]
+#[operation(name = "reject", recovery = reject, rejection = "reject rejected during restore")]
 #[derive(Encode, Decode)]
 pub struct Reject {
     pub label: String,
 }
 
-#[operation(name = "reissue", schema = 2, recovery = reissue, rejection = "reissue rejected")]
+#[operation(name = "reissue", recovery = reissue, rejection = "reissue rejected")]
 #[derive(Encode, Decode)]
 pub struct Reissue {
     pub label: String,

@@ -7,8 +7,7 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Error, Expr, Ident, ItemStruct, LitInt, LitStr, Path, Result, Token, TypePath, braced,
-    bracketed,
+    Error, Expr, Ident, ItemStruct, LitStr, Path, Result, Token, TypePath, braced, bracketed,
 };
 
 use super::typed::{extract_slots, slot_decls};
@@ -61,11 +60,10 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     check_struct(&item)?;
     let ty = &item.ident;
     let span = ty.span();
-    let (mut name, mut schema, mut recovery, mut rejection) = (None, None, None, None);
+    let (mut name, mut recovery, mut rejection) = (None, None, None);
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut name, &key, || attribute_value::<LitStr>(input)),
-            "schema" => set(&mut schema, &key, || attribute_value::<LitInt>(input)),
             "recovery" => set(&mut recovery, &key, || {
                 let value: Ident = attribute_value(input)?;
                 let variant = match value.to_string().as_str() {
@@ -88,7 +86,6 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     })
     .parse2(args)?;
     let name = required(name, span, "name")?;
-    let schema = required(schema, span, "schema")?;
     let recovery = required(recovery, span, "recovery")?;
     let rejection = rejection.map(|value| quote!(const REJECTION: &'static str = #value;));
 
@@ -96,7 +93,6 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
         #item
         impl ::yield_vm::Operation for #ty {
             const NAME: &'static str = #name;
-            const SCHEMA: u32 = #schema;
             const RECOVERY: ::yield_vm::Recovery = ::yield_vm::Recovery::#recovery;
             #rejection
         }
@@ -435,7 +431,7 @@ mod tests {
             struct Wait;
         );
         diagnostic(
-            operation(quote!(name = "wait", schema = 1), item.clone()),
+            operation(quote!(name = "wait"), item.clone()),
             "missing `recovery`",
         );
         diagnostic(
@@ -453,7 +449,7 @@ mod tests {
         for key in [quote!(encode), quote!(decode)] {
             diagnostic(
                 operation(
-                    quote!(name = "wait", schema = 1, recovery = pause, #key = callback),
+                    quote!(name = "wait", recovery = pause, #key = callback),
                     quote!(
                         struct Wait;
                     ),

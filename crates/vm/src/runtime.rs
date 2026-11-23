@@ -100,7 +100,6 @@ impl std::fmt::Debug for ModuleState {
 
 pub(crate) struct PendingOperation {
     pub(crate) name: String,
-    pub(crate) schema: u32,
     pub(crate) recovery: Recovery,
     pub(crate) rejection: &'static str,
     pub(crate) state: Vec<u8>,
@@ -132,7 +131,6 @@ impl std::fmt::Debug for PendingOperation {
         formatter
             .debug_struct("PendingOperation")
             .field("name", &self.name)
-            .field("schema", &self.schema)
             .field("recovery", &self.recovery)
             .field("target", &self.target)
             .field("armed", &self.live.is_some())

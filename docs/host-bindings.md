@@ -44,7 +44,7 @@
 - **H6 payload 不含 VM 引用。** payload 字节中不得出现 VM 对象 ID、`NativeKey` 或函数指针；这类边只能走槽。
 - **H7 恢复原子。** 任何声明缺失、指纹不符、槽非法或 payload 解码失败都整体拒绝恢复；不启动脚本、不投递事件、不重发请求。
 - **H8 无同步重入。** 宿主函数不得在调用期间回调 VM 执行脚本或排空微任务。异步结果只能通过 operation 或新任务轮次交付。
-- **H9 精确版本。** 格式版本、字节码版本、Build ID、绑定指纹、类 payload schema 版本和 operation 策略必须全部匹配。
+- **H9 精确版本。** 格式版本、字节码版本、Build ID、绑定指纹和 operation 策略必须全部匹配。
 - **H10 中断必有策略。** 没有声明恢复策略的异步类型不能注册，也不能启动。
 
 ## 4. 声明层
@@ -99,7 +99,7 @@ impl Matcher {
 - **标签**：稳定字符串或宏生成的 ID，出现在快照与诊断中，不出现在 JS。
 - **父类**：可选的父类标签。声明层把原型链接到父类原型，并把父类槽排在子类槽之前；基类方法与访问器接收派生实例，子类声明的槽索引按自身布局计数。
 - **槽布局**：有序、带名字、带种类。首版槽种类只有 `Js`（单个 `JsValue`）与 `JsList`（有序 `JsValue` 列表）。`JsList` 用于事件监听器集合这类「数量可变、元素是 JS 值」的状态，避免把引用塞进 payload。是否需要 `JsMap`、弱引用槽见[未决问题](#15-未决问题)。
-- **payload**：可选的 `T` 及其 schema 版本与 codec。`T` 不得包含 `JsValue`。payload 属于具体实例类，不沿继承链合并。
+- **payload**：可选的 `T` 及其 codec。`T` 不得包含 `JsValue`。payload 属于具体实例类，不沿继承链合并。
 - **原型成员**：方法、访问器。成员名区分字符串与符号；`Symbol.iterator` 这类内建符号由稳定的枚举（`WellKnownSymbol`）在声明期内静态给出，不接受运行期 Symbol。`Symbol.dispose` / `Symbol.asyncDispose`（显式资源管理，见 `design.md`）同样按枚举声明；`asyncDispose` 需要异步收尾时以 `cx.promise(op)` 起始 operation，沿用现有挂起/恢复契约。
 - **可选构造器**：只有声明了 `Constructor` 的类才导出可 `new` 的函数。未声明时，类只作为返回类型和原型存在。
 
@@ -118,9 +118,9 @@ impl Matcher {
 绑定声明在链接期计算**指纹**，写入快照头部；恢复时用本进程的声明重新计算并比对。指纹只覆盖语义字段：
 
 - 模块名、导出名及种类、每个模块的状态槽名字/顺序/种类；
-- 类标签、槽名字/顺序/种类、payload schema 版本与 codec 标识；
+- 类标签、槽名字/顺序/种类、codec 标识；
 - 成员名、种类（方法/访问器/数据）、参数与返回种类；
-- operation 类型、状态 schema 版本、恢复策略；
+- operation 类型、恢复策略；
 - 参与指纹的服务契约，按 `id:version` 排序。
 
 指纹不含 Rust 类型名、函数地址、宏展开细节或调试名称，因此重命名内部符号不会使快照失效；删除槽、改变顺序、更换 codec 或改变恢复策略会使快照失效。变更策略沿用项目的精确版本约定：不自动迁移，报告具体不匹配项。
@@ -198,7 +198,7 @@ pub trait Decode: Sized {
 - **上下文提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Bindings` 按键读取服务，例如 `bindings.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
-- **版本独立。** 类 payload 与 operation 状态各自声明 schema 版本。未知版本拒绝恢复；模块 payload 不声明 schema。顶层解码必须消费全部字节。
+- **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
 服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings` 和 `CallCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
@@ -233,7 +233,7 @@ host_bindings! {
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
 - 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。
 - 新 VM 通过 `FromBindings` 初始化模块；恢复只调用 `Decode`。实现 `Default` 的类型自动获得 `FromBindings`。需要服务的模块直接实现 `FromBindings`，不同时实现 `Default`。
-- `#[host_module]` 和 `#[host_class]` 应放在 codec derive 之前，使 `#[js_slot]` / `#[js_list]` 不参与编码。没有剩余 Rust 字段的模块自动补齐缺省的 `Default` derive 和空 codec；非空模块必须明确选择初始化和 codec 实现。类只有声明 `schema` 才使用 Rust payload codec。
+- `#[host_module]` 和 `#[host_class]` 应放在 codec derive 之前，使 `#[js_slot]` / `#[js_list]` 不参与编码。没有剩余 Rust 字段的模块自动补齐缺省的 `Default` derive 和空 codec；非空模块必须明确选择初始化和 codec 实现。
 - 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
 ## 6. 调用协议
@@ -291,14 +291,14 @@ impl CallCx {
 ### 7.1 声明
 
 ```rust
-#[operation(name = "wait", schema = 2, recovery = pause)]
+#[operation(name = "wait", recovery = pause)]
 #[derive(Encode, Decode)]
 struct Wait {
     label: String,              // 持久状态，编码进快照
 }
 ```
 
-每个 operation 声明类型 ID、状态 schema、codec 和恢复策略。`OperationDriver` 从链接的 `Bindings` 获取服务，并用 `start` / `resume` 返回拥有平台登记的 `Live`。状态和 `Live` 均不得持有 guest 值；回调与其他活值由 VM 的后台任务保存。`Live` 的 `Drop` 释放登记，`checkpoint` 可为本次镜像编码替换状态。
+每个 operation 声明类型 ID、codec 和恢复策略。`OperationDriver` 从链接的 `Bindings` 获取服务，并用 `start` / `resume` 返回拥有平台登记的 `Live`。状态和 `Live` 均不得持有 guest 值；回调与其他活值由 VM 的后台任务保存。`Live` 的 `Drop` 释放登记，`checkpoint` 可为本次镜像编码替换状态。
 
 ### 7.2 启动与结算
 
@@ -336,12 +336,12 @@ struct Wait {
 
 ```text
 Snapshot {
-    header:    format, bytecode, build_id, binding_fingerprints, payload_schemas,
+    header:    format, bytecode, build_id, binding_fingerprints,
                service_ids, instance_epochs?          // 见 11
     objects:   [ObjectRecord]                        // 含绑定实例
     module_states: [ { module, slots, bytes } ]
     continuations: […]                               // 现有续体记录
-    operations: [ { type, schema, state, target, strategy } ]
+    operations: [ { type, state, target, strategy } ]
     host_tasks: [ { id, owner, stage, receiver, saved, waiting_on } ]
     next_host_task_id: u64
     globals / roots / imports / script_env / …
@@ -351,7 +351,7 @@ ObjectRecord(NativeInstance) {
     id, class_tag, prototype: ObjectId,
     properties: ordinary own properties,
     slots: [slot kind payload…],     // 顺序由声明决定
-    payload: Option<{ schema, bytes }>,
+    payload: Option<bytes>,
 }
 ```
 
@@ -400,7 +400,7 @@ flowchart TB
 
 ## 10. 版本与失败策略
 
-- 校验顺序：快照格式 → 字节码版本 → Build ID → 所需模块与导出 → 类指纹（槽布局、成员、payload schema）→ operation 类型与策略 → 服务可用性。
+- 校验顺序：快照格式 → 字节码版本 → Build ID → 所需模块与导出 → 类指纹（槽布局、成员）→ operation 类型与策略 → 服务可用性。
 - 任一失败：整体拒绝，错误中列出第一处不匹配及声明 ID；不启动 VM，不投递事件，不发请求。
 - 运行时 `HostFault`：VM 进入不可继续执行的状态；宿主可丢弃该 VM 并选择按策略重新初始化，但不能把它当作成功恢复。
 - 策略性拒绝（`Reject`）与恢复失败在 API 层必须使用不同类型，避免宿主误把可重试的业务拒绝当成存档损坏。
@@ -448,7 +448,7 @@ flowchart TB
 1. **跨进程式恢复。** 保存 `m = expect(obj)`、`obj.matcher = m`、`f = m.toEqual.bind(m)` 和环；销毁 VM 与宿主，只用快照、Build、声明恢复；通过别名修改 `obj` 后调用 `f`，断言看到修改，且实例身份、原型和别名延续。
 2. **方法共享与接收者校验。** `a.toEqual === b.toEqual`；裸调抛 `TypeError`；`Object.create(Matcher.prototype)` 对象不能冒充实例；脚本改写原型方法后快照保留修改。
 3. **值域。** 函数、符号、环、同一对象的多个槽、`undefined` 与「未初始化」区分正确；跨调用保存的旧句柄被拒绝。
-4. **payload 与服务。** 带 payload 的节点从平台工厂重建，不依赖旧节点表；缺少服务、schema 版本不符、payload 截断均整体拒绝恢复且无资源泄漏。
+4. **payload 与服务。** 带 payload 的节点从平台工厂重建，不依赖旧节点表；缺少服务或 payload 截断均整体拒绝恢复且无资源泄漏。
 5. **operation 策略。** `Pause` 以 `undefined` 兑现且只兑现一次；`Resume` 重新登记后交付一次；`Reissue` 不重跑发起函数；`Reject` 经原 `catch` 路径；旧代际交付被拒绝。
 6. **策略性拒绝 vs 恢复失败。** 前者脚本可观察、其他续体继续；后者 VM 不创建。
 7. **不可达实例。** 不在快照中的实例不要求解码，快照也不包含其 payload。
@@ -474,7 +474,7 @@ flowchart TB
 
 ## 16. 首版落地状态
 
-已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；非零大小载荷必须声明 schema；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局、payload schema 与 operation 声明。
+已落地：类型化宏声明与签名指纹；VM 自有原型、方法共享、接收者校验、访问器；字符串与 well-known Symbol 成员名（`MemberName` / `WellKnownSymbol`）；绑定类父类声明的原型链、槽合并、基类接收者校验与快照往返；实例隐藏槽（`Js` / `JsList`）、payload codec 与服务；类实例身份与普通自有属性；`JsValue` 句柄的代际/调用校验；模块状态槽与 payload；operation 的 `Pause` / `Resume` / `Reissue` / `Reject` 策略、代际令牌；恢复只做 `Pause` / `Reject` 结算，`Resume` / `Reissue` 在任何外部工作前保持 pending，并在 `Vm::restore` 返回后由 `Vm::start_recovered_operations` 重新登记（启动失败结算该 operation）；快照只保存可达实例，恢复前原子校验绑定指纹、槽布局与 operation 声明。
 
 脚本 `class` / `extends` / `super` 已支持：脚本派生实例的原型、宿主槽和 payload、脚本私元素均可跨快照恢复，恢复不再执行构造器或初始化器。BigInt 值域已落地：`JsValue::bigint` / `as_bigint`、`Inspect::bigint` 和 `InspectKind::BigInt`，并以规范十进制在构建与快照中往返。尚未实现：TypeScript 生成、C ABI、弱引用槽、`JsMap` 槽和流式 payload；恢复资源限制仅由可信本地快照这一前提约束。
 

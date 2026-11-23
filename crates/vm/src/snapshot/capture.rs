@@ -190,20 +190,17 @@ impl Vm {
                     HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
                 })
                 .collect();
-            let payload = match self.bindings.class_payload_schema(class) {
-                Some(schema) => {
-                    let payload = instance.payload.as_ref().ok_or_else(|| {
-                        VmError::InvalidState(format!(
-                            "host instance {object} is missing its payload"
-                        ))
-                    })?;
-                    let mut bytes = Vec::new();
-                    self.bindings
-                        .class_encode(class, payload.as_ref(), &mut bytes)
-                        .map_err(|error| VmError::InvalidState(error.0))?;
-                    Some(PayloadRecord { schema, bytes })
-                }
-                None => None,
+            let payload = if self.bindings.class_has_payload_codec(class) {
+                let payload = instance.payload.as_ref().ok_or_else(|| {
+                    VmError::InvalidState(format!("host instance {object} is missing its payload"))
+                })?;
+                let mut bytes = Vec::new();
+                self.bindings
+                    .class_encode(class, payload.as_ref(), &mut bytes)
+                    .map_err(|error| VmError::InvalidState(error.0))?;
+                Some(PayloadRecord { bytes })
+            } else {
+                None
             };
             snapshot.host_instances.push(HostInstanceRecord {
                 object: *object,
@@ -294,7 +291,6 @@ impl Vm {
                 snapshot.operations.push(PendingOperationRecord {
                     id: *id,
                     name: TIMEOUT_OPERATION_NAME.to_owned(),
-                    schema: TIMEOUT_OPERATION_SCHEMA,
                     recovery: Recovery::Reissue,
                     state: Vec::new(),
                     target: operation.target,
@@ -305,7 +301,6 @@ impl Vm {
             snapshot.operations.push(PendingOperationRecord {
                 id: *id,
                 name: operation.name.clone(),
-                schema: operation.schema,
                 recovery: operation.recovery,
                 state: operation
                     .checkpoint(&self.bindings)

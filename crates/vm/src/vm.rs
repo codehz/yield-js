@@ -120,7 +120,6 @@ pub(crate) fn module_getter_capture(target: ModuleTarget) -> Option<u32> {
 pub struct PendingOperationInfo {
     pub token: crate::binding::OperationToken,
     pub name: String,
-    pub schema: u32,
     pub recovery: crate::binding::Recovery,
     pub state: Vec<u8>,
 }
@@ -1209,7 +1208,6 @@ impl Vm {
                     id: *id,
                 },
                 name: operation.name.clone(),
-                schema: operation.schema,
                 recovery: operation.recovery,
                 state: operation.state.clone(),
             })
@@ -1326,12 +1324,11 @@ impl Vm {
     ) -> Result<OperationToken, HostFault> {
         let token = self.allocate_operation_token()?;
         let id = token.id;
-        let (name, schema, recovery, rejection) = self.bindings.operation_metadata(decl);
+        let (name, recovery, rejection) = self.bindings.operation_metadata(decl);
         self.operations.insert(
             id,
             PendingOperation {
                 name: name.to_owned(),
-                schema,
                 recovery,
                 rejection,
                 state,

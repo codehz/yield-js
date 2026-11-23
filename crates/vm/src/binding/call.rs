@@ -649,13 +649,13 @@ impl<'a> CallCx<'a> {
             .filter(|(target, _)| *target == record.source)
             .map_or(record.prototype, |(_, prototype)| prototype);
         let payload = Box::new(payload);
-        if self.bindings.class_payload_schema(class).is_none()
+        if !self.bindings.class_has_payload_codec(class)
             && !self
                 .bindings
                 .class_payload_is_empty(class, payload.as_ref())
         {
             return Err(JsError::Fault(HostFault::new(format!(
-                "class {} has data but no payload schema",
+                "class {} has data but no payload codec",
                 T::TAG
             ))));
         }

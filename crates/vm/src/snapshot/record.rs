@@ -9,10 +9,10 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Extractable raw CryptoKey object records.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 91;
+// Host class and operation records without per-binding schemas.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 92;
 
-/// Version for the binary envelope and bincode options, not the snapshot schema.
+/// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
 const SNAPSHOT_MAGIC: &[u8; 8] = b"YIELDSNP";
 const SNAPSHOT_HEADER_LEN: usize = SNAPSHOT_MAGIC.len() + 2 * size_of::<u32>();
@@ -174,14 +174,12 @@ pub struct ScriptTimer {
 }
 
 pub(crate) const TIMEOUT_OPERATION_NAME: &str = "wintertc.timeout";
-pub(crate) const TIMEOUT_OPERATION_SCHEMA: u32 = 1;
 pub(crate) const TIMEOUT_OPERATION_REJECTION: &str = "timeout timer failed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingOperationRecord {
     pub id: u64,
     pub name: String,
-    pub schema: u32,
     pub recovery: Recovery,
     pub state: Vec<u8>,
     pub target: DeliveryTarget,
@@ -207,7 +205,6 @@ pub enum HostSlotRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadRecord {
-    pub schema: u32,
     pub bytes: Vec<u8>,
 }
 

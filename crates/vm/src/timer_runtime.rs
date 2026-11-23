@@ -11,7 +11,7 @@ use crate::host::Host;
 use crate::runtime::{Arguments, Invocation, PendingOperation};
 use crate::snapshot::{
     DeliveryTarget, OrdinaryTask, ScriptTimer, TIMEOUT_OPERATION_NAME, TIMEOUT_OPERATION_REJECTION,
-    TIMEOUT_OPERATION_SCHEMA, TimerKey, TimerState, TimerTarget,
+    TimerKey, TimerState, TimerTarget,
 };
 use crate::value::Value;
 
@@ -106,7 +106,6 @@ impl Vm {
             token.id,
             PendingOperation {
                 name: TIMEOUT_OPERATION_NAME.to_owned(),
-                schema: TIMEOUT_OPERATION_SCHEMA,
                 recovery: crate::binding::Recovery::Reissue,
                 rejection: TIMEOUT_OPERATION_REJECTION,
                 state: Vec::new(),

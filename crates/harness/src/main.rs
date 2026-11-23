@@ -52,7 +52,7 @@ impl DemoCounters {
     }
 }
 
-#[operation(name = "wait", schema = 2, recovery = resume)]
+#[operation(name = "wait", recovery = resume)]
 #[derive(Encode, Decode)]
 struct Wait {
     label: String,
