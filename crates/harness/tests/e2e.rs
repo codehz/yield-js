@@ -1163,3 +1163,49 @@ export function run() {
             if message.contains("tracks the length of a fixed-length buffer")
     ));
 }
+
+#[test]
+fn stream_strategy_binary_restore_checks_high_water_mark() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{Object, Snapshot, Value, Vm, VmError, VmOptions};
+
+    let build = build(
+        r#"
+const strategy = new CountQueuingStrategy({ highWaterMark: -Infinity });
+const size = strategy.size;
+export function run() {
+    return strategy.highWaterMark === -Infinity && strategy.size === size;
+}
+"#,
+    );
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), &mut host, VmOptions::default()).unwrap();
+    vm.collect_garbage(&[]).unwrap();
+    let snapshot = Snapshot::from_bytes(&vm.snapshot(&[]).unwrap().to_bytes().unwrap()).unwrap();
+    let full = || RestoreOptions {
+        validation: SnapshotValidation::Full,
+        ..Default::default()
+    };
+    let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host, full()).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "run", vec![]).unwrap(),
+        Value::boolean(true)
+    );
+
+    let mut malformed = snapshot;
+    let mark = malformed
+        .objects
+        .iter_mut()
+        .find_map(|record| match &mut record.object {
+            Object::QueuingStrategy {
+                high_water_mark, ..
+            } => Some(high_water_mark),
+            _ => None,
+        })
+        .unwrap();
+    *mark = Value::NULL;
+    assert!(matches!(
+        Vm::restore(malformed, build, &mut host, full()),
+        Err(VmError::InvalidSnapshot(message)) if message.contains("nonnumeric high water mark")
+    ));
+}

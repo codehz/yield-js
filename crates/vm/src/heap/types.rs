@@ -1562,6 +1562,12 @@ pub enum Object {
         object: PlainObject,
     },
     TextDecoder(TextDecoderObject),
+    QueuingStrategy {
+        object: PlainObject,
+        // Value's Number encoding preserves NaN and infinities in JSON.
+        high_water_mark: Value,
+        byte_length: bool,
+    },
     Url {
         object: PlainObject,
         url: url::Url,

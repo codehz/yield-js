@@ -410,6 +410,15 @@ pub(super) fn check_heap_edges(
                 )));
             }
         }
+        if let Object::QueuingStrategy {
+            high_water_mark, ..
+        } = heap.get(id)?
+            && !matches!(high_water_mark.view(), ValueRef::Number(_))
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "queuing strategy {id} has a nonnumeric high water mark"
+            )));
+        }
         if let Object::RegExpStringIterator { regexp, .. } = heap.get(id)?
             && heap.get(*regexp).is_err()
         {

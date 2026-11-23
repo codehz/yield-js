@@ -163,6 +163,8 @@ builtin_globals! {
     "clearInterval" => Global::Owner(super::timers::CLEAR_INTERVAL),
     "atob" => Global::Function(global_functions::ATOB),
     "btoa" => Global::Function(global_functions::BTOA),
+    "CountQueuingStrategy" => Global::Owner(super::streams::COUNT_OWNER),
+    "ByteLengthQueuingStrategy" => Global::Owner(super::streams::BYTE_LENGTH_OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

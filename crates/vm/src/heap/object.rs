@@ -113,6 +113,7 @@ macro_rules! map_object_storage {
             | Object::DataView(DataViewObject { object: $storage, .. })
             | Object::TextEncoder { object: $storage }
             | Object::TextDecoder(TextDecoderObject { object: $storage, .. })
+            | Object::QueuingStrategy { object: $storage, .. }
             | Object::Url { object: $storage, .. }
             | Object::UrlSearchParams { object: $storage, .. }
             | Object::UrlSearchParamsIterator { object: $storage, .. }
@@ -520,6 +521,7 @@ impl Object {
             | Self::DomException { .. }
             | Self::TextEncoder { .. }
             | Self::TextDecoder(_)
+            | Self::QueuingStrategy { .. }
             | Self::UrlPattern { .. }
             | Self::WeakMap { .. }
             | Self::WeakSet { .. }
