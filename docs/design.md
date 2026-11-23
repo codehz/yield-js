@@ -106,7 +106,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 
 ## Web API 互操作性设计：WinterTC
 
-以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为固定基线：**除 WebAssembly 外，列出的所有接口、全局方法和属性均为实现目标**。目标包括上游规范定义的成员及可观察行为，不只是同名全局。纯 VM 功能不依赖宿主接入；有外部依赖的功能仍提供 JS 接口，由可选宿主能力承接外部工作。此目标不改变首版 Solid/React 的验收清单，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。
+以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为固定基线：**除 WebAssembly 外，列出的所有接口、全局方法和属性均为实现目标**。目标包括上游规范定义的成员及可观察行为，不只是同名全局；解码标签范围按下表有意收窄。纯 VM 功能不依赖宿主接入；有外部依赖的功能仍提供 JS 接口，由可选宿主能力承接外部工作。此目标不改变首版 Solid/React 的验收清单，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。
 
 | API 组 | 实现目标与归属 |
 | --- | --- |
@@ -115,7 +115,7 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 | 消息与克隆 | `MessageChannel`、`MessagePort`、`MessageEvent`、`structuredClone`。VM 持有端口配对、任务队列、关闭和转移状态；补齐规范所需的克隆与转移类型（如 `Blob`、`File`、`MessagePort`），不要求 Worker。 |
 | 定时器与时钟 | `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval` 由 VM 实现脚本语义，由可选宿主能力唤醒。`Performance`、`performance.now()`、`performance.timeOrigin` 完全由 VM 提供。禁止运行时编译，故字符串 timer handler 不支持。 |
 | 全局别名与标识 | `globalThis`、`self`、`navigator.userAgent`。`self` 初始值与 `globalThis` 相同；默认 User-Agent 按 §7 使用符合 HTTP 语法的运行时标识，不假冒浏览器。 |
-| 编码与 Base64 | `atob`／`btoa` 按 HTML 字符串 API 实现；`TextEncoder`、`TextDecoder`、`TextEncoderStream`、`TextDecoderStream` 按 Encoding Standard 实现，含支持标签、增量状态、BOM 和错误处理。 |
+| 编码与 Base64 | `atob`／`btoa` 按 HTML 字符串 API 实现。`TextEncoder` 和 `TextEncoderStream` 仅输出 UTF-8；`TextDecoder` 和 `TextDecoderStream` 仅支持 UTF-8、UTF-16LE、UTF-16BE 及其在 Encoding Standard 中定义的标签，其他标签抛 `RangeError`，不纳入实现目标。支持范围内遵循 Encoding Standard 的增量处理、BOM 和错误语义；两个流接口提供 `readable`／`writable`，增量编解码状态随 VM 快照恢复。 |
 | URL | `URL`、`URLSearchParams`、`URLPattern`。覆盖 URL 解析与序列化、`URL.searchParams` 的双向联动及模式匹配。基准 URL 不来自浏览器文档：创建 VM 时由宿主显式提供一个 baseURL（可省略），它是 `new URL(相对URL)` 省略 `base` 实参时的默认基准，也用于 Fetch 相对 URL 解析；省略 baseURL 时无默认基准，相对 URL 按规范抛出 `TypeError`。 |
 | 微任务、流与压缩 | `queueMicrotask`；`ReadableStream`、`ReadableStreamDefaultReader`、`ReadableStreamDefaultController`、`ReadableStreamBYOBReader`、`ReadableStreamBYOBRequest`、`ReadableByteStreamController`；`WritableStream`、`WritableStreamDefaultWriter`、`WritableStreamDefaultController`；`TransformStream`、`TransformStreamDefaultController`；`CountQueuingStrategy`、`ByteLengthQueuingStrategy`；`CompressionStream`、`DecompressionStream`。流的队列、锁、背压、待结算 Promise 和增量编解码进度进入 VM 快照。 |
 | Fetch 与二进制对象 | `Headers`、`Request`、`Response`、`FormData`、`Blob`、`File`、`fetch`。`FormData` 不引入 HTML 表单元素；VM 实现 Fetch 算法和 JS 对象，外部网络及环境服务通过可选宿主能力接入，见下文。 |
