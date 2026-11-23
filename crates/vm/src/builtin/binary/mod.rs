@@ -14,6 +14,7 @@ pub(crate) mod element;
 mod buffer;
 pub(super) mod codec;
 pub(crate) mod text;
+pub(crate) mod text_codec;
 mod typed;
 mod view;
 
