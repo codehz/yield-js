@@ -1,6 +1,7 @@
 use yield_vm::binding::CallCx;
 use yield_vm::{
-    HostClass, Instance, JsResult, JsValue, This, host_bindings, host_class, host_module, methods,
+    HostClass, Instance, JsResult, JsValue, ModuleCx, This, host_bindings, host_class, host_module,
+    methods, module_exports,
 };
 
 #[path = "external/registry.rs"]
@@ -29,11 +30,12 @@ impl Example {
 }
 
 #[host_module(name = "example")]
-mod example {
-    use super::*;
+struct ExampleModule;
 
+#[module_exports]
+impl ExampleModule {
     #[constructor(name = "Example", class = Example)]
-    fn make(cx: &mut CallCx<'_>, item: Option<JsValue>) -> JsResult<Instance<Example>> {
+    fn make(cx: &mut ModuleCx<'_, Self>, item: Option<JsValue>) -> JsResult<Instance<Example>> {
         let example = cx.alloc(Example)?;
         if let Some(item) = item {
             example.set_item(cx, item)?;
@@ -49,7 +51,7 @@ mod example {
 fn links_an_external_module_and_class() -> Result<(), String> {
     let bindings = host_bindings! {
         dts: "dts/example.d.ts",
-        modules: [example], classes: [Example], states: [], operations: [],
+        modules: [ExampleModule], classes: [Example], operations: [],
         services: {},
     }?;
     assert_eq!(

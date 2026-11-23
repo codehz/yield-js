@@ -217,9 +217,6 @@ impl Vm {
             });
         }
         for (module, state) in self.module_states.iter().enumerate() {
-            let Some(state) = state else {
-                continue;
-            };
             let slots = state
                 .slots
                 .iter()
@@ -228,20 +225,21 @@ impl Vm {
                     HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
                 })
                 .collect();
-            let schema = self
-                .bindings
-                .state_schema(module)
-                .ok_or_else(|| VmError::InvalidState("module state is undeclared".to_owned()))?;
+            let schema = self.bindings.state_schema(module);
             let mut bytes = Vec::new();
             self.bindings
                 .state_encode(module, state.payload.as_ref(), &mut bytes)
-                .ok_or_else(|| VmError::InvalidState("module state is undeclared".to_owned()))?
-                .map_err(|error| VmError::InvalidState(error.0))?;
+                .map_err(|error| {
+                    VmError::InvalidState(format!(
+                        "module {:?} state payload: {error}",
+                        self.bindings.module_name(module)
+                    ))
+                })?;
             snapshot.module_states.push(ModuleStateRecord {
                 module: self
                     .bindings
-                    .state_name(module)
-                    .unwrap_or_default()
+                    .module_name(module)
+                    .expect("linked module index")
                     .to_owned(),
                 slots,
                 payload: PayloadRecord { schema, bytes },

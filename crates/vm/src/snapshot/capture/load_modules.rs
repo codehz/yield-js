@@ -170,8 +170,8 @@ pub(super) fn load_module_states(
     bindings: &Bindings,
     heap: &Heap,
     records: &[ModuleStateRecord],
-) -> Result<Vec<Option<ModuleState>>, VmError> {
-    let declared = bindings.state_modules();
+) -> Result<Vec<ModuleState>, VmError> {
+    let count = bindings.module_count();
     let mut by_name: BTreeMap<&str, &ModuleStateRecord> = BTreeMap::new();
     for record in records {
         if by_name.insert(record.module.as_str(), record).is_some() {
@@ -181,24 +181,20 @@ pub(super) fn load_module_states(
             )));
         }
     }
-    if by_name.len() != declared.len() {
+    if by_name.len() != count {
         return Err(VmError::InvalidSnapshot(format!(
             "module state count mismatch: snapshot {}, bindings {}",
             by_name.len(),
-            declared.len()
+            count
         )));
     }
-    let mut states = (0..bindings.module_count())
-        .map(|_| None)
-        .collect::<Vec<_>>();
-    for module in declared {
-        let name = bindings
-            .state_name(module)
-            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?;
+    let mut states = Vec::with_capacity(count);
+    for module in 0..count {
+        let name = bindings.module_name(module).expect("linked module index");
         let record = by_name.get(name).ok_or_else(|| {
             VmError::InvalidSnapshot(format!("snapshot is missing module state {name:?}"))
         })?;
-        let expected_slots = bindings.state_slots(module).unwrap_or_default();
+        let expected_slots = bindings.state_slots(module);
         if record.slots.len() != expected_slots.len() {
             return Err(VmError::InvalidSnapshot(format!(
                 "module {name} state slot count mismatch"
@@ -228,9 +224,7 @@ pub(super) fn load_module_states(
             }
             slots.push(slot);
         }
-        let schema = bindings
-            .state_schema(module)
-            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?;
+        let schema = bindings.state_schema(module);
         if record.payload.schema != schema {
             return Err(VmError::InvalidSnapshot(format!(
                 "module {name} state payload schema mismatch: snapshot {}, bindings {}",
@@ -239,11 +233,10 @@ pub(super) fn load_module_states(
         }
         let payload = bindings
             .state_decode(module, &record.payload.bytes)
-            .ok_or_else(|| VmError::InvalidSnapshot("module state is undeclared".to_owned()))?
             .map_err(|error| {
                 VmError::InvalidSnapshot(format!("module {name} state payload: {error}"))
             })?;
-        states[module] = Some(ModuleState { slots, payload });
+        states.push(ModuleState { slots, payload });
     }
     Ok(states)
 }

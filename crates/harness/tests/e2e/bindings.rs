@@ -10,7 +10,7 @@ use yield_vm::binding::{CallCx, CodecError, DecodeCx, HostFault, OperationToken}
 use yield_vm::{
     Bindings, Completion, GuestOutcome, Host, HostStep, Instance, JsError, JsResult, JsValue,
     OperationDriver, PromiseState, RestoreOptions, SnapshotValidation, This, Value, Vm, VmError,
-    VmOptions, host_bindings, host_class, host_module, host_state, methods, operation,
+    VmOptions, host_bindings, host_class, host_module, methods, module_exports, operation,
 };
 
 #[path = "signature_fingerprint.rs"]
@@ -104,36 +104,43 @@ mod strategy_fixture {
     strategy_operation!(RejectOperation, "reject", reject, "strategy rejected");
 
     #[host_module(name = "ops")]
-    mod ops {
-        use super::*;
+    struct Ops;
 
+    #[module_exports]
+    impl Ops {
         #[function(name = "pause")]
-        fn pause(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn pause(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(PauseOperation)
         }
 
         #[function(name = "resume")]
-        fn resume(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn resume(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(ResumeOperation)
         }
 
         #[function(name = "withSignal")]
-        fn with_signal(cx: &mut CallCx<'_>, signal: JsValue) -> JsResult<JsValue> {
+        fn with_signal(
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
+            signal: JsValue,
+        ) -> JsResult<JsValue> {
             cx.promise_with_signal(ResumeOperation, &signal)
         }
 
         #[function(name = "abortReason")]
-        fn abort_reason(cx: &mut CallCx<'_>, signal: JsValue) -> JsResult<JsValue> {
+        fn abort_reason(
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
+            signal: JsValue,
+        ) -> JsResult<JsValue> {
             Ok(cx.abort_reason(&signal)?.unwrap_or_else(JsValue::undefined))
         }
 
         #[function(name = "reissue")]
-        fn reissue(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn reissue(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(ReissueOperation)
         }
 
         #[function(name = "reject")]
-        fn reject(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn reject(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(RejectOperation)
         }
     }
@@ -141,9 +148,8 @@ mod strategy_fixture {
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/ops.d.ts",
-            modules: [ops],
+            modules: [Ops],
             classes: [],
-            states: [],
             operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
             services: {
                 LabelServiceKey => Arc::clone(labels),
@@ -436,11 +442,12 @@ mod stale_fixture {
     }
 
     #[host_module(name = "stale")]
-    mod stale {
-        use super::*;
+    struct Stale;
 
+    #[module_exports]
+    impl Stale {
         #[function(name = "stash")]
-        fn stash(cx: &mut CallCx<'_>, value: JsValue) -> JsResult<()> {
+        fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<()> {
             let stash = cx
                 .service::<StashKey>()
                 .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
@@ -449,7 +456,7 @@ mod stale_fixture {
         }
 
         #[function(name = "unstash")]
-        fn unstash(cx: &mut CallCx<'_>) -> JsResult<Instance<Sink>> {
+        fn unstash(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Sink>> {
             let value = cx
                 .service::<StashKey>()
                 .and_then(|stash| stash.lock().expect("stash lock").clone())
@@ -463,9 +470,8 @@ mod stale_fixture {
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
             dts: "../dts/stale.d.ts",
-            modules: [stale],
+            modules: [Stale],
             classes: [Sink],
-            states: [],
             operations: [],
             services: {
                 StashKey => Stash::default(),
@@ -517,11 +523,12 @@ mod guest_call_fixture {
     }
 
     #[host_module(name = "guest")]
-    mod guest {
-        use super::*;
+    struct Guest;
 
+    #[module_exports]
+    impl Guest {
         #[function(name = "later")]
-        fn later(cx: &mut CallCx<'_>, callee: JsValue) -> JsResult<HostStep> {
+        fn later(cx: &mut yield_vm::ModuleCx<'_, Self>, callee: JsValue) -> JsResult<HostStep> {
             cx.request_call(
                 callee,
                 JsValue::undefined(),
@@ -532,21 +539,21 @@ mod guest_call_fixture {
         }
 
         #[function(name = "stash")]
-        fn stash(cx: &mut CallCx<'_>, callee: JsValue) -> JsResult<()> {
-            let request = later(cx, callee)?;
+        fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, callee: JsValue) -> JsResult<()> {
+            let request = Self::later(cx, callee)?;
             *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "stashGc")]
-        fn stash_gc(cx: &mut CallCx<'_>) -> JsResult<()> {
+        fn stash_gc(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             let request = cx.request_gc(vec![], unexpected_resume)?;
             *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "replay")]
-        fn replay(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+        fn replay(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
             Ok(cx
                 .service::<StashKey>()
                 .unwrap()
@@ -557,12 +564,12 @@ mod guest_call_fixture {
         }
 
         #[function(name = "fault")]
-        fn fault(cx: &mut CallCx<'_>) -> JsResult<()> {
+        fn fault(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             Err(JsError::Fault(cx.fault("guest host fault")))
         }
 
         #[function(name = "mark")]
-        fn mark(cx: &mut CallCx<'_>) -> JsResult<()> {
+        fn mark(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             cx.service::<RunsKey>()
                 .unwrap()
                 .fetch_add(1, Ordering::Relaxed);
@@ -570,7 +577,11 @@ mod guest_call_fixture {
         }
 
         #[function(name = "twice")]
-        fn twice(cx: &mut CallCx<'_>, callee: JsValue, seed: JsValue) -> JsResult<HostStep> {
+        fn twice(
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
+            callee: JsValue,
+            seed: JsValue,
+        ) -> JsResult<HostStep> {
             cx.request_call(
                 callee.clone(),
                 cx.this_value(),
@@ -582,7 +593,7 @@ mod guest_call_fixture {
 
         #[function(name = "catchThenCompare")]
         async fn catch_then_compare(
-            cx: &mut CallCx<'_>,
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
             original: JsValue,
             throwing: JsValue,
             returning: JsValue,
@@ -628,9 +639,8 @@ mod guest_call_fixture {
         let runs = Arc::new(AtomicUsize::new(0));
         let bindings = host_bindings! {
             dts: "../dts/guest.d.ts",
-            modules: [guest],
+            modules: [Guest],
             classes: [],
-            states: [],
             operations: [],
             services: {
                 StashKey => Stash::default(),
@@ -743,12 +753,12 @@ mod counter_fixture {
     use super::*;
     use yield_harness::Wait;
 
-    #[host_state(module = "counter", schema = 1, init = CounterState::new, encode = CounterState::encode_payload, decode = CounterState::decode_payload)]
-    struct CounterState {
+    #[host_module(name = "counter", schema = 1, init = Self::new, encode = Self::encode_payload, decode = Self::decode_payload)]
+    struct Counter {
         count: u32,
     }
 
-    impl CounterState {
+    impl Counter {
         fn new() -> Self {
             Self { count: 0 }
         }
@@ -768,30 +778,27 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "counter")]
-    mod counter {
-        use super::*;
-
+    #[module_exports]
+    impl Counter {
         #[function(name = "bump")]
-        fn bump(cx: &mut CallCx<'_>) -> JsResult<()> {
-            cx.state::<CounterState>()?.count += 1;
+        fn bump(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
+            cx.state().count += 1;
             Ok(())
         }
 
         #[function(name = "value")]
-        fn value(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
-            Ok(JsValue::number(f64::from(
-                cx.state::<CounterState>()?.count,
-            )))
+        fn value(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
+            Ok(JsValue::number(f64::from(cx.state().count)))
         }
     }
 
     #[host_module(name = "test")]
-    mod test {
-        use super::*;
+    struct TestModule;
 
+    #[module_exports]
+    impl TestModule {
         #[function(name = "wait")]
-        fn wait(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+        fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
             let label = cx
                 .string(&arg)?
                 .to_utf8()
@@ -803,9 +810,8 @@ mod counter_fixture {
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
-            modules: [counter, test],
+            modules: [Counter, TestModule],
             classes: [],
-            states: [CounterState],
             operations: [Wait],
             services: {
                 LabelServiceKey => Arc::clone(labels),
@@ -820,6 +826,7 @@ fn module_state_survives_restore() {
     let source = r#"
 import { bump, value } from "counter";
 import { wait } from "test";
+export function read() { return value(); }
 export async function run() {
   bump();
   bump();
@@ -839,8 +846,44 @@ export async function run() {
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
-    assert_eq!(snapshot.module_states.len(), 1);
-    assert_eq!(snapshot.module_states[0].module, "counter");
+    let [counter, test] = snapshot.module_states.as_slice() else {
+        panic!("expected exactly one record per registered module");
+    };
+    assert_eq!(counter.module, "counter");
+    assert_eq!(counter.payload.bytes, 2u32.to_le_bytes());
+    assert_eq!(test.module, "test");
+    assert_eq!(test.payload.schema, 1);
+    assert!(test.payload.bytes.is_empty());
+
+    let mut second = Vm::new(build.clone(), &mut host, Default::default()).expect("second VM");
+    assert_eq!(
+        second.start(&mut host, "read", vec![]).unwrap(),
+        Value::number(0.0)
+    );
+
+    let mut missing = snapshot.clone();
+    missing.module_states.pop();
+    let mut wrong_schema = snapshot.clone();
+    wrong_schema.module_states[0].payload.schema += 1;
+    let mut nonempty = snapshot.clone();
+    nonempty.module_states[1].payload.bytes.push(0);
+    for (invalid, expected) in [
+        (missing, "module state count mismatch"),
+        (wrong_schema, "state payload schema mismatch"),
+        (nonempty, "unexpected module payload"),
+    ] {
+        let options = RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                Vm::restore(invalid, build.clone(), &mut host, options),
+                Err(VmError::InvalidSnapshot(message)) if message.contains(expected)
+            ),
+            "restore must reject {expected}"
+        );
+    }
     drop(vm);
 
     let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
@@ -887,11 +930,15 @@ mod geom_fixture {
     }
 
     #[host_module(name = "geom")]
-    mod geom {
-        use super::*;
+    struct Geom;
 
+    #[module_exports]
+    impl Geom {
         #[constructor(name = "Point", class = Point)]
-        fn point(cx: &mut CallCx<'_>, value: JsValue) -> JsResult<Instance<Point>> {
+        fn point(
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
+            value: JsValue,
+        ) -> JsResult<Instance<Point>> {
             let x = cx.number(&value)?;
             cx.alloc(Point { x })
         }
@@ -900,9 +947,8 @@ mod geom_fixture {
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
             dts: "../dts/geom.d.ts",
-            modules: [geom],
+            modules: [Geom],
             classes: [Point],
-            states: [],
             operations: [],
             services: {},
         }
@@ -940,11 +986,12 @@ mod loose_fixture {
     }
 
     #[host_module(name = "loose")]
-    mod loose {
-        use super::*;
+    struct LooseModule;
 
+    #[module_exports]
+    impl LooseModule {
         #[function(name = "make")]
-        fn make(cx: &mut CallCx<'_>) -> JsResult<Instance<Loose>> {
+        fn make(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Loose>> {
             cx.alloc(Loose { _n: 1 })
         }
     }
@@ -952,9 +999,8 @@ mod loose_fixture {
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
             dts: "../dts/loose.d.ts",
-            modules: [loose],
+            modules: [LooseModule],
             classes: [Loose],
-            states: [],
             operations: [],
             services: {},
         }
@@ -1095,16 +1141,21 @@ mod inherit_fixture {
     }
 
     #[host_module(name = "inherit")]
-    mod inherit {
-        use super::*;
+    struct Inherit;
 
+    #[module_exports]
+    impl Inherit {
         #[function(name = "wait")]
-        fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(InheritWait)
         }
 
         #[function(name = "assert")]
-        fn assert(cx: &mut CallCx<'_>, value: JsValue, _message: Option<JsValue>) -> JsResult<()> {
+        fn assert(
+            cx: &mut yield_vm::ModuleCx<'_, Self>,
+            value: JsValue,
+            _message: Option<JsValue>,
+        ) -> JsResult<()> {
             if value.truthy() {
                 return Ok(());
             }
@@ -1112,7 +1163,7 @@ mod inherit_fixture {
         }
 
         #[constructor(name = "Base", class = Base)]
-        fn base(cx: &mut CallCx<'_>) -> JsResult<Instance<Base>> {
+        fn base(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Base>> {
             let sidecar = cx.alloc(Derived)?;
             sidecar.set_value(cx, JsValue::number(2.0))?;
             let base = cx.alloc(Base { payload_value: 9 })?;
@@ -1123,7 +1174,7 @@ mod inherit_fixture {
         }
 
         #[constructor(name = "Derived", class = Derived)]
-        fn derived(cx: &mut CallCx<'_>) -> JsResult<Instance<Derived>> {
+        fn derived(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Derived>> {
             let derived = cx.alloc(Derived)?;
             derived.set_value(cx, JsValue::number(2.0))?;
             Ok(derived)
@@ -1133,9 +1184,8 @@ mod inherit_fixture {
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/inherit.d.ts",
-            modules: [inherit],
+            modules: [Inherit],
             classes: [Base, Derived],
-            states: [],
             operations: [InheritWait],
             services: {
                 LabelServiceKey => Arc::clone(labels),
@@ -1309,16 +1359,17 @@ mod subset_fixture {
     use super::*;
 
     #[host_module(name = "subset")]
-    mod subset {
-        use super::*;
+    struct Subset;
 
+    #[module_exports]
+    impl Subset {
         #[function(name = "hidden")]
-        fn hidden(_cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn hidden(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             Ok(JsValue::number(1.0))
         }
 
         #[function(name = "alpha")]
-        fn alpha(_cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn alpha(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             Ok(JsValue::number(4.0))
         }
     }
@@ -1326,9 +1377,8 @@ mod subset_fixture {
     pub(super) fn bindings() -> Bindings {
         host_bindings! {
             dts: "../dts/subset.d.ts",
-            modules: [subset],
+            modules: [Subset],
             classes: [],
-            states: [],
             operations: [],
             services: {},
         }

@@ -381,16 +381,19 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
 }
 
 #[yield_vm::host_module(name = "chain")]
-mod chain {
-    use yield_harness::Timer;
-    use yield_vm::binding::CallCx;
-    use yield_vm::{JsResult, JsValue};
+struct Chain;
 
+#[yield_vm::module_exports]
+impl Chain {
     #[function(name = "start")]
-    fn start(cx: &mut CallCx<'_>, cb: JsValue, mode: JsValue) -> JsResult<JsValue> {
+    fn start(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        cb: JsValue,
+        mode: JsValue,
+    ) -> yield_vm::JsResult<JsValue> {
         cx.spawn(async move {
             let delay = if cx.number(&mode)? == 1.0 { 10.0 } else { 90.0 };
-            let timer = Timer::from_delay(cx, &JsValue::number(delay))?;
+            let timer = yield_harness::Timer::from_delay(cx, &JsValue::number(delay))?;
             match delay {
                 10.0 => {
                     cx.effect(timer).await?;
@@ -401,15 +404,18 @@ mod chain {
             }
             cx.call(cb.clone(), JsValue::undefined(), Vec::new())
                 .await?;
-            cx.effect(Timer::from_delay(cx, &JsValue::number(20.0))?)
-                .await?;
+            cx.effect(yield_harness::Timer::from_delay(
+                cx,
+                &JsValue::number(20.0),
+            )?)
+            .await?;
             cx.call(cb, JsValue::undefined(), Vec::new()).await?;
             Ok(())
         })
     }
 
     #[function(name = "cancel")]
-    fn cancel(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
+    fn cancel(cx: &mut yield_vm::ModuleCx<'_, Self>, handle: JsValue) -> yield_vm::JsResult<()> {
         cx.cancel_task(&handle)
     }
 }
@@ -436,7 +442,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     let clock = Arc::new(yield_harness::FakeClock::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/chain.d.ts",
-        modules: [chain], classes: [], states: [], operations: [Timer],
+        modules: [Chain], classes: [], operations: [Timer],
         services: {
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },

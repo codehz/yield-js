@@ -202,29 +202,34 @@ flowchart LR
 
 每份模块描述声明模块名、导出函数及其签名、类的槽布局与方法、可选的构造器导出，以及所用 codec 和 operation 类型。编译器从描述中取得导入清单，VM 装载时把声明标识链接到注册的实现。函数和方法都是一等 JS 函数值；读属性走普通原型链，调用时传入实际 `this`。宿主不用实现 `call_native`、按名字读取原生属性，或为每个实例制造方法函数。
 
-下面以 `test` 模块的 `expect` 导出为例：`Matcher` 在模块内静态注册，只有工厂函数向 JS 返回其实例。Rust 宏语法仅示意，不规定最终命名或要求使用 builder：
+下面以 `test` 模块的 `expect` 导出为例：`Matcher` 与模块类型一起静态注册，只有工厂函数向 JS 返回其实例。Rust 宏示例：
 
 ```rust
-#[host_module("test")]
-mod test {
-    #[host_class]
-    struct Matcher {
-        #[js_slot]
-        actual: JsValue,
-    }
+#[host_module(name = "test")]
+struct TestModule;
 
-    #[export]
-    fn expect(cx: &mut CallCx, actual: JsValue) -> JsResult<Instance<Matcher>> {
-        Matcher::alloc(cx, MatcherSlots { actual })
+#[module_exports]
+impl TestModule {
+    #[function(name = "expect")]
+    fn expect(cx: &mut ModuleCx<'_, Self>, actual: JsValue) -> JsResult<Instance<Matcher>> {
+        let instance = cx.alloc(Matcher)?;
+        instance.set_actual(cx, actual)?;
+        Ok(instance)
     }
+}
 
-    #[methods(Matcher)]
-    impl Matcher {
-        #[method(name = "toEqual")]
-        fn to_equal(cx: &mut CallCx, this: This<Matcher>, expected: JsValue) -> JsResult<()> {
-            let actual = this.actual(cx);
-            check_own_data_equal(cx, actual, expected)
-        }
+#[host_class(tag = "Matcher", methods)]
+struct Matcher {
+    #[js_slot]
+    actual: JsValue,
+}
+
+#[methods(Matcher)]
+impl Matcher {
+    #[method(name = "toEqual")]
+    fn to_equal(cx: &mut CallCx<'_>, this: This<Matcher>, expected: JsValue) -> JsResult<()> {
+        let actual = this.actual(cx)?;
+        check_own_data_equal(cx, actual, expected)
     }
 }
 ```

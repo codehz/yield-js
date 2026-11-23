@@ -4,7 +4,7 @@ use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
 use yield_vm::{
     Bindings, Host, Instance, JsResult, JsValue, RestoreOptions, SnapshotValidation, This, Value,
-    Vm, host_bindings, host_class, host_module, methods,
+    Vm, host_bindings, host_class, host_module, methods, module_exports,
 };
 
 #[test]
@@ -70,11 +70,15 @@ impl EventNode {
 }
 
 #[host_module(name = "event-fixture")]
-mod fixture {
-    use super::*;
+struct EventModule;
 
+#[module_exports]
+impl EventModule {
     #[function(name = "node")]
-    fn node(cx: &mut CallCx<'_>, parent: JsValue) -> JsResult<Instance<EventNode>> {
+    fn node(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        parent: JsValue,
+    ) -> JsResult<Instance<EventNode>> {
         let node = cx.alloc(EventNode)?;
         node.set_parent(cx, parent)?;
         Ok(node)
@@ -82,7 +86,7 @@ mod fixture {
 
     #[function(name = "dispatch")]
     async fn dispatch(
-        cx: &mut CallCx<'_>,
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
         node: JsValue,
         detail: JsValue,
         bubbles: JsValue,
@@ -101,8 +105,8 @@ impl EventHost {
         Self(Arc::new(
             host_bindings! {
                 dts: "../dts/event-fixture.d.ts",
-                modules: [fixture], classes: [EventNode],
-                states: [], operations: [], services: {},
+                modules: [EventModule], classes: [EventNode],
+                operations: [], services: {},
             }
             .unwrap(),
         ))

@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use super::support::{compile_main, declared, json_round_trip};
 use yield_harness::{FakeClock, TestHost, Timer, build};
-use yield_vm::binding::{CallCx, NativeTarget};
+use yield_vm::binding::NativeTarget;
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{
     Bindings, Host, JsResult, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation,
-    Value, Vm, VmError, host_bindings, host_module,
+    Value, Vm, VmError, host_bindings, host_module, module_exports,
 };
 
 const TIMERS: &str = r#"
@@ -270,13 +270,14 @@ macro_rules! timer_contract {
             use super::*;
 
             #[host_module(name = "contract")]
-            mod api {
-                use super::*;
+            struct Api;
 
+            #[module_exports]
+            impl Api {
                 $($before)*
 
                 #[function(name = "schedule")]
-                fn schedule(cx: &mut CallCx<'_>, cb: JsValue, $extra: JsValue) -> JsResult<JsValue> {
+                fn schedule(cx: &mut yield_vm::ModuleCx<'_, Self>, cb: JsValue, $extra: JsValue) -> JsResult<JsValue> {
                     let timer = Timer::from_delay(cx, &JsValue::number(10.0))?;
                     cx.spawn(async move {
                         cx.effect(timer).await?;
@@ -291,9 +292,8 @@ macro_rules! timer_contract {
             pub(super) fn bindings(clock: &Arc<FakeClock>) -> Bindings {
                 host_bindings! {
                     dts: "../dts/contract.d.ts",
-                    modules: [api],
+                    modules: [Api],
                     classes: [],
-                    states: [],
                     operations: [Timer],
                     services: {
                         yield_harness::timer::FakeClockKey => Arc::clone(clock),
@@ -306,17 +306,17 @@ macro_rules! timer_contract {
 
 timer_contract!(
     original, _extra, (),
-    (#[function(name = "other")] fn other(_cx: &mut CallCx<'_>) -> JsResult<()> { Ok(()) }),
+    (#[function(name = "other")] fn other(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> { Ok(()) }),
     Vec::new()
 );
 timer_contract!(
     reordered, _extra,
-    (#[function(name = "other")] fn other(_cx: &mut CallCx<'_>) -> JsResult<()> { Ok(()) }),
+    (#[function(name = "other")] fn other(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> { Ok(()) }),
     (), Vec::new()
 );
 timer_contract!(
     extra_slot, extra, (),
-    (#[function(name = "other")] fn other(_cx: &mut CallCx<'_>) -> JsResult<()> { Ok(()) }),
+    (#[function(name = "other")] fn other(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> { Ok(()) }),
     Vec::from([extra])
 );
 

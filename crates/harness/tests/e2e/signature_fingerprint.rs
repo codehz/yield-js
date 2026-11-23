@@ -6,7 +6,7 @@ use yield_harness::{LabelService, LabelServiceKey, Wait};
 use yield_vm::binding::{CallCx, ExportDecl};
 use yield_vm::{
     Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
-    VmError, host_bindings, host_class, host_module, methods,
+    VmError, host_bindings, host_class, host_module, methods, module_exports,
 };
 
 mod original {
@@ -19,7 +19,10 @@ mod original {
     struct Auxiliary;
 
     #[host_module(name = "auxiliary")]
-    mod extra {}
+    struct ExtraModule;
+
+    #[module_exports]
+    impl ExtraModule {}
 
     #[methods(Entity)]
     impl Entity {
@@ -30,16 +33,17 @@ mod original {
     }
 
     #[host_module(name = "contract")]
-    mod api {
-        use super::*;
+    struct Api;
 
+    #[module_exports]
+    impl Api {
         #[function(name = "probe")]
-        fn probe(_: &mut CallCx<'_>, value: JsValue) -> JsResult<JsValue> {
+        fn probe(_: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<JsValue> {
             Ok(value)
         }
 
         #[function(name = "wait")]
-        fn wait(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+        fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
             cx.promise(Wait {
                 label: "pending".into(),
             })
@@ -49,7 +53,7 @@ mod original {
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
         host_bindings! {
             dts: "../dts/auxiliary-contract.d.ts",
-            modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
+            modules: [Api, ExtraModule], classes: [Entity, Auxiliary], operations: [Wait],
             services: {
                 LabelServiceKey => Arc::clone(labels),
             },
@@ -69,7 +73,10 @@ macro_rules! independent_contract {
             struct Extra;
 
             #[host_module(name = "auxiliary")]
-            mod extra {}
+            struct ExtraModule;
+
+            #[module_exports]
+            impl ExtraModule {}
 
 
             #[methods(Entity)]
@@ -79,22 +86,23 @@ macro_rules! independent_contract {
             }
 
             #[host_module(name = "contract")]
-            mod alternate_api {
-                use super::*;
+            struct AlternateApi;
 
+            #[module_exports]
+            impl AlternateApi {
                 #[function(name = "wait")]
-                fn schedule(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+                fn schedule(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
                     cx.promise(Wait { label: "pending".into() })
                 }
 
                 #[function(name = "probe")]
-                fn renamed_probe($probe_cx: &mut CallCx<'_>, $value: $($arg)+) -> JsResult<$($result)+> $probe
+                fn renamed_probe($probe_cx: &mut yield_vm::ModuleCx<'_, Self>, $value: $($arg)+) -> JsResult<$($result)+> $probe
             }
 
             pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
                 host_bindings! {
                     dts: "../dts/auxiliary-contract.d.ts",
-                    modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
+                    modules: [ExtraModule, AlternateApi], classes: [Extra, Entity], operations: [Wait],
                     services: {
                         LabelServiceKey => Arc::clone(labels),
                     },

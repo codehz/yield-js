@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`design.md`](design.md) 中「静态模块与原型」「JS 值槽与非 JS 数据」「Operation 的中断与恢复」三节；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModuleState`、`Operation`；`binding/call.rs` 提供 `JsValue` 与 `CallCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
+> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `ModuleExports`、`Operation`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`；VM 持有原型、实例槽、payload、模块状态和 operation 记录；旧 `Host::call` / `Host::call_native` / `NativeKey` / `HostValue` / `HostData` 已删除。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
 
 ## 1. 目标与范围
 
@@ -51,21 +51,25 @@
 
 ### 4.1 模块描述
 
-模块描述由 `#[host_module]` 生成，`host_bindings!` 一次性链接模块、类、状态、operation 与服务，并读取 `dts` 指定的声明文件。`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
+`#[host_module]` 在 Rust 类型上声明唯一模块名、每台 VM 的状态和 codec；`#[module_exports]` 标注同一类型的一个 inherent impl。`host_bindings!` 按类型一次性链接模块、类、operation 与服务，并读取 `dts` 指定的声明文件。`dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
 ```rust
-ModuleDecl {
-    name: "test",
-    exports: [
-        Function { name: "expect", signature: (JsValue) -> Instance<Matcher> },
-        Constant { name: "version", kind: JsString },
-    ],
-    classes:  [Matcher],
-    state:    None,
+#[host_module(name = "demo")]
+struct Demo;
+
+#[module_exports]
+impl Demo {
+    #[function(name = "seed")]
+    fn seed(_: &mut ModuleCx<'_, Self>) -> JsResult<JsValue> {
+        Ok(JsValue::number(10.0))
+    }
+
+    #[constant(name = "version")]
+    const VERSION: &str = "1";
 }
 ```
 
-- 编译器用 `CompileOptions::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与 `#[host_module]` 生成的 `__YIELD_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的值（它们不进入命名空间导出）。
+- 编译器用 `CompileOptions::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与 同一类型的 `HostModule::NAME` 和 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的值（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
 - 声明可以在多个 VM 之间共享，但**实例、原型和模块状态每 VM 一份**。声明的数据结构必须 `Send + Sync`。
 
@@ -113,7 +117,7 @@ impl Matcher {
 
 绑定声明在链接期计算**指纹**，写入快照头部；恢复时用本进程的声明重新计算并比对。指纹只覆盖语义字段：
 
-- 模块名、导出名及种类；
+- 模块名、导出名及种类、每个模块的状态 schema 与槽名字/顺序/种类；
 - 类标签、槽名字/顺序/种类、payload schema 版本与 codec 标识；
 - 成员名、种类（方法/访问器/数据）、参数与返回种类；
 - operation 类型、状态 schema 版本、恢复策略；
@@ -173,7 +177,7 @@ this.set_actual(cx, value);                   // 写槽：替换强引用
 this.pending(cx).push(callback);              // JsList 槽
 ```
 
-- 槽写只能通过 `CallCx`（或恢复期的等价上下文）。宿主既然拿不到底层对象表，就不存在绕过 VM 的写入路径。
+- 实例槽写入通过 `CallCx`，模块槽写入通过 `ModuleCx`（或恢复期的等价上下文）。宿主既然拿不到底层对象表，就不存在绕过 VM 的写入路径。
 - 槽是强边，参与与普通属性相同的可达性遍历：保留身份、别名和环；实例本身不是根，只有从模块命名空间、模块状态、脚本根或 operation 可达时才进入快照。
 - 槽的读取不触发 getter 或 Proxy trap；它只是对象图边。
 - 槽布局在声明期固定，快照按声明顺序写值。恢复时先建立对象身份，再写入槽；缺失或数量不符即拒绝。
@@ -203,9 +207,8 @@ trait PayloadCodec<T> {
 ```rust
 host_bindings! {
     dts: "test.d.ts",
-    modules: [test],
+    modules: [TestModule],
     classes: [Node],
-    states: [],
     operations: [Wait],
     services: {
         CountersKey => counters,
@@ -229,7 +232,8 @@ host_bindings! {
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
-- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。
+- 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。没有 Rust payload 字段时可省略 `schema`、`init`、`encode`、`decode` 整组，使用 schema `1` 和空 payload；有字段时必须显式指定整组。
+- 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
 ## 6. 调用协议
 

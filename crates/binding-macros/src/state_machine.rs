@@ -9,7 +9,7 @@ use syn::{
 };
 
 pub(super) fn lower(signature: &Signature, block: &Block) -> syn::Result<TokenStream> {
-    lower_impl(signature, &[], block, None, false).map(|(body, _)| body)
+    lower_impl(signature, &[], block, None, None, false).map(|(body, _)| body)
 }
 
 pub(super) fn lower_method(
@@ -17,7 +17,7 @@ pub(super) fn lower_method(
     block: &Block,
     class: &Type,
 ) -> syn::Result<TokenStream> {
-    lower_impl(signature, &[], block, Some(class), false).map(|(body, _)| body)
+    lower_impl(signature, &[], block, Some(class), None, false).map(|(body, _)| body)
 }
 
 pub(super) fn lower_spawn(
@@ -26,7 +26,17 @@ pub(super) fn lower_spawn(
     background: &Block,
     class: Option<&Type>,
 ) -> syn::Result<(TokenStream, TokenStream)> {
-    lower_impl(signature, prefix, background, class, true)
+    lower_impl(signature, prefix, background, class, None, true)
+}
+
+pub(super) fn lower_module(
+    signature: &Signature,
+    prefix: &[Stmt],
+    block: &Block,
+    module: &Type,
+    spawn: bool,
+) -> syn::Result<(TokenStream, TokenStream)> {
+    lower_impl(signature, prefix, block, None, Some(module), spawn)
 }
 
 // Each node runs one ordinary Rust fragment. Synchronous edges move live
@@ -37,6 +47,7 @@ fn lower_impl<'a>(
     prefix: &'a [Stmt],
     block: &'a Block,
     class: Option<&Type>,
+    module: Option<&Type>,
     spawn: bool,
 ) -> syn::Result<(TokenStream, TokenStream)> {
     let Some(FnArg::Typed(first)) = signature.inputs.first() else {
@@ -102,6 +113,7 @@ fn lower_impl<'a>(
         graph: &graph,
         live: &live,
         cx: cx_ident,
+        linked: spawn || module.is_some(),
         runner: generated("run", 0),
         state: generated("state", 0),
         pending: generated("pending", 0),
@@ -116,7 +128,10 @@ fn lower_impl<'a>(
     let pending = &r.pending;
     let cx_pat = &first.pat;
     let step = quote!(::yield_vm::HostStep);
-    let context = quote!(&mut ::yield_vm::binding::CallCx<'_>);
+    let context = match module {
+        Some(ty) => quote!(&mut ::yield_vm::ModuleCx<'_, #ty>),
+        None => quote!(&mut ::yield_vm::binding::CallCx<'_>),
+    };
     let guest = quote!(::yield_vm::GuestOutcome);
     let mut used_slots = std::collections::BTreeSet::new();
     for node_live in &live {
@@ -249,22 +264,29 @@ fn lower_impl<'a>(
                 })
                 .unwrap_or_else(|| quote!(None));
             let kind = Ident::new(boundary.kind, Span::mixed_site());
+            let resume = if let Some(ty) = module {
+                quote!(::yield_vm::__macro_support::ResumeCall::Module(|cx, outcome| {
+                    ::yield_vm::__macro_support::with_module::<#ty>(cx, |cx| #runner(cx, None, #index, outcome))
+                }))
+            } else {
+                quote!(::yield_vm::__macro_support::ResumeCall::Plain(|cx, outcome| #runner(cx, None, #index, outcome)))
+            };
             quote!(::yield_vm::__macro_support::CpsStage {
-                resume: |cx, outcome| #runner(cx, None, #index, outcome),
+                resume: #resume,
                 kind: ::yield_vm::__macro_support::CpsBoundary::#kind,
                 slots: &[#(#slots),*],
                 receiver: #receiver,
             })
         });
-    let descriptor = if spawn {
+    let descriptor = if spawn || module.is_some() {
         let stages_ident = generated("stages", 0);
         quote!({ #helper const #stages_ident: &[::yield_vm::__macro_support::CpsStage] = &[#(#stages),*]; #stages_ident })
     } else {
         quote!(&[])
     };
     Ok((
-        replace_self(quote!({ #helper #call }), class),
-        replace_self(descriptor, class),
+        replace_self(quote!({ #helper #call }), module.or(class)),
+        replace_self(descriptor, module.or(class)),
     ))
 }
 
@@ -298,6 +320,7 @@ struct Render<'a, 'ast> {
     graph: &'a Graph<'ast>,
     live: &'a [Live],
     cx: &'a Ident,
+    linked: bool,
     runner: Ident,
     state: Ident,
     pending: Ident,
@@ -451,7 +474,7 @@ impl Render<'_, '_> {
         });
         let saved = quote!(::std::vec![#(#saved),*]);
         let runner = &self.runner;
-        let linked = self.graph.spawn;
+        let linked = self.linked;
         let index = stage as u32;
         let resume = quote!(|cx, outcome| #runner(cx, None, #stage, outcome));
         let request = match effect {
@@ -484,7 +507,7 @@ impl Render<'_, '_> {
                 quote!({ let #state = #op; #cx.__linked_effect(#state, #saved, #index) })
             }
         };
-        if linked {
+        if self.graph.spawn {
             let pending = &self.pending;
             quote!(#pending = Some(#request?); return Ok(());)
         } else {
@@ -982,7 +1005,8 @@ impl<'a> Graph<'a> {
                 for arg in args {
                     self.scan_expr(node, env, arg.as_ref())?;
                 }
-                "Dispatch"
+                // Dispatch invokes a fixed intrinsic through the guest call action.
+                "Call"
             }
             Effect::Gc => "Gc",
             Effect::External(op) => {

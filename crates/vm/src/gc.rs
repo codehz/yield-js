@@ -298,7 +298,7 @@ impl Vm {
         for class in &self.host_classes {
             tracer.mark_object(class.prototype)?;
         }
-        for state in self.module_states.iter().flatten() {
+        for state in &self.module_states {
             for slot in &state.slots {
                 tracer.mark_slot(slot)?;
             }

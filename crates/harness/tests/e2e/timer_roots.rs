@@ -169,25 +169,36 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
 }
 
 #[yield_vm::host_module(name = "repeat_timer")]
-mod repeat_timer {
-    use yield_harness::Timer;
-    use yield_vm::binding::CallCx;
-    use yield_vm::{JsResult, JsValue};
+struct RepeatTimer;
 
+#[yield_vm::module_exports]
+impl RepeatTimer {
     #[function(name = "start")]
-    fn start(cx: &mut CallCx<'_>, callback: JsValue) -> JsResult<JsValue> {
+    fn start(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        callback: JsValue,
+    ) -> yield_vm::JsResult<JsValue> {
         cx.spawn(async move {
-            cx.effect(Timer::from_delay(cx, &JsValue::number(10.0))?)
-                .await?;
+            cx.effect(yield_harness::Timer::from_delay(
+                cx,
+                &JsValue::number(10.0),
+            )?)
+            .await?;
             cx.call(callback, JsValue::undefined(), Vec::new()).await?;
-            cx.effect(Timer::from_delay(cx, &JsValue::number(20.0))?)
-                .await?;
+            cx.effect(yield_harness::Timer::from_delay(
+                cx,
+                &JsValue::number(20.0),
+            )?)
+            .await?;
             Ok(())
         })
     }
 
     #[function(name = "cancelDelayedTask")]
-    fn cancel_delayed_task(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
+    fn cancel_delayed_task(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        handle: JsValue,
+    ) -> yield_vm::JsResult<()> {
         cx.cancel_task(&handle)
     }
 }
@@ -213,7 +224,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     let clock = Arc::new(FakeClock::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/repeat_timer.d.ts",
-        modules: [repeat_timer], classes: [], states: [], operations: [Timer],
+        modules: [RepeatTimer], classes: [], operations: [Timer],
         services: {
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },

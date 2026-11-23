@@ -10,3 +10,7 @@ declare module "branch" {
     export function cancel(handle: unknown): void;
     export function early(mode: unknown): unknown;
 }
+
+declare module "mirror" {
+    export function choose(): unknown;
+}

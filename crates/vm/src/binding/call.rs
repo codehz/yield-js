@@ -231,6 +231,139 @@ impl<T: HostClass> This<T> {
 // ---------------------------------------------------------------------------
 // Calls
 
+/// Runtime-only input to a typed module trampoline.
+#[doc(hidden)]
+pub struct ModuleDispatch<'a> {
+    call: CallCx<'a>,
+    owner: NativeTarget,
+}
+
+impl<'a> ModuleDispatch<'a> {
+    pub(crate) fn new(call: CallCx<'a>, owner: NativeTarget) -> Self {
+        Self { call, owner }
+    }
+}
+
+#[doc(hidden)]
+pub fn with_module<'a, M: HostModule>(
+    dispatch: ModuleDispatch<'a>,
+    run: impl FnOnce(&mut ModuleCx<'a, M>) -> JsResult<HostStep>,
+) -> (CallCx<'a>, JsResult<HostStep>) {
+    let ModuleDispatch { call, owner } = dispatch;
+    let NativeTarget::Export(export) = owner else {
+        return (
+            call,
+            Err(JsError::fault("typed callback is not a module export")),
+        );
+    };
+    let module = export.module as usize;
+    if call.bindings.state_type(module) != Some(std::any::TypeId::of::<M>())
+        || !call
+            .vm
+            .module_states
+            .get(module)
+            .is_some_and(|state| state.payload.is::<M>())
+    {
+        return (
+            call,
+            Err(JsError::fault("module state payload type mismatch")),
+        );
+    }
+    let mut cx = ModuleCx {
+        call,
+        module,
+        marker: std::marker::PhantomData,
+    };
+    let result = run(&mut cx);
+    (cx.call, result)
+}
+
+/// A host export's capability to access its own per-VM module state.
+pub struct ModuleCx<'a, M: HostModule> {
+    call: CallCx<'a>,
+    module: usize,
+    marker: std::marker::PhantomData<M>,
+}
+
+impl<'a, M: HostModule> std::ops::Deref for ModuleCx<'a, M> {
+    type Target = CallCx<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.call
+    }
+}
+
+impl<M: HostModule> std::ops::DerefMut for ModuleCx<'_, M> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.call
+    }
+}
+
+impl<M: HostModule> ModuleCx<'_, M> {
+    pub fn state(&mut self) -> &mut M {
+        self.call.vm.module_states[self.module]
+            .payload
+            .downcast_mut::<M>()
+            .expect("module payload validated before dispatch")
+    }
+
+    pub fn state_slot(&self, index: usize) -> JsResult<JsValue> {
+        match self.call.vm.module_states[self.module].slots.get(index) {
+            Some(crate::runtime::HostSlot::Js(value)) => Ok(self.js_value(value.clone())),
+            Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
+                "module state slot is a JavaScript list",
+            ))),
+            None => Err(JsError::Fault(HostFault::new(
+                "module state slot index out of range",
+            ))),
+        }
+    }
+
+    pub fn set_state_slot(&mut self, index: usize, value: JsValue) -> JsResult<()> {
+        self.check_value(&value)?;
+        match self.call.vm.module_states[self.module].slots.get_mut(index) {
+            Some(crate::runtime::HostSlot::Js(slot)) => {
+                *slot = value.value;
+                Ok(())
+            }
+            Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
+                "module state slot is a JavaScript list",
+            ))),
+            None => Err(JsError::Fault(HostFault::new(
+                "module state slot index out of range",
+            ))),
+        }
+    }
+
+    pub fn state_list_len(&self, index: usize) -> JsResult<usize> {
+        match self.call.vm.module_states[self.module].slots.get(index) {
+            Some(crate::runtime::HostSlot::JsList(values)) => Ok(values.len()),
+            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
+                "module state slot is a JavaScript value",
+            ))),
+            None => Err(JsError::Fault(HostFault::new(
+                "module state slot index out of range",
+            ))),
+        }
+    }
+
+    pub fn state_list_push(&mut self, index: usize, value: JsValue) -> JsResult<()> {
+        self.check_value(&value)?;
+        match self.call.vm.module_states[self.module].slots.get_mut(index) {
+            Some(crate::runtime::HostSlot::JsList(values)) => {
+                values.push(value.value);
+                Ok(())
+            }
+            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
+                "module state slot is a JavaScript value",
+            ))),
+            None => Err(JsError::Fault(HostFault::new(
+                "module state slot index out of range",
+            ))),
+        }
+    }
+}
+
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut Vm,
     pub(crate) roots: &'a ActiveRoots<'a>,
@@ -501,129 +634,6 @@ impl<'a> CallCx<'a> {
 
     pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
         self.bindings.service::<K>()
-    }
-
-    fn state_module<S: crate::binding::HostModuleState>(&self) -> JsResult<usize> {
-        self.bindings.state_module(S::MODULE).ok_or_else(|| {
-            JsError::Fault(HostFault::new(format!(
-                "module state for {:?} is not declared",
-                S::MODULE
-            )))
-        })
-    }
-
-    pub fn state<S: crate::binding::HostModuleState>(&mut self) -> JsResult<&mut S> {
-        let module = self.state_module::<S>()?;
-        let state = self
-            .vm
-            .module_states
-            .get_mut(module)
-            .and_then(Option::as_mut)
-            .ok_or_else(|| JsError::Fault(HostFault::new("module state is missing")))?;
-        state
-            .payload
-            .downcast_mut::<S>()
-            .ok_or_else(|| JsError::Fault(HostFault::new("module state payload type mismatch")))
-    }
-
-    pub fn state_slot<S: crate::binding::HostModuleState>(
-        &self,
-        index: usize,
-    ) -> JsResult<JsValue> {
-        let module = self.state_module::<S>()?;
-        match self
-            .vm
-            .module_states
-            .get(module)
-            .and_then(Option::as_ref)
-            .and_then(|state| state.slots.get(index))
-        {
-            Some(crate::runtime::HostSlot::Js(value)) => Ok(self.js_value(value.clone())),
-            Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript list",
-            ))),
-            None => Err(JsError::Fault(HostFault::new(
-                "module state slot index out of range",
-            ))),
-        }
-    }
-
-    pub fn set_state_slot<S: crate::binding::HostModuleState>(
-        &mut self,
-        index: usize,
-        value: JsValue,
-    ) -> JsResult<()> {
-        self.check_value(&value)?;
-        let module = self.state_module::<S>()?;
-        let value = value.value;
-        match self
-            .vm
-            .module_states
-            .get_mut(module)
-            .and_then(Option::as_mut)
-            .and_then(|state| state.slots.get_mut(index))
-        {
-            Some(crate::runtime::HostSlot::Js(slot)) => {
-                *slot = value;
-                Ok(())
-            }
-            Some(crate::runtime::HostSlot::JsList(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript list",
-            ))),
-            None => Err(JsError::Fault(HostFault::new(
-                "module state slot index out of range",
-            ))),
-        }
-    }
-
-    pub fn state_list_len<S: crate::binding::HostModuleState>(
-        &self,
-        index: usize,
-    ) -> JsResult<usize> {
-        let module = self.state_module::<S>()?;
-        match self
-            .vm
-            .module_states
-            .get(module)
-            .and_then(Option::as_ref)
-            .and_then(|state| state.slots.get(index))
-        {
-            Some(crate::runtime::HostSlot::JsList(values)) => Ok(values.len()),
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript value",
-            ))),
-            None => Err(JsError::Fault(HostFault::new(
-                "module state slot index out of range",
-            ))),
-        }
-    }
-
-    pub fn state_list_push<S: crate::binding::HostModuleState>(
-        &mut self,
-        index: usize,
-        value: JsValue,
-    ) -> JsResult<()> {
-        self.check_value(&value)?;
-        let module = self.state_module::<S>()?;
-        let value = value.value;
-        match self
-            .vm
-            .module_states
-            .get_mut(module)
-            .and_then(Option::as_mut)
-            .and_then(|state| state.slots.get_mut(index))
-        {
-            Some(crate::runtime::HostSlot::JsList(values)) => {
-                values.push(value);
-                Ok(())
-            }
-            Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
-                "module state slot is a JavaScript value",
-            ))),
-            None => Err(JsError::Fault(HostFault::new(
-                "module state slot index out of range",
-            ))),
-        }
     }
 
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {

@@ -25,7 +25,7 @@ impl Fixture {
         fs::write(
             dir.join("Cargo.toml"),
             format!(
-                "[package]\nname = \"host-dts-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+                "[package]\nname = \"yield-fixture-{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
                  [workspace]\n\n[dependencies]\nyield-vm = {{ path = \"{}\" }}\n\n\
                  [patch.crates-io]\nbrotli-decompressor = {{ path = \"{}\" }}\n",
                 vm.display(),
@@ -43,23 +43,24 @@ impl Fixture {
             ""
         };
         format!(
-            r#"use yield_vm::binding::CallCx;
-use yield_vm::{{JsResult, JsValue, host_bindings, host_module}};
+            r#"use yield_vm::{{JsResult, JsValue, ModuleCx, host_bindings, host_module, module_exports}};
 
 #[host_module(name = "a")]
-mod a {{
-    use super::*;
+struct A;
 
+#[module_exports]
+impl A {{
     #[function(name = "used")]
-    fn used(_cx: &mut CallCx<'_>) -> JsResult<JsValue> {{
+    fn used(_cx: &mut ModuleCx<'_, Self>) -> JsResult<JsValue> {{
         Ok(JsValue::number(1.0))
     }}
 }}
 
 #[host_module(name = "b")]
-mod b {{
-    use super::*;
+struct B;
 
+#[module_exports]
+impl B {{
     {constant}
 
     #[constant(name = "privateExtra")]
@@ -70,9 +71,8 @@ mod b {{
 pub fn bindings() -> Result<yield_vm::Bindings, String> {{
     host_bindings! {{
         dts: "host.d.ts",
-        modules: [a, b],
+        modules: [A, B],
         classes: [],
-        states: [],
         operations: [],
         services: {{}},
     }}
@@ -162,6 +162,59 @@ declare module "b" {
     let (ok, output) = fixture.check();
     assert!(!ok, "a newly declared export must fail:\n{output}");
     assert!(output.contains("missing host export: b:added"), "{output}");
+}
+
+#[test]
+fn typed_modules_reject_foreign_contexts_and_legacy_states() {
+    let declarations = "declare module 'counter' { export function bump(): void; }";
+    let source = r#"
+use yield_vm::{JsResult, ModuleCx, host_bindings, host_module, module_exports};
+
+#[host_module(name = "counter")]
+struct Counter;
+
+#[host_module(name = "other")]
+struct Other;
+
+#[module_exports]
+impl Counter {
+    #[function(name = "bump")]
+    fn bump(_: &mut ModuleCx<'_, Self>) -> JsResult<()> { Ok(()) }
+}
+
+pub fn bind() -> Result<yield_vm::Bindings, String> {
+    host_bindings! { dts: "host.d.ts", modules: [Counter], classes: [], operations: [], services: {} }
+}
+"#;
+    let fixture = Fixture::new("typed-modules");
+    fixture.write("src/host.d.ts", declarations);
+    fixture.write("src/lib.rs", source);
+    let (ok, output) = fixture.check();
+    assert!(ok, "baseline typed module must compile:\n{output}");
+
+    let fixture = Fixture::new("foreign-module-context");
+    fixture.write("src/host.d.ts", declarations);
+    fixture.write(
+        "src/lib.rs",
+        &source.replace("ModuleCx<'_, Self>", "ModuleCx<'_, Other>"),
+    );
+    let (ok, output) = fixture.check();
+    assert!(
+        !ok && output.contains("first parameter must be &mut ModuleCx<'_, Self>"),
+        "{output}"
+    );
+
+    let fixture = Fixture::new("legacy-states-section");
+    fixture.write("src/host.d.ts", declarations);
+    fixture.write(
+        "src/lib.rs",
+        &source.replace("classes: [],", "classes: [], states: [],"),
+    );
+    let (ok, output) = fixture.check();
+    assert!(
+        !ok && output.contains("unknown host_bindings section"),
+        "{output}"
+    );
 }
 
 #[test]

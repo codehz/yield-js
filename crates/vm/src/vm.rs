@@ -1,8 +1,8 @@
 use crate::JsString;
 use crate::binding::{
-    Action, Bindings, CallCx, CpsBoundary, CpsStage, ExportDecl, ExportId, GuestOutcome,
-    GuestResume, HostCall, HostFault, HostStep, JsError, JsValue, LiveRegistration, NativeTarget,
-    OperationToken, Resume,
+    Action, Bindings, CallCx, CpsBoundary, CpsStage, ExportCall, ExportDecl, ExportId,
+    GuestOutcome, HostFault, HostStep, JsError, JsValue, LiveRegistration, ModuleDispatch,
+    NativeTarget, OperationToken, Resume, ResumeCall,
 };
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
@@ -132,8 +132,8 @@ pub(crate) struct HostConstruction {
 }
 
 enum HostEntry {
-    Call(HostCall),
-    Resume(GuestResume, Invocation),
+    Call(ExportCall),
+    Resume(ResumeCall, Invocation),
 }
 
 struct HostActivation<'a> {
@@ -162,7 +162,7 @@ pub(crate) struct RestoredState {
     pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) host_classes: Vec<HostClassRecord>,
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
-    pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
+    pub(crate) module_states: Vec<crate::runtime::ModuleState>,
     pub(crate) globals: BTreeMap<JsString, Value>,
     pub(crate) builtins: BuiltinRoots,
     pub(crate) templates: Vec<ObjectId>,
@@ -392,7 +392,7 @@ pub struct Vm {
     /// Hidden slots and payloads keyed by the ordinary object that owns them.
     pub(crate) host_instances: BTreeMap<ObjectId, HostInstance>,
     /// Per-module state aligned with the sorted module declaration table.
-    pub(crate) module_states: Vec<Option<crate::runtime::ModuleState>>,
+    pub(crate) module_states: Vec<crate::runtime::ModuleState>,
     pub(crate) epoch: u32,
     pub(crate) next_operation_id: u64,
     pub(crate) next_host_call: u64,
@@ -449,7 +449,11 @@ impl Vm {
                 }
             },
             NativeTarget::Method(id) => match bindings.method(id) {
-                Some(method) => (method.call, false, method.name.to_string()),
+                Some(method) => (
+                    ExportCall::Plain(method.call),
+                    false,
+                    method.name.to_string(),
+                ),
                 None => {
                     return Err(VmError::Host(format!(
                         "host method at {id:?} is not declared"
@@ -473,7 +477,11 @@ impl Vm {
                             if set { "setter" } else { "getter" }
                         )));
                     };
-                    (entry.call, false, declaration.name.to_string())
+                    (
+                        ExportCall::Plain(entry.call),
+                        false,
+                        declaration.name.to_string(),
+                    )
                 }
                 None => {
                     return Err(VmError::Host(format!(
@@ -555,15 +563,27 @@ impl Vm {
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
             };
-            let step = match entry {
+            let (cx, step) = match entry {
                 HostEntry::Resume(resume, outcome) => {
                     let outcome = match outcome {
                         Invocation::Value(value) => GuestOutcome::Returned(wrap(value)),
                         Invocation::Thrown(value) => GuestOutcome::Thrown(wrap(value)),
                     };
-                    resume(&mut cx, outcome)
+                    match resume {
+                        ResumeCall::Plain(resume) => {
+                            let step = resume(&mut cx, outcome);
+                            (cx, step)
+                        }
+                        ResumeCall::Module(resume) => {
+                            resume(ModuleDispatch::new(cx, owner), outcome)
+                        }
+                    }
                 }
-                HostEntry::Call(call) => call(&mut cx),
+                HostEntry::Call(ExportCall::Plain(call)) => {
+                    let step = call(&mut cx);
+                    (cx, step)
+                }
+                HostEntry::Call(ExportCall::Module(call)) => call(ModuleDispatch::new(cx, owner)),
             };
             let request = match step {
                 Ok(HostStep::Return(value)) => {
@@ -625,7 +645,7 @@ impl Vm {
                 Resume::Inline(resume)
                     if !spawn && matches!(boundary, CpsBoundary::Call | CpsBoundary::Gc) =>
                 {
-                    (None, resume)
+                    (None, ResumeCall::Plain(resume))
                 }
                 Resume::Inline(_) => {
                     return Err(VmError::HostFault(

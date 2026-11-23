@@ -12,7 +12,7 @@ fn expand(result: syn::Result<proc_macro2::TokenStream>) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn host_module(args: TokenStream, item: TokenStream) -> TokenStream {
-    expand(typed::host_module(args.into(), item.into()))
+    expand(registry::host_module(args.into(), item.into()))
 }
 
 /// Declares an internal VM namespace and its builtin function members.
@@ -37,11 +37,11 @@ pub fn operation(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn host_state(args: TokenStream, item: TokenStream) -> TokenStream {
-    expand(registry::host_state(args.into(), item.into()))
+pub fn module_exports(args: TokenStream, item: TokenStream) -> TokenStream {
+    expand(typed::module_exports(args.into(), item.into()))
 }
 
-/// Links host modules, classes, states, operations and services. The `dts`
+/// Links host modules, classes, operations and services. The `dts`
 /// path is resolved relative to the file containing the invocation, like
 /// `include_str!`; it falls back to `CARGO_MANIFEST_DIR` when the invocation
 /// file is unknown (for example inside a macro expansion).

@@ -20,7 +20,7 @@ struct TaskHost {
 impl TaskHost {
     fn new() -> Self {
         let labels = Arc::new(LabelService::default());
-        let module = abi::module(
+        let module = abi::raw_module(
             "task",
             vec![
                 abi::function_cps(
@@ -50,7 +50,7 @@ impl TaskHost {
         services
             .insert::<LabelServiceKey>(Arc::clone(&labels))
             .unwrap();
-        let bindings = abi::link([module], [], [], [abi::operation::<Wait>()], services).unwrap();
+        let bindings = abi::link([module], [], [abi::operation::<Wait>()], services).unwrap();
         Self {
             bindings: Arc::new(bindings),
             labels,
@@ -74,13 +74,13 @@ impl Host for TaskHost {
 
 static STAGES: [CpsStage; 2] = [
     CpsStage {
-        resume: fire,
+        resume: abi::ResumeCall::Plain(fire),
         kind: CpsBoundary::External,
         slots: &[0],
         receiver: None,
     },
     CpsStage {
-        resume: finish,
+        resume: abi::ResumeCall::Plain(finish),
         kind: CpsBoundary::Call,
         slots: &[],
         receiver: None,
@@ -219,13 +219,63 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-#[yield_vm::host_module(name = "branch")]
-mod branch {
-    use super::*;
+#[yield_vm::host_module(name = "branch", schema = 1, init = Self::new, encode = Self::encode, decode = Self::decode)]
+struct Branch {
+    count: u8,
+}
 
+impl Branch {
+    fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), yield_vm::binding::CodecError> {
+        out.push(self.count);
+        Ok(())
+    }
+
+    fn decode(
+        input: &[u8],
+        _: &mut yield_vm::binding::DecodeCx<'_>,
+    ) -> Result<Self, yield_vm::binding::CodecError> {
+        match input {
+            &[count] => Ok(Self { count }),
+            _ => Err(yield_vm::binding::CodecError::new("invalid branch payload")),
+        }
+    }
+
+    fn increment(cx: &mut yield_vm::ModuleCx<'_, Self>) {
+        cx.state().count += 1;
+    }
+}
+
+#[yield_vm::host_module(name = "mirror")]
+struct Mirror {
+    #[js_slot]
+    count: JsValue,
+}
+
+#[yield_vm::module_exports]
+impl Mirror {
     #[function(name = "choose")]
-    async fn choose(cx: &mut CallCx<'_>, cb: JsValue, mode: JsValue) -> JsResult<HostStep> {
+    fn choose(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
+        let count = cx.state_slot(Self::SLOT_COUNT)?.as_number().unwrap_or(0.0);
+        let next = JsValue::number(count + 100.0);
+        cx.set_state_slot(Self::SLOT_COUNT, next.clone())?;
+        Ok(next)
+    }
+}
+
+#[yield_vm::module_exports]
+impl Branch {
+    #[function(name = "choose")]
+    async fn choose(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        cb: JsValue,
+        mode: JsValue,
+    ) -> JsResult<HostStep> {
         let result = if cx.number(&mode)? == 1.0 {
+            Self::increment(cx);
             cx.call(cb.clone(), JsValue::undefined(), vec![JsValue::number(7.0)])
                 .await?
         } else {
@@ -239,12 +289,17 @@ mod branch {
             None => JsValue::undefined(),
         };
         Ok(HostStep::Return(JsValue::number(
-            cx.number(&result)? + cx.number(&shadowed)?,
+            cx.number(&result)? + cx.number(&shadowed)? + f64::from(cx.state().count),
         )))
     }
 
     #[function(name = "spawn")]
-    fn spawn(cx: &mut CallCx<'_>, cb: JsValue, mode: JsValue) -> JsResult<JsValue> {
+    fn spawn(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        cb: JsValue,
+        mode: JsValue,
+    ) -> JsResult<JsValue> {
+        Self::increment(cx);
         cx.spawn(async move {
             hit(cx, "prefix");
             let selected = match cx.number(&mode)? {
@@ -269,7 +324,8 @@ mod branch {
                 label: "again".into(),
             })
             .await?;
-            cx.call(cb, JsValue::undefined(), Vec::from([JsValue::number(20.0)]))
+            let count = JsValue::number(f64::from(cx.state().count));
+            cx.call(cb, JsValue::undefined(), Vec::from([count]))
                 .await?;
             hit(cx, "tail");
             Ok(())
@@ -277,7 +333,7 @@ mod branch {
     }
 
     #[function(name = "repeat")]
-    fn repeat(cx: &mut CallCx<'_>, cb: JsValue) -> JsResult<JsValue> {
+    fn repeat(cx: &mut yield_vm::ModuleCx<'_, Self>, cb: JsValue) -> JsResult<JsValue> {
         cx.spawn(async move {
             hit(cx, "repeat-prefix");
             let mut previous = JsValue::undefined();
@@ -302,7 +358,10 @@ mod branch {
     }
 
     #[function(name = "countWhile")]
-    async fn count_while(cx: &mut CallCx<'_>, limit: JsValue) -> JsResult<HostStep> {
+    async fn count_while(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        limit: JsValue,
+    ) -> JsResult<HostStep> {
         let mut count = JsValue::number(0.0);
         while {
             hit(cx, "while-check");
@@ -315,7 +374,7 @@ mod branch {
     }
 
     #[function(name = "countWhileLet")]
-    async fn count_while_let(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+    async fn count_while_let(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let mut value = JsValue::number(0.0);
         let mut sum = JsValue::number(0.0);
         while let Some(value) = next_match(cx, &mut value)? {
@@ -327,15 +386,8 @@ mod branch {
         )))
     }
 
-    fn next_match(cx: &mut CallCx<'_>, count: &mut JsValue) -> JsResult<Option<JsValue>> {
-        hit(cx, "while-let-check");
-        let next = cx.number(count)? + 1.0;
-        *count = JsValue::number(next);
-        Ok((next <= 2.0).then(|| JsValue::number(next * 10.0)))
-    }
-
     #[function(name = "labeled")]
-    async fn labeled(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+    async fn labeled(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let mut round = JsValue::number(0.0);
         let result = 'outer: loop {
             round = JsValue::number(cx.number(&round)? + 1.0);
@@ -355,7 +407,7 @@ mod branch {
     }
 
     #[function(name = "nativeFor")]
-    async fn native_for(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+    async fn native_for(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let result = 'outer: loop {
             cx.gc().await?;
             for index in 0..3 {
@@ -371,7 +423,7 @@ mod branch {
     }
 
     #[function(name = "selectorJump")]
-    async fn selector_jump(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+    async fn selector_jump(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let mut count = JsValue::number(0.0);
         'outer: while {
             count = JsValue::number(cx.number(&count)? + 1.0);
@@ -397,17 +449,13 @@ mod branch {
         Ok(HostStep::Return(count))
     }
 
-    fn hit(cx: &CallCx<'_>, name: &str) {
-        cx.service::<CountersKey>().unwrap().hit(name);
-    }
-
     #[function(name = "cancel")]
-    fn cancel(cx: &mut CallCx<'_>, handle: JsValue) -> JsResult<()> {
+    fn cancel(cx: &mut yield_vm::ModuleCx<'_, Self>, handle: JsValue) -> JsResult<()> {
         cx.cancel_task(&handle)
     }
 
     #[function(name = "early")]
-    fn early(cx: &mut CallCx<'_>, mode: JsValue) -> JsResult<JsValue> {
+    fn early(cx: &mut yield_vm::ModuleCx<'_, Self>, mode: JsValue) -> JsResult<JsValue> {
         if cx.number(&mode)? == 2.0 {
             return Ok(JsValue::number(-1.0));
         }
@@ -420,13 +468,24 @@ mod branch {
     }
 }
 
+fn next_match(cx: &mut CallCx<'_>, count: &mut JsValue) -> JsResult<Option<JsValue>> {
+    hit(cx, "while-let-check");
+    let next = cx.number(count)? + 1.0;
+    *count = JsValue::number(next);
+    Ok((next <= 2.0).then(|| JsValue::number(next * 10.0)))
+}
+
+fn hit(cx: &CallCx<'_>, name: &str) {
+    cx.service::<CountersKey>().unwrap().hit(name);
+}
+
 #[test]
 fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let labels = Arc::new(LabelService::default());
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
-        modules: [branch], classes: [], states: [], operations: [Wait],
+        modules: [Branch, Mirror], classes: [], operations: [Wait],
         services: {
             LabelServiceKey => Arc::clone(&labels),
             CountersKey => Arc::clone(&counters),
@@ -441,6 +500,8 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let build = compile_main(
         r#"
         import { choose, spawn, cancel, early } from 'branch';
+        import { choose as mirrorChoose } from 'mirror';
+        export function other() { return mirrorChoose(); }
         export let result = 0;
         let handle;
         function add(n) { result += n; return result; }
@@ -474,15 +535,23 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         Value::number(99.0)
     );
     assert_eq!(
+        vm.start(&mut host, "other", vec![]).unwrap(),
+        Value::number(100.0)
+    );
+    assert_eq!(
         vm.start(&mut host, "sync", vec![JsValue::number(1.0)])
             .unwrap(),
-        Value::number(10.0)
+        Value::number(11.0)
     );
     let handle = vm.start(&mut host, "run", vec![]).unwrap();
     assert_eq!(host.labels.pending_labels(), ["wait:one"]);
     let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
     vm = Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
+    assert_eq!(
+        vm.start(&mut host, "other", vec![]).unwrap(),
+        Value::number(200.0)
+    );
     vm.start_recovered_operations().unwrap();
     let first = host.labels.token("wait:one").unwrap();
     vm.complete_operation(first, Completion::Fulfilled(JsValue::number(5.0)))
@@ -520,7 +589,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         vm.run_until_idle(&mut host).unwrap();
         assert_eq!(
             vm.get_export("result").unwrap(),
-            Value::number(if cancel { 12.0 } else { 32.0 })
+            Value::number(if cancel { 12.0 } else { 14.0 })
         );
     }
     assert_eq!(counters.count("prefix"), 1);
@@ -534,7 +603,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     let counters = Arc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
-        modules: [branch], classes: [], states: [], operations: [Wait],
+        modules: [Branch, Mirror], classes: [], operations: [Wait],
         services: {
             LabelServiceKey => Arc::clone(&labels),
             CountersKey => Arc::clone(&counters),

@@ -13,7 +13,7 @@ use yield_vm::{
     ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, FetchKey, GuestOutcome, Host,
     HostStep, JsString, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
 };
-use yield_vm::{host_bindings, host_class, host_module, methods, operation};
+use yield_vm::{host_bindings, host_class, host_module, methods, module_exports, operation};
 
 mod case;
 pub mod fetch;
@@ -846,9 +846,8 @@ fn test_bindings(
 ) -> Result<Bindings, String> {
     host_bindings! {
         dts: "../test.d.ts",
-        modules: [test],
+        modules: [TestModule],
         classes: [Node, Matcher],
-        states: [],
         operations: [Wait, Pause, Reject, Reissue, Timer],
         services: {
             CountersKey => counters,
@@ -866,11 +865,16 @@ fn test_bindings(
 }
 
 #[host_module(name = "test")]
-mod test {
-    use super::*;
+struct TestModule;
 
+#[module_exports]
+impl TestModule {
     #[function(name = "spawnDelayedTask")]
-    fn spawn_delayed_task(cx: &mut CallCx<'_>, cb: JsValue, ms: JsValue) -> JsResult<JsValue> {
+    fn spawn_delayed_task(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        cb: JsValue,
+        ms: JsValue,
+    ) -> JsResult<JsValue> {
         if !cx.is_callable(&cb)? {
             return Err(cx.type_error("expected a callable"));
         }
@@ -883,7 +887,10 @@ mod test {
     }
 
     #[function(name = "cancelDelayedTask")]
-    fn cancel_delayed_task(cx: &mut CallCx<'_>, handle: Option<JsValue>) -> JsResult<()> {
+    fn cancel_delayed_task(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        handle: Option<JsValue>,
+    ) -> JsResult<()> {
         if let Some(h) = handle {
             cx.cancel_task(&h)?;
         }
@@ -891,13 +898,13 @@ mod test {
     }
 
     #[function(name = "sleep")]
-    fn sleep(cx: &mut CallCx<'_>, ms: JsValue) -> JsResult<JsValue> {
+    fn sleep(cx: &mut yield_vm::ModuleCx<'_, Self>, ms: JsValue) -> JsResult<JsValue> {
         let timer = Timer::from_delay(cx, &ms)?;
         cx.promise(timer)
     }
 
     #[function(name = "gc")]
-    async fn gc(cx: &mut CallCx<'_>) -> JsResult<HostStep> {
+    async fn gc(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
         let outcome = cx.gc().await;
         match outcome {
             GuestOutcome::Returned(value) => Ok(HostStep::Return(value)),
@@ -906,7 +913,7 @@ mod test {
     }
 
     #[function(name = "inspect")]
-    fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+    fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
         if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("inspect");
         }
@@ -914,7 +921,7 @@ mod test {
     }
 
     #[function(name = "seed")]
-    fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+    fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
         if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("seed");
         }
@@ -922,7 +929,7 @@ mod test {
     }
 
     #[function(name = "wait")]
-    fn wait(cx: &mut CallCx<'_>, arg: Option<JsValue>) -> JsResult<JsValue> {
+    fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: Option<JsValue>) -> JsResult<JsValue> {
         if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("wait");
         }
@@ -938,7 +945,7 @@ mod test {
     }
 
     #[function(name = "pause")]
-    fn pause(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+    fn pause(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
         let label = cx
             .string(&arg)?
             .to_utf8()
@@ -947,7 +954,10 @@ mod test {
     }
 
     #[function(name = "rejectAfterRestore")]
-    fn reject_after_restore(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+    fn reject_after_restore(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        arg: JsValue,
+    ) -> JsResult<JsValue> {
         let label = cx
             .string(&arg)?
             .to_utf8()
@@ -956,7 +966,7 @@ mod test {
     }
 
     #[function(name = "reissue")]
-    fn reissue(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+    fn reissue(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
         let label = cx
             .string(&arg)?
             .to_utf8()
@@ -965,7 +975,7 @@ mod test {
     }
 
     #[function(name = "bind")]
-    fn bind(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<Instance<Node>> {
+    fn bind(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<Instance<Node>> {
         let label = cx
             .string(&arg)?
             .to_utf8()
@@ -975,7 +985,7 @@ mod test {
 
     #[function(name = "setLabel")]
     fn set_label(
-        cx: &mut CallCx<'_>,
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
         _node: Option<JsValue>,
         _label: Option<JsValue>,
     ) -> JsResult<()> {
@@ -986,7 +996,10 @@ mod test {
     }
 
     #[function(name = "expect")]
-    fn expect(cx: &mut CallCx<'_>, actual: Option<JsValue>) -> JsResult<Instance<Matcher>> {
+    fn expect(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        actual: Option<JsValue>,
+    ) -> JsResult<Instance<Matcher>> {
         if let Some(counters) = cx.service::<CountersKey>() {
             counters.hit("expect");
         }
@@ -1003,7 +1016,7 @@ mod test {
 
     #[function(name = "assert")]
     fn assert(
-        cx: &mut CallCx<'_>,
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
         actual: Option<JsValue>,
         message: Option<JsValue>,
     ) -> JsResult<()> {

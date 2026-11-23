@@ -118,7 +118,7 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     })
 }
 
-pub(super) fn host_state(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
+pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     use syn::parse::Parser;
 
     let mut item: ItemStruct = syn::parse2(item)?;
@@ -127,21 +127,57 @@ pub(super) fn host_state(args: TokenStream, item: TokenStream) -> Result<TokenSt
     let (mut module, mut schema, mut init, mut encode, mut decode) = (None, None, None, None, None);
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
-            "module" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
+            "name" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
             "schema" => set(&mut schema, &key, || attribute_value::<LitInt>(input)),
             "init" => set(&mut init, &key, || attribute_value::<Path>(input)),
             "encode" => set(&mut encode, &key, || attribute_value::<Path>(input)),
             "decode" => set(&mut decode, &key, || attribute_value::<Path>(input)),
-            _ => Err(Error::new(key.span(), "unknown host_state option")),
+            _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
     })
     .parse2(args)?;
-    let module = required(module, span, "module")?;
-    let schema = required(schema, span, "schema")?;
-    let init = required(init, span, "init")?;
-    let encode = required(encode, span, "encode")?;
-    let decode = required(decode, span, "decode")?;
+    let module = required(module, span, "name")?;
     let slots = extract_slots(&mut item)?;
+    let empty = match &item.fields {
+        syn::Fields::Unit => Some(quote!(Self)),
+        syn::Fields::Named(fields) if fields.named.is_empty() => Some(quote!(Self {})),
+        syn::Fields::Unnamed(fields) if fields.unnamed.is_empty() => Some(quote!(Self())),
+        _ => None,
+    };
+    let (schema, new, encode, decode) = if let Some(empty) =
+        empty.filter(|_| schema.is_none() && init.is_none() && encode.is_none() && decode.is_none())
+    {
+        (
+            quote!(1),
+            empty.clone(),
+            quote!(Ok(())),
+            quote! {
+                if _input.is_empty() { Ok(#empty) } else {
+                    Err(::yield_vm::binding::CodecError("unexpected module payload".into()))
+                }
+            },
+        )
+    } else {
+        let schema = required(schema, span, "schema")?;
+        let init = required(init, span, "init")?;
+        let encode = required(encode, span, "encode")?;
+        let decode = required(decode, span, "decode")?;
+        (
+            quote!(#schema),
+            quote! {
+                let callback: fn() -> Self = #init;
+                callback()
+            },
+            quote! {
+                let callback: fn(&Self, &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> = #encode;
+                callback(self, _out)
+            },
+            quote! {
+                let callback: fn(&[u8], &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> = #decode;
+                callback(_input, _cx)
+            },
+        )
+    };
     let decls = slot_decls(&slots);
     let ty = &item.ident;
     let mut names = std::collections::HashSet::new();
@@ -168,25 +204,16 @@ pub(super) fn host_state(args: TokenStream, item: TokenStream) -> Result<TokenSt
     Ok(quote! {
         #item
         #constants
-        impl ::yield_vm::HostModuleState for #ty {
-            const MODULE: &'static str = #module;
+        impl ::yield_vm::HostModule for #ty {
+            const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
             const PAYLOAD_SCHEMA: u32 = #schema;
 
-            fn new() -> Self {
-                let callback: fn() -> Self = #init;
-                callback()
-            }
+            fn new() -> Self { #new }
 
-            fn encode_payload(&self, out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
-                let callback: fn(&Self, &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> = #encode;
-                callback(self, out)
-            }
+            fn encode_payload(&self, _out: &mut ::std::vec::Vec<u8>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> { #encode }
 
-            fn decode_payload(input: &[u8], cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
-                let callback: fn(&[u8], &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> = #decode;
-                callback(input, cx)
-            }
+            fn decode_payload(_input: &[u8], _cx: &mut ::yield_vm::binding::DecodeCx<'_>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> { #decode }
         }
     })
 }
@@ -234,9 +261,8 @@ fn service_bindings(input: ParseStream<'_>) -> Result<Vec<ServiceBinding>> {
 
 struct Registry {
     dts: LitStr,
-    modules: Vec<Path>,
+    modules: Vec<TypePath>,
     classes: Vec<syn::TypePath>,
-    states: Vec<syn::TypePath>,
     operations: Vec<syn::TypePath>,
     services: Vec<ServiceBinding>,
 }
@@ -244,8 +270,8 @@ struct Registry {
 impl Parse for Registry {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let span = input.span();
-        let (mut dts, mut modules, mut classes, mut states, mut operations, mut services) =
-            (None, None, None, None, None, None);
+        let (mut dts, mut modules, mut classes, mut operations, mut services) =
+            (None, None, None, None, None);
         entries(input, |key, input| match key.to_string().as_str() {
             "dts" => set(&mut dts, &key, || {
                 input.parse::<Token![:]>()?;
@@ -253,7 +279,6 @@ impl Parse for Registry {
             }),
             "modules" => set(&mut modules, &key, || list(input)),
             "classes" => set(&mut classes, &key, || list(input)),
-            "states" => set(&mut states, &key, || list(input)),
             "operations" => set(&mut operations, &key, || list(input)),
             "services" => set(&mut services, &key, || {
                 input.parse::<Token![:]>()?;
@@ -265,7 +290,6 @@ impl Parse for Registry {
             dts: required(dts, span, "dts")?,
             modules: required(modules, span, "modules")?,
             classes: required(classes, span, "classes")?,
-            states: required(states, span, "states")?,
             operations: required(operations, span, "operations")?,
             services: required(services, span, "services")?,
         })
@@ -277,7 +301,6 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
         dts,
         modules,
         classes,
-        states,
         operations,
         services,
     } = syn::parse2(input)?;
@@ -309,9 +332,8 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
             }) {
                 ::core::result::Result::Ok(__yield_services) => {
                     ::yield_vm::__macro_support::link(
-                        [#(#modules::__yield_module()),*],
+                        [#(::yield_vm::__macro_support::module::<#modules>()),*],
                         [#(::yield_vm::__macro_support::class::<#classes>()),*],
-                        [#(::yield_vm::__macro_support::state::<#states>()),*],
                         [#(::yield_vm::__macro_support::operation::<#operations>()),*],
                         __yield_services,
                     )
@@ -367,7 +389,7 @@ fn line_column(source: &str, offset: u32) -> (usize, usize) {
 
 fn declaration_checks(
     declarations: &BTreeMap<String, BTreeSet<String>>,
-    modules: &[Path],
+    modules: &[TypePath],
 ) -> Vec<TokenStream> {
     let mut checks = Vec::new();
     for (module, names) in declarations {
@@ -392,7 +414,10 @@ fn declaration_checks(
                         }
                         true
                     }
-                    let modules: &[(&str, &[&str])] = &[#(#modules::__YIELD_NAMES),*];
+                    let modules: &[(&str, &[&str])] = &[
+                        #((<#modules as ::yield_vm::HostModule>::NAME,
+                           <#modules as ::yield_vm::ModuleExports>::EXPORT_NAMES)),*
+                    ];
                     let mut module_index = 0;
                     let mut found = false;
                     while module_index < modules.len() {
@@ -458,11 +483,11 @@ mod tests {
     }
 
     #[test]
-    fn host_state_reports_missing_init_and_slot_constant_collisions() {
+    fn host_module_reports_missing_init_and_slot_constant_collisions() {
         diagnostic(
-            host_state(
+            host_module(
                 quote!(
-                    module = "counter",
+                    name = "counter",
                     schema = 1,
                     encode = encode,
                     decode = decode
@@ -474,9 +499,9 @@ mod tests {
             "missing `init`",
         );
         diagnostic(
-            host_state(
+            host_module(
                 quote!(
-                    module = "counter",
+                    name = "counter",
                     schema = 1,
                     init = init,
                     encode = encode,
@@ -502,7 +527,6 @@ mod tests {
                 dts: "tests/dts/empty.d.ts",
                 modules: [],
                 classes: [],
-                states: [],
                 operations: []
             )),
             "missing `services`",
@@ -523,7 +547,6 @@ mod tests {
             dts: "tests/dts/missing.d.ts",
             modules: [],
             classes: [],
-            states: [],
             operations: [],
             services: {}
         ))
@@ -537,9 +560,8 @@ mod tests {
 
         let error = host_bindings(quote!(
             dts: "tests/dts/reexport.d.ts",
-            modules: [x],
+            modules: [X],
             classes: [],
-            states: [],
             operations: [],
             services: {}
         ))
@@ -564,27 +586,27 @@ mod tests {
                 dts: "tests/dts/empty.d.ts",
                 modules: [],
                 classes: [],
-                states: [],
                 operations: [],
                 services: {},
             ))
             .is_ok()
         );
-        assert!(
-            host_bindings(quote! {
-                dts: "tests/dts/empty.d.ts",
-                services: {
-                    Clock => tick(),
-                    Timer? => timer,
-                    Console? => ::core::option::Option::None,
-                },
-                operations: [work::Wait,],
-                states: [data::Counter],
-                classes: [types::Point],
-                modules: [api::v1,],
-            })
-            .is_ok()
-        );
+        let expanded = host_bindings(quote! {
+            dts: "tests/dts/empty.d.ts",
+            services: {
+                Clock => tick(),
+                Timer? => timer,
+                Console? => ::core::option::Option::None,
+            },
+            operations: [work::Wait,],
+            classes: [types::Point],
+            modules: [api::V1,],
+        })
+        .unwrap()
+        .to_string();
+        assert!(expanded.contains("module :: < api :: V1 > ()"));
+        assert!(expanded.contains("class :: < types :: Point > ()"));
+        assert!(expanded.contains("operation :: < work :: Wait > ()"));
     }
 
     #[test]
@@ -593,7 +615,6 @@ mod tests {
             dts: "tests/dts/empty.d.ts",
             modules: [],
             classes: [],
-            states: [],
             operations: [],
             services: { Clock tick() }
         ))

@@ -87,9 +87,9 @@ pub use binding::__macro_support;
 
 pub use binding::{
     Bindings, ClassId, ConstKind, ConstValue, ExportId, GuestOutcome, HostClass, HostFault,
-    HostModuleState, HostStep, Instance, JsError, JsResult, JsValue, MemberName, MethodId,
-    NativeTarget, Operation, OperationDriver, OperationToken, Recovery, Registration, ServiceKey,
-    Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
+    HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName, MethodId, ModuleCx,
+    ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken, Recovery,
+    Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
@@ -115,5 +115,5 @@ pub use snapshot::{SNAPSHOT_BINARY_VERSION, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, ValueRef};
 pub use vm::{PendingOperationInfo, VerifiedBuild, Vm};
 pub use yield_binding_macros::{
-    host_bindings, host_class, host_module, host_state, methods, operation,
+    host_bindings, host_class, host_module, methods, module_exports, operation,
 };

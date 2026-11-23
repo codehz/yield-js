@@ -155,7 +155,9 @@ fn lower_binding(
     block: &mut syn::Block,
     kind: &str,
     class: Option<&Type>,
+    module: Option<&Type>,
 ) -> Result<(Call, Option<TokenStream>)> {
+    let call = |sig: &Signature| Call::parse(sig, class, module.is_some());
     let spawn = block.stmts.split_last().and_then(|(tail, prefix)| {
         let syn::Stmt::Expr(Expr::MethodCall(spawn), None) = tail else {
             return None;
@@ -172,8 +174,27 @@ fn lower_binding(
         .then_some((spawn, prefix))
     });
     let Some((spawn, prefix)) = spawn else {
+        if let Some(module) = module.filter(|_| sig.asyncness.is_some()) {
+            if kind != "function" {
+                return Err(Error::new_spanned(
+                    sig,
+                    "async is only supported on #[function] and #[method]",
+                ));
+            }
+            let (body, stages) = state_machine::lower_module(sig, &[], block, module, false)?;
+            *block = syn::parse2(body)?;
+            sig.asyncness = None;
+            let call = call(sig)?;
+            if !matches!(call.output, Output::Step) {
+                return Err(Error::new_spanned(
+                    &sig.output,
+                    "async bindings must return JsResult<HostStep>",
+                ));
+            }
+            return Ok((call, Some(stages)));
+        }
         lower_async(sig, block, kind, class)?;
-        return Ok((Call::parse(sig, class)?, None));
+        return Ok((call(sig)?, None));
     };
     if sig.asyncness.is_some() || !matches!(kind, "function" | "method") {
         return Err(Error::new_spanned(
@@ -182,7 +203,7 @@ fn lower_binding(
         ));
     }
     // Parse the JS-facing signature before changing the Rust entry to return HostStep.
-    let call = Call::parse(sig, class)?;
+    let call = call(sig)?;
     if !matches!(call.output, Output::Value) {
         return Err(Error::new_spanned(
             &sig.output,
@@ -205,7 +226,11 @@ fn lower_binding(
             "expected an async move block",
         ));
     }
-    let (body, stages) = state_machine::lower_spawn(sig, prefix, &background.block, class)?;
+    let (body, stages) = if let Some(module) = module {
+        state_machine::lower_module(sig, prefix, &background.block, module, true)?
+    } else {
+        state_machine::lower_spawn(sig, prefix, &background.block, class)?
+    };
     *block = syn::parse2(body)?;
     sig.output = syn::parse_quote!(-> ::yield_vm::JsResult<::yield_vm::HostStep>);
     Ok((call, Some(stages)))
@@ -238,7 +263,7 @@ struct Call {
 }
 
 impl Call {
-    fn parse(sig: &Signature, receiver: Option<&Type>) -> Result<Self> {
+    fn parse(sig: &Signature, receiver: Option<&Type>, module: bool) -> Result<Self> {
         if sig.asyncness.is_some()
             || sig.unsafety.is_some()
             || sig.abi.is_some()
@@ -257,27 +282,28 @@ impl Call {
                 "Rust self receivers are not supported; use This<Class>",
             )),
         });
+        let expected = if module {
+            "first parameter must be &mut ModuleCx<'_, Self>"
+        } else {
+            "first parameter must be &mut CallCx<'_>"
+        };
         let Some(cx) = inputs.next().transpose()? else {
-            return Err(Error::new_spanned(
-                sig,
-                "first parameter must be &mut CallCx<'_>",
-            ));
+            return Err(Error::new_spanned(sig, expected));
         };
         let valid_cx = match cx {
             Type::Reference(reference) if reference.mutability.is_some() && reference.lifetime.is_none() => {
                 last(&reference.elem).is_some_and(|segment| {
-                    segment.ident == "CallCx" && matches!(&segment.arguments,
-                        PathArguments::AngleBracketed(args) if args.args.len() == 1
-                        && matches!(args.args.first(), Some(GenericArgument::Lifetime(lt)) if lt.ident == "_"))
+                    segment.ident == if module { "ModuleCx" } else { "CallCx" }
+                        && matches!(&segment.arguments, PathArguments::AngleBracketed(args)
+                            if args.args.len() == if module { 2 } else { 1 }
+                            && matches!(args.args.first(), Some(GenericArgument::Lifetime(lt)) if lt.ident == "_")
+                            && (!module || matches!(args.args.last(), Some(GenericArgument::Type(ty)) if simple(ty, "Self"))))
                 })
             }
             _ => false,
         };
         if !valid_cx {
-            return Err(Error::new_spanned(
-                cx,
-                "first parameter must be &mut CallCx<'_>",
-            ));
+            return Err(Error::new_spanned(cx, expected));
         }
         if let Some(class) = receiver {
             let Some(ty) = inputs.next().transpose()? else {
@@ -364,6 +390,7 @@ impl Call {
         target: TokenStream,
         receiver: Option<&Type>,
         body_returns_step: bool,
+        module: Option<&Type>,
     ) -> TokenStream {
         let decode_this = receiver.map(|class| quote!(let receiver = cx.this::<#class>()?;));
         let pass_this = receiver.map(|_| quote!(receiver,));
@@ -393,8 +420,12 @@ impl Call {
             }
             Output::Step => call,
         };
+        let context = match module {
+            Some(ty) => quote!(::yield_vm::ModuleCx<'_, #ty>),
+            None => quote!(::yield_vm::binding::CallCx<'_>),
+        };
         quote! {
-            fn __yield_call(cx: &mut ::yield_vm::binding::CallCx<'_>) -> ::yield_vm::JsResult<::yield_vm::HostStep> {
+            fn __yield_call(cx: &mut #context) -> ::yield_vm::JsResult<::yield_vm::HostStep> {
                 #decode_this
                 #(#decode)*
                 #result
@@ -906,48 +937,26 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
 const EXPORT_MARKERS: &[&str] = &["function", "constructor", "constant"];
 const MEMBER_MARKERS: &[&str] = &["method", "get", "set"];
 
-pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
-    let mut module: ItemMod = syn::parse2(item)?;
-    let opts = options(args, &["name"])?;
-    let module_name = string(required(&opts, "name", module.ident.span())?)?;
-    let Some((_, items)) = &mut module.content else {
+pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
+    let mut item: ItemImpl = syn::parse2(item)?;
+    generics(&item.generics)?;
+    if !args.is_empty() || item.trait_.is_some() {
         return Err(Error::new_spanned(
-            module,
-            "host_module requires an inline module",
+            &item.self_ty,
+            "module_exports requires an inherent impl and no options",
         ));
-    };
+    }
+    let module = &item.self_ty;
     let mut exports = Vec::new();
     let mut keys = HashSet::new();
     let mut names = Vec::new();
-    for item in items {
-        let attrs = match item {
-            Item::Fn(item) => {
-                if item.sig.ident == "__yield_module" {
-                    return Err(Error::new_spanned(
-                        &item.sig.ident,
-                        "reserved module registration function name",
-                    ));
-                }
-                &mut item.attrs
-            }
-            Item::Const(item) => {
-                if item.ident == "__YIELD_NAMES" {
-                    return Err(Error::new_spanned(
-                        &item.ident,
-                        "reserved module declaration constant name",
-                    ));
-                }
-                &mut item.attrs
-            }
-            other => {
-                let attrs = item_attrs(other);
-                reject_markers(
-                    attrs,
-                    EXPORT_MARKERS,
-                    "export markers require a function or const item",
-                )?;
-                continue;
-            }
+    for member in &mut item.items {
+        let attrs = match member {
+            ImplItem::Fn(item) => &mut item.attrs,
+            ImplItem::Const(item) => &mut item.attrs,
+            ImplItem::Type(item) => &mut item.attrs,
+            ImplItem::Macro(item) => &mut item.attrs,
+            _ => continue,
         };
         reject_markers(
             attrs,
@@ -968,10 +977,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         if !keys.insert(name.value()) {
             return Err(Error::new_spanned(name, "duplicate module export name"));
         }
-        names.push(name.value());
-        let (attrs, export) = match item {
-            Item::Fn(item) if kind != "constant" => {
-                let (call, stages) = lower_binding(&mut item.sig, &mut item.block, &kind, None)?;
+        let (attrs, export) = match member {
+            ImplItem::Fn(item) if kind != "constant" => {
+                let (call, stages) =
+                    lower_binding(&mut item.sig, &mut item.block, &kind, None, Some(module))?;
                 let sig = &item.sig;
                 let ident = &sig.ident;
                 let class = if let Some(class) = opts.get("class") {
@@ -990,12 +999,18 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 } else {
                     quote!(None)
                 };
-                let adapter = call.adapter(quote!(self::#ident), None, stages.is_some());
+                let adapter = call.adapter(
+                    quote!(<#module>::#ident),
+                    None,
+                    stages.is_some(),
+                    Some(module),
+                );
                 let signature = call.signature();
-                let register = if let Some(stages) = stages {
-                    quote!(::yield_vm::__macro_support::function_cps(#name, #constructable, #class, __yield_call, #signature, #stages))
-                } else {
-                    quote!(::yield_vm::__macro_support::function(#name, #constructable, #class, __yield_call, #signature))
+                let stages = stages.map_or_else(|| quote!(None), |stages| quote!(Some(#stages)));
+                let register = quote! {
+                    ::yield_vm::__macro_support::module_function(#name, #constructable, #class,
+                        |cx| ::yield_vm::__macro_support::with_module::<#module>(cx, __yield_call),
+                        #signature, #stages)
                 };
                 (
                     &item.attrs,
@@ -1005,11 +1020,11 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                     }),
                 )
             }
-            Item::Const(item) if kind == "constant" => {
+            ImplItem::Const(item) if kind == "constant" => {
                 let ident = &item.ident;
                 (
                     &item.attrs,
-                    quote!(::yield_vm::__macro_support::constant(#name, self::#ident)),
+                    quote!(::yield_vm::__macro_support::constant(#name, <#module>::#ident)),
                 )
             }
             _ => {
@@ -1019,23 +1034,25 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 ));
             }
         };
-        let cfg = attrs.iter().filter(|attr| attr.path().is_ident("cfg"));
+        let cfg = attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"))
+            .collect::<Vec<_>>();
+        names.push(quote!(#(#cfg)* #name));
         exports.push(quote!(#(#cfg)* #export));
     }
-    let (_, items) = module.content.as_mut().expect("inline module");
-    items.push(syn::parse_quote! {
-        #[doc(hidden)]
-        pub fn __yield_module() -> ::yield_vm::__macro_support::ModuleDecl {
-            ::yield_vm::__macro_support::module(#module_name, ::std::vec![#(#exports),*])
+    let cfg = item.attrs.iter().filter(|attr| attr.path().is_ident("cfg"));
+    Ok(quote! {
+        #item
+        #(#cfg)*
+        impl ::yield_vm::ModuleExports for #module {
+            const EXPORT_NAMES: &'static [&'static str] = &[#(#names),*];
+
+            fn exports() -> ::std::vec::Vec<::yield_vm::__macro_support::ExportDecl> {
+                ::std::vec![#(#exports),*]
+            }
         }
-    });
-    items.push(syn::parse_quote! {
-        /// Host declaration metadata: module name and declared value exports.
-        #[doc(hidden)]
-        pub const __YIELD_NAMES: (&'static str, &'static [&'static str]) =
-            (#module_name, &[#(#names),*]);
-    });
-    Ok(quote!(#module))
+    })
 }
 
 pub(super) struct Slot {
@@ -1483,7 +1500,7 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
                 reject_markers(
                     &constant.attrs,
                     EXPORT_MARKERS,
-                    "export markers require a host_module",
+                    "export markers require a module_exports impl",
                 )?;
                 continue;
             }
@@ -1514,15 +1531,20 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
         reject_markers(
             &method.attrs,
             EXPORT_MARKERS,
-            "export markers require a host_module",
+            "export markers require a module_exports impl",
         )?;
         let Some((kind, attr)) = take_marker(&mut method.attrs, MEMBER_MARKERS)? else {
             continue;
         };
         let opts = options(attr.parse_args()?, &["name", "symbol"])?;
         let (id, key) = member_key(&opts, attr.span())?;
-        let (call, stages) =
-            lower_binding(&mut method.sig, &mut method.block, &kind, Some(&class))?;
+        let (call, stages) = lower_binding(
+            &mut method.sig,
+            &mut method.block,
+            &kind,
+            Some(&class),
+            None,
+        )?;
         if kind == "get" && !call.optional.is_empty() {
             return Err(Error::new_spanned(
                 &method.sig,
@@ -1542,7 +1564,12 @@ pub(super) fn methods(args: TokenStream, item: TokenStream) -> Result<TokenStrea
             ));
         }
         let name = &method.sig.ident;
-        let adapter = call.adapter(quote!(<#class>::#name), Some(&class), stages.is_some());
+        let adapter = call.adapter(
+            quote!(<#class>::#name),
+            Some(&class),
+            stages.is_some(),
+            None,
+        );
         let signature = call.signature();
         let cfg = method
             .attrs
@@ -1634,20 +1661,20 @@ mod tests {
 
     #[test]
     fn spawn_function_keeps_original_js_signature() {
-        let expanded = host_module(
-            quote!(name = "x"),
+        let expanded = module_exports(
+            quote!(),
             quote! {
-                mod x {
+                impl X {
                     #[function(name = "spawn")]
-                    fn start(ctx: &mut CallCx<'_>, option: Option<JsValue>) -> JsResult<JsValue> {
-                        let op = operation(ctx, option)?;
+                    fn start(ctx: &mut ModuleCx<'_, Self>, option: Option<JsValue>) -> JsResult<JsValue> {
+                        let op = Self::operation(ctx, option)?;
                         ctx.spawn(async move {
                             ctx.effect(op).await?;
                             Ok(())
                         })
                     }
                     #[function(name = "promise")]
-                    fn promise(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+                    fn promise(cx: &mut ModuleCx<'_, Self>) -> JsResult<JsValue> {
                         cx.promise(operation())
                     }
                 }
@@ -1655,11 +1682,18 @@ mod tests {
         )
         .unwrap()
         .to_string();
-        assert_eq!(expanded.matches("function_cps").count(), 1);
+        assert_eq!(expanded.matches("module_function").count(), 2);
+        assert_eq!(expanded.matches("CpsStage {").count(), 1);
+        assert!(expanded.contains("ModuleExports for X"));
+        assert_eq!(expanded.matches("with_module :: < X >").count(), 3);
+        assert!(expanded.contains("ResumeCall :: Module"));
+        assert!(expanded.contains("< X > :: operation"));
+        assert!(!expanded.contains("Self :: operation"));
         assert_eq!(expanded.matches("ReturnKind :: Value").count(), 2);
         assert!(expanded.contains("ArgKind :: OptionalValue"));
-        assert!(expanded.contains("self :: promise (cx ,) . map"));
-        assert!(!expanded.contains("self :: start (cx , arg_0) . map"));
+        assert!(expanded.contains("< X > :: promise (cx ,) . map"));
+        assert!(expanded.contains("< X > :: start (cx , arg_0)"));
+        assert!(!expanded.contains("< X > :: start (cx , arg_0) . map"));
         assert!(expanded.contains("__spawn"));
     }
 
@@ -1692,12 +1726,12 @@ mod tests {
     fn rejects_spawn_in_constructors_and_accessors() {
         let expected = "spawn is only supported on synchronous #[function] and #[method]";
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote! {
-                    mod x {
+                    impl X {
                         #[constructor(name = "C", class = C)]
-                        fn new(cx: &mut CallCx<'_>) -> JsResult<Instance<C>> {
+                        fn new(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<C>> {
                             cx.spawn(async move { Ok(()) })
                         }
                     }
@@ -1741,12 +1775,12 @@ mod tests {
             ),
         ] {
             diagnostic(
-                host_module(
-                    quote!(name = "x"),
+                module_exports(
+                    quote!(),
                     quote! {
-                        mod x {
+                        impl X {
                             #[function(name = "start")]
-                            fn start(cx: &mut CallCx<'_>) -> JsResult<#output> {
+                            fn start(cx: &mut ModuleCx<'_, Self>) -> JsResult<#output> {
                                 cx.spawn(#background)
                             }
                         }
@@ -2084,12 +2118,12 @@ mod tests {
 
     #[test]
     fn lowers_async_step_functions_and_methods() {
-        let function = host_module(
-            quote!(name = "x"),
+        let function = module_exports(
+            quote!(),
             quote! {
-                mod x {
+                impl X {
                     #[function(name = "f")]
-                    async fn f(cx: &mut CallCx<'_>, f: JsValue) -> JsResult<HostStep> {
+                    async fn f(cx: &mut ModuleCx<'_, Self>, f: JsValue) -> JsResult<HostStep> {
                         let outcome = cx.call(f, JsValue::undefined(), Vec::new()).await;
                         finish(cx, outcome)
                     }
@@ -2102,7 +2136,10 @@ mod tests {
         assert!(function.contains("fn f"));
         assert!(!function.contains("async fn f"));
         assert!(function.contains("async fn helper"));
-        assert!(function.contains("request_call"));
+        assert!(function.contains("__linked_call"));
+        assert!(function.contains("module_function"));
+        assert!(function.contains("ResumeCall :: Module"));
+        assert_eq!(function.matches("with_module :: < X >").count(), 2);
         assert!(!function.contains(". await"));
 
         let method = methods(
@@ -2130,12 +2167,12 @@ mod tests {
     fn rejects_async_constructors_and_accessors() {
         let expected = "async is only supported on #[function] and #[method]";
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote! {
-                    mod x {
+                    impl X {
                         #[constructor(name = "C", class = C)]
-                        async fn new(cx: &mut CallCx<'_>) -> JsResult<Instance<C>> { make(cx) }
+                        async fn new(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<C>> { make(cx) }
                     }
                 },
             ),
@@ -2192,43 +2229,33 @@ mod tests {
     #[test]
     fn module_options_and_export_conflicts() {
         diagnostic(
-            host_module(
-                quote!(name = "x"),
-                quote!(
-                    mod x;
-                ),
-            ),
-            "inline module",
-        );
-        diagnostic(
-            host_module(
-                quote!(name = "x", nmae = "y"),
+            module_exports(
+                quote!(),
                 quote!(
                     mod x {}
                 ),
             ),
-            "unknown attribute option",
+            "expected `impl`",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x", name = "y"),
-                quote!(
-                    mod x {}
-                ),
-            ),
-            "duplicate attribute option",
+            module_exports(quote!(name = "x"), quote!(impl X {})),
+            "module_exports requires an inherent impl and no options",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(quote!(), quote!(impl Trait for X {})),
+            "module_exports requires an inherent impl and no options",
+        );
+        diagnostic(
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(name = "f")]
-                        struct F;
+                        const F: u32 = 1;
                     }
                 ),
             ),
-            "export markers require a function or const item",
+            "function and constructor mark functions; constant marks a const item",
         );
         diagnostic(
             methods(
@@ -2240,12 +2267,12 @@ mod tests {
             "method markers require a function",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(class = C)]
-                        fn f(cx: &mut CallCx<'_>) -> JsResult<()> {
+                        fn f(cx: &mut ModuleCx<'_, Self>) -> JsResult<()> {
                             todo!()
                         }
                     }
@@ -2254,14 +2281,14 @@ mod tests {
             "unknown attribute option",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[constant(name = "f")]
                         const C: u32 = 1;
                         #[function(name = "f")]
-                        fn f(cx: &mut CallCx<'_>) -> JsResult<()> {
+                        fn f(cx: &mut ModuleCx<'_, Self>) -> JsResult<()> {
                             todo!()
                         }
                     }
@@ -2274,12 +2301,12 @@ mod tests {
     #[test]
     fn typed_export_signature_errors() {
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[constructor(name = "C", class = C)]
-                        fn new(cx: &mut CallCx<'_>) -> JsResult<Instance<D>> {
+                        fn new(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<D>> {
                             todo!()
                         }
                     }
@@ -2288,12 +2315,12 @@ mod tests {
             "constructor must return",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(name = "f")]
-                        async fn f(cx: &mut CallCx<'_>) -> JsResult<()> {
+                        async fn f(cx: &mut ModuleCx<'_, Self>) -> JsResult<()> {
                             todo!()
                         }
                     }
@@ -2302,26 +2329,26 @@ mod tests {
             "async bindings must return JsResult<HostStep>",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(name = "f")]
-                        fn f(cx: &CallCx<'_>) -> JsResult<()> {
+                        fn f(cx: &ModuleCx<'_, Self>) -> JsResult<()> {
                             todo!()
                         }
                     }
                 ),
             ),
-            "first parameter must be &mut CallCx",
+            "first parameter must be &mut ModuleCx<'_, Self>",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(name = "f")]
-                        fn f<T>(cx: &mut CallCx<'_>) -> JsResult<T> {
+                        fn f<T>(cx: &mut ModuleCx<'_, Self>) -> JsResult<T> {
                             todo!()
                         }
                     }
@@ -2330,12 +2357,12 @@ mod tests {
             "cannot be generic",
         );
         diagnostic(
-            host_module(
-                quote!(name = "x"),
+            module_exports(
+                quote!(),
                 quote!(
-                    mod x {
+                    impl X {
                         #[function(name = "f")]
-                        fn f(cx: &mut CallCx<'_>, x: Option<String>) -> JsResult<()> {
+                        fn f(cx: &mut ModuleCx<'_, Self>, x: Option<String>) -> JsResult<()> {
                             todo!()
                         }
                     }

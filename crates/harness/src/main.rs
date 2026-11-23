@@ -4,12 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::{CompileOptions, MemoryResolver, compile};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
-use yield_vm::binding::{
-    Bindings, CallCx, CodecError, JsResult, JsValue, OperationDriver, OperationToken,
-};
+use yield_vm::binding::{Bindings, CodecError, JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
-use yield_vm::{host_bindings, host_module, operation};
+use yield_vm::{host_bindings, host_module, module_exports, operation};
 
 const SOURCE: &str = r#"
 import { inspect, seed, wait } from 'demo';
@@ -152,9 +150,8 @@ fn demo_bindings(
 ) -> Result<Bindings, String> {
     host_bindings! {
         dts: "../demo.d.ts",
-        modules: [demo],
+        modules: [Demo],
         classes: [],
-        states: [],
         operations: [Wait],
         services: {
             DemoCountersKey => counters,
@@ -165,11 +162,12 @@ fn demo_bindings(
 }
 
 #[host_module(name = "demo")]
-mod demo {
-    use super::*;
+struct Demo;
 
+#[module_exports]
+impl Demo {
     #[function(name = "inspect")]
-    fn inspect(cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
+    fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
         println!("  host call: inspect({:?})", cx.args());
         if let Some(counters) = cx.service::<DemoCountersKey>() {
             counters.hit("inspect");
@@ -178,7 +176,7 @@ mod demo {
     }
 
     #[function(name = "seed")]
-    fn seed(cx: &mut CallCx<'_>) -> JsResult<JsValue> {
+    fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
         println!("  host call: seed()");
         if let Some(counters) = cx.service::<DemoCountersKey>() {
             counters.hit("seed");
@@ -187,7 +185,7 @@ mod demo {
     }
 
     #[function(name = "wait")]
-    fn wait(cx: &mut CallCx<'_>, arg: JsValue) -> JsResult<JsValue> {
+    fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
         let label = cx
             .string(&arg)?
             .to_utf8()

@@ -151,7 +151,7 @@ impl Vm {
 
     fn empty(build: VerifiedBuild, bindings: Arc<Bindings>, clock: VmClock) -> Self {
         let time = time_source(&bindings);
-        let module_states = (0..bindings.module_count()).map(|_| None).collect();
+        let module_states = Vec::new();
         let caches = property_caches(&build);
         Self {
             property_caches: caches,
@@ -350,23 +350,26 @@ impl Vm {
     }
 
     fn install_module_states(&mut self, bindings: &Bindings) {
-        for module in bindings.state_modules() {
-            let Some(payload) = bindings.state_new(module) else {
-                continue;
-            };
-            let slots = bindings
-                .state_slots(module)
-                .unwrap_or_default()
-                .iter()
-                .map(|slot| match slot.kind {
-                    crate::binding::SlotKind::Js => crate::runtime::HostSlot::Js(Value::UNDEFINED),
-                    crate::binding::SlotKind::JsList => {
-                        crate::runtime::HostSlot::JsList(Vec::new())
-                    }
-                })
-                .collect();
-            self.module_states[module] = Some(crate::runtime::ModuleState { slots, payload });
-        }
+        self.module_states = (0..bindings.module_count())
+            .map(|module| {
+                let slots = bindings
+                    .state_slots(module)
+                    .iter()
+                    .map(|slot| match slot.kind {
+                        crate::binding::SlotKind::Js => {
+                            crate::runtime::HostSlot::Js(Value::UNDEFINED)
+                        }
+                        crate::binding::SlotKind::JsList => {
+                            crate::runtime::HostSlot::JsList(Vec::new())
+                        }
+                    })
+                    .collect();
+                crate::runtime::ModuleState {
+                    slots,
+                    payload: bindings.state_new(module),
+                }
+            })
+            .collect();
     }
 
     fn import_export_value(

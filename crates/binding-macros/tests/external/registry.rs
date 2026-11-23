@@ -2,15 +2,12 @@ use std::cell::Cell;
 use std::sync::Arc;
 use yield_vm::binding::{CodecError, DecodeCx};
 use yield_vm::{
-    Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, HostFault, HostModuleState, Operation,
+    Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, HostFault, HostModule, Operation,
     OperationDriver, OperationToken, Recovery, Registration, ServiceKey, Services, host_bindings,
-    host_module, host_state, operation,
+    host_module, module_exports, operation,
 };
 
-#[host_module(name = "state")]
-mod state {}
-
-#[host_state(module = "state", schema = 1, init = State::init, encode = State::encode, decode = State::decode)]
+#[host_module(name = "state", schema = 1, init = State::init, encode = State::encode, decode = State::decode)]
 struct State {
     #[js_slot]
     current: JsValue,
@@ -19,6 +16,7 @@ struct State {
     count: u8,
 }
 
+#[module_exports]
 impl State {
     fn init() -> Self {
         Self { count: 3 }
@@ -109,7 +107,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     let evaluations = Cell::new(0);
     let bindings = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [state], classes: [], states: [State], operations: [Work],
+        modules: [State], classes: [], operations: [Work],
         services: {
             ClockV2 => { evaluations.set(evaluations.get() + 1); 17 },
         },
@@ -123,7 +121,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
 
     let absent = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV2 => 17,
             CounterKey? => None::<u64>,
@@ -133,7 +131,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
 
     let duplicate = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV2 => 17,
             ClockV3 => 23,
@@ -152,7 +150,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
 
     let baseline = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV2 => 17,
             CounterKey => 0,
@@ -160,7 +158,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
     }?;
     let reordered = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             CounterKey => 0,
             ClockV2 => 17,
@@ -170,7 +168,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
 
     let other_clock = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV2 => 42,
             CounterKey => 0,
@@ -180,7 +178,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
 
     let with_console = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV2 => 17,
             CounterKey => 0,
@@ -191,7 +189,7 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
 
     let upgraded = host_bindings! {
         dts: "../dts/state.d.ts",
-        modules: [], classes: [], states: [], operations: [],
+        modules: [], classes: [], operations: [],
         services: {
             ClockV3 => 17,
             CounterKey => 0,
