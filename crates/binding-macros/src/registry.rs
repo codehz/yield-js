@@ -6,7 +6,10 @@ use quote::quote;
 use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Error, Expr, Ident, ItemStruct, LitInt, LitStr, Path, Result, Token, bracketed};
+use syn::{
+    Error, Expr, Ident, ItemStruct, LitInt, LitStr, Path, Result, Token, TypePath, braced,
+    bracketed,
+};
 
 use super::typed::{extract_slots, slot_decls};
 
@@ -198,13 +201,44 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .collect())
 }
 
+/// One `services:` entry. `Key? => option` registers the value only when the
+/// option is `Some`, letting callers describe optional platform services
+/// inline instead of assembling `Services` before the link.
+struct ServiceBinding {
+    key: TypePath,
+    optional: bool,
+    value: Expr,
+}
+
+impl Parse for ServiceBinding {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let key = input.parse()?;
+        let optional = input.parse::<Option<Token![?]>>()?.is_some();
+        input.parse::<Token![=>]>()?;
+        Ok(Self {
+            key,
+            optional,
+            value: input.parse()?,
+        })
+    }
+}
+
+fn service_bindings(input: ParseStream<'_>) -> Result<Vec<ServiceBinding>> {
+    let contents;
+    braced!(contents in input);
+    Ok(contents
+        .parse_terminated(ServiceBinding::parse, Token![,])?
+        .into_iter()
+        .collect())
+}
+
 struct Registry {
     dts: LitStr,
     modules: Vec<Path>,
     classes: Vec<syn::TypePath>,
     states: Vec<syn::TypePath>,
     operations: Vec<syn::TypePath>,
-    services: Expr,
+    services: Vec<ServiceBinding>,
 }
 
 impl Parse for Registry {
@@ -223,7 +257,7 @@ impl Parse for Registry {
             "operations" => set(&mut operations, &key, || list(input)),
             "services" => set(&mut services, &key, || {
                 input.parse::<Token![:]>()?;
-                input.parse()
+                service_bindings(input)
             }),
             _ => Err(Error::new(key.span(), "unknown host_bindings section")),
         })?;
@@ -250,17 +284,42 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
     let (path, declarations) = read_declarations(&dts, origin.as_deref())?;
     let include = LitStr::new(&path.to_string_lossy(), dts.span());
     let checks = declaration_checks(&declarations, &modules);
+    let inserts = services.iter().map(|binding| {
+        let key = &binding.key;
+        let value = &binding.value;
+        if binding.optional {
+            quote! {
+                if let ::core::option::Option::Some(__yield_service) = #value {
+                    __yield_services.insert::<#key>(__yield_service)?;
+                }
+            }
+        } else {
+            quote! {
+                __yield_services.insert::<#key>(#value)?;
+            }
+        }
+    });
     Ok(quote! {
         {
             const _: &str = include_str!(#include);
             #(#checks)*
-            ::yield_vm::__macro_support::link(
-                [#(#modules::__yield_module()),*],
-                [#(::yield_vm::__macro_support::class::<#classes>()),*],
-                [#(::yield_vm::__macro_support::state::<#states>()),*],
-                [#(::yield_vm::__macro_support::operation::<#operations>()),*],
-                #services,
-            )
+            match ::yield_vm::__macro_support::services(|__yield_services| {
+                #(#inserts)*
+                ::core::result::Result::Ok(())
+            }) {
+                ::core::result::Result::Ok(__yield_services) => {
+                    ::yield_vm::__macro_support::link(
+                        [#(#modules::__yield_module()),*],
+                        [#(::yield_vm::__macro_support::class::<#classes>()),*],
+                        [#(::yield_vm::__macro_support::state::<#states>()),*],
+                        [#(::yield_vm::__macro_support::operation::<#operations>()),*],
+                        __yield_services,
+                    )
+                }
+                ::core::result::Result::Err(__yield_error) => {
+                    ::core::result::Result::Err(__yield_error)
+                }
+            }
         }
     })
 }
@@ -466,7 +525,7 @@ mod tests {
             classes: [],
             states: [],
             operations: [],
-            services: ::yield_vm::Services::default()
+            services: {}
         ))
         .unwrap_err()
         .to_string();
@@ -482,7 +541,7 @@ mod tests {
             classes: [],
             states: [],
             operations: [],
-            services: ::yield_vm::Services::default()
+            services: {}
         ))
         .unwrap_err()
         .to_string();
@@ -493,13 +552,13 @@ mod tests {
     #[test]
     fn host_bindings_rejects_duplicate_services_sections() {
         diagnostic(
-            host_bindings(quote!(services: first, services: second)),
+            host_bindings(quote!(services: {}, services: {})),
             "duplicate `services`",
         );
     }
 
     #[test]
-    fn host_bindings_accepts_empty_lists_and_service_expressions() {
+    fn host_bindings_accepts_empty_lists_and_service_bindings() {
         assert!(
             host_bindings(quote!(
                 dts: "tests/dts/empty.d.ts",
@@ -507,14 +566,18 @@ mod tests {
                 classes: [],
                 states: [],
                 operations: [],
-                services: ::yield_vm::Services::default(),
+                services: {},
             ))
             .is_ok()
         );
         assert!(
             host_bindings(quote! {
                 dts: "tests/dts/empty.d.ts",
-                services: { make_services(1, 2) },
+                services: {
+                    Clock => tick(),
+                    Timer? => timer,
+                    Console? => ::core::option::Option::None,
+                },
                 operations: [work::Wait,],
                 states: [data::Counter],
                 classes: [types::Point],
@@ -522,5 +585,20 @@ mod tests {
             })
             .is_ok()
         );
+    }
+
+    #[test]
+    fn host_bindings_reports_malformed_service_bindings() {
+        let error = host_bindings(quote!(
+            dts: "tests/dts/empty.d.ts",
+            modules: [],
+            classes: [],
+            states: [],
+            operations: [],
+            services: { Clock tick() }
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("expected `=>`"), "{error}");
     }
 }

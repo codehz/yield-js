@@ -110,7 +110,9 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     let bindings = host_bindings! {
         dts: "../dts/state.d.ts",
         modules: [state], classes: [], states: [State], operations: [Work],
-        services: { evaluations.set(evaluations.get() + 1); services },
+        services: {
+            ClockV2 => { evaluations.set(evaluations.get() + 1); 17 },
+        },
     }?;
     assert_eq!(evaluations.get(), 1);
     assert_eq!(bindings.service::<ClockV2>(), Some(&17));
@@ -118,6 +120,26 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
+
+    let absent = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV2 => 17,
+            CounterKey? => None::<u64>,
+        },
+    }?;
+    assert_eq!(absent.service::<CounterKey>(), None);
+
+    let duplicate = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV2 => 17,
+            ClockV3 => 23,
+        },
+    };
+    assert_eq!(duplicate.unwrap_err(), "duplicate host service \"clock\"");
     Ok(())
 }
 
@@ -128,37 +150,53 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
         fn write(&self, _: &ConsoleEvent) {}
     }
 
-    let bindings = |services| {
-        host_bindings! {
-            dts: "../dts/state.d.ts",
-            modules: [], classes: [], states: [], operations: [],
-            services: services,
-        }
-    };
-    let table = |clock| {
-        let mut services = Services::default();
-        services.insert::<ClockV2>(clock)?;
-        services.insert::<CounterKey>(0)?;
-        Ok::<_, String>(services)
-    };
-    let baseline = bindings(table(17)?)?;
-    assert_eq!(baseline.fingerprint(), bindings(table(42)?)?.fingerprint());
+    let baseline = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV2 => 17,
+            CounterKey => 0,
+        },
+    }?;
+    let reordered = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            CounterKey => 0,
+            ClockV2 => 17,
+        },
+    }?;
+    assert_eq!(baseline.fingerprint(), reordered.fingerprint());
 
-    let mut reordered = Services::default();
-    reordered.insert::<CounterKey>(0)?;
-    reordered.insert::<ClockV2>(17)?;
-    assert_eq!(baseline.fingerprint(), bindings(reordered)?.fingerprint());
+    let other_clock = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV2 => 42,
+            CounterKey => 0,
+        },
+    }?;
+    assert_eq!(baseline.fingerprint(), other_clock.fingerprint());
 
-    let mut with_console = table(17)?;
-    with_console.insert::<ConsoleKey>(Arc::new(Sink))?;
-    assert_eq!(
-        baseline.fingerprint(),
-        bindings(with_console)?.fingerprint()
-    );
+    let with_console = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV2 => 17,
+            CounterKey => 0,
+            ConsoleKey => Arc::new(Sink),
+        },
+    }?;
+    assert_eq!(baseline.fingerprint(), with_console.fingerprint());
 
-    let mut upgraded = Services::default();
-    upgraded.insert::<ClockV3>(17)?;
-    upgraded.insert::<CounterKey>(0)?;
-    assert_ne!(baseline.fingerprint(), bindings(upgraded)?.fingerprint());
+    let upgraded = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [], classes: [], states: [], operations: [],
+        services: {
+            ClockV3 => 17,
+            CounterKey => 0,
+        },
+    }?;
+    assert_ne!(baseline.fingerprint(), upgraded.fingerprint());
     Ok(())
 }

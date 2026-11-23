@@ -150,21 +150,17 @@ fn demo_bindings(
     labels: Arc<LabelService>,
     time_zone: String,
 ) -> Result<Bindings, String> {
-    let mut services = yield_vm::Services::default();
-    services.insert::<DemoCountersKey>(counters)?;
-    services.insert::<LabelServiceKey>(labels)?;
-    services
-        .insert::<yield_vm::host::TimeKey>(Arc::new(yield_vm::host::SystemTimeService::new(
-            time_zone,
-        )))
-        .map_err(|error| format!("failed to register the time service: {error}"))?;
     host_bindings! {
         dts: "../demo.d.ts",
         modules: [demo],
         classes: [],
         states: [],
         operations: [Wait],
-        services: services,
+        services: {
+            DemoCountersKey => counters,
+            LabelServiceKey => labels,
+            yield_vm::host::TimeKey => Arc::new(yield_vm::host::SystemTimeService::new(time_zone)),
+        },
     }
 }
 

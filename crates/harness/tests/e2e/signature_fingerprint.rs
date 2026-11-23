@@ -47,12 +47,12 @@ mod original {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
-        let mut services = yield_vm::Services::default();
-        services.insert::<LabelServiceKey>(Arc::clone(labels))?;
         host_bindings! {
             dts: "../dts/auxiliary-contract.d.ts",
             modules: [api, extra], classes: [Entity, Auxiliary], states: [], operations: [Wait],
-            services: services,
+            services: {
+                LabelServiceKey => Arc::clone(labels),
+            },
         }
     }
 }
@@ -92,12 +92,12 @@ macro_rules! independent_contract {
             }
 
             pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
-                let mut services = yield_vm::Services::default();
-                services.insert::<LabelServiceKey>(Arc::clone(labels))?;
                 host_bindings! {
                     dts: "../dts/auxiliary-contract.d.ts",
                     modules: [extra, alternate_api], classes: [Extra, Entity], states: [], operations: [Wait],
-                    services: services,
+                    services: {
+                        LabelServiceKey => Arc::clone(labels),
+                    },
                 }
             }
         }

@@ -289,15 +289,15 @@ macro_rules! timer_contract {
             }
 
             pub(super) fn bindings(clock: &Arc<FakeClock>) -> Bindings {
-                let mut services = yield_vm::Services::default();
-                services.insert::<yield_harness::timer::FakeClockKey>(Arc::clone(clock)).unwrap();
                 host_bindings! {
                     dts: "../dts/contract.d.ts",
                     modules: [api],
                     classes: [],
                     states: [],
                     operations: [Timer],
-                    services: services,
+                    services: {
+                        yield_harness::timer::FakeClockKey => Arc::clone(clock),
+                    },
                 }.unwrap()
             }
         }

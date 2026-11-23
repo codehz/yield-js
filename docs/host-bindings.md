@@ -198,7 +198,24 @@ trait PayloadCodec<T> {
 - **尺寸与错误。** 解码错误带声明 ID、槽或字段路径；超限、截断、非规范编码都视为损坏快照。
 - 普通 `serde` 类型可经适配器转为 `PayloadCodec`；但这只是无上下文情形的便利路径，不要求所有 payload 只实现标准 trait。
 
-服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。宿主先建立 `Services::default()`，用 `services.insert::<Key>(value)?` 注册，再将表作为 `host_bindings!` 的 `services:` 表达式传入；重复 ID 返回错误且不覆盖。链接后，`Bindings`、`CallCx` 和 `DecodeCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings`、`CallCx` 和 `DecodeCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+
+```rust
+host_bindings! {
+    dts: "test.d.ts",
+    modules: [test],
+    classes: [Node],
+    states: [],
+    operations: [Wait],
+    services: {
+        CountersKey => counters,
+        LabelServiceKey => labels,
+        TimerKey? => timer,          // Option<Arc<dyn TimerService>>
+        ConsoleKey? => console,
+    },
+}
+```
+
 
 资源值不进入快照。默认只有契约的 ID 和版本进入绑定指纹，缺失或版本不匹配会拒绝恢复。六种可选内建适配器均不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；`TimeKey`（`wintertc.time`，版本 `1`）注册 `Arc<dyn TimeService>`，为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区；未注册时 VM 回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）；其余三种如下。
 

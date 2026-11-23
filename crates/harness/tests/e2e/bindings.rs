@@ -139,17 +139,15 @@ mod strategy_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
-        let mut services = yield_vm::Services::default();
-        services
-            .insert::<LabelServiceKey>(Arc::clone(labels))
-            .unwrap();
         host_bindings! {
             dts: "../dts/ops.d.ts",
             modules: [ops],
             classes: [],
             states: [],
             operations: [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
-            services: services,
+            services: {
+                LabelServiceKey => Arc::clone(labels),
+            },
         }
         .expect("strategy bindings")
     }
@@ -463,15 +461,15 @@ mod stale_fixture {
     }
 
     pub(super) fn bindings() -> Bindings {
-        let mut services = yield_vm::Services::default();
-        services.insert::<StashKey>(Stash::default()).unwrap();
         host_bindings! {
             dts: "../dts/stale.d.ts",
             modules: [stale],
             classes: [Sink],
             states: [],
             operations: [],
-            services: services,
+            services: {
+                StashKey => Stash::default(),
+            },
         }
         .expect("stale bindings")
     }
@@ -628,16 +626,16 @@ mod guest_call_fixture {
 
     pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
         let runs = Arc::new(AtomicUsize::new(0));
-        let mut services = yield_vm::Services::default();
-        services.insert::<StashKey>(Stash::default()).unwrap();
-        services.insert::<RunsKey>(runs.clone()).unwrap();
         let bindings = host_bindings! {
             dts: "../dts/guest.d.ts",
             modules: [guest],
             classes: [],
             states: [],
             operations: [],
-            services: services,
+            services: {
+                StashKey => Stash::default(),
+                RunsKey => runs.clone(),
+            },
         }
         .expect("guest bindings");
         let build =
@@ -803,17 +801,15 @@ mod counter_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
-        let mut services = yield_vm::Services::default();
-        services
-            .insert::<LabelServiceKey>(Arc::clone(labels))
-            .unwrap();
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
             modules: [counter, test],
             classes: [],
             states: [CounterState],
             operations: [Wait],
-            services: services,
+            services: {
+                LabelServiceKey => Arc::clone(labels),
+            },
         }
         .expect("counter bindings")
     }
@@ -908,7 +904,7 @@ mod geom_fixture {
             classes: [Point],
             states: [],
             operations: [],
-            services: ::yield_vm::Services::default(),
+            services: {},
         }
         .expect("geometry bindings")
     }
@@ -960,7 +956,7 @@ mod loose_fixture {
             classes: [Loose],
             states: [],
             operations: [],
-            services: ::yield_vm::Services::default(),
+            services: {},
         }
         .expect("loose bindings")
     }
@@ -1135,17 +1131,15 @@ mod inherit_fixture {
     }
 
     pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
-        let mut services = yield_vm::Services::default();
-        services
-            .insert::<LabelServiceKey>(Arc::clone(labels))
-            .unwrap();
         host_bindings! {
             dts: "../dts/inherit.d.ts",
             modules: [inherit],
             classes: [Base, Derived],
             states: [],
             operations: [InheritWait],
-            services: services,
+            services: {
+                LabelServiceKey => Arc::clone(labels),
+            },
         }
         .expect("derived bindings")
     }
@@ -1336,7 +1330,7 @@ mod subset_fixture {
             classes: [],
             states: [],
             operations: [],
-            services: ::yield_vm::Services::default(),
+            services: {},
         }
         .expect("subset bindings")
     }

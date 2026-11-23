@@ -74,7 +74,7 @@ pub fn bindings() -> Result<yield_vm::Bindings, String> {{
         classes: [],
         states: [],
         operations: [],
-        services: ::yield_vm::Services::default(),
+        services: {{}},
     }}
 }}
 "#

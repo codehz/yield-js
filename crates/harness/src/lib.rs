@@ -11,7 +11,7 @@ use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
     ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, FetchKey, GuestOutcome, Host,
-    HostStep, JsString, Services, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
+    HostStep, JsString, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
 };
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
@@ -844,34 +844,24 @@ fn test_bindings(
     subtle: Option<Arc<dyn SubtleCryptoService>>,
     time: Arc<dyn yield_vm::TimeService>,
 ) -> Result<Bindings, String> {
-    let mut services = Services::default();
-    services.insert::<CountersKey>(counters)?;
-    services.insert::<NodeFactoryKey>(NodeFactory)?;
-    services.insert::<LabelServiceKey>(labels)?;
-    services.insert::<timer::FakeClockKey>(Arc::clone(clock))?;
-    services.insert::<yield_vm::host::TimeKey>(time)?;
-    if timers {
-        services.insert::<TimerKey>(clock.clone())?;
-    }
-    if let Some(fetch) = fetch {
-        services.insert::<FetchKey>(fetch)?;
-    }
-    if let Some(console) = console {
-        services.insert::<ConsoleKey>(console)?;
-    }
-    if let Some(crypto) = crypto {
-        services.insert::<CryptoKey>(crypto)?;
-    }
-    if let Some(subtle) = subtle {
-        services.insert::<SubtleCryptoKey>(subtle)?;
-    }
     host_bindings! {
         dts: "../test.d.ts",
         modules: [test],
         classes: [Node, Matcher],
         states: [],
         operations: [Wait, Pause, Reject, Reissue, Timer],
-        services: services,
+        services: {
+            CountersKey => counters,
+            NodeFactoryKey => NodeFactory,
+            LabelServiceKey => labels,
+            timer::FakeClockKey => Arc::clone(clock),
+            yield_vm::host::TimeKey => time,
+            TimerKey? => timers.then(|| clock.clone()),
+            FetchKey? => fetch,
+            ConsoleKey? => console,
+            CryptoKey? => crypto,
+            SubtleCryptoKey? => subtle,
+        },
     }
 }
 

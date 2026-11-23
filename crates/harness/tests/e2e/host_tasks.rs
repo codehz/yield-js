@@ -424,17 +424,13 @@ mod branch {
 fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     let labels = Arc::new(LabelService::default());
     let counters = Arc::new(yield_harness::Counters::default());
-    let mut services = yield_vm::Services::default();
-    services
-        .insert::<LabelServiceKey>(Arc::clone(&labels))
-        .unwrap();
-    services
-        .insert::<CountersKey>(Arc::clone(&counters))
-        .unwrap();
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
-        services: services,
+        services: {
+            LabelServiceKey => Arc::clone(&labels),
+            CountersKey => Arc::clone(&counters),
+        },
     }
     .unwrap();
     let mut host = TaskHost {
@@ -536,17 +532,13 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
 fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     let labels = Arc::new(LabelService::default());
     let counters = Arc::new(yield_harness::Counters::default());
-    let mut services = yield_vm::Services::default();
-    services
-        .insert::<LabelServiceKey>(Arc::clone(&labels))
-        .unwrap();
-    services
-        .insert::<CountersKey>(Arc::clone(&counters))
-        .unwrap();
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
         modules: [branch], classes: [], states: [], operations: [Wait],
-        services: services,
+        services: {
+            LabelServiceKey => Arc::clone(&labels),
+            CountersKey => Arc::clone(&counters),
+        },
     }
     .unwrap();
     (

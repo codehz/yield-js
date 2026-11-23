@@ -434,14 +434,12 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     use yield_harness::Timer;
 
     let clock = Arc::new(yield_harness::FakeClock::default());
-    let mut services = yield_vm::Services::default();
-    services
-        .insert::<yield_harness::timer::FakeClockKey>(Arc::clone(&clock))
-        .unwrap();
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/chain.d.ts",
         modules: [chain], classes: [], states: [], operations: [Timer],
-        services: services,
+        services: {
+            yield_harness::timer::FakeClockKey => Arc::clone(&clock),
+        },
     }
     .unwrap();
     let mut host = ChainHost(Arc::new(bindings));

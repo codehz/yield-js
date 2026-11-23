@@ -727,6 +727,16 @@ pub mod __macro_support {
         OperationType(OperationDecl::of::<T>())
     }
 
+    /// Builds the service table for a `host_bindings!` invocation, surfacing a
+    /// duplicate service ID as the macro's `Err`.
+    pub fn services(
+        build: impl FnOnce(&mut Services) -> Result<(), String>,
+    ) -> Result<Services, String> {
+        let mut services = Services::default();
+        build(&mut services)?;
+        Ok(services)
+    }
+
     pub fn link(
         modules: impl IntoIterator<Item = ModuleDecl>,
         classes: impl IntoIterator<Item = Class>,
