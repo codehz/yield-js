@@ -1,4 +1,4 @@
-//! `TextEncoder` and `TextDecoder`, UTF-8 only.
+//! `TextEncoder` (UTF-8) and `TextDecoder` (UTF-8 and UTF-16).
 //!
 //! Both constructors are ordinary branded objects: script properties live on
 //! the instance header, and the decoder state (`prefix`, `pending`) is the only
@@ -21,7 +21,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL, TextDecoderObject,
-    ViewRange,
+    TextEncoding, ViewRange,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -47,8 +47,8 @@ const IGNORE_BOM: IntrinsicKey =
     IntrinsicKey::new("TextDecoder", Slot::PrototypeGetter, "ignoreBOM");
 const DECODE: IntrinsicKey = IntrinsicKey::new("TextDecoder", Slot::Prototype, "decode");
 
-/// Every label the Encoding Standard maps to UTF-8. Nothing else is accepted.
-const LABELS: &[&str] = &[
+/// Every label the Encoding Standard maps to UTF-8.
+const UTF8_LABELS: &[&str] = &[
     "unicode-1-1-utf-8",
     "unicode11utf8",
     "unicode20utf8",
@@ -87,7 +87,14 @@ const DECODER_INTRINSICS: &[IntrinsicDef] = &[
     ),
     IntrinsicDef::call(DECODER_ENCODING, 0, |vm, _, roots, _, receiver| {
         match vm.text_decoder_state(receiver)? {
-            Some(_) => Ok(Invocation::Value(Value::string("utf-8".into()))),
+            Some(state) => Ok(Invocation::Value(Value::string(
+                match state.encoding {
+                    TextEncoding::Utf8 => "utf-8",
+                    TextEncoding::Utf16Le => "utf-16le",
+                    TextEncoding::Utf16Be => "utf-16be",
+                }
+                .into(),
+            ))),
             None => vm.throw_type_error(
                 roots,
                 "TextDecoder method called on an incompatible receiver",
@@ -242,15 +249,16 @@ fn construct_decoder(
         Ok(values) => values,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
-    if canonical_label(&label).is_none() {
+    let Some(encoding) = canonical_label(&label) else {
         return Ok(Invocation::Thrown(vm.make_range_error(
             roots,
             "unsupported TextDecoder encoding label",
         )?));
-    }
+    };
     let prototype = prototype.unwrap_or_else(|| vm.builtins.get(DECODER_PROTOTYPE));
     let object = vm.heap.alloc(Object::TextDecoder(TextDecoderObject {
         object: PlainObject::new(Some(prototype)),
+        encoding,
         fatal,
         ignore_bom,
         streaming: false,
@@ -263,10 +271,16 @@ fn construct_decoder(
 }
 
 /// Strip ASCII whitespace and ASCII-lowercase, then look the label up.
-fn canonical_label(label: &str) -> Option<&'static str> {
+fn canonical_label(label: &str) -> Option<TextEncoding> {
     let trimmed = label.trim_matches(|c: char| matches!(c, '\t' | '\n' | '\u{0c}' | '\r' | ' '));
     let lowered = trimmed.to_ascii_lowercase();
-    LABELS.iter().copied().find(|label| *label == lowered)
+    match lowered.as_str() {
+        "unicodefffe" | "utf-16be" => Some(TextEncoding::Utf16Be),
+        "csunicode" | "iso-10646-ucs-2" | "ucs-2" | "unicode" | "unicodefeff" | "utf-16"
+        | "utf-16le" => Some(TextEncoding::Utf16Le),
+        label if UTF8_LABELS.contains(&label) => Some(TextEncoding::Utf8),
+        _ => None,
+    }
 }
 
 /// The `TextDecoderOptions` dictionary: undefined and null are empty, any
@@ -552,7 +566,8 @@ impl Vm {
             }
             record.streaming = stream;
             let pending = std::mem::take(&mut record.pending);
-            Utf8Decoder {
+            Decoder {
+                encoding: record.encoding,
                 fatal: record.fatal,
                 ignore_bom: record.ignore_bom,
                 bom_seen: record.bom_seen,
@@ -627,8 +642,9 @@ fn utf8_bytes(text: &JsString) -> Vec<u8> {
     out
 }
 
-/// Streaming UTF-8 state for one `decode` call.
-struct Utf8Decoder {
+/// Streaming state for one `decode` call.
+struct Decoder {
+    encoding: TextEncoding,
     fatal: bool,
     ignore_bom: bool,
     bom_seen: bool,
@@ -640,7 +656,7 @@ struct Utf8Decoder {
     pending: Vec<u8>,
 }
 
-impl Utf8Decoder {
+impl Decoder {
     fn push(&mut self, scalar: char) {
         if !self.ignore_bom && !self.bom_seen {
             self.bom_seen = true;
@@ -662,11 +678,74 @@ impl Utf8Decoder {
     fn feed(&mut self, input: &[u8], last: bool) -> bool {
         let pending = std::mem::take(&mut self.pending);
         self.out.reserve(pending.len() + input.len());
-        let mut cursor = Cursor {
+        let cursor = Cursor {
             sources: [&pending, input],
             index: 0,
             at: 0,
         };
+        match self.encoding {
+            TextEncoding::Utf8 => self.feed_utf8(cursor, last),
+            encoding => self.feed_utf16(cursor, last, encoding),
+        }
+    }
+
+    fn feed_utf16(&mut self, mut cursor: Cursor<'_>, last: bool, encoding: TextEncoding) -> bool {
+        let mut bytes = [0; 4];
+        let mut len = self.prefix_len;
+        bytes[..len].copy_from_slice(&self.prefix[..len]);
+        loop {
+            cursor.fill(&mut bytes, &mut len, 2);
+            if len < 2 {
+                break;
+            }
+            let first = encoding.utf16_unit([bytes[0], bytes[1]]);
+            let (scalar, consumed) = if (0xd800..=0xdbff).contains(&first) {
+                cursor.fill(&mut bytes, &mut len, 4);
+                if len < 4 {
+                    break;
+                }
+                let second = encoding.utf16_unit([bytes[2], bytes[3]]);
+                if (0xdc00..=0xdfff).contains(&second) {
+                    let (scalar, _) = scalar_at(&[first, second], 0);
+                    (Some(scalar), 4)
+                } else {
+                    // The following unit is not part of the error. Reprocess it.
+                    (None, 2)
+                }
+            } else {
+                (char::from_u32(u32::from(first)), 2)
+            };
+            if let Some(scalar) = scalar {
+                self.push(scalar);
+            } else if self.fatal {
+                if !last {
+                    self.retained.extend_from_slice(&bytes[consumed..len]);
+                    cursor.copy_remainder(&mut self.retained);
+                }
+                return false;
+            } else {
+                self.push('\u{fffd}');
+            }
+            bytes.copy_within(consumed..len, 0);
+            len -= consumed;
+        }
+        if last {
+            if len != 0 {
+                if self.fatal {
+                    return false;
+                }
+                // EOF with a pending high surrogate and/or a byte is one error.
+                self.push('\u{fffd}');
+            }
+            self.prefix_len = 0;
+        } else {
+            self.prefix[..len].copy_from_slice(&bytes[..len]);
+            self.prefix_len = len;
+        }
+        true
+    }
+
+    fn feed_utf8(&mut self, mut cursor: Cursor<'_>, last: bool) -> bool {
         let mut buffer = [0u8; 4];
         let mut len = self.prefix_len;
         buffer[..len].copy_from_slice(&self.prefix[..len]);
@@ -792,6 +871,17 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    fn fill(&mut self, buffer: &mut [u8], len: &mut usize, target: usize) {
+        while *len < target
+            && let Some(rest) = self.rest()
+        {
+            let take = (target - *len).min(rest.len());
+            buffer[*len..*len + take].copy_from_slice(&rest[..take]);
+            self.take(take);
+            *len += take;
+        }
+    }
+
     /// The unread remainder of the current source, skipping exhausted ones.
     fn rest(&mut self) -> Option<&'a [u8]> {
         while self.index < self.sources.len() && self.at == self.sources[self.index].len() {

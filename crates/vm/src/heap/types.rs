@@ -1034,15 +1034,33 @@ pub struct DataViewObject {
     pub byte_length: Option<usize>,
 }
 
-/// A UTF-8 `TextDecoder` instance: the ordinary object header plus the
-/// decoder state that survives a snapshot boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl TextEncoding {
+    pub(crate) fn utf16_unit(self, bytes: [u8; 2]) -> u16 {
+        match self {
+            Self::Utf16Le => u16::from_le_bytes(bytes),
+            Self::Utf16Be => u16::from_be_bytes(bytes),
+            Self::Utf8 => unreachable!("not a UTF-16 encoding"),
+        }
+    }
+}
+
+/// A `TextDecoder` instance: the ordinary object header plus the decoder
+/// state that survives a snapshot boundary.
 ///
-/// `prefix` holds the trailing bytes of an incomplete UTF-8 sequence from a
-/// streaming call; `pending` holds the bytes after a consumed fatal error while
-/// the stream is still open. A non-streaming call always clears both.
+/// `prefix` holds the trailing bytes of an incomplete UTF-8 or UTF-16 scalar;
+/// `pending` holds the bytes after a consumed fatal error while the stream is
+/// still open. A non-streaming call always clears both.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextDecoderObject {
     pub object: PlainObject,
+    pub encoding: TextEncoding,
     pub fatal: bool,
     pub ignore_bom: bool,
     /// The `stream` flag of the most recent `decode` call.

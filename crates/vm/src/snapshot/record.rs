@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// URL objects, linked query lists, patterns, and the VM base URL.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 74;
+// TextDecoder encoding and HTML Base64 intrinsic roots.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 75;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

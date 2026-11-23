@@ -1,6 +1,7 @@
 //! Global functions with stable native identities shared by bare names and globalThis.
 
 use super::FUNCTION_PARENT;
+use super::binary::codec::{decode_html_base64, encode_html_base64};
 use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
 use crate::error::VmError;
@@ -58,6 +59,37 @@ function!(
         Ok(Invocation::Value(Value::UNDEFINED))
     }
 );
+
+function!(ATOB, "atob", 1, |vm, host, roots, args, _| {
+    call_base64(vm, host, roots, &args, decode_html_base64)
+});
+function!(BTOA, "btoa", 1, |vm, host, roots, args, _| {
+    call_base64(vm, host, roots, &args, encode_html_base64)
+});
+
+fn call_base64(
+    vm: &mut Vm,
+    host: &mut dyn Host,
+    roots: &ActiveRoots<'_>,
+    args: &[Value],
+    transform: fn(&JsString) -> Option<JsString>,
+) -> Result<Invocation, VmError> {
+    let Some(input) = args.first() else {
+        return vm.throw_type_error(roots, "Base64 function requires one argument");
+    };
+    let roots = &roots.with(&args);
+    let text = match vm.coerce_string(host, roots, input)? {
+        Ok(text) => text,
+        Err(error) => return Ok(Invocation::Thrown(error)),
+    };
+    Ok(match transform(&text) {
+        Some(text) => Invocation::Value(Value::string(text)),
+        None => Invocation::Thrown(vm.alloc_dom_exception(
+            "InvalidCharacterError".into(),
+            "Invalid Base64 input".into(),
+        )),
+    })
+}
 
 fn number_predicate(
     vm: &mut Vm,

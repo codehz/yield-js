@@ -161,6 +161,8 @@ builtin_globals! {
     "setInterval" => Global::Owner(super::timers::SET_INTERVAL),
     "clearTimeout" => Global::Owner(super::timers::CLEAR_TIMEOUT),
     "clearInterval" => Global::Owner(super::timers::CLEAR_INTERVAL),
+    "atob" => Global::Function(global_functions::ATOB),
+    "btoa" => Global::Function(global_functions::BTOA),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {

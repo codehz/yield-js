@@ -44,8 +44,8 @@ fn value_of(character: u16) -> Option<u8> {
 }
 
 /// Skip TAB, LF, FF, CR, and SPACE between base64 characters.
-fn skip_whitespace(units: &[u16], mut index: usize) -> usize {
-    while let Some(&character) = units.get(index) {
+fn skip_whitespace(units: &JsString, mut index: usize) -> usize {
+    while let Some(character) = units.unit_at(index) {
         if !matches!(character, 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
             break;
         }
@@ -88,8 +88,13 @@ fn decode_final_chunk(chunk: &[u16], throw_on_extra_bits: bool) -> Result<Vec<u8
     }
 }
 
-fn from_base64(units: &[u16], alphabet: Alphabet, last: LastChunk, max_length: usize) -> Decoded {
-    let length = units.len();
+fn from_base64(
+    units: &JsString,
+    alphabet: Alphabet,
+    last: LastChunk,
+    max_length: usize,
+) -> Decoded {
+    let length = units.unit_len();
     if max_length == 0 {
         return Decoded {
             read: 0,
@@ -131,7 +136,7 @@ fn from_base64(units: &[u16], alphabet: Alphabet, last: LastChunk, max_length: u
                 error: None,
             };
         }
-        let mut character = units[index];
+        let mut character = units.unit_at(index).expect("index within input");
         index += 1;
         if character == u16::from(b'=') {
             if chunk.len() < 2 {
@@ -151,7 +156,7 @@ fn from_base64(units: &[u16], alphabet: Alphabet, last: LastChunk, max_length: u
                     }
                     return error(read, bytes);
                 }
-                if units[index] != u16::from(b'=') {
+                if units.unit_at(index) != Some(u16::from(b'=')) {
                     return error(read, bytes);
                 }
                 index = skip_whitespace(units, index + 1);
@@ -249,13 +254,33 @@ fn from_hex(units: &[u16], max_length: usize) -> Decoded {
     }
 }
 
-fn encode(units: &[u8], alphabet: Alphabet, omit_padding: bool) -> String {
+pub(in crate::builtin) fn decode_html_base64(text: &JsString) -> Option<JsString> {
+    let decoded = from_base64(text, Alphabet::Base64, LastChunk::Loose, usize::MAX);
+    decoded
+        .error
+        .is_none()
+        .then(|| JsString::from_latin1(decoded.bytes))
+}
+
+pub(in crate::builtin) fn encode_html_base64(text: &JsString) -> Option<JsString> {
+    if let Some(bytes) = text.latin1_bytes() {
+        return Some(encode(bytes, Alphabet::Base64, false));
+    }
+    let bytes = text
+        .units()
+        .map(u8::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    Some(encode(&bytes, Alphabet::Base64, false))
+}
+
+fn encode(units: &[u8], alphabet: Alphabet, omit_padding: bool) -> JsString {
     let symbols = if alphabet == Alphabet::Url {
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     } else {
         STANDARD
     };
-    let mut out = String::with_capacity(units.len().div_ceil(3) * 4);
+    let mut out = Vec::with_capacity(units.len().div_ceil(3) * 4);
     for chunk in units.chunks(3) {
         let first = u32::from(chunk[0]);
         let second = u32::from(*chunk.get(1).unwrap_or(&0));
@@ -270,13 +295,13 @@ fn encode(units: &[u8], alphabet: Alphabet, omit_padding: bool) -> String {
         let kept = chunk.len() + 1;
         for (position, index) in indexes.iter().enumerate() {
             if position < kept {
-                out.push(char::from(symbols[*index as usize]));
+                out.push(symbols[*index as usize]);
             } else if !omit_padding {
-                out.push('=');
+                out.push(b'=');
             }
         }
     }
-    out
+    JsString::from_latin1(out)
 }
 
 impl Vm {
@@ -492,12 +517,7 @@ impl Vm {
         } else {
             Alphabet::Base64
         };
-        let decoded = from_base64(
-            &text.to_utf16(),
-            alphabet,
-            last_chunk(last),
-            super::MAX_BYTE_LENGTH,
-        );
+        let decoded = from_base64(&text, alphabet, last_chunk(last), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
             let error = self.alloc_error(
                 roots,
@@ -593,7 +613,7 @@ impl Vm {
         } else {
             Alphabet::Base64
         };
-        let decoded = from_base64(&text.to_utf16(), alphabet, last_chunk(last), length);
+        let decoded = from_base64(&text, alphabet, last_chunk(last), length);
         self.write_uint8_bytes(id, &decoded.bytes)?;
         self.codec_result(roots, decoded.read, decoded.bytes.len(), decoded.error)
     }
@@ -688,9 +708,11 @@ impl Vm {
         } else {
             Alphabet::Base64
         };
-        Ok(Invocation::Value(Value::string(
-            encode(&bytes, alphabet, omit_padding).into(),
-        )))
+        Ok(Invocation::Value(Value::string(encode(
+            &bytes,
+            alphabet,
+            omit_padding,
+        ))))
     }
 
     pub(super) fn uint8_to_hex(

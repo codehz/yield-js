@@ -3,7 +3,7 @@
 use super::support::{RUN, Suspended, compile_main, count_delta, json_round_trip};
 use yield_harness::{TestHost, build};
 use yield_vm::bytecode::{Instr, ModuleTarget, Slot};
-use yield_vm::heap::EnvironmentObject;
+use yield_vm::heap::{EnvironmentObject, TextEncoding};
 use yield_vm::snapshot::ObjectRecord;
 use yield_vm::{
     Completion, JsString, JsValue, Object, PromiseState, RestoreOptions, Snapshot,
@@ -865,6 +865,20 @@ export async function run() {
     let error = s
         .restore_validated(invalid_prefix)
         .expect_err("invalid prefix bytes");
+    assert!(
+        matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
+    );
+
+    let mut utf16_complete_unit = snapshot.clone();
+    let Object::TextDecoder(state) = &mut utf16_complete_unit.objects[decoder].object else {
+        unreachable!();
+    };
+    state.encoding = TextEncoding::Utf16Be;
+    state.prefix_len = 2;
+    state.prefix = [0x00, 0x41, 0];
+    let error = s
+        .restore_validated(utf16_complete_unit)
+        .expect_err("a complete UTF-16 scalar cannot be buffered as a prefix");
     assert!(
         matches!(error, VmError::InvalidSnapshot(message) if message.contains("invalid stream state"))
     );

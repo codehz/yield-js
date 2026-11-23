@@ -6,7 +6,7 @@ use crate::builtin::is_callable_object;
 use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::heap::{AbortStep, Heap, Object, OwnProperty, OwnedEdge, PrivateMemberKind, Property};
-use crate::heap::{CollectionIteration, CollectionKind, EventPayload, push_value};
+use crate::heap::{CollectionIteration, CollectionKind, EventPayload, TextEncoding, push_value};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
 
 use crate::snapshot::record::valid_string_position;
@@ -390,11 +390,16 @@ pub(super) fn check_heap_edges(
             let prefix_len = usize::from(decoder.prefix_len);
             // A saved prefix must be the beginning of one scalar, not a
             // complete or plainly invalid sequence.
-            let prefix_valid = prefix_len <= decoder.prefix.len()
-                && (prefix_len == 0
-                    || std::str::from_utf8(&decoder.prefix[..prefix_len]).is_err_and(|error| {
-                        error.valid_up_to() == 0 && error.error_len().is_none()
-                    }));
+            let prefix_valid = match decoder.prefix.get(..prefix_len) {
+                Some([]) => true,
+                Some(bytes) if decoder.encoding == TextEncoding::Utf8 => std::str::from_utf8(bytes)
+                    .is_err_and(|error| error.valid_up_to() == 0 && error.error_len().is_none()),
+                Some([_]) => true,
+                Some([first, second, ..]) => {
+                    (0xd800..=0xdbff).contains(&decoder.encoding.utf16_unit([*first, *second]))
+                }
+                None => false,
+            };
             // Only an open stream can leave a prefix, and only a fatal error
             // in an open stream retains unprocessed bytes.
             let stream_valid = decoder.streaming || prefix_len == 0 && decoder.pending.is_empty();
