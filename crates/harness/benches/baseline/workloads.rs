@@ -214,10 +214,7 @@ fn build_react() -> Build {
 }
 
 pub(super) fn build_react_with_options(options: &CompileOptions) -> Build {
-    let preload = concat!(
-        include_str!("react-preload.mjs"),
-        "\nexport const window = undefined; export const process = undefined;\n",
-    );
+    let preload = include_str!("react-preload.mjs");
     let resolver = MemoryResolver::new([
         ("main.js", include_str!("react.js")),
         ("preload.js", preload),

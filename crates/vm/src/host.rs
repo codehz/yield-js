@@ -6,6 +6,17 @@ use crate::value::Value;
 /// Optional one-shot wakeup service for script timers and AbortSignal.timeout.
 pub const TIMER_SERVICE: &str = "wintertc.timer";
 
+pub use crate::console::ConsoleEvent;
+
+/// Optional, synchronous console Printer service (version 1).
+pub const CONSOLE_SERVICE: &str = "wintertc.console";
+
+/// Receives owned-data notifications by reference. Implementations may clone
+/// events but must not reenter the VM.
+pub trait ConsoleSink: Send + Sync {
+    fn write(&self, event: &ConsoleEvent);
+}
+
 /// Arms a platform wakeup without carrying any guest values into its callback.
 /// The scheduler calls [`crate::Vm::wake_timer`] on the VM thread, then drains the turn.
 pub trait TimerService: Send + Sync {

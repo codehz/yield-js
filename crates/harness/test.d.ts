@@ -31,11 +31,3 @@ declare module "test" {
     /** Throws a host string error unless `actual` is truthy. */
     export function assert(actual?: unknown, message?: unknown): void;
 }
-
-declare module "console" {
-    export function debug(value?: unknown): void;
-    export function error(value?: unknown): void;
-    export function info(value?: unknown): void;
-    export function log(value?: unknown): void;
-    export function warn(value?: unknown): void;
-}

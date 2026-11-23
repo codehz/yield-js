@@ -202,6 +202,8 @@ trait PayloadCodec<T> {
 
 Fetch 适配器 `wintertc.fetch`（协议版本 `1`）注册为 `Arc<dyn FetchService>`，同样在链接时校验类型和版本，且不计入通用服务指纹：快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
 
+Console 的 `wintertc.console` 是可选同步服务，链接时要求版本 `1` 和 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不参与绑定指纹，不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
+
 ### 5.5 模块状态
 
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。

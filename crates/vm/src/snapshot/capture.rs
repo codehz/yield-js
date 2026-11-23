@@ -82,6 +82,7 @@ impl Vm {
 
         let mut snapshot = Snapshot::new(self.build.build_id.clone());
         snapshot.elapsed = self.clock.elapsed();
+        snapshot.console = self.console.clone();
         snapshot.base_url = self.base_url.clone();
         snapshot.fetch_environment = self.fetch_environment.clone();
         snapshot.fetch_state = self.fetch_state.clone();
@@ -493,6 +494,7 @@ impl Vm {
             snapshot.next_host_task_id,
         )?;
         if AUDIT {
+            snapshot.console.validate(snapshot.elapsed)?;
             crate::builtin::streams::transfer::validate_tasks(
                 &heap,
                 &snapshot.ordinary_tasks,
@@ -522,6 +524,7 @@ impl Vm {
                 next_timer_id: snapshot.next_timer_id,
                 next_stream_message: snapshot.next_stream_message,
                 clock: crate::runtime::VmClock::new(clock, snapshot.elapsed),
+                console: snapshot.console,
                 base_url: snapshot.base_url,
                 fetch_environment: snapshot.fetch_environment,
                 fetch_state: snapshot.fetch_state,

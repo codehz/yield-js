@@ -722,6 +722,7 @@ pub mod __macro_support {
         for Service(id, version, value) in services {
             let is_timer = id == crate::host::TIMER_SERVICE;
             let is_fetch = id == crate::fetch::FETCH_SERVICE;
+            let is_console = id == crate::host::CONSOLE_SERVICE;
             if is_timer && (version != 1 || !value.is::<Arc<dyn crate::host::TimerService>>()) {
                 return Err(format!(
                     "incompatible service {id:?}: expected TimerService version 1"
@@ -736,6 +737,11 @@ pub mod __macro_support {
                     crate::fetch::FETCH_PROTOCOL_VERSION
                 ));
             }
+            if is_console && (version != 1 || !value.is::<Arc<dyn crate::host::ConsoleSink>>()) {
+                return Err(format!(
+                    "incompatible service {id:?}: expected ConsoleSink version 1"
+                ));
+            }
             match table.services.values.entry(id.to_owned()) {
                 Entry::Vacant(entry) => {
                     entry.insert(value);
@@ -745,7 +751,8 @@ pub mod __macro_support {
             // Timer and fetch compatibility is checked by the VM against the
             // saved work. A queued one-shot task needs no platform service to
             // run, and restored fetch work is interrupted instead of resumed.
-            if !is_timer && !is_fetch {
+            // Console has no outstanding work to recover.
+            if !is_timer && !is_fetch && !is_console {
                 table.service_ids.insert(format!("{id}:{version}"));
             }
         }

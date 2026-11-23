@@ -8,7 +8,7 @@ use yield_vm::binding::{
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
-use yield_vm::{GuestOutcome, Host, HostStep, JsString, Vm};
+use yield_vm::{ConsoleEvent, ConsoleSink, GuestOutcome, Host, HostStep, JsString, Vm};
 use yield_vm::{host_bindings, host_class, host_module, methods, operation};
 
 mod case;
@@ -451,11 +451,21 @@ pub enum RejectionEvent {
     Unhandled { promise: JsValue, reason: JsValue },
 }
 
+#[derive(Default)]
+struct CapturedConsole(Mutex<Vec<ConsoleEvent>>);
+
+impl ConsoleSink for CapturedConsole {
+    fn write(&self, event: &ConsoleEvent) {
+        self.0.lock().expect("console lock").push(event.clone());
+    }
+}
+
 pub struct TestHost {
     bindings: Arc<Bindings>,
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
     clock: Arc<FakeClock>,
+    console: Option<Arc<CapturedConsole>>,
     time_zone: String,
     errors: Vec<JsValue>,
     rejection_events: Vec<RejectionEvent>,
@@ -472,32 +482,39 @@ impl Default for TestHost {
 
 impl TestHost {
     pub fn new() -> Self {
-        Self::with_timer_service(true)
+        Self::with_services(true, None, true)
     }
 
     pub fn without_timer_service() -> Self {
-        Self::with_timer_service(false)
+        Self::with_services(false, None, true)
+    }
+
+    pub fn without_console_service() -> Self {
+        Self::with_services(true, None, false)
     }
 
     /// A host that also registers an explicit Fetch adapter.
     pub fn with_fetch_service(service: Arc<dyn yield_vm::fetch::FetchService>) -> Self {
-        Self::with_services(true, Some(service))
+        Self::with_services(true, Some(service), true)
     }
 
-    fn with_timer_service(timers: bool) -> Self {
-        Self::with_services(timers, None)
-    }
-
-    fn with_services(timers: bool, fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>) -> Self {
+    fn with_services(
+        timers: bool,
+        fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
+        capture_console: bool,
+    ) -> Self {
         let counters = Arc::new(Counters::default());
         let labels = Arc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
+        let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
+        let sink = console.clone().map(|sink| -> Arc<dyn ConsoleSink> { sink });
         let bindings = test_bindings(
             Arc::clone(&counters),
             Arc::clone(&labels),
             &clock,
             timers,
             fetch,
+            sink,
         )
         .expect("test bindings");
         Self {
@@ -505,6 +522,7 @@ impl TestHost {
             counters,
             labels,
             clock,
+            console,
             time_zone: "Etc/UTC".into(),
             errors: Vec::new(),
             rejection_events: Vec::new(),
@@ -533,6 +551,12 @@ impl TestHost {
 
     pub fn rejection_events(&self) -> &[RejectionEvent] {
         &self.rejection_events
+    }
+
+    pub fn take_console_events(&self) -> Vec<ConsoleEvent> {
+        self.console.as_ref().map_or_else(Vec::new, |sink| {
+            std::mem::take(&mut *sink.0.lock().expect("console lock"))
+        })
     }
 
     /// Replaces the values kept alive by guest-triggered GC. The values must
@@ -613,12 +637,13 @@ fn test_bindings(
     clock: &Arc<FakeClock>,
     timers: bool,
     fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
+    console: Option<Arc<dyn ConsoleSink>>,
 ) -> Result<Bindings, String> {
     macro_rules! link {
         ($($service:tt)*) => {
             host_bindings! {
                 dts: "test.d.ts",
-                modules: [test, console],
+                modules: [test],
                 classes: [Node, Matcher],
                 states: [],
                 operations: [Wait, Pause, Reject, Reissue, Timer],
@@ -632,17 +657,25 @@ fn test_bindings(
             }
         };
     }
+    macro_rules! link_platform {
+        ($($service:tt)*) => {
+            match console {
+                Some(sink) => link!(("wintertc.console", 1, sink), $($service)*),
+                None => link!($($service)*),
+            }
+        };
+    }
     match (timers, fetch) {
         (true, Some(fetch)) => {
             let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-            link!(("wintertc.timer", 1, wakeups), ("wintertc.fetch", 1, fetch))
+            link_platform!(("wintertc.timer", 1, wakeups), ("wintertc.fetch", 1, fetch))
         }
         (true, None) => {
             let wakeups: Arc<dyn yield_vm::host::TimerService> = clock.clone();
-            link!(("wintertc.timer", 1, wakeups))
+            link_platform!(("wintertc.timer", 1, wakeups))
         }
-        (false, Some(fetch)) => link!(("wintertc.fetch", 1, fetch)),
-        (false, None) => link!(),
+        (false, Some(fetch)) => link_platform!(("wintertc.fetch", 1, fetch)),
+        (false, None) => link_platform!(),
     }
 }
 
@@ -800,48 +833,6 @@ mod test {
             None => String::new(),
         };
         Err(cx.throw_string(format!("assert: expected truthy, actual {actual}{message}")))
-    }
-}
-
-fn write_console(level: &str, value: Option<JsValue>) {
-    match value {
-        Some(value) => eprintln!("console.{level}: {value}"),
-        None => eprintln!("console.{level}"),
-    }
-}
-
-#[host_module(name = "console")]
-mod console {
-    use super::*;
-
-    #[function(name = "debug")]
-    fn debug(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        write_console("debug", _value);
-        Ok(())
-    }
-
-    #[function(name = "error")]
-    fn error(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        write_console("error", _value);
-        Ok(())
-    }
-
-    #[function(name = "info")]
-    fn info(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        write_console("info", _value);
-        Ok(())
-    }
-
-    #[function(name = "log")]
-    fn log(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        write_console("log", _value);
-        Ok(())
-    }
-
-    #[function(name = "warn")]
-    fn warn(_cx: &mut CallCx<'_>, _value: Option<JsValue>) -> JsResult<()> {
-        write_console("warn", _value);
-        Ok(())
     }
 }
 

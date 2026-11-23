@@ -87,7 +87,7 @@
 
 `crates/harness/tests/e2e/react_compat.rs` 用真实 React 19（19.2.0，esm.sh 打包的单文件 ESM，来源见 `tests/e2e/vendor/react-19.2.0-esm-sh.mjs` 头部注释）和 `react-reconciler` 0.31.0 验证严格 ESM 子集与宿主边界。探针现在编译并运行成功：`tests/e2e/vendor/react-renderer.mjs` 的自定义 renderer 完成一次 headless 渲染，`react_reconciler_custom_renderer_headless_smoke` 在推进调度器 timer 后断言容器提交了一个子节点。
 
-preload 只提供 `console` 宿主模块；测试可选地探测 `window`、`process` 为 `undefined`。`reportError`、`performance`、`setTimeout` 与 `clearTimeout` 由 VM 提供，原 scheduler 不使用 timer shim。夹具装载器为 esm.sh 的 Node 事件 polyfill 补充缺失的模块私有 `kEvents`，不改锁定的上游包。
+preload 可选地提供值为 `undefined` 的 `window` 与 `process`。`console`、`reportError`、`performance`、`setTimeout` 与 `clearTimeout` 由 VM 提供，原 scheduler 不使用 timer shim。`console.dirxml` 没有 DOM 树可展示，改用普通值预览；`%c` 样式随事件交给宿主，不在 VM 内渲染。夹具装载器为 esm.sh 的 Node 事件 polyfill 补充缺失的模块私有 `kEvents`，不改锁定的上游包。
 
 探针同时关闭了以下框架缺口：
 
@@ -100,4 +100,4 @@ preload 只提供 `console` 宿主模块；测试可选地探测 `window`、`pro
 
 `react-renderer.mjs` 自身还有一个夹具缺陷：它把默认导入当作命名空间使用（`ReactReconciler.default(hostConfig)`），并缺少 React 19 host config 要求的 `resolveUpdatePriority`、`getCurrentUpdatePriority` / `setCurrentUpdatePriority`、`maySuspendCommit`、`preloadInstance`。这些是夹具问题，不是引擎能力缺口；修复后 render 才能提交。
 
-`MessageChannel` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。额外 e2e 编译探针仍在不导出 `window` / `process` 的 preload 下编译整条 reconciler 图。
+`MessageChannel` 的 `typeof` 条件所选死侧不再产生引用；`__REACT_DEVTOOLS_GLOBAL_HOOK__` 的缺名探测本身也不要求 preload 提供该全局。额外 e2e 编译探针不使用 preload，直接编译整条 reconciler 图。

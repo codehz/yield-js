@@ -187,6 +187,7 @@ builtin_globals! {
     "TransformStream" => Global::Owner(super::streams::TRANSFORM_OWNER),
     "TransformStreamDefaultController" => Global::Owner(super::streams::TRANSFORM_CONTROLLER_OWNER),
     "fetch" => Global::Function(super::fetch::controller::OWNER),
+    "console" => Global::Owner(super::console::OWNER),
 }
 
 fn owners() -> impl Iterator<Item = &'static Owner> {
@@ -334,7 +335,7 @@ impl Vm {
             }
             let name: &str = name;
             let value = self.builtin_value(index as u32).expect("global builtin");
-            let attributes = if matches!(GLOBALS[index], Global::Function(_)) {
+            let attributes = if matches!(GLOBALS[index], Global::Function(_)) || name == "console" {
                 Attributes::METHOD
             } else {
                 Attributes::ORDINARY

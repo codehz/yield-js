@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Fetch data objects, live transactions, object URL names and the environment.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 86;
+// Console count, timer, and group state.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 87;
 
 /// Version for the binary envelope and bincode options, not the snapshot schema.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -276,6 +276,7 @@ pub struct Snapshot {
     pub generators: BTreeMap<ObjectId, GeneratorObject>,
     pub random_state: u64,
     pub(crate) elapsed: std::time::Duration,
+    pub(crate) console: crate::console::ConsoleState,
     pub(crate) base_url: Option<url::Url>,
     /// Origin, referrer, partition and host authorization for `fetch`.
     pub fetch_environment: crate::fetch::FetchEnvironment,
@@ -323,6 +324,7 @@ impl Snapshot {
             generators: BTreeMap::new(),
             random_state: crate::builtin::math::RANDOM_SEED,
             elapsed: std::time::Duration::ZERO,
+            console: Default::default(),
             base_url: None,
             fetch_environment: Default::default(),
             fetch_state: Default::default(),

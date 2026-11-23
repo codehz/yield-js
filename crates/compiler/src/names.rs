@@ -102,6 +102,6 @@ pub(crate) fn builtin_index(name: &str) -> Option<usize> {
 pub(crate) fn is_dynamic_global(name: &str) -> bool {
     matches!(
         name,
-        "onerror" | "onunhandledrejection" | "onrejectionhandled"
+        "onerror" | "onunhandledrejection" | "onrejectionhandled" | "console"
     )
 }

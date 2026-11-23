@@ -1,2 +1,2 @@
-import * as console from "console";
-export { console };
+export const window = undefined;
+export const process = undefined;

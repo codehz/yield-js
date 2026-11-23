@@ -1,6 +1,5 @@
 import React from "react.mjs";
 import { render, renderer } from "renderer.mjs";
-import * as console from "console";
 
 let firstContainer;
 const updateContainer = { children: [] };

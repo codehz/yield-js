@@ -20,7 +20,7 @@ pub(super) fn declared(dts: &str) -> CompileOptions {
     CompileOptions::from_dts(dts).expect("host declarations parse")
 }
 
-/// Declaration of the shared `TestHost` modules (`test`, `console`).
+/// Declaration of the shared `TestHost` module (`test`).
 pub(super) const TEST_DECLARATIONS: &str = include_str!("../../test.d.ts");
 
 pub(super) fn compile_preloaded(

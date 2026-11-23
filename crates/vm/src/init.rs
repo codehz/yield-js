@@ -166,6 +166,7 @@ impl Vm {
             ordinary_tasks: VecDeque::new(),
             next_stream_message: 0,
             script_timers: BTreeMap::new(),
+            console: Default::default(),
             next_timer_id: 1,
             timer_nesting: 0,
             timer_deadlines: BTreeMap::new(),

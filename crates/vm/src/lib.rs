@@ -60,6 +60,7 @@ pub mod binding;
 mod builtin;
 use builtin as builtins;
 pub mod bytecode;
+pub mod console;
 mod digest;
 pub mod error;
 mod exec;
@@ -94,13 +95,14 @@ pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
     ResumeEntry, Slot, SlotKind,
 };
+pub use console::ConsoleEvent;
 pub use error::VmError;
 pub use fetch::{
     CredentialsMode, FETCH_PROTOCOL_VERSION, FETCH_SERVICE, FetchEnvironment, FetchEvent,
     FetchFailure, FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
 };
 pub use heap::{Object, PromiseState};
-pub use host::{Completion, Host};
+pub use host::{CONSOLE_SERVICE, Completion, ConsoleSink, Host};
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};
 #[doc(hidden)]

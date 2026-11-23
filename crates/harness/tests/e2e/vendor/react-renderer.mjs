@@ -1,7 +1,5 @@
 import ReactReconciler from "react-reconciler-0.31.0.mjs";
 import { inspect } from "test";
-import * as console from "console";
-
 
 let updatePriority = 0;
 const hostConfig = {

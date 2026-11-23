@@ -64,6 +64,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 快照根包括带索引的源码模块环境与命名空间、内建、类原型、宿主模块状态槽、pending operation、Promise 拒绝候选及待交付的拒绝任务，以及调用方提供的脚本根。遍历可达闭包环境、宿主实例槽与异步续体。成功的微任务检查点只入队；拒绝事件在普通任务中派发，恢复本身不派发。原生指针、宿主回调与已入队的微任务不进快照。
 - 活动事件路径仅存在于同步派发栈，由活动根保护，不进入快照。事件保留上次目标，监听器按登记 ID 保存。取消信号的 source/dependent 与监听器取消步骤中的目标是弱引用；GC 和快照捕获裁剪失活边，并仅在有活源且存在取消步骤或 `abort` 监听器时保活未取消的 dependent。
 - VM 定时器共享一次性唤醒 operation。待唤醒时保存 VM 相对截止时间与调度序号；到期者撤销登记并按（截止时间、序号）入普通任务 FIFO。脚本任务只引用 ID 和序号，记录强引用回调和参数。普通任务可跨快照；已排队的一次性任务恢复不需要唤醒服务，有待登记的 timer 或会续订的 interval 则需要。
+- `console` 的计数、计时起点和分组标题与 VM 命名空间根一同恢复。预览不含 JS 引用；计时起点与 snapshot.elapsed 共享相对时钟域。快照不携带 Printer 服务或输出历史。
 - `fetch` 的脚本对象和获取状态都由 VM 持有：`Request`/`Response` 各有一条字节流 body，`BodyRead.active` 强引用当前读 promise（不借用 `stream_dependency` 指向 promise），`FetchState` 保存逐事务阶段、已接受但未运行的事件、上传额度和取消边。适配器只持有 operation token 与自己的连接；登记、后台队列和 socket 不进入快照。`deliver_fetch_event` 只核对代际、顺序与额度后入普通任务队列，不执行 JS：额度可累加，`Data` 只能消耗已授予的下载额度，最终 head 至多一次，`Eof`/`Failed` 终结唯一。恢复先按记录顺序消费镜像内事件，再对仍依赖外部传输的事务排一个本地 `AbortError` 中断任务：未暴露的响应拒绝原 Promise，已暴露的响应只让未完成的体出错；不重发、不启动新传输，旧代令牌的迟到事件被忽略。
 - 恢复是精确版本匹配：`SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 与绑定指纹都必须一致。缺少声明、槽/payload 不匹配或缺少 operation 会拒绝整个恢复，VM 不得启动。不做快照迁移。
 - `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。

@@ -1082,13 +1082,7 @@ impl<'a> Inspect<'a> {
             return Vec::new();
         };
         let mut keys = Vec::new();
-        for key in object.own_keys(false) {
-            let Some(property) = object.own_property(key.borrowed()) else {
-                continue;
-            };
-            if !property.attributes().enumerable {
-                continue;
-            }
+        for (key, _) in object.enumerable_own_properties() {
             keys.push(match key {
                 PropertyKey::String(key) => InspectKey::String(key),
                 PropertyKey::Symbol(key) => InspectKey::Symbol(key),

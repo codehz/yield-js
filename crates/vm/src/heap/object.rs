@@ -326,6 +326,16 @@ impl Object {
         lookup_tables(props, symbols, key).map(|p| OwnProperty::Stored(&p.value, p.attributes))
     }
 
+    /// Internal descriptors only: no prototype lookup, getter, or proxy trap.
+    pub(crate) fn enumerable_own_properties(
+        &self,
+    ) -> impl Iterator<Item = (PropertyKey, OwnProperty<'_>)> + '_ {
+        self.own_keys(false).filter_map(|key| {
+            let property = self.own_property(key.borrowed())?;
+            property.attributes().enumerable.then_some((key, property))
+        })
+    }
+
     pub(crate) fn own_keys(
         &self,
         enumerable_strings_only: bool,

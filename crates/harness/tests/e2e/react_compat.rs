@@ -7,7 +7,7 @@
 //!
 //! Host-provided environment globals are supplied by the preload module; the
 //! remaining framework-owned gaps are recorded in `docs/gaps.md` §8.
-use super::support::{TEST_DECLARATIONS, compile_preloaded, declared};
+use super::support::{TEST_DECLARATIONS, compile_main, compile_preloaded, declared};
 use yield_compiler::{MemoryResolver, compile};
 use yield_harness::TestHost;
 use yield_vm::{RestoreOptions, Value, Vm, VmOptions};
@@ -19,30 +19,19 @@ const REACT_RECONCILER: &str = concat!(
     include_str!("vendor/react-reconciler-0.31.0.mjs"),
 );
 const CUSTOM_RENDERER: &str = include_str!("vendor/react-renderer.mjs");
-// The preload supplies console; the vendor scheduler uses VM timer globals.
 const PRELOAD: &str = include_str!("../../benches/baseline/react-preload.mjs");
-
-fn preload_source(environment_globals: bool) -> String {
-    let mut source = String::from(PRELOAD);
-    if environment_globals {
-        source.push_str("export const window = undefined; export const process = undefined;");
-    }
-    source
-}
 
 #[test]
 fn real_react_19_bundle_compiles_with_environment_polyfills() {
-    let preload = preload_source(true);
-    compile_preloaded(REACT_19_BUNDLE, &preload, &declared(TEST_DECLARATIONS))
+    compile_preloaded(REACT_19_BUNDLE, PRELOAD, &declared(TEST_DECLARATIONS))
         .unwrap_or_else(|error| panic!("React 19 compile diagnostic changed: {error}"));
 }
 
 #[test]
 fn react_bundle_compiles_without_window_or_process_preload_exports() {
-    let preload = preload_source(false);
-    compile_preloaded(REACT_19_BUNDLE, &preload, &declared(TEST_DECLARATIONS)).unwrap_or_else(
-        |error| panic!("React bundle depended on a removed environment export: {error}"),
-    );
+    compile_main(REACT_19_BUNDLE, &declared(TEST_DECLARATIONS)).unwrap_or_else(|error| {
+        panic!("React bundle depended on a removed environment export: {error}")
+    });
 }
 
 #[test]
@@ -56,22 +45,14 @@ fn react_reconciler_compiles_without_window_or_process_preload_exports() {
             return container.children.length;
         }
     "#;
-    let preload = preload_source(false);
     let resolver = MemoryResolver::new([
         ("main.js", main),
-        ("preload.js", &preload),
         ("react.mjs", REACT_19_BUNDLE),
         ("react-reconciler-0.31.0.mjs", REACT_RECONCILER),
         ("renderer.mjs", CUSTOM_RENDERER),
     ])
     .expect("valid React probe module paths");
-    compile(
-        "main.js",
-        Some("preload.js"),
-        &resolver,
-        &declared(TEST_DECLARATIONS),
-    )
-    .unwrap_or_else(|error| {
+    compile("main.js", None, &resolver, &declared(TEST_DECLARATIONS)).unwrap_or_else(|error| {
         panic!("React reconciler depended on a removed environment export: {error}")
     });
 }
@@ -90,10 +71,9 @@ fn react_reconciler_custom_renderer_headless_smoke() {
             return container.children.length;
         }
     "#;
-    let preload = preload_source(true);
     let resolver = MemoryResolver::new([
         ("main.js", main),
-        ("preload.js", &preload),
+        ("preload.js", PRELOAD),
         ("react.mjs", REACT_19_BUNDLE),
         ("react-reconciler-0.31.0.mjs", REACT_RECONCILER),
         ("renderer.mjs", CUSTOM_RENDERER),

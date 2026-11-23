@@ -115,11 +115,26 @@ impl Vm {
             self.heap
                 .define_data(id, "message", Value::string(message), Attributes::METHOD)?;
         }
+        let mut suffix = String::new();
+        self.visit_stack_frames(roots, |name, module, line, column| {
+            write!(suffix, "\n    at {name} ({module}:{line}:{column})")
+                .expect("writing to String cannot fail");
+        });
+        stack.push_str(&JsString::from(suffix));
+        self.heap
+            .define_data(id, "stack", Value::string(stack), Attributes::METHOD)?;
+        Ok(Value::object(id))
+    }
+
+    pub(crate) fn visit_stack_frames(
+        &self,
+        roots: &ActiveRoots<'_>,
+        mut visit: impl FnMut(&str, &str, u32, u32),
+    ) {
         // A frame can appear in more than one root view. Dedup by address,
         // not function ID: recursive calls are separate frames.
         let mut visible = [std::ptr::null(); 10];
         let mut depth = 0;
-        let mut suffix = String::new();
         for frame in roots.frames() {
             let address = std::ptr::from_ref(frame);
             if visible[..depth].contains(&address) {
@@ -149,24 +164,13 @@ impl Vm {
                 &function.initial_name
             };
             let module = &self.build.modules[module as usize].id;
-            write!(
-                suffix,
-                "\n    at {name} ({module}:{}:{})",
-                site.line, site.column
-            )
-            .expect("writing to String cannot fail");
+            visit(name, module, site.line, site.column);
             visible[depth] = address;
             depth += 1;
             if depth == visible.len() {
                 break;
             }
         }
-        if !suffix.is_empty() {
-            stack.push_str(&JsString::from(suffix));
-        }
-        self.heap
-            .define_data(id, "stack", Value::string(stack), Attributes::METHOD)?;
-        Ok(Value::object(id))
     }
 
     pub(crate) fn alloc_suppressed_error(
