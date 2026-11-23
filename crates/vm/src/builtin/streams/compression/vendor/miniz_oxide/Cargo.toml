@@ -1,0 +1,20 @@
+[package]
+name = "miniz_oxide"
+version = "0.9.1"
+edition = "2021"
+license = "MIT OR Zlib OR Apache-2.0"
+repository = "https://github.com/Frommi/miniz_oxide"
+
+[features]
+default = ["with-alloc"]
+with-alloc = []
+block-boundary = []
+std = ["serde?/std"]
+
+[dependencies]
+adler2 = { version = "2.0", default-features = false }
+serde = { version = "1.0", optional = true, default-features = false, features = ["derive", "alloc"] }
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(fuzzing)", 'cfg(feature, values("rustc-dep-of-std", "simd"))']

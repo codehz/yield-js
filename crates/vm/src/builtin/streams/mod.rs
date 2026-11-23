@@ -1,5 +1,6 @@
 //! Web IDL installation and argument conversion shared by the stream interfaces.
 
+pub(crate) mod compression;
 pub(crate) mod iteration;
 pub(crate) mod pipe;
 pub(crate) mod tee;

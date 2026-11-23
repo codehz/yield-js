@@ -1,0 +1,22 @@
+[package]
+name = "brotli-decompressor"
+version = "6.0.1"
+edition = "2015"
+license = "BSD-3-Clause OR MIT"
+repository = "https://github.com/dropbox/rust-brotli-decompressor"
+autobins = false
+
+[features]
+default = ["std"]
+std = ["alloc-stdlib"]
+unsafe = ["alloc-no-stdlib/unsafe", "alloc-stdlib/unsafe"]
+benchmark = []
+disable-timer = []
+ffi-api = []
+no-stdlib-ffi-binding = ["ffi-api"]
+pass-through-ffi-panics = []
+
+[dependencies]
+alloc-no-stdlib = "3.0.0"
+alloc-stdlib = { version = "0.3.0", optional = true }
+serde = { version = "1.0", default-features = false, features = ["derive"] }

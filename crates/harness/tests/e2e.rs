@@ -1456,3 +1456,47 @@ export function run() {
         PromiseState::Fulfilled(_)
     ));
 }
+
+#[test]
+fn stream_performance_compression_snapshots_stay_bounded() {
+    use yield_harness::{TestHost, build};
+    use yield_vm::{JsValue, Vm, VmOptions};
+    let build = build(r#"
+import { wait } from "test";
+export async function run(size) {
+    const stream = new CompressionStream("gzip");
+    const writer = stream.writable.getWriter();
+    const reader = stream.readable.getReader();
+    const drain = (async () => { for (;;) { if ((await reader.read()).done) return; } })();
+    const chunk = new Uint8Array(4096);
+    for (let sent = 0; sent < size; sent += chunk.length) await writer.write(chunk);
+    await wait("cut");
+    await writer.close();
+    await drain;
+}
+"#);
+    let sizes: &[usize] = if cfg!(debug_assertions) { &[1 << 20] } else { &[1 << 20, 16 << 20] };
+    let mut captured = Vec::new();
+    for &size in sizes {
+        let mut host = TestHost::default();
+        let mut vm = Vm::new(build.clone(), &mut host, VmOptions::default()).unwrap();
+        let started = std::time::Instant::now();
+        let result = vm.start(&mut host, "run", vec![JsValue::number(size as f64)]).unwrap();
+        vm.run_until_idle(&mut host).unwrap();
+        let elapsed = started.elapsed();
+        vm.collect_garbage(std::slice::from_ref(&result)).unwrap();
+        let bytes = vm.snapshot(std::slice::from_ref(&result)).unwrap().to_bytes().unwrap();
+        assert!(bytes.len() > 0);
+        println!(
+            "stream_performance size={} elapsed_ms={} snapshot_bytes={} throughput_mib_s={:.1}",
+            size,
+            elapsed.as_millis(),
+            bytes.len(),
+            size as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0),
+        );
+        captured.push(bytes.len());
+    }
+    if let [small, large] = captured.as_slice() {
+        assert!(*large <= small * 2, "snapshot grew with input history: {small} -> {large}");
+    }
+}

@@ -37,7 +37,7 @@ macro_rules! interface {
                 &[
                     RootSpec::new($root, RootKind::Native($key), FUNCTION_PARENT)
                         .fixed($proto)
-                        .backlink(Some(Attributes::METHOD)),
+                        .backlink(Some(crate::heap::Attributes::METHOD)),
                     RootSpec::new($proto, RootKind::Plain, OBJECT_PARENT),
                 ],
                 &[MEMBERS],

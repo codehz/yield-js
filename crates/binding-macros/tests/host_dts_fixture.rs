@@ -27,8 +27,10 @@ impl Fixture {
             dir.join("Cargo.toml"),
             format!(
                 "[package]\nname = \"host-dts-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
-                 [workspace]\n\n[dependencies]\nyield-vm = {{ path = \"{}\" }}\n",
-                vm.display()
+                 [workspace]\n\n[dependencies]\nyield-vm = {{ path = \"{}\" }}\n\n\
+                 [patch.crates-io]\nbrotli-decompressor = {{ path = \"{}\" }}\n",
+                vm.display(),
+                vm.join("src/builtin/streams/compression/vendor/brotli-decompressor").display()
             ),
         )
         .expect("fixture manifest");

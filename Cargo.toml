@@ -1,5 +1,9 @@
 [workspace]
 members = ["crates/vm", "crates/compiler", "crates/harness", "crates/binding-macros", "crates/host-dts"]
+exclude = [
+    "crates/vm/src/builtin/streams/compression/vendor/brotli-decompressor",
+    "crates/vm/src/builtin/streams/compression/vendor/miniz_oxide",
+]
 resolver = "2"
 
 [workspace.package]
@@ -18,3 +22,6 @@ ryu-js = "=1.0.3"
 thiserror = "2.0"
 num-bigint = "0.5"
 num-traits = "0.2"
+
+[patch.crates-io]
+brotli-decompressor = { path = "crates/vm/src/builtin/streams/compression/vendor/brotli-decompressor" }

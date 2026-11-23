@@ -2,8 +2,8 @@
 
 use super::install;
 use super::readable::{converted, illegal_constructor, interface};
+use super::transform::endpoint_defaults;
 use crate::VmError;
-use crate::builtin::binary::ARRAY_BUFFER_PROTOTYPE;
 use crate::builtin::binary::text::{
     Source, buffer_source, decoder_config, encoding_value, source_bytes,
 };
@@ -13,9 +13,8 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT};
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    ArrayBufferObject, Attributes, ElementKind, Heap, Object, PlainObject, ReadableStreamObject,
-    TextDecoderConfig, TextEncoding, TransformAlgorithms, TransformStage, TypedArrayObject,
-    WritableState, WritableStreamObject,
+    Heap, Object, PlainObject, ReadableStreamObject, TextDecoderConfig, TextEncoding,
+    TransformAlgorithms, TransformStage, WritableState, WritableStreamObject,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -203,7 +202,7 @@ impl Vm {
             if bytes.is_empty() {
                 return Ok(Invocation::Value(Value::UNDEFINED));
             }
-            self.text_stream_bytes(bytes)
+            self.stream_bytes(bytes)
         } else {
             let source = if flush {
                 Source::Empty
@@ -245,31 +244,6 @@ impl Vm {
         };
         self.transform_enqueue(host, roots, stream, &output)
     }
-
-    fn text_stream_bytes(&mut self, bytes: Vec<u8>) -> Value {
-        // Move the freshly encoded bytes; no constructor or prototype getter
-        // is invoked by the native transform.
-        let byte_length = bytes.len();
-        let buffer = self.heap.alloc(Object::ArrayBuffer(ArrayBufferObject {
-            object: PlainObject::new(Some(self.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
-            bytes: Some(bytes),
-            max_byte_length: None,
-        }));
-        Value::object(self.heap.alloc(Object::TypedArray(TypedArrayObject {
-            object: PlainObject::new(Some(self.builtins.get("uint8Array.prototype"))),
-            buffer,
-            byte_offset: 0,
-            byte_length: Some(byte_length),
-            kind: ElementKind::Uint8,
-        })))
-    }
-}
-
-fn endpoint_defaults(readable: &ReadableStreamObject, writable: &WritableStreamObject) -> bool {
-    readable.high_water_mark == 0.0
-        && writable.high_water_mark == 1.0
-        && readable.size.is_none()
-        && writable.sink.size.is_none()
 }
 
 pub(super) fn validate_native(
@@ -283,7 +257,7 @@ pub(super) fn validate_native(
             TransformAlgorithms::TextDecoder(config, state) => {
                 state.valid_stream_checkpoint(config.encoding, config.ignore_bom)
             }
-            TransformAlgorithms::Script { .. } => false,
+            TransformAlgorithms::Script { .. } | TransformAlgorithms::Compression(_) => false,
         }
 }
 
@@ -302,11 +276,12 @@ pub(super) fn validate_wrapper(
         return false;
     };
     !stream.transfer_proxy
+        && stream.compression_brand.is_none()
         && endpoint_defaults(readable, writable)
         && match &stream.algorithms {
             Some(TransformAlgorithms::TextEncoder(_)) => decoder.is_none(),
             Some(TransformAlgorithms::TextDecoder(config, _)) => decoder == Some(*config),
-            Some(TransformAlgorithms::Script { .. }) => false,
+            Some(TransformAlgorithms::Script { .. } | TransformAlgorithms::Compression(_)) => false,
             None => stream.finish.is_some() || !matches!(writable.state, WritableState::Writable),
         }
 }

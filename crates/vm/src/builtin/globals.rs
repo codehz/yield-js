@@ -131,6 +131,8 @@ builtin_globals! {
     "TextDecoder" => Global::Owner(binary::text::DECODER_OWNER),
     "TextEncoderStream" => Global::Owner(super::streams::text::ENCODER_OWNER),
     "TextDecoderStream" => Global::Owner(super::streams::text::DECODER_OWNER),
+    "CompressionStream" => Global::Owner(super::streams::compression::ENCODER_OWNER),
+    "DecompressionStream" => Global::Owner(super::streams::compression::DECODER_OWNER),
     "URL" => Global::Owner(super::url_api::URL_OWNER),
     "URLSearchParams" => Global::Owner(super::url_api::params::PARAMS_OWNER),
     "URLPattern" => Global::Owner(super::url_api::pattern::PATTERN_OWNER),

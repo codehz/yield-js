@@ -12,7 +12,7 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT};
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, Object, PlainObject, PromiseState, WritableAbort, WritableFlight, WritableRequest,
+    Object, PlainObject, PromiseState, WritableAbort, WritableFlight, WritableRequest,
     WritableSink, WritableState, WritableStreamObject, WritableWriterObject,
 };
 use crate::host::Host;

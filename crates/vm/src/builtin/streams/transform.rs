@@ -8,6 +8,7 @@ use super::readable::{
     is_undefined, member,
 };
 use crate::VmError;
+use crate::builtin::binary::ARRAY_BUFFER_PROTOTYPE;
 use crate::builtin::event::new_target_prototype;
 use crate::builtin::globals::Owner;
 use crate::builtin::is_callable_object;
@@ -15,9 +16,10 @@ use crate::builtin::roots::{RootKind, RootSpec};
 use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT};
 use crate::gc::ActiveRoots;
 use crate::heap::{
-    Attributes, Heap, Object, PlainObject, PromiseState, ReactionJob, ReadableState,
-    TransformAlgorithms, TransformStage, TransformStreamObject, WritableFlight, WritableSink,
-    WritableState,
+    ArrayBufferObject, ElementKind, Heap, Object, PlainObject, PromiseState, ReactionJob,
+    ReadableState, ReadableStreamObject, TransformAlgorithms, TransformStage,
+    TransformStreamObject, TypedArrayObject, WritableFlight, WritableSink, WritableState,
+    WritableStreamObject,
 };
 use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -287,6 +289,7 @@ impl Vm {
         let backpressure_change = self.heap.alloc_promise();
         *self.heap.get_mut(stream)? = Object::TransformStream(TransformStreamObject {
             transfer_proxy: true,
+            compression_brand: None,
             object: PlainObject::new(Some(prototype)),
             readable,
             writable,
@@ -334,6 +337,10 @@ impl Vm {
         let readable =
             self.create_readable_internal(source, readable_hwm, readable_size, false, start)?;
         let backpressure_change = self.heap.alloc_promise();
+        let compression_brand = match &algorithms {
+            TransformAlgorithms::Compression(codec) => Some(codec.decoding()),
+            _ => None,
+        };
         *self.heap.get_mut(stream)? = Object::TransformStream(TransformStreamObject {
             object: PlainObject::new(Some(prototype)),
             readable,
@@ -341,6 +348,7 @@ impl Vm {
             controller,
             algorithms: Some(algorithms),
             transfer_proxy: false,
+            compression_brand,
             backpressure: true,
             backpressure_change,
             write: None,
@@ -368,6 +376,24 @@ impl Vm {
         )?;
         self.settle(start, Settlement::Fulfilled(Value::UNDEFINED))?;
         Ok(stream)
+    }
+
+    pub(super) fn stream_bytes(&mut self, bytes: Vec<u8>) -> Value {
+        // Move the freshly encoded bytes; no constructor or prototype getter
+        // is invoked by the native transform.
+        let byte_length = bytes.len();
+        let buffer = self.heap.alloc(Object::ArrayBuffer(ArrayBufferObject {
+            object: PlainObject::new(Some(self.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
+            bytes: Some(bytes),
+            max_byte_length: None,
+        }));
+        Value::object(self.heap.alloc(Object::TypedArray(TypedArrayObject {
+            object: PlainObject::new(Some(self.builtins.get("uint8Array.prototype"))),
+            buffer,
+            byte_offset: 0,
+            byte_length: Some(byte_length),
+            kind: ElementKind::Uint8,
+        })))
     }
 
     pub(in crate::builtin) fn transform_enqueue(
@@ -508,6 +534,9 @@ impl Vm {
             cancel,
         } = algorithms
         else {
+            if matches!(algorithms, TransformAlgorithms::Compression(_)) {
+                return self.invoke_compression_transform(host, roots, stream, stage, value);
+            }
             return self.invoke_text_transform(host, roots, stream, stage, value);
         };
         let callback = match stage {
@@ -799,6 +828,7 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
                     && (!matches!(writable.state, crate::heap::WritableState::Writable)
                         || writable.flight == Some(WritableFlight::Close))))
             && s.algorithms.is_none()
+            && s.compression_brand.is_none()
             && s.backpressure
             && s.write.is_none()
             && s.finish.is_none()
@@ -839,6 +869,11 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
         && writable.sink.write.is_none()
         && writable.sink.close.is_none()
         && writable.sink.abort.is_none()
+        && s.compression_brand.is_none_or(|_| {
+            endpoint_defaults(readable, writable)
+                && (s.algorithms.is_some() || s.finish.is_some()
+                    || !matches!(writable.state, WritableState::Writable))
+        })
         && (readable.source == owner
             || (!matches!(readable.state, ReadableState::Readable)
                 && is_undefined(&readable.source)))
@@ -846,11 +881,17 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
         && pending(s.backpressure_change) && s.algorithms.as_ref().is_none_or(|a| {
         s.finish.is_none() && match a {
             TransformAlgorithms::Script { transform, flush, cancel, .. } => {
-                [transform, flush, cancel].into_iter().flatten().all(|v| {
-                    matches!(v.view(), ValueRef::Object(f) if heap.get(f).is_ok_and(is_callable_object))
-                })
+                s.compression_brand.is_none()
+                    && [transform, flush, cancel].into_iter().flatten().all(|v| {
+                        matches!(v.view(), ValueRef::Object(f) if heap.get(f).is_ok_and(is_callable_object))
+                    })
             }
-            native => super::text::validate_native(native, readable, writable),
+            TransformAlgorithms::Compression(codec) => {
+                s.compression_brand == Some(codec.decoding()) && codec.valid_checkpoint()
+            }
+            native => {
+                s.compression_brand.is_none() && super::text::validate_native(native, readable, writable)
+            }
         }
     }) && match (s.write, s.write_wait) {
         (None, None) => true,
@@ -887,4 +928,14 @@ pub(super) fn validate_transform_record(heap: &Heap, id: ObjectId, object: &Obje
         }
         _ => false,
     }
+}
+
+pub(super) fn endpoint_defaults(
+    readable: &ReadableStreamObject,
+    writable: &WritableStreamObject,
+) -> bool {
+    readable.high_water_mark == 0.0
+        && writable.high_water_mark == 1.0
+        && readable.size.is_none()
+        && writable.sink.size.is_none()
 }

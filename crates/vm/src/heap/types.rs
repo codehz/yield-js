@@ -1720,11 +1720,14 @@ pub enum TransformAlgorithms {
         TextDecoderConfig,
         crate::builtin::binary::text_codec::DecoderState,
     ),
+    Compression(Box<crate::builtin::streams::compression::Codec>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransformStreamObject {
     pub transfer_proxy: bool,
+    /// Native compression branding survives algorithm disposal on close/error.
+    pub compression_brand: Option<bool>,
     pub object: PlainObject,
     pub readable: ObjectId,
     pub writable: ObjectId,
@@ -1794,6 +1797,11 @@ pub enum Object {
         transform: ObjectId,
         /// None brands an encoder; decoder settings outlive the algorithms.
         decoder: Option<TextDecoderConfig>,
+    },
+    CompressionStream {
+        object: PlainObject,
+        transform: ObjectId,
+        decoding: bool,
     },
     QueuingStrategy {
         object: PlainObject,

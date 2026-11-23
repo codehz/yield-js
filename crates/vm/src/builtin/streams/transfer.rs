@@ -287,15 +287,14 @@ impl TransferRecord {
                         ) => {}
                     (Phase::Waiting(_), None) => {}
                     (Phase::Returning, Some(Message::Response(_, reply)))
-                        if match (self.readable, stage, reply) {
+                        if matches!(
+                            (self.readable, stage, reply),
                             (
                                 true,
                                 TransferStage::Data,
                                 Reply::Chunk(_) | Reply::Closed | Reply::Error(_),
-                            ) => true,
-                            (_, _, Reply::Ack | Reply::Error(_)) => true,
-                            _ => false,
-                        } => {}
+                            ) | (_, _, Reply::Ack | Reply::Error(_))
+                        ) => {}
                     _ => return false,
                 }
             } else if let Some(message) = messages.next()

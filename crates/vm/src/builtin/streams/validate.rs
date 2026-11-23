@@ -288,6 +288,11 @@ pub(crate) fn validate_composition(
             Object::TextStream {
                 transform, decoder, ..
             } => super::text::validate_wrapper(heap, *transform, *decoder),
+            Object::CompressionStream {
+                transform,
+                decoding,
+                ..
+            } => super::compression::validate_wrapper(heap, *transform, *decoding),
             Object::StreamPipe(record) => record.validate(heap, id),
             Object::StreamTransfer(record) => record.validate(heap, id),
             Object::Tee(record) => record.validate(heap, id),

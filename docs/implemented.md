@@ -176,6 +176,7 @@
 - 字节读取支持默认 reader 自动分配和 BYOB reader 的 `min`、偏移及元素边界。字节队列保存缓冲区区间；同长转移移动后备存储并分离旧缓冲区。快照保留未完成的 pull-into 和 BYOB request，完整校验检查关联、区间与对齐。
 - `TransformStream`、`pipeTo` / `pipeThrough`、`tee` 与 `ReadableStream.from` / 异步迭代由 VM 内部端点组合。默认可读 HWM 为 0、可写为 1；pipe 尊重三个 prevent 标志与 `AbortSignal`，tee 分普通与字节分支，迭代器串行执行 `next` / `return`。未完成步骤、锁、取消原因和端点关联均随快照保存。
 - `TextEncoderStream` 与 `TextDecoderStream` 复用编码内建与标签规则，提供固定的 `readable` / `writable` 端点；编码器跨块保留高代理并在 flush 时替换一次，解码器按 UTF-8/UTF-16 增量处理且无输出时不入队。编解码进度随快照恢复。
+- `CompressionStream` 与 `DecompressionStream` 支持 `gzip`、`deflate`、`deflate-raw` 与 `brotli`。编码器跨 64 KiB 输入块产生单个合法流，gzip/zlib 包装与 CRC32/Adler32 随外层状态推进；解码器接受任意合法块、跨块回引和校验，拒绝截断、尾随数据与非法头。位缓存、窗口、熵表和包装游标随快照保存而不重放历史输入。
 - `URL`、`URLSearchParams`、`URLPattern` 同时暴露为静态裸名与 `globalThis` 属性，不依赖宿主服务。`URL` 支持组件读写、`toString` / `toJSON` 与静态 `parse` / `canParse`；`URLSearchParams` 支持字符串、键值对序列和记录初始化、查询修改、排序与实时迭代；`URLPattern` 支持字符串与字典、组件访问器、`test` / `exec`。
 - `VmOptions::base_url` 在模块求值前设置绝对基准 URL，只用于构造器省略 `base` 时的解析，不改变静态方法。快照格式 **74** 保存基准、URL 与查询列表的双向链接、迭代游标及模式输入；恢复只使用快照保存的基准（也保留无基准的情况），不能通过 `RestoreOptions` 覆盖，也不重新运行模块初始化。
 - `Number`、`BigInt` 及其共享原型是快照根；`Number.NaN` 和正负无穷常量通过专用数值编码跨 JSON 快照往返保留。
