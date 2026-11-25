@@ -39,6 +39,7 @@
 - 单名 `using` / `await using` 接受初始化器，初始化绑定前捕获释放方法，无隐式等待初始化器。函数、块和模块求值的清理由隐式 `finally` 路由；同步模块及同步函数不允许 `await using`。没有资源声明的作用域不分配清理列表。编译器使用私有内建登记和单步清理，异步等待沿普通 `Await` 保存待完成值与清理状态；恢复不会重做登记或已执行的释放。`yield` 不退出作用域，生成器恢复注入的 `return` / `throw` 才按完成路径清理。
 - C 风格 `for` 的 `using` / `await using` 头在整个循环退出时释放；`continue` 不结束头部资源的生命周期。`for…of` 和 `for await…of` 的单名资源头每轮先登记、再初始化绑定和执行正文，当轮清理先于迭代器关闭。迭代方式独立于释放 hint，`for…in` 不允许资源头。模块顶层 `using` 在本模块求值返回前完成清理，不在实例化、恢复或 VM 销毁时运行。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
+- `yield-blitz` 执行签入的 React DOM 19.2.0 浏览器生产 ESM，以同步 `flushSync` 首次挂载到同一 Blitz `HtmlDocument`；本地连续句柄映射 Blitz NodeId，DOM 原语经 `yield:dom` 绑定并由 JS preload 提供稳定 wrapper 身份。DOM 树与 VM 不做快照；执行结束即丢弃 VM 并移交文档。`cargo test -p yield-blitz` 无窗口验证真实 bundle 的 `#root > main > h1`、文本替换与 wrapper 身份；`cargo run -p yield-blitz` 用 Vello 原生窗口显示。该入口不承诺交互、热更新或恢复。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的值分配到瞬时槽，活性区间不相交的值可复用同一个瞬时槽；持久槽不复用。挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
 - 未导出且未跨函数共享的绑定在帧槽中；导出和闭包共享的绑定仍在堆环境，快照保留环境、闭包与对象身份。没有共享绑定且不创建闭包的调用不分配环境。

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vm", "crates/compiler", "crates/harness", "crates/binding-macros", "crates/host-dts"]
+members = ["crates/vm", "crates/compiler", "crates/harness", "crates/binding-macros", "crates/host-dts", "crates/blitz"]
 exclude = [
     "crates/vm/src/builtin/streams/compression/vendor/brotli-decompressor",
     "crates/vm/src/builtin/streams/compression/vendor/miniz_oxide",

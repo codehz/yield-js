@@ -12,7 +12,7 @@ brotli = { version = "=9.0.0", features = ["portable-float"] }
 brotli-decompressor = "=6.0.1"
 chrono = { version = "0.4", default-features = false }
 chrono-tz = "=0.10.4"
-icu_normalizer = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_normalizer = { version = "~2.3.0", default-features = false, features = ["compiled_data"] }
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 # Match chrono-tz 0.10.4's IANA 2025b data.
 jiff-tzdb = "=0.1.4"

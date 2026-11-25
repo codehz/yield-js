@@ -32,3 +32,12 @@ cargo run -p yield-harness …                  # 以 src/index.tsx 为 entry �
 ```
 
 预期：构建产出可链接 ESM 字节码；执行后 `roots` 中出现 `app` 节点树；同一构建产物在参考 JS 引擎（ESM 模式 + 同一 HostConfig）下节点树与事件日志一致。
+
+## Blitz 首屏入口
+
+`src/blitz.jsx` 是独立于上述 reconciler 验收入口的 `react-dom/client` 首次挂载用例。已生成的 `blitz.mjs` 是 Rust crate 的签入输入；消费者不需要 Node.js 或 `node_modules`。维护 fixture 时在本目录运行：
+
+```sh
+npm ci
+npx --no-install esbuild src/blitz.jsx --bundle --format=esm --platform=browser --define:process.env.NODE_ENV='"production"' --jsx=automatic --legal-comments=inline --outfile=blitz.mjs
+```

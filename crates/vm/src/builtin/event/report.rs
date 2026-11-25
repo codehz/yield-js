@@ -16,7 +16,7 @@ impl Vm {
         error: Value,
     ) -> Result<(), VmError> {
         if self.reporting_exception {
-            host.report_error(self.host_value(error));
+            self.deliver_exception(host, error);
             return Ok(());
         }
         let message = self.exception_message(&error);
@@ -56,7 +56,7 @@ impl Vm {
         let result = self.dispatch_global_notification(host, roots, event);
         self.reporting_exception = false;
         if result? {
-            host.report_error(self.host_value(error));
+            self.deliver_exception(host, error);
         }
         Ok(())
     }
@@ -97,6 +97,21 @@ impl Vm {
             Invocation::Value(value) => Ok(value.truthy()),
             Invocation::Thrown(error) => Err(VmError::Thrown(error)),
         }
+    }
+
+    fn deliver_exception(&self, host: &mut dyn Host, error: Value) {
+        let diagnostic = self.exception_diagnostic(&error);
+        host.report_error_with_diagnostic(self.host_value(error), &diagnostic);
+    }
+
+    pub(crate) fn exception_diagnostic(&self, error: &Value) -> JsString {
+        if let ValueRef::Object(id) = error.view()
+            && matches!(self.heap.get(id), Ok(Object::Plain(object)) if object.is_error)
+            && let Some(stack) = self.diagnostic_string(id, "stack")
+        {
+            return stack;
+        }
+        self.exception_message(error)
     }
 
     fn exception_message(&self, error: &Value) -> JsString {

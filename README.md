@@ -20,6 +20,8 @@ cargo run -p yield-harness
 
 `yield-harness` 编译并执行双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。编译器通过同步解析器静态链接严格 ES 模块；宿主只访问入口模块的公开导出。VM 执行和恢复均不需要源文件或解析器。
 
+`yield-blitz` 使用已签入的 React DOM 生产 ESM 首次挂载并打开原生 Blitz 窗口；无窗口验收运行 `cargo test -p yield-blitz`。维护该 fixture 时才需 npm 与固定版本 esbuild，Rust 构建与运行使用签入 bundle。
+
 ## 目录
 
 | 路径 | 内容 |

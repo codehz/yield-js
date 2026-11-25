@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::binding::{Bindings, JsValue};
-use crate::value::Value;
+use crate::value::{JsString, Value};
 
 mod console;
 mod crypto;
@@ -56,6 +56,16 @@ pub trait Host {
     /// Default report for an exception whose global error event was not canceled.
     /// This callback must not re-enter the VM.
     fn report_error(&mut self, error: JsValue);
+
+    /// Same report, with an Error stack or message inspected without running script.
+    /// Hosts that only need the thrown value can implement `report_error` alone.
+    fn report_error_with_diagnostic(&mut self, error: JsValue, _diagnostic: &JsString) {
+        self.report_error(error);
+    }
+
+    /// Diagnostic for a module initialization exception, before the VM is discarded.
+    /// This does not dispatch an event or change the error returned by construction.
+    fn report_startup_exception(&mut self, _diagnostic: &JsString) {}
 
     /// Default report for a Promise rejection whose notification was not canceled.
     /// This callback must not re-enter the VM.

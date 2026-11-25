@@ -702,17 +702,21 @@ impl Vm {
     ) -> Result<(), VmError> {
         let function_index = self.function_index(func_id)?;
         let prepared = self.module_envs[module];
-        self.activate(
-            host,
-            &ActiveRoots::EMPTY,
-            function_index,
-            None,
-            prepared,
-            Arguments::EMPTY,
-            (&Value::UNDEFINED, &Value::UNDEFINED, None),
-            None,
-        )?
-        .into_result()
-        .map(|_| ())
+        let result = self
+            .activate(
+                host,
+                &ActiveRoots::EMPTY,
+                function_index,
+                None,
+                prepared,
+                Arguments::EMPTY,
+                (&Value::UNDEFINED, &Value::UNDEFINED, None),
+                None,
+            )?
+            .into_result();
+        if let Err(VmError::Thrown(error)) = &result {
+            host.report_startup_exception(&self.exception_diagnostic(error));
+        }
+        result.map(|_| ())
     }
 }
