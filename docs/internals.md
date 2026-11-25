@@ -33,7 +33,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 公共入口：
 
-- `Compiler::compile(Project) -> Result<Build, CompileError>` 链接显式根；`Compiler::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
+- `Compiler::compile(Project) -> Result<Build, CompileError>` 链接显式根；`Compiler::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`ModuleResolver::resolve` 返回 `ResolvedModule`，同时给出规范模块 ID 与该定义模块的框架标记；`NodeResolver` 把 `node_modules` 中定义的模块标为框架，覆盖包 `exports` 目标、嵌套依赖和包内相对导入，其他解析器默认不标记。标记只决定是否生成栈位置，不改变解析、链接或运行语义；隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
 - `Vm::new(build, &mut host, VmOptions::default())` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
 - `VmOptions::default()` 不设置基准 URL 或测试时钟。用 `VmOptions { base_url: Some("https://example.com/"), ..Default::default() }` 可在任何模块求值之前设置默认基准。构造和恢复的选项都可通过 `test_clock` 注入 `Arc<dyn TestClock>`，默认使用正常时钟。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。

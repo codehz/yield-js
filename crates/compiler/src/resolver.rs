@@ -10,15 +10,36 @@ pub use node::NodeResolver;
 
 use crate::ModuleId;
 
+/// A canonical module identity together with the framework mark of the module
+/// that defines it.
+///
+/// The mark only decides whether the module contributes Error stack sites; it
+/// never affects resolution, linking or runtime semantics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedModule {
+    /// Stable, nonempty canonical module ID; the key accepted by [`ModuleResolver::load`].
+    pub id: ModuleId,
+    /// Whether the defining module is framework code, whose frames stay hidden.
+    pub is_framework: bool,
+}
+
 /// Resolves source specifiers to stable, nonempty canonical module IDs.
 pub trait ModuleResolver {
     /// `None` identifies an explicit compilation root.
-    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String>;
+    fn resolve(
+        &self,
+        referrer: Option<&ModuleId>,
+        specifier: &str,
+    ) -> Result<ResolvedModule, String>;
     fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String>;
 }
 
 impl<R: ModuleResolver + ?Sized> ModuleResolver for &R {
-    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
+    fn resolve(
+        &self,
+        referrer: Option<&ModuleId>,
+        specifier: &str,
+    ) -> Result<ResolvedModule, String> {
         (**self).resolve(referrer, specifier)
     }
 
@@ -45,8 +66,17 @@ impl<'a> MemoryResolver<'a> {
 }
 
 impl ModuleResolver for MemoryResolver<'_> {
-    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
-        normalize(referrer.map(String::as_str), specifier)
+    fn resolve(
+        &self,
+        referrer: Option<&ModuleId>,
+        specifier: &str,
+    ) -> Result<ResolvedModule, String> {
+        let id = normalize(referrer.map(String::as_str), specifier)?;
+        // In-memory sources are authored project code, never framework code.
+        Ok(ResolvedModule {
+            id,
+            is_framework: false,
+        })
     }
 
     fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {

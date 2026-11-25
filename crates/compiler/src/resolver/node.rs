@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use super::ModuleResolver;
+use super::ResolvedModule;
 use super::manifest::{self, Map, Value};
 use crate::ModuleId;
 
@@ -232,7 +233,11 @@ impl NodeResolver {
 }
 
 impl ModuleResolver for NodeResolver {
-    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
+    fn resolve(
+        &self,
+        referrer: Option<&ModuleId>,
+        specifier: &str,
+    ) -> Result<ResolvedModule, String> {
         let (referrer, package) = match referrer {
             Some(id) => {
                 let (path, package) = decode_id(id)?;
@@ -240,15 +245,17 @@ impl ModuleResolver for NodeResolver {
             }
             None => (None, None),
         };
-        if referrer.is_none()
-            || matches!(specifier, "." | "..")
-            || specifier.starts_with("./")
-            || specifier.starts_with("../")
-        {
-            let relative = normalize_source(referrer, specifier)?;
-            return self.probe(&relative, package);
-        }
-        self.resolve_package(referrer.expect("import has a referrer"), specifier)
+        let id = match referrer {
+            None => self.probe(&normalize_source(None, specifier)?, None)?,
+            Some(referrer) if is_relative_request(specifier) => {
+                self.probe(&normalize_source(Some(referrer), specifier)?, package)?
+            }
+            Some(referrer) => self.resolve_package(referrer, specifier)?,
+        };
+        // A canonical ID carries an installed package scope exactly when its definition
+        // lives inside node_modules, whatever specifier or export path produced it.
+        let is_framework = decode_id(&id)?.1.is_some();
+        Ok(ResolvedModule { id, is_framework })
     }
 
     fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
@@ -263,6 +270,10 @@ impl ModuleResolver for NodeResolver {
             .map(Cow::Owned)
             .map_err(|err| format!("{file:?}: {err}"))
     }
+}
+
+fn is_relative_request(specifier: &str) -> bool {
+    matches!(specifier, "." | "..") || specifier.starts_with("./") || specifier.starts_with("../")
 }
 
 fn normalize_source(referrer: Option<&str>, specifier: &str) -> Result<String, String> {

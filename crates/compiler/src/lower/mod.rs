@@ -90,8 +90,7 @@ pub(crate) fn lower_graph<'ast>(
             let scope = ModuleScope {
                 index,
                 source,
-                stack_traces: options.stack_traces
-                    && !options.framework_modules.contains(&module.id),
+                stack_traces: options.stack_traces && !module.is_framework,
                 entry: index == graph.entry,
                 slots: &reservations[index as usize],
                 module_bindings: reservations[index as usize].values().copied().collect(),

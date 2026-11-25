@@ -11,7 +11,7 @@ use oxc::span::{GetSpan, Span};
 use yield_vm::bytecode::ImportDecl;
 
 use crate::error::{CompileError, unsupported};
-use crate::{Compiler, ModuleId, ModuleResolver, ParsedModule, SourceTransform};
+use crate::{Compiler, ModuleId, ModuleResolver, ParsedModule, ResolvedModule, SourceTransform};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Target {
@@ -67,6 +67,8 @@ pub struct Dependency {
 pub(crate) struct Module<'a> {
     parsed: ParsedModule<'a>,
     original_source: &'a str,
+    /// Framework mark the resolver reported for this module's definition.
+    pub(crate) is_framework: bool,
     pub(crate) dependencies: Vec<Dependency>,
     pub(crate) deps: Vec<u32>,
     pub(crate) in_preload: bool,
@@ -138,6 +140,13 @@ impl<'a> ModuleGraph<'a> {
             .map(|(index, module)| (module.id.clone(), index as u32))
             .collect();
         let mut records = Vec::with_capacity(self.modules.len());
+        // Every edge re-resolution below refreshes the mark of the module it targets,
+        // so a graph transform cannot leave a stale framework classification behind.
+        let mut framework: Vec<bool> = self
+            .modules
+            .iter()
+            .map(|module| module.is_framework)
+            .collect();
         for module in &mut self.modules {
             super::validate_syntax(&module.program).map_err(|err| err.in_module(&module.id))?;
             super::jsx::lower(&mut module.parsed, &options.jsx_runtime)?;
@@ -153,11 +162,15 @@ impl<'a> ModuleGraph<'a> {
                     } else {
                         let locate =
                             |reason| dependency_error(source, span, &module.id, specifier, reason);
-                        let target = crate::resolved_id(resolver, Some(&module.id), specifier)
+                        let ResolvedModule {
+                            id: target,
+                            is_framework,
+                        } = crate::resolved_id(resolver, Some(&module.id), specifier)
                             .map_err(locate)?;
                         let index = *ids.get(&target).ok_or_else(|| {
                             locate(format!("target {target:?} is not in the graph"))
                         })?;
+                        framework[index as usize] = is_framework;
                         if seen.insert(index) {
                             deps.push(index);
                         }
@@ -180,11 +193,14 @@ impl<'a> ModuleGraph<'a> {
             })?;
             for (specifier, span) in dynamic {
                 let locate = |reason| dependency_error(source, span, &module.id, specifier, reason);
-                let target_id =
-                    crate::resolved_id(resolver, Some(&module.id), specifier).map_err(locate)?;
+                let ResolvedModule {
+                    id: target_id,
+                    is_framework,
+                } = crate::resolved_id(resolver, Some(&module.id), specifier).map_err(locate)?;
                 let target = *ids
                     .get(&target_id)
                     .ok_or_else(|| locate(format!("target {target_id:?} is not in the graph")))?;
+                framework[target as usize] = is_framework;
                 if seen.insert(target) {
                     deps.push(target);
                 }
@@ -200,6 +216,9 @@ impl<'a> ModuleGraph<'a> {
             module.deps = deps;
             module.dependencies = dependencies;
             module.in_preload = false;
+        }
+        for (module, is_framework) in self.modules.iter_mut().zip(framework) {
+            module.is_framework = is_framework;
         }
         let mut work = self.preload.into_iter().collect::<Vec<_>>();
         while let Some(index) = work.pop() {
@@ -348,12 +367,14 @@ pub(crate) fn link<'a>(
         if root.is_empty() {
             return Err(root_error("empty source root".into()));
         }
-        let id = crate::resolved_id(resolver, None, root).map_err(root_error)?;
+        let ResolvedModule { id, is_framework } =
+            crate::resolved_id(resolver, None, root).map_err(root_error)?;
         let (index, fresh) = insert(
             &mut graph,
             &mut ids,
             &mut discovery,
             id,
+            is_framework,
             in_preload,
             root_error,
         )?;
@@ -383,10 +404,17 @@ pub(crate) fn link<'a>(
                 for (specifier, span) in dynamic {
                     let locate =
                         |reason| dependency_error(source, span, &referrer, specifier, reason);
-                    let id =
+                    let ResolvedModule { id, is_framework } =
                         crate::resolved_id(resolver, Some(&referrer), specifier).map_err(locate)?;
-                    let (target, fresh) =
-                        insert(&mut graph, &mut ids, &mut discovery, id, in_preload, locate)?;
+                    let (target, fresh) = insert(
+                        &mut graph,
+                        &mut ids,
+                        &mut discovery,
+                        id,
+                        is_framework,
+                        in_preload,
+                        locate,
+                    )?;
                     if seen.insert(target) {
                         graph.modules[i].deps.push(target);
                     }
@@ -415,13 +443,15 @@ pub(crate) fn link<'a>(
                     let referrer = current.id.clone();
                     let location =
                         |reason| dependency_error(source, span, &referrer, &specifier, reason);
-                    let id = crate::resolved_id(resolver, Some(&referrer), &specifier)
-                        .map_err(location)?;
+                    let ResolvedModule { id, is_framework } =
+                        crate::resolved_id(resolver, Some(&referrer), &specifier)
+                            .map_err(location)?;
                     let (target, is_new) = insert(
                         &mut graph,
                         &mut ids,
                         &mut discovery,
                         id,
+                        is_framework,
                         in_preload,
                         location,
                     )?;
@@ -476,6 +506,7 @@ fn insert<'a>(
     ids: &mut BTreeMap<ModuleId, u32>,
     discovery: &mut Discovery<'a, '_, '_>,
     id: ModuleId,
+    is_framework: bool,
     in_preload: bool,
     locate: impl Fn(String) -> CompileError,
 ) -> Result<(u32, bool), CompileError> {
@@ -517,6 +548,7 @@ fn insert<'a>(
     graph.modules.push(Module {
         parsed,
         original_source: source,
+        is_framework,
         dependencies: Vec::new(),
         deps: Vec::new(),
         in_preload,

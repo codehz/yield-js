@@ -2034,14 +2034,17 @@ fn memory_resolver_resolves_relative_and_root_relative_paths() {
         ("dep.js", "export const shared = 3;"),
     ])
     .unwrap();
-    let entry = resolver.resolve(None, "./src/main.js").unwrap();
+    let entry = resolver.resolve(None, "./src/main.js").unwrap().id;
     assert_eq!(entry, "src/main.js");
-    let local = resolver.resolve(Some(&entry), "./dir/../dep.js").unwrap();
+    let local = resolver
+        .resolve(Some(&entry), "./dir/../dep.js")
+        .unwrap()
+        .id;
     assert_eq!(local, "src/dep.js");
     assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
-    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap();
+    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap().id;
     assert_eq!(shared, "dep.js");
-    assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap(), shared);
+    assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap().id, shared);
     assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
     assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
 }
@@ -2090,15 +2093,18 @@ fn node_resolver_resolves_relative_paths_and_explicit_roots() {
     fs::write(root.0.join("dep.js"), "export const shared = 3;").unwrap();
 
     let resolver = NodeResolver::new(&root.0).unwrap();
-    let entry = resolver.resolve(None, "./src/main.js").unwrap();
+    let entry = resolver.resolve(None, "./src/main.js").unwrap().id;
     assert_eq!(entry, "src/main.js");
-    let local = resolver.resolve(Some(&entry), "./dir/../dep.js").unwrap();
+    let local = resolver
+        .resolve(Some(&entry), "./dir/../dep.js")
+        .unwrap()
+        .id;
     assert_eq!(local, "src/dep.js");
     assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
-    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap();
+    let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap().id;
     assert_eq!(shared, "dep.js");
     assert!(resolver.resolve(Some(&entry), "dep.js").is_err());
-    assert_eq!(resolver.resolve(None, "dep.js").unwrap(), shared);
+    assert_eq!(resolver.resolve(None, "dep.js").unwrap().id, shared);
     assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
     assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
 }
@@ -2117,7 +2123,7 @@ fn node_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
     symlink("../outside.js", root.join("escape.js")).unwrap();
 
     let resolver = NodeResolver::new(&root).unwrap();
-    assert_eq!(resolver.resolve(None, "alias.js").unwrap(), "dep.js");
+    assert_eq!(resolver.resolve(None, "alias.js").unwrap().id, "dep.js");
     let error = resolver.resolve(None, "escape.js").unwrap_err();
     assert!(error.contains("outside the source root"), "{error}");
     let error = resolver.load(&ModuleId::from("escape.js")).unwrap_err();
@@ -2209,23 +2215,28 @@ fn node_resolver_probes_exports_and_package_relative_imports() {
     );
     fixture(&root, "node_modules/@scope/pkg/dir/index.js", "");
     let resolver = NodeResolver::new(&root.0).unwrap();
-    let entry = resolver.resolve(None, "src/main").unwrap();
+    let entry = resolver.resolve(None, "src/main").unwrap().id;
     assert_eq!(
-        resolver.resolve(Some(&entry), "./which").unwrap(),
+        resolver.resolve(Some(&entry), "./which").unwrap().id,
         "src/which.js"
     );
     assert_eq!(
-        resolver.resolve(Some(&entry), "./dir").unwrap(),
+        resolver.resolve(Some(&entry), "./dir").unwrap().id,
         "src/dir/index.mjs"
     );
     let package = resolver.resolve(Some(&entry), "@scope/pkg").unwrap();
-    assert_eq!(package, "npm:node_modules/@scope/pkg/entry.mjs");
-    let private = resolver.resolve(Some(&package), "./private").unwrap();
+    assert_eq!(package.id, "npm:node_modules/@scope/pkg/entry.mjs");
+    assert!(
+        package.is_framework,
+        "installed packages are framework code"
+    );
+    let private = resolver.resolve(Some(&package.id), "./private").unwrap().id;
     assert_eq!(resolver.load(&private).unwrap(), "export const value = 1;");
     assert!(
         resolver
             .resolve(Some(&entry), "@scope/pkg/public")
             .unwrap()
+            .id
             .ends_with("dir/index.js")
     );
     for request in [
@@ -2281,18 +2292,62 @@ fn node_resolver_retains_installation_context_for_package_collisions() {
         fixture(&root, &format!("{prefix}sibling/index.mjs"), prefix);
     }
     let resolver = NodeResolver::new(&root.0).unwrap();
-    let entry = resolver.resolve(None, "src/main").unwrap();
-    let outer = resolver.resolve(Some(&entry), "dep").unwrap();
-    let inner = resolver.resolve(Some(&outer), "dep").unwrap();
+    let entry = resolver.resolve(None, "src/main").unwrap().id;
+    let outer = resolver.resolve(Some(&entry), "dep").unwrap().id;
+    let inner = resolver.resolve(Some(&outer), "dep").unwrap().id;
     assert_ne!(outer, inner);
-    let outer_sibling = resolver.resolve(Some(&entry), "sibling").unwrap();
-    let inner_sibling = resolver.resolve(Some(&inner), "sibling").unwrap();
+    let outer_sibling = resolver.resolve(Some(&entry), "sibling").unwrap().id;
+    let inner_sibling = resolver.resolve(Some(&inner), "sibling").unwrap().id;
     assert_ne!(outer_sibling, inner_sibling);
     assert_eq!(resolver.load(&outer_sibling).unwrap(), "node_modules/");
     assert_eq!(
         resolver.load(&inner_sibling).unwrap(),
         "node_modules/dep/node_modules/"
     );
+}
+
+#[test]
+fn resolvers_report_framework_definitions() {
+    let memory = MemoryResolver::new([("src/main.js", ""), ("dep.js", "")]).unwrap();
+    assert!(!memory.resolve(None, "src/main.js").unwrap().is_framework);
+    assert!(!memory.resolve(None, "dep.js").unwrap().is_framework);
+
+    let root = TempDir::new();
+    fixture(&root, "src/main.js", "");
+    fixture(
+        &root,
+        "node_modules/dep/package.json",
+        r#"{"exports":"./index.mjs"}"#,
+    );
+    fixture(&root, "node_modules/dep/index.mjs", "");
+    fixture(
+        &root,
+        "node_modules/dep/node_modules/inner/package.json",
+        r#"{"exports":"./index.mjs"}"#,
+    );
+    fixture(&root, "node_modules/dep/node_modules/inner/index.mjs", "");
+    let resolver = NodeResolver::new(&root.0).unwrap();
+    let entry = resolver.resolve(None, "src/main").unwrap();
+    assert_eq!(entry.id, "src/main.js");
+    assert!(
+        !entry.is_framework,
+        "project files are never framework code"
+    );
+    let dep = resolver.resolve(Some(&entry.id), "dep").unwrap();
+    assert_eq!(dep.id, "npm:node_modules/dep/index.mjs");
+    assert!(dep.is_framework, "installed packages are framework code");
+    let inner = resolver.resolve(Some(&dep.id), "inner").unwrap();
+    assert_eq!(
+        inner.id,
+        "npm:node_modules/dep/node_modules/inner/index.mjs"
+    );
+    assert!(
+        inner.is_framework,
+        "nested dependencies are framework code too"
+    );
+    let sibling = resolver.resolve(Some(&dep.id), "./index.mjs").unwrap();
+    assert_eq!(sibling.id, dep.id);
+    assert!(sibling.is_framework);
 }
 
 #[test]
@@ -2404,11 +2459,11 @@ fn node_resolver_rejects_symlink_exports_and_relative_package_bypasses() {
     )
     .unwrap();
     let resolver = NodeResolver::new(&root.0).unwrap();
-    let entry = resolver.resolve(None, "src/main.js").unwrap();
-    let package = resolver.resolve(Some(&entry), "pkg").unwrap();
+    let entry = resolver.resolve(None, "src/main.js").unwrap().id;
+    let package = resolver.resolve(Some(&entry), "pkg").unwrap().id;
     assert_eq!(package, "npm:node_modules/pkg/actual.mjs");
     assert_eq!(
-        resolver.resolve(Some(&package), "./good.mjs").unwrap(),
+        resolver.resolve(Some(&package), "./good.mjs").unwrap().id,
         package
     );
     assert!(

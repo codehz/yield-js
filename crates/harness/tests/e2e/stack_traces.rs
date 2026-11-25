@@ -1,32 +1,79 @@
-use yield_compiler::{Compiler, MemoryResolver, Project};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use yield_compiler::{Compiler, NodeResolver, Project};
 use yield_harness::{TestHost, string};
 use yield_vm::{Build, Completion, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
 
 use super::support::{TEST_DECLARATIONS, declared};
 
+const ENTRY: &str = "import { relay } from 'vendor';\n\
+     import { callback } from './callback.js';\n\
+     import { wait } from 'test';\n\
+     export function capture() {\n  return relay(callback).stack;\n}\n\
+     export async function run() {\n  const error = relay(callback);\n  await wait('stack');\n  return error.stack;\n}";
+
 const FILTERED: &str =
     "Error: created\n    at callback (callback.js:2:10)\n    at capture (entry.js:5:10)";
 
-fn build_stack(options: &Compiler, import: &str, alias: &str) -> Build {
-    let entry = format!(
-        "import {{ relay as {alias} }} from '{import}';\n\
-         import {{ callback }} from './callback.js';\n\
-         import {{ wait }} from 'test';\n\
-         export function capture() {{\n  return {alias}(callback).stack;\n}}\n\
-         export async function run() {{\n  const error = {alias}(callback);\n  await wait('stack');\n  return error.stack;\n}}",
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "yield-stack-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("creating {path:?}: {error}"),
+            }
+        }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write(root: &Path, relative: &str, source: &str) {
+    let path = root.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, source).unwrap();
+}
+
+/// A project module and a callback reachable only through an installed package.
+fn fixture() -> TempDir {
+    let root = TempDir::new();
+    write(&root.0, "entry.js", ENTRY);
+    write(
+        &root.0,
+        "callback.js",
+        "export function callback() {\n  return new Error('created');\n}",
     );
-    let resolver = MemoryResolver::new([
-        ("entry.js", entry.as_str()),
-        (
-            "lib/vendor.js",
-            "export function relay(callback) {\n  return callback();\n}",
-        ),
-        (
-            "callback.js",
-            "export function callback() {\n  return new Error('created');\n}",
-        ),
-    ])
-    .unwrap();
+    write(
+        &root.0,
+        "node_modules/vendor/package.json",
+        r#"{"name":"vendor","type":"module","exports":{".":"./index.js"}}"#,
+    );
+    write(
+        &root.0,
+        "node_modules/vendor/index.js",
+        "export function relay(callback) {\n  return callback();\n}",
+    );
+    root
+}
+
+fn build_stack(options: &Compiler) -> Build {
+    let root = fixture();
+    let resolver = NodeResolver::new(&root.0).unwrap();
     options.compile(Project::new("entry.js", resolver)).unwrap()
 }
 
@@ -45,51 +92,51 @@ fn text(value: &Value) -> String {
 }
 
 #[test]
-fn filters_defining_module_and_round_trips_build() {
-    let mut options = declared(TEST_DECLARATIONS);
-    // A specifier alias and a host name are not canonical source IDs.
-    options
-        .framework_modules
-        .extend(["./lib/vendor.js".into(), "test".into()]);
-    let visible = build_stack(&options, "./lib/vendor.js", "relay");
-    assert_eq!(
-        stack_text(visible, "capture"),
-        "Error: created\n    at callback (callback.js:2:10)\n    at relay (lib/vendor.js:2:10)\n    at capture (entry.js:5:10)",
+fn filters_node_modules_modules_and_round_trips_build() {
+    let build = build_stack(&declared(TEST_DECLARATIONS));
+    let framework: Vec<_> = build
+        .functions
+        .iter()
+        .filter(|function| {
+            function
+                .module
+                .is_some_and(|index| build.modules[index as usize].id.starts_with("npm:"))
+        })
+        .collect();
+    assert!(!framework.is_empty(), "the fixture links the package");
+    assert!(
+        framework
+            .iter()
+            .all(|function| function.stack_sites.is_empty()),
+        "node_modules definitions carry no stack sites"
     );
-    options.framework_modules.insert("lib/vendor.js".into());
-    for (import, alias) in [
-        ("./lib/vendor.js", "relay"),
-        ("./lib/../lib/vendor.js", "alias"),
-    ] {
-        let build = build_stack(&options, import, alias);
-        for function in build.functions.iter().filter(|f| {
-            f.module
-                .is_some_and(|i| build.modules[i as usize].id == "lib/vendor.js")
-        }) {
-            assert!(function.stack_sites.is_empty());
-        }
-        let decoded = Build::from_bytes(&build.to_bytes()).unwrap();
-        assert_eq!(decoded.build_id, build.build_id);
-        assert_eq!(stack_text(build, "capture"), FILTERED);
-        assert_eq!(stack_text(decoded, "capture"), FILTERED);
-    }
-    options
-        .framework_modules
-        .extend(["entry.js".into(), "callback.js".into()]);
-    let hidden = build_stack(&options, "./lib/vendor.js", "relay");
-    assert_eq!(stack_text(hidden, "capture"), "Error: created");
-    options.framework_modules.clear();
+    assert!(
+        build.functions.iter().any(|function| {
+            function
+                .module
+                .is_some_and(|index| build.modules[index as usize].id == "callback.js")
+                && !function.stack_sites.is_empty()
+        }),
+        "project modules keep their stack sites"
+    );
+    let decoded = Build::from_bytes(&build.to_bytes()).unwrap();
+    assert_eq!(decoded.build_id, build.build_id);
+    assert_eq!(stack_text(build, "capture"), FILTERED);
+    assert_eq!(stack_text(decoded, "capture"), FILTERED);
+}
+
+#[test]
+fn stack_traces_flag_disables_every_site() {
+    let mut options = declared(TEST_DECLARATIONS);
     options.stack_traces = false;
-    let disabled = build_stack(&options, "./lib/vendor.js", "relay");
-    assert!(disabled.functions.iter().all(|f| f.stack_sites.is_empty()));
-    assert_eq!(stack_text(disabled, "capture"), "Error: created");
+    let build = build_stack(&options);
+    assert!(build.functions.iter().all(|f| f.stack_sites.is_empty()));
+    assert_eq!(stack_text(build, "capture"), "Error: created");
 }
 
 #[test]
 fn retains_creation_stack_across_snapshot_restore() {
-    let mut options = declared(TEST_DECLARATIONS);
-    options.framework_modules.insert("lib/vendor.js".into());
-    let build = build_stack(&options, "./lib/vendor.js", "relay");
+    let build = build_stack(&declared(TEST_DECLARATIONS));
     let mut host = TestHost::default();
     let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let result = vm.start(&mut host, "run", Vec::<JsValue>::new()).unwrap();
@@ -118,7 +165,7 @@ fn retains_creation_stack_across_snapshot_restore() {
 
 #[test]
 fn rejects_rehashed_invalid_stack_sites() {
-    let build = build_stack(&declared(TEST_DECLARATIONS), "./lib/vendor.js", "relay");
+    let build = build_stack(&declared(TEST_DECLARATIONS));
     let index = build
         .functions
         .iter()

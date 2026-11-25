@@ -47,7 +47,7 @@ use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
 pub use frontend::link::{Dependency, DependencyKind, ModuleGraph};
-pub use resolver::{MemoryResolver, ModuleResolver, NodeResolver};
+pub use resolver::{MemoryResolver, ModuleResolver, NodeResolver, ResolvedModule};
 pub use transform::{
     BuildTransform, GraphTransform, ParsedModule, SourceTransform, TransformError,
 };
@@ -112,9 +112,8 @@ pub struct Compiler {
     /// this manifest; the VM resolves it before executing the script.
     pub imports: BTreeMap<String, BTreeSet<String>>,
     /// Emit source sites for synchronous Error stacks (enabled by default).
+    /// Modules the resolver marks as framework contribute no sites.
     pub stack_traces: bool,
-    /// Canonical source module IDs whose frames should never be shown.
-    pub framework_modules: BTreeSet<String>,
     /// Automatic JSX runtime package (defaults to `react`).
     /// A `.jsx` module using JSX imports the helpers it needs from this package's `/jsx-runtime`.
     pub jsx_runtime: String,
@@ -125,7 +124,6 @@ impl Default for Compiler {
         Self {
             imports: BTreeMap::new(),
             stack_traces: true,
-            framework_modules: BTreeSet::new(),
             jsx_runtime: "react".into(),
         }
     }
@@ -195,10 +193,10 @@ fn resolved_id(
     resolver: &dyn ModuleResolver,
     referrer: Option<&ModuleId>,
     specifier: &str,
-) -> Result<ModuleId, String> {
-    let id = resolver.resolve(referrer, specifier)?;
-    if id.is_empty() {
+) -> Result<ResolvedModule, String> {
+    let resolved = resolver.resolve(referrer, specifier)?;
+    if resolved.id.is_empty() {
         return Err("resolver returned an empty module ID".into());
     }
-    Ok(id)
+    Ok(resolved)
 }

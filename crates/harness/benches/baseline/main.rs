@@ -484,29 +484,14 @@ fn run_stack_traces(samples: usize) {
     ])
     .unwrap();
     let mut builds = Vec::new();
-    for (name, stack_traces, hide_vendor) in [
-        ("stacks-off", false, false),
-        ("stacks-on", true, false),
-        ("stacks-hide-vendor", true, true),
-    ] {
+    for (name, stack_traces) in [("stacks-off", false), ("stacks-on", true)] {
         let mut options = Compiler::from_dts(include_str!("../../test.d.ts")).unwrap();
         options.stack_traces = stack_traces;
-        let mut error_options = options.clone();
-        if hide_vendor {
-            options.framework_modules.extend([
-                "react.mjs".into(),
-                "react-reconciler-0.31.0.mjs".into(),
-                "renderer.mjs".into(),
-            ]);
-            error_options.framework_modules.insert("vendor.js".into());
-        }
         let bytes = workloads::build_react_with_options(&options)
             .to_bytes()
             .len();
         println!("{name},react_artifact_size,0,{bytes},bytes");
-        let build = error_options
-            .compile(Project::new("main.js", &resolver))
-            .unwrap();
+        let build = options.compile(Project::new("main.js", &resolver)).unwrap();
         builds.push((name, VerifiedBuild::new(build).unwrap()));
     }
     for i in 0..WARMUP_SAMPLES + samples {
