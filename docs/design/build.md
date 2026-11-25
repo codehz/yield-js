@@ -6,14 +6,13 @@
 
 | 验收目标 | 锁定的运行时入口 | 不包含 |
 | --- | --- | --- |
-| Solid 非 Web | [`solid-js@1.9.9`](https://unpkg.com/solid-js@1.9.9/package.json) 的生产响应式核心、`solid-js/universal` 的 `createRenderer` 和 `solid-js/store` 的 `createStore`。构建显式选用 `dist/solid.js` 和 `store/dist/store.js`，不能因 `node`/`worker` 条件误选 SSR 入口。 | `solid-js/web`、SSR、浏览器 hydration；不启用依赖浏览器 `MessageChannel` 的可选 `enableScheduling()` 路径。 |
 | React 非 Web | `react@19.2.0`、`react/jsx-runtime`、[`react-reconciler@0.33.0`](https://unpkg.com/react-reconciler@0.33.0/package.json) 和 `scheduler@0.27.0` 的生产包；使用自定义 mutation-mode `HostConfig`，按该版本实现调度与事件优先级接口。 | React DOM、React Native/Fabric 平台层、SSR/RSC、hydration 和开发工具。 |
 
 应用入口可直接使用 JS/TS/JSX/TSX，并从源码按模块解析依赖。扩展前端与核心共享一张可达模块图：对每个模块执行解析/加载、按模块转换，再由同一 ESM 链接层解析转换结果中的静态导入并发现后续模块；转换器不得私自链接或改变核心 ESM 的活绑定语义。默认路径接受严格 ESM，扩展路径由官方预设启用额外语法与包解析。扩展可组合实现这些阶段，但首版只承诺核心 ESM 与官方 npm/React 预设，不冻结第三方插件 API；扩展不替代核心链接器、语法子集校验或字节码编译器。
 
 模块解析与加载是同步构建期操作。解析器将导入请求和 referrer 映射到稳定、非空的逻辑模块 ID，再按 ID 加载源码；同一逻辑 ID 在一次构建中必须唯一对应同一内容，冲突时报构建错误。项目源码 ID 相对项目根规范化；npm 依赖 ID 由包名、可得的版本声明和包内相对路径组成，不含机器绝对路径。加载可跟随 `node_modules` 中的符号链接以支持 workspace，但必须解析并校验目标是普通文件；不得执行包代码、安装脚本或其他构建脚本。该边界是读取边界，不是对恶意依赖内容的沙箱。
 
-官方 npm 预设从调用方已安装的 `node_modules` 读取依赖，不安装、更新或锁定包，也不承诺完整的跨机器可复现性。预设必须定义其工具版本及 `package.json` 条件导出的条件集合和优先级；按该策略选择 `exports` 目标，若包声明 `exports` 而请求未被其允许则报解析错误，不回退到包内私有路径。无 `exports` 的包仅使用预设明确定义的字段/子路径回退规则，未定义的字段不隐式猜测。条件选择不得由运行宿主环境意外改变，React 预设选择生产入口；Solid 的目标入口固定为 `dist/solid.js`、`store/dist/store.js`，不得误选 SSR 入口。应用入口显式导出仍是宿主公开 API，依赖内部导出不自动暴露；VM 不负责模块加载。
+官方 npm 预设从调用方已安装的 `node_modules` 读取依赖，不安装、更新或锁定包，也不承诺完整的跨机器可复现性。预设必须定义其工具版本及 `package.json` 条件导出的条件集合和优先级；按该策略选择 `exports` 目标，若包声明 `exports` 而请求未被其允许则报解析错误，不回退到包内私有路径。无 `exports` 的包仅使用预设明确定义的字段/子路径回退规则，未定义的字段不隐式猜测。条件选择不得由运行宿主环境意外改变，React 预设选择生产入口。应用入口显式导出仍是宿主公开 API，依赖内部导出不自动暴露；VM 不负责模块加载。
 
 转换按模块进行，产物必须是核心可链接的 ESM，转换产生的导入照常进入同一图。TypeScript 转换只移除类型语法，不声称类型检查；JSX 按预设配置转换为指定 runtime。CJS 转换仅覆盖静态可分析子集：字面量 `require`、常见 `module.exports` / `exports` 赋值与属性访问，以及所覆盖的循环初始化行为；不承诺完整 Node wrapper、Node 内建或任意 CJS 语义。动态或无法静态确定目标的 `require` 必须在构建期报错，不能留下运行时 require。转换不得破坏 ESM 活绑定或所覆盖 CJS 初始化行为；无法安全表达的写法明确拒绝，不以近似行为静默通过。
 
