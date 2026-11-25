@@ -8,7 +8,7 @@
 //! Host-provided environment globals are supplied by the preload module; the
 //! remaining framework-owned gaps are recorded in `docs/gaps.md` §8.
 use super::support::{TEST_DECLARATIONS, compile_main, compile_preloaded, declared};
-use yield_compiler::{MemoryResolver, compile};
+use yield_compiler::{MemoryResolver, Project};
 use yield_harness::TestHost;
 use yield_vm::{RestoreOptions, Value, Vm, VmOptions};
 
@@ -52,9 +52,11 @@ fn react_reconciler_compiles_without_window_or_process_preload_exports() {
         ("renderer.mjs", CUSTOM_RENDERER),
     ])
     .expect("valid React probe module paths");
-    compile("main.js", None, &resolver, &declared(TEST_DECLARATIONS)).unwrap_or_else(|error| {
-        panic!("React reconciler depended on a removed environment export: {error}")
-    });
+    declared(TEST_DECLARATIONS)
+        .compile(Project::new("main.js", resolver))
+        .unwrap_or_else(|error| {
+            panic!("React reconciler depended on a removed environment export: {error}")
+        });
 }
 
 #[test]
@@ -79,13 +81,9 @@ fn react_reconciler_custom_renderer_headless_smoke() {
         ("renderer.mjs", CUSTOM_RENDERER),
     ])
     .expect("valid React probe module paths");
-    let build = compile(
-        "main.js",
-        Some("preload.js"),
-        &resolver,
-        &declared(TEST_DECLARATIONS),
-    )
-    .unwrap_or_else(|error| panic!("React probe stopped compiling: {error}"));
+    let build = declared(TEST_DECLARATIONS)
+        .compile(Project::new("main.js", resolver).with_preload("preload.js"))
+        .unwrap_or_else(|error| panic!("React probe stopped compiling: {error}"));
 
     let mut host = TestHost::default();
     let clock = host.clock().clone();
@@ -140,13 +138,9 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
         ("preload.js", PRELOAD),
     ])
     .unwrap();
-    let build = compile(
-        "main.js",
-        Some("preload.js"),
-        &resolver,
-        &declared(TEST_DECLARATIONS),
-    )
-    .unwrap();
+    let build = declared(TEST_DECLARATIONS)
+        .compile(Project::new("main.js", resolver).with_preload("preload.js"))
+        .unwrap();
     let mut host = TestHost::new();
     let clock = host.clock().clone();
     let mut source = Vm::new(

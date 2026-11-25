@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
+use yield_compiler::{CompileError, Compiler, MemoryResolver, Project};
 use yield_vm::binding::{
     Bindings, CallCx, CodecError, HostFault, InspectKey, InspectValue, Instance, JsResult, JsValue,
     Operation, OperationDriver, OperationToken, Registration, This,
@@ -990,8 +990,8 @@ impl TestModule {
 fn compile_source(source: &str) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).expect("valid fixture path");
     let options =
-        CompileOptions::from_dts(include_str!("../test.d.ts")).expect("test declarations parse");
-    compile("main.js", None, &resolver, &options)
+        Compiler::from_dts(include_str!("../test.d.ts")).expect("test declarations parse");
+    options.compile(Project::new("main.js", resolver))
 }
 
 pub fn build(source: &str) -> Build {

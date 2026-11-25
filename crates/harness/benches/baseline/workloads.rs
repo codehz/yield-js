@@ -1,4 +1,4 @@
-use yield_compiler::{CompileOptions, MemoryResolver, compile};
+use yield_compiler::{Compiler, MemoryResolver, Project};
 use yield_harness::{TestHost, build, number, string};
 use yield_vm::{Build, Completion, JsValue, PromiseState, Value, Vm};
 
@@ -209,11 +209,11 @@ fn numeric_branch(vm: &mut Vm, host: &mut TestHost) {
 
 fn build_react() -> Build {
     let options =
-        CompileOptions::from_dts(include_str!("../../test.d.ts")).expect("test declarations parse");
+        Compiler::from_dts(include_str!("../../test.d.ts")).expect("test declarations parse");
     build_react_with_options(&options)
 }
 
-pub(super) fn build_react_with_options(options: &CompileOptions) -> Build {
+pub(super) fn build_react_with_options(options: &Compiler) -> Build {
     let preload = include_str!("react-preload.mjs");
     let resolver = MemoryResolver::new([
         ("main.js", include_str!("react.js")),
@@ -235,7 +235,9 @@ pub(super) fn build_react_with_options(options: &CompileOptions) -> Build {
         ),
     ])
     .expect("valid React fixture paths");
-    compile("main.js", Some("preload.js"), &resolver, options).expect("React fixture compiles")
+    options
+        .compile(Project::new("main.js", resolver).with_preload("preload.js"))
+        .expect("React fixture compiles")
 }
 
 fn react_commit(vm: &mut Vm, host: &mut TestHost) {

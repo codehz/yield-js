@@ -462,7 +462,7 @@ fn run(workload: &Workload, samples: usize) {
 }
 
 fn run_stack_traces(samples: usize) {
-    use yield_compiler::{CompileOptions, MemoryResolver, compile};
+    use yield_compiler::{Compiler, MemoryResolver, Project};
     use yield_vm::{ValueRef, VerifiedBuild};
 
     const ERRORS: usize = 4096;
@@ -489,7 +489,7 @@ fn run_stack_traces(samples: usize) {
         ("stacks-on", true, false),
         ("stacks-hide-vendor", true, true),
     ] {
-        let mut options = CompileOptions::from_dts(include_str!("../../test.d.ts")).unwrap();
+        let mut options = Compiler::from_dts(include_str!("../../test.d.ts")).unwrap();
         options.stack_traces = stack_traces;
         let mut error_options = options.clone();
         if hide_vendor {
@@ -504,7 +504,9 @@ fn run_stack_traces(samples: usize) {
             .to_bytes()
             .len();
         println!("{name},react_artifact_size,0,{bytes},bytes");
-        let build = compile("main.js", None, &resolver, &error_options).unwrap();
+        let build = error_options
+            .compile(Project::new("main.js", &resolver))
+            .unwrap();
         builds.push((name, VerifiedBuild::new(build).unwrap()));
     }
     for i in 0..WARMUP_SAMPLES + samples {

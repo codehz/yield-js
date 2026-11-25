@@ -3,8 +3,7 @@
 //! Oxc parses the source, which is lowered to logical-register code and then
 //! decoded into a control-flow IR. Optimizations operate on blocks; only final
 //! layout assigns bytecode PCs and slot allocation produces the VM function.
-//! Oxc types do not escape this crate except as the byte [`oxc::span::Span`] on
-//! [`CompileError`].
+//! Built-in syntax transforms operate on the pinned Oxc AST internally.
 //!
 //! ```text
 //! source roots and resolver
@@ -37,6 +36,7 @@ mod propagate;
 mod resolver;
 mod session;
 mod source_lines;
+mod transform;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,10 +45,60 @@ use oxc::span::Span;
 use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
+pub use frontend::link::{Dependency, DependencyKind, ModuleGraph};
 pub use resolver::{FileResolver, MemoryResolver, ModuleResolver};
+pub use transform::{
+    BuildTransform, GraphTransform, ParsedModule, SourceTransform, TransformError,
+};
+
+/// A stable, nonempty canonical source module identity.
+pub type ModuleId = String;
+
+/// Source roots, resolver and transforms for one build.
+pub struct Project<'a> {
+    pub entry: ModuleId,
+    pub preload: Option<ModuleId>,
+    resolver: Box<dyn ModuleResolver + 'a>,
+    sources: Vec<Box<dyn SourceTransform + 'a>>,
+    graphs: Vec<Box<dyn GraphTransform + 'a>>,
+    builds: Vec<Box<dyn BuildTransform + 'a>>,
+}
+
+impl<'a> Project<'a> {
+    pub fn new(entry: impl Into<ModuleId>, resolver: impl ModuleResolver + 'a) -> Self {
+        Self {
+            entry: entry.into(),
+            preload: None,
+            resolver: Box::new(resolver),
+            sources: Vec::new(),
+            graphs: Vec::new(),
+            builds: Vec::new(),
+        }
+    }
+
+    pub fn with_preload(mut self, id: impl Into<ModuleId>) -> Self {
+        self.preload = Some(id.into());
+        self
+    }
+
+    pub fn with_source_transform(mut self, transform: impl SourceTransform + 'a) -> Self {
+        self.sources.push(Box::new(transform));
+        self
+    }
+
+    pub fn with_graph_transform(mut self, transform: impl GraphTransform + 'a) -> Self {
+        self.graphs.push(Box::new(transform));
+        self
+    }
+
+    pub fn with_build_transform(mut self, transform: impl BuildTransform + 'a) -> Self {
+        self.builds.push(Box::new(transform));
+        self
+    }
+}
 
 #[derive(Debug, Clone)]
-pub struct CompileOptions {
+pub struct Compiler {
     /// Static host module specifiers and available exports. The build retains
     /// this manifest; the VM resolves it before executing the script.
     pub imports: BTreeMap<String, BTreeSet<String>>,
@@ -56,19 +106,22 @@ pub struct CompileOptions {
     pub stack_traces: bool,
     /// Canonical source module IDs whose frames should never be shown.
     pub framework_modules: BTreeSet<String>,
+    /// Automatic JSX runtime package (defaults to `react`).
+    pub jsx_runtime: String,
 }
 
-impl Default for CompileOptions {
+impl Default for Compiler {
     fn default() -> Self {
         Self {
             imports: BTreeMap::new(),
             stack_traces: true,
             framework_modules: BTreeSet::new(),
+            jsx_runtime: "react".into(),
         }
     }
 }
 
-impl CompileOptions {
+impl Compiler {
     /// Reads the host import manifest from a declaration file.
     ///
     /// Only direct value declarations inside string-named module blocks count;
@@ -82,18 +135,42 @@ impl CompileOptions {
             ..Self::default()
         })
     }
-}
 
-/// Compiles explicit source roots with a synchronous source resolver.
-pub fn compile(
-    entry: &str,
-    preload: Option<&str>,
-    resolver: &dyn ModuleResolver,
-    options: &CompileOptions,
-) -> Result<Build, CompileError> {
-    let allocator = Allocator::default();
-    let graph = frontend::link::link(&allocator, entry, preload, resolver, options)?;
-    lower::lower_graph(&graph, options)
+    /// Runs source transforms, graph transforms, lowering and build transforms.
+    pub fn compile(&self, mut project: Project<'_>) -> Result<Build, CompileError> {
+        let allocator = Allocator::default();
+        let resolver = project.resolver.as_ref();
+        let mut graph = frontend::link::link(
+            &allocator,
+            &project.entry,
+            project.preload.as_deref(),
+            resolver,
+            self,
+            &mut project.sources,
+        )?;
+        for (index, transform) in project.graphs.iter_mut().enumerate() {
+            let stage = format!("graph transform {}", index + 1);
+            transform.transform(&mut graph).map_err(|error| {
+                let module = error.module.as_ref().and_then(|id| graph.module(id));
+                error.diagnostic(&stage, module)
+            })?;
+            graph
+                .relink(resolver, self)
+                .map_err(|error| error.in_stage(&stage))?;
+        }
+        let mut build = lower::lower_graph(&graph, self)?;
+        for (index, transform) in project.builds.iter_mut().enumerate() {
+            let stage = format!("build transform {}", index + 1);
+            transform
+                .transform(&mut build)
+                .map_err(|error| error.diagnostic(&stage, None))?;
+            build.finalize();
+            build
+                .validate()
+                .map_err(|error| CompileError::internal(error.to_string()).in_stage(&stage))?;
+        }
+        Ok(build)
+    }
 }
 
 fn root_error(request: &str, reason: String) -> CompileError {
@@ -102,9 +179,9 @@ fn root_error(request: &str, reason: String) -> CompileError {
 
 fn resolved_id(
     resolver: &dyn ModuleResolver,
-    referrer: Option<&str>,
+    referrer: Option<&ModuleId>,
     specifier: &str,
-) -> Result<String, String> {
+) -> Result<ModuleId, String> {
     let id = resolver.resolve(referrer, specifier)?;
     if id.is_empty() {
         return Err("resolver returned an empty module ID".into());

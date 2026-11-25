@@ -4,7 +4,7 @@ use oxc::span::Span;
 use yield_vm::bytecode::ImportDecl;
 
 use super::{Edge, Export, Module, Record, Request, Target};
-use crate::{CompileError, CompileOptions};
+use crate::{CompileError, Compiler};
 
 pub(super) struct Resolved {
     pub(super) imports: BTreeMap<String, Target>,
@@ -110,7 +110,7 @@ fn request_outcome<'a>(
 pub(super) fn resolve(
     modules: &[Module<'_>],
     records: &[Record],
-    options: &CompileOptions,
+    options: &Compiler,
 ) -> Result<Vec<Resolved>, CompileError> {
     let hosts: Vec<_> = options
         .imports

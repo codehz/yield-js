@@ -1,4 +1,4 @@
-use yield_compiler::{CompileOptions, MemoryResolver, compile};
+use yield_compiler::{Compiler, MemoryResolver, Project};
 use yield_harness::{TestHost, string};
 use yield_vm::{Build, Completion, JsValue, PromiseState, Snapshot, Value, ValueRef, Vm};
 
@@ -7,7 +7,7 @@ use super::support::{TEST_DECLARATIONS, declared};
 const FILTERED: &str =
     "Error: created\n    at callback (callback.js:2:10)\n    at capture (entry.js:5:10)";
 
-fn build_stack(options: &CompileOptions, import: &str, alias: &str) -> Build {
+fn build_stack(options: &Compiler, import: &str, alias: &str) -> Build {
     let entry = format!(
         "import {{ relay as {alias} }} from '{import}';\n\
          import {{ callback }} from './callback.js';\n\
@@ -27,7 +27,7 @@ fn build_stack(options: &CompileOptions, import: &str, alias: &str) -> Build {
         ),
     ])
     .unwrap();
-    compile("entry.js", None, &resolver, options).unwrap()
+    options.compile(Project::new("entry.js", resolver)).unwrap()
 }
 
 fn stack_text(build: Build, entry: &str) -> String {

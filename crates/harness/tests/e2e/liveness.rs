@@ -1,7 +1,7 @@
 //! Snapshots retain live values across suspension edges and omit dead objects.
 
 use super::support::{Suspended, baseline_at_first_await, json_round_trip, values_beyond};
-use yield_compiler::CompileOptions;
+use yield_compiler::Compiler;
 use yield_harness::number;
 use yield_vm::heap::Property;
 use yield_vm::{Completion, JsString, JsValue, Object, PromiseState, Value};
@@ -206,7 +206,7 @@ export async function run() {
 fn sequential_temporaries_use_constant_frame_space() {
     let slots = |statements: &str| {
         let source = format!("export function run() {{ {statements} return 7; }}");
-        let build = super::support::compile_main(&source, &CompileOptions::default())
+        let build = super::support::compile_main(&source, &Compiler::default())
             .expect("compile sequential temporaries");
         build
             .functions

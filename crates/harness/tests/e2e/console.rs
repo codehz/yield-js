@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use yield_compiler::CompileOptions;
+use yield_compiler::Compiler;
 use yield_harness::{TestHost, build};
 use yield_vm::console::{
     ConsoleArg, ConsoleFragment, ConsoleKey, ConsoleLevel, ConsolePayload, ConsolePreviewMode,
@@ -136,7 +136,7 @@ fn console_table_dir_groups_clear_and_trace_have_structured_payloads() {
     "#;
     for stack_traces in [true, false] {
         let mut host = TestHost::new();
-        let options = CompileOptions {
+        let options = Compiler {
             stack_traces,
             ..Default::default()
         };

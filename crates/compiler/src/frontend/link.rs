@@ -3,6 +3,7 @@
 mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::*;
@@ -10,7 +11,7 @@ use oxc::span::{GetSpan, Span};
 use yield_vm::bytecode::ImportDecl;
 
 use crate::error::{CompileError, unsupported};
-use crate::{CompileOptions, ModuleResolver};
+use crate::{Compiler, ModuleId, ModuleResolver, ParsedModule, SourceTransform};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Target {
@@ -46,9 +47,25 @@ struct Record {
 
 pub(crate) const DEFAULT_SLOT: &str = "\0default";
 
+/// The kind of a module request, before import/export binding resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DependencyKind {
+    Static,
+    Host,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dependency {
+    pub specifier: String,
+    pub kind: DependencyKind,
+    /// Canonical source ID, or host manifest name for a host edge.
+    pub target: ModuleId,
+}
+
 pub(crate) struct Module<'a> {
-    pub(crate) id: String,
-    pub(crate) program: Program<'a>,
+    parsed: ParsedModule<'a>,
+    original_source: &'a str,
+    dependencies: Vec<Dependency>,
     pub(crate) deps: Vec<u32>,
     pub(crate) in_preload: bool,
     pub(crate) locals: BTreeSet<String>,
@@ -56,28 +73,231 @@ pub(crate) struct Module<'a> {
     pub(crate) exports: BTreeMap<String, Target>,
 }
 
-pub(crate) struct Graph<'a> {
+impl<'a> Deref for Module<'a> {
+    type Target = ParsedModule<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parsed
+    }
+}
+
+/// A reachable source graph. Only parsed ASTs are mutable; dependency and
+/// linker tables are derived again after each graph transform. New requests
+/// must resolve to existing graph modules or the host import manifest.
+pub struct ModuleGraph<'a> {
     pub(crate) modules: Vec<Module<'a>>,
     pub(crate) entry: u32,
     pub(crate) preload: Option<u32>,
 }
 
-pub(crate) fn link<'a>(
-    allocator: &'a Allocator,
-    entry: &str,
-    preload: Option<&str>,
-    resolver: &'a dyn ModuleResolver,
-    options: &CompileOptions,
-) -> Result<Graph<'a>, CompileError> {
-    let hosts: BTreeMap<_, _> = options
+impl<'a> ModuleGraph<'a> {
+    pub fn entry(&self) -> &ModuleId {
+        self.modules[self.entry as usize].id()
+    }
+
+    pub fn preload(&self) -> Option<&ModuleId> {
+        self.preload.map(|id| self.modules[id as usize].id())
+    }
+
+    pub fn modules(&self) -> impl ExactSizeIterator<Item = &ParsedModule<'a>> {
+        self.modules.iter().map(|module| &module.parsed)
+    }
+
+    pub fn modules_mut(&mut self) -> impl ExactSizeIterator<Item = &mut ParsedModule<'a>> {
+        self.modules.iter_mut().map(|module| &mut module.parsed)
+    }
+
+    pub fn module(&self, id: &ModuleId) -> Option<&ParsedModule<'a>> {
+        self.modules().find(|module| module.id() == id)
+    }
+
+    pub fn module_mut(&mut self, id: &ModuleId) -> Option<&mut ParsedModule<'a>> {
+        self.modules_mut().find(|module| module.id() == id)
+    }
+
+    pub fn dependencies(&self, id: &ModuleId) -> Option<&[Dependency]> {
+        self.modules
+            .iter()
+            .find(|module| module.id() == id)
+            .map(|module| module.dependencies.as_slice())
+    }
+
+    pub(crate) fn relink(
+        &mut self,
+        resolver: &dyn ModuleResolver,
+        options: &Compiler,
+    ) -> Result<(), CompileError> {
+        let hosts = hosts(options)?;
+        let ids: BTreeMap<_, _> = self
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(index, module)| (module.id.clone(), index as u32))
+            .collect();
+        let mut records = Vec::with_capacity(self.modules.len());
+        for module in &mut self.modules {
+            let mut record = Record::default();
+            let mut deps = Vec::new();
+            let mut dependencies = Vec::new();
+            let mut seen = BTreeSet::new();
+            let source = module.source();
+            for stmt in &module.program.body {
+                let edge = if let Some((specifier, span)) = module_request(module, stmt)? {
+                    let (edge, kind, target) = if let Some(&host) = hosts.get(specifier) {
+                        (Edge::Host(host), DependencyKind::Host, specifier.to_owned())
+                    } else {
+                        let locate =
+                            |reason| dependency_error(source, span, &module.id, specifier, reason);
+                        let target = crate::resolved_id(resolver, Some(&module.id), specifier)
+                            .map_err(locate)?;
+                        let index = *ids.get(&target).ok_or_else(|| {
+                            locate(format!("target {target:?} is not in the graph"))
+                        })?;
+                        if seen.insert(index) {
+                            deps.push(index);
+                        }
+                        (Edge::Source(index), DependencyKind::Static, target)
+                    };
+                    dependencies.push(Dependency {
+                        specifier: specifier.to_owned(),
+                        kind,
+                        target,
+                    });
+                    Some(edge)
+                } else {
+                    None
+                };
+                extract(&mut record, stmt, edge, source)
+                    .map_err(|err| err.in_module(&module.id))?;
+            }
+            record.locals = crate::lower::module_locals(source, &module.program.body)
+                .map_err(|err| err.in_module(&module.id))?;
+            records.push(record);
+            module.deps = deps;
+            module.dependencies = dependencies;
+            module.in_preload = false;
+        }
+        let mut work = self.preload.into_iter().collect::<Vec<_>>();
+        while let Some(index) = work.pop() {
+            let module = &mut self.modules[index as usize];
+            if !std::mem::replace(&mut module.in_preload, true) {
+                work.extend_from_slice(&module.deps);
+            }
+        }
+        self.resolve_bindings(records, options)?;
+        self.prune_unreachable();
+        Ok(())
+    }
+
+    fn prune_unreachable(&mut self) {
+        let mut reachable = vec![false; self.modules.len()];
+        let mut work = self
+            .preload
+            .into_iter()
+            .chain([self.entry])
+            .collect::<Vec<_>>();
+        while let Some(index) = work.pop() {
+            if !std::mem::replace(&mut reachable[index as usize], true) {
+                work.extend_from_slice(&self.modules[index as usize].deps);
+            }
+        }
+        let mut remap = Vec::with_capacity(reachable.len());
+        let mut next = 0;
+        self.modules.retain(|_| {
+            let keep = reachable[remap.len()];
+            remap.push(keep.then_some(next));
+            next += u32::from(keep);
+            keep
+        });
+        let remap = |index: u32| remap[index as usize].expect("target of reachable module");
+        self.entry = remap(self.entry);
+        self.preload = self.preload.map(remap);
+        for module in &mut self.modules {
+            for dep in &mut module.deps {
+                *dep = remap(*dep);
+            }
+            for target in module
+                .imports
+                .values_mut()
+                .chain(module.exports.values_mut())
+            {
+                match target {
+                    Target::Binding { module, .. } | Target::Namespace { module } => {
+                        *module = remap(*module)
+                    }
+                    Target::Host(_) => {}
+                }
+            }
+        }
+    }
+
+    fn resolve_bindings(
+        &mut self,
+        records: Vec<Record>,
+        options: &Compiler,
+    ) -> Result<(), CompileError> {
+        let resolved = resolve::resolve(&self.modules, &records, options)?;
+        for ((module, names), record) in self.modules.iter_mut().zip(resolved).zip(records) {
+            module.imports = names.imports;
+            module.exports = names.exports;
+            module.locals = record.locals;
+        }
+        Ok(())
+    }
+}
+
+fn hosts(options: &Compiler) -> Result<BTreeMap<&str, u32>, CompileError> {
+    options
         .imports
         .keys()
         .map(String::as_str)
         .enumerate()
         .map(|(index, key)| u32::try_from(index).map(|index| (key, index)))
         .collect::<Result<_, _>>()
-        .map_err(|_| CompileError::internal("too many host modules"))?;
-    let mut graph = Graph {
+        .map_err(|_| CompileError::internal("too many host modules"))
+}
+
+fn module_request<'s>(
+    module: &Module<'_>,
+    stmt: &'s Statement<'_>,
+) -> Result<Option<(&'s str, Span)>, CompileError> {
+    let source = module.source();
+    let Some(request) = request(stmt)
+        .map_err(|(span, feature)| unsupported(source, span, feature).in_module(&module.id))?
+    else {
+        return Ok(None);
+    };
+    let specifier = request.value.as_str().ok_or_else(|| {
+        unsupported(source, request.span, "non-string module specifier").in_module(&module.id)
+    })?;
+    Ok(Some((specifier, request.span)))
+}
+
+fn dependency_error(
+    source: &str,
+    span: Span,
+    referrer: &str,
+    specifier: &str,
+    reason: String,
+) -> CompileError {
+    CompileError::new(
+        source,
+        span,
+        format!("source dependency {specifier:?} from {referrer:?}: {reason}"),
+    )
+    .in_module(referrer)
+}
+
+pub(crate) fn link<'a>(
+    allocator: &'a Allocator,
+    entry: &str,
+    preload: Option<&str>,
+    resolver: &dyn ModuleResolver,
+    options: &Compiler,
+    transforms: &mut [Box<dyn SourceTransform + '_>],
+) -> Result<ModuleGraph<'a>, CompileError> {
+    let hosts = hosts(options)?;
+    let mut graph = ModuleGraph {
         modules: Vec::new(),
         entry: 0,
         preload: None,
@@ -95,7 +315,7 @@ pub(crate) fn link<'a>(
         }
         let id = crate::resolved_id(resolver, None, root).map_err(root_error)?;
         let (index, fresh) = insert(
-            &mut graph, &mut ids, allocator, resolver, id, in_preload, root_error,
+            &mut graph, &mut ids, allocator, resolver, transforms, id, in_preload, root_error,
         )?;
         if in_preload {
             graph.preload = Some(index);
@@ -119,30 +339,19 @@ pub(crate) fn link<'a>(
             };
             *cursor += 1;
             let mut fresh = None;
-            let edge = if let Some(request) = request(stmt).map_err(|(span, feature)| {
-                unsupported(source, span, feature).in_module(&current.id)
-            })? {
-                let referrer = current.id.clone();
-                let specifier = request.value.as_str().ok_or_else(|| {
-                    unsupported(source, request.span, "non-string module specifier")
-                        .in_module(&referrer)
-                })?;
-                if let Some(&host) = hosts.get(specifier) {
-                    Some(Edge::Host(host))
+            let edge = if let Some((specifier, span)) = module_request(current, stmt)? {
+                let specifier = specifier.to_owned();
+                let (edge, kind, target) = if let Some(&host) = hosts.get(specifier.as_str()) {
+                    (Edge::Host(host), DependencyKind::Host, specifier.clone())
                 } else {
-                    let span = request.span;
-                    let location = |reason| {
-                        CompileError::new(
-                            source,
-                            span,
-                            format!("source dependency {specifier:?} from {referrer:?}: {reason}"),
-                        )
-                        .in_module(&referrer)
-                    };
-                    let id = crate::resolved_id(resolver, Some(&referrer), specifier)
+                    let referrer = current.id.clone();
+                    let location =
+                        |reason| dependency_error(source, span, &referrer, &specifier, reason);
+                    let id = crate::resolved_id(resolver, Some(&referrer), &specifier)
                         .map_err(location)?;
                     let (target, is_new) = insert(
-                        &mut graph, &mut ids, allocator, resolver, id, in_preload, location,
+                        &mut graph, &mut ids, allocator, resolver, transforms, id, in_preload,
+                        location,
                     )?;
                     if seen.insert(target) {
                         graph.modules[i].deps.push(target);
@@ -150,8 +359,18 @@ pub(crate) fn link<'a>(
                     if is_new {
                         fresh = Some(target);
                     }
-                    Some(Edge::Source(target))
-                }
+                    (
+                        Edge::Source(target),
+                        DependencyKind::Static,
+                        graph.modules[target as usize].id.clone(),
+                    )
+                };
+                graph.modules[i].dependencies.push(Dependency {
+                    specifier,
+                    kind,
+                    target,
+                });
+                Some(edge)
             } else {
                 None
             };
@@ -169,41 +388,48 @@ pub(crate) fn link<'a>(
             }
         }
     }
-    let resolved = resolve::resolve(&graph.modules, &records, options)?;
-    for (module, names) in graph.modules.iter_mut().zip(resolved) {
-        module.imports = names.imports;
-        module.exports = names.exports;
-    }
-    for (module, record) in graph.modules.iter_mut().zip(records) {
-        module.locals = record.locals;
-    }
+    graph.resolve_bindings(records, options)?;
     Ok(graph)
 }
 
 fn insert<'a>(
-    graph: &mut Graph<'a>,
-    ids: &mut BTreeMap<String, u32>,
+    graph: &mut ModuleGraph<'a>,
+    ids: &mut BTreeMap<ModuleId, u32>,
     allocator: &'a Allocator,
-    resolver: &'a dyn ModuleResolver,
-    id: String,
+    resolver: &dyn ModuleResolver,
+    transforms: &mut [Box<dyn SourceTransform + '_>],
+    id: ModuleId,
     in_preload: bool,
     locate: impl Fn(String) -> CompileError,
 ) -> Result<(u32, bool), CompileError> {
+    let loaded = resolver.load(&id).map_err(&locate)?;
     if let Some(&index) = ids.get(&id) {
+        if graph.modules[index as usize].original_source != loaded.as_ref() {
+            return Err(locate(format!(
+                "conflicting source bodies for module ID {id:?}"
+            )));
+        }
         return Ok((index, false));
     }
     let index =
         u32::try_from(graph.modules.len()).map_err(|_| locate("too many source modules".into()))?;
-    let source = resolver.load(&id).map_err(locate)?;
-    let source = match source {
-        std::borrow::Cow::Borrowed(text) => text,
-        std::borrow::Cow::Owned(text) => allocator.alloc_str(&text),
-    };
+    let source = allocator.alloc_str(loaded.as_ref());
     let program = super::parse(allocator, source).map_err(|err| err.in_module(&id))?;
+    let mut parsed = ParsedModule {
+        id: id.clone(),
+        allocator,
+        program,
+    };
+    for (index, transform) in transforms.iter_mut().enumerate() {
+        transform.transform(&mut parsed).map_err(|error| {
+            error.diagnostic(&format!("source transform {}", index + 1), Some(&parsed))
+        })?;
+    }
     ids.insert(id.clone(), index);
     graph.modules.push(Module {
-        id,
-        program,
+        parsed,
+        original_source: source,
+        dependencies: Vec::new(),
         deps: Vec::new(),
         in_preload,
         locals: BTreeSet::new(),

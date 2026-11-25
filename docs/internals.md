@@ -12,11 +12,12 @@ yield-harness  →  yield-compiler  →  yield-vm
                   yield-host-dts   ←  yield-binding-macros  (expansion only)
 ```
 
-`yield-vm` 持有字节码契约，永不导入编译器。Oxc AST 只存在于 `yield-compiler`（仅 `frontend` 与 `lower`）和 `yield-host-dts` 内部；后者对外只暴露普通名字表与字节跨度。编译器公开面上唯一的 Oxc 类型是 `CompileError` 上的 `oxc::span::Span`。
+`yield-vm` 持有字节码契约，永不导入编译器。自定义源码和图转换可以替换模块源码并重新解析；Oxc AST 和 CFG 保持私有。`yield-host-dts` 对外只暴露普通名字表与字节跨度。
 
 ```text
 源码根与同步解析器（严格 ES 模块）
-  → frontend     解析可达模块，解析 import/export 目标
+  → frontend     解析可达模块，按模块应用源码转换并发现依赖
+  → graph        按注册顺序应用图转换，每次重新校验依赖并链接 import/export
   → lower        绑定、异常、await  →  LoweredFunction
   → bindings     确定哪些 id 跨函数共享
   → cfg          消费线性发射结果，建立带恢复边和异常边的基本块
@@ -26,12 +27,13 @@ yield-harness  →  yield-compiler  →  yield-vm
   → analyze      按前驱重查 CFG live-in（含恢复边与异常边），移除无副作用的死写入
   → allocate     按原块序布局，流式记录瞬时槽区间并分配槽；保存集合取 CFG 块入口活性
   → Build        版本化字节码；build_id = 执行相关字段的摘要
+  → build stages 按注册顺序转换 Build，每次重新计算 build_id 并校验
   → Vm           校验、运行、宿主操作、快照 / 恢复
 ```
 
 公共入口：
 
-- `yield_compiler::compile(entry, preload, resolver, &options) -> Result<Build, CompileError>` 链接显式根；`CompileOptions::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
+- `Compiler::compile(Project) -> Result<Build, CompileError>` 链接显式根；`Compiler::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`framework_modules` 精确匹配 `ModuleResolver::resolve` 返回的定义模块 ID，而非导入拼写或宿主模块名。隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
 - `Vm::new(build, &mut host, VmOptions::default())` 校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。
 - `VmOptions::default()` 不设置基准 URL 或测试时钟。用 `VmOptions { base_url: Some("https://example.com/"), ..Default::default() }` 可在任何模块求值之前设置默认基准。构造和恢复的选项都可通过 `test_clock` 注入 `Arc<dyn TestClock>`，默认使用正常时钟。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。
@@ -127,7 +129,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 
 关键文件：
 - `Cargo.toml` — workspace 成员与锁定依赖（`oxc = "=0.159.0"`，启用 `ast_visit`）
-- `crates/compiler/src/lib.rs` — 流水线与 `compile`
+- `crates/compiler/src/lib.rs` — `Compiler` 与 `Project`；`transform.rs` 定义公开转换接口
 - `crates/host-dts/src/lib.rs` — `parse(source) -> module/export name tables`，带位置的拒绝
 - `crates/vm/src/lib.rs` — 再导出：`Build`、`Vm`、`Host`、`Snapshot`、`Value`、`VmError`
 - `crates/vm/src/bytecode/instr.rs` — `instruction_table!` 是唯一的指令表，由同一份表生成 `Instr` 和穷尽的验证分派；变体顺序与字段顺序即产物编码
@@ -149,5 +151,5 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 有序映射一律 `BTreeMap` / `BTreeSet`（imports、globals、operations、natives）。身份或快照顺序相关时保持这一点。
 - `const` 的可变性按绑定 ID 在编译期解析，包括经闭包。初始化写入（含循环声明）允许。对 `const` 赋值在写入处抛出可捕获的运行期 `TypeError`，位于此前求值副作用之后；逻辑赋值可以短路而不写入。这不会冻结绑定值。当前函数的静态 TDZ 状态在 `compiler/src/env.rs` 的 `pending_lexicals`，不在 emitter 中。闭包不继承该集合，因此跨闭包的提前读取得到 `undefined`。这不是完整 ECMAScript TDZ。`for` 的 `let` / `const` 头（C 风格、`for…in`、`for…of`、`for await…of`）每轮建立独立环境：`NewIterationEnv` 从当前环境复制仍逃逸的循环绑定到以保存的外层环境为父的新环境，`RestoreEnv` 在循环结束后恢复外层环境。未逃逸的循环头绑定由 `compiler/src/promote.rs` 提升为帧槽并从 `NewIterationEnv` 的绑定表移除；绑定表为空且循环体没有仍需独立单元格的被捕获声明时，整组环境指令被删除。循环体内的被捕获块级声明仍要求每轮新单元格，因此即使循环头绑定全部提升也要保留空绑定表的 `NewIterationEnv`。
 - 名字解析（`compiler/src/names.rs`）：本地绑定、静态导入（源码与宿主）、合格的 preload 全局，最后是内建及三个全局事件处理器属性。裸 preload 名在 preload 子图之外经 `globalThis` 读取只读 getter；处理器名经固定 `globalThis` 读写动态属性，裸调用不绑定接收者。
-- 宿主模块使用排序的 `CompileOptions.imports: BTreeMap<String, BTreeSet<String>>` 清单。`CompileOptions::from_dts` 从宿主 `.d.ts` 读出它；`host_bindings! { dts: "path" }`（相对路径按宏调用所在源文件解析，无法确定调用文件时回退到 `CARGO_MANIFEST_DIR`）在宏展开时重新解析同一文件，把每个声明的 `module:export` 与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES`比对。声明了但 `#[module_exports]` 未实现的名字在编译期报 `missing host export: module:export`；多出的实现允许存在，且不进入命名空间导出。Harness 声明是 `crates/harness/test.d.ts` 与 `crates/harness/demo.d.ts`；e2e 夹具在 `crates/harness/tests/dts/`，按排序后的模块组合命名。
+- 宿主模块使用排序的 `Compiler.imports: BTreeMap<String, BTreeSet<String>>` 清单。`Compiler::from_dts` 从宿主 `.d.ts` 读出它；`host_bindings! { dts: "path" }`（相对路径按宏调用所在源文件解析，无法确定调用文件时回退到 `CARGO_MANIFEST_DIR`）在宏展开时重新解析同一文件，把每个声明的 `module:export` 与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES`比对。声明了但 `#[module_exports]` 未实现的名字在编译期报 `missing host export: module:export`；多出的实现允许存在，且不进入命名空间导出。Harness 声明是 `crates/harness/test.d.ts` 与 `crates/harness/demo.d.ts`；e2e 夹具在 `crates/harness/tests/dts/`，按排序后的模块组合命名。
 - `TestHost` 要点：导出名单以 `crates/harness/test.d.ts` 为准；`seed()` 返回 `10`；`wait(label)` 启动 `Wait` operation（显示标签 `wait:{label}`，默认恢复策略 `Resume`）；`bind(label)` 分配带 payload `label` 与 `label()` 方法的 `Node` 实例；`expect(actual)` 分配带槽 `actual` 的 `Matcher` 实例；`inspect` / `setLabel` 返回 `undefined`。用 `host.labels().set_reject_restore_operation(true)` 注入恢复失败；通过编辑 record 破坏快照 payload。

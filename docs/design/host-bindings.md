@@ -73,7 +73,7 @@ impl Demo {
 }
 ```
 
-- 编译器用 `CompileOptions::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与 同一类型的 `HostModule::NAME` 和 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的值（它们不进入命名空间导出）。
+- 编译器用 `Compiler::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的名字（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
 - 声明可以在多个 VM 之间共享，但**实例、原型和模块状态每 VM 一份**。声明的数据结构必须 `Send + Sync`。
 
@@ -131,7 +131,7 @@ impl Matcher {
 
 ### 4.4 与编译器的接口
 
-- `CompileOptions.imports` 由声明集合派生，不在手写源码里重复维护。
+- `Compiler.imports` 由声明集合派生，不在手写源码里重复维护。
 - 编译器只拒绝三种情况：导入未声明的模块、导入模块中不存在的导出、从宿主模块做默认导入。其余签名不匹配留给 VM 在首次调用时即时检查，或在开发模式下做静态签名检查。
 - 类名和成员名不进入 Build。Build 中只保留模块命名空间和函数值，函数值携带声明 ID。
 

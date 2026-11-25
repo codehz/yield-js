@@ -4,11 +4,23 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::ModuleId;
+
 /// Resolves source specifiers to stable, nonempty canonical module IDs.
 pub trait ModuleResolver {
     /// `None` identifies an explicit compilation root.
-    fn resolve(&self, referrer: Option<&str>, specifier: &str) -> Result<String, String>;
-    fn load(&self, id: &str) -> Result<Cow<'_, str>, String>;
+    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String>;
+    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String>;
+}
+
+impl<R: ModuleResolver + ?Sized> ModuleResolver for &R {
+    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
+        (**self).resolve(referrer, specifier)
+    }
+
+    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
+        (**self).load(id)
+    }
 }
 
 pub struct MemoryResolver<'a> {
@@ -29,11 +41,11 @@ impl<'a> MemoryResolver<'a> {
 }
 
 impl ModuleResolver for MemoryResolver<'_> {
-    fn resolve(&self, referrer: Option<&str>, specifier: &str) -> Result<String, String> {
-        normalize(referrer, specifier)
+    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
+        normalize(referrer.map(String::as_str), specifier)
     }
 
-    fn load(&self, id: &str) -> Result<Cow<'_, str>, String> {
+    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
         self.files
             .get(id)
             .copied()
@@ -72,8 +84,8 @@ impl FileResolver {
 }
 
 impl ModuleResolver for FileResolver {
-    fn resolve(&self, referrer: Option<&str>, specifier: &str) -> Result<String, String> {
-        let path = self.file(&normalize(referrer, specifier)?)?;
+    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
+        let path = self.file(&normalize(referrer.map(String::as_str), specifier)?)?;
         let relative = path.strip_prefix(&self.root).expect("checked source root");
         let mut id = String::new();
         for part in relative.components() {
@@ -89,7 +101,7 @@ impl ModuleResolver for FileResolver {
         Ok(id)
     }
 
-    fn load(&self, id: &str) -> Result<Cow<'_, str>, String> {
+    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
         std::fs::read_to_string(self.file(&normalize(None, id)?)?)
             .map(Cow::Owned)
             .map_err(|err| err.to_string())

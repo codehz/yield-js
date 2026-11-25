@@ -1,7 +1,7 @@
 //! Source module linking, initialization, and snapshot integration.
 
 use super::support::{TEST_DECLARATIONS, declared, json_round_trip};
-use yield_compiler::{CompileError, MemoryResolver, compile};
+use yield_compiler::{CompileError, MemoryResolver, Project};
 use yield_harness::TestHost;
 use yield_vm::bytecode::ModuleTarget;
 use yield_vm::heap::Property;
@@ -16,7 +16,11 @@ fn link<'a>(
 ) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new(files).expect("valid fixture paths");
     let options = declared(TEST_DECLARATIONS);
-    compile("main.js", preload, &resolver, &options)
+    let project = Project::new("main.js", resolver);
+    options.compile(match preload {
+        Some(preload) => project.with_preload(preload),
+        None => project,
+    })
 }
 
 fn run(files: &[(&str, &str)], expected: f64) {

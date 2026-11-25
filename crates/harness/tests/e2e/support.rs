@@ -1,6 +1,6 @@
 //! Shared fixtures and lifecycle helpers for snapshot tests.
 
-use yield_compiler::{CompileError, CompileOptions, MemoryResolver, compile};
+use yield_compiler::{CompileError, Compiler, MemoryResolver, Project};
 use yield_harness::{TestHost, build};
 use yield_vm::{
     Completion, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
@@ -9,15 +9,15 @@ use yield_vm::{
 
 pub(super) fn compile_main(
     source: &str,
-    options: &CompileOptions,
+    options: &Compiler,
 ) -> Result<yield_vm::Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).expect("valid fixture path");
-    compile("main.js", None, &resolver, options)
+    options.compile(Project::new("main.js", resolver))
 }
 
 /// Compiler options read from a host declaration file, as a host would build them.
-pub(super) fn declared(dts: &str) -> CompileOptions {
-    CompileOptions::from_dts(dts).expect("host declarations parse")
+pub(super) fn declared(dts: &str) -> Compiler {
+    Compiler::from_dts(dts).expect("host declarations parse")
 }
 
 /// Declaration of the shared `TestHost` module (`test`).
@@ -26,11 +26,11 @@ pub(super) const TEST_DECLARATIONS: &str = include_str!("../../test.d.ts");
 pub(super) fn compile_preloaded(
     source: &str,
     preload: &str,
-    options: &CompileOptions,
+    options: &Compiler,
 ) -> Result<yield_vm::Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source), ("preload.js", preload)])
         .expect("valid fixture paths");
-    compile("main.js", Some("preload.js"), &resolver, options)
+    options.compile(Project::new("main.js", resolver).with_preload("preload.js"))
 }
 
 pub(super) const RUN: &str = r#"

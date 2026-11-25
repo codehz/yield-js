@@ -28,7 +28,7 @@ use crate::cfg::FunctionCfg;
 use crate::emit::{Emitter, Reg};
 use crate::env::{BindingKind, CapturedEnv, Env};
 use crate::error::{CompileError, unsupported};
-use crate::frontend::link::{DEFAULT_SLOT, Graph, Target};
+use crate::frontend::link::{DEFAULT_SLOT, ModuleGraph, Target};
 use crate::ir::{GeneratorStartSite, IterationEnvGroup, LoweredFunction};
 use crate::names::Tables;
 use crate::promote;
@@ -37,8 +37,8 @@ use crate::source_lines::SourceLines;
 use control::Control;
 
 pub(crate) fn lower_graph<'ast>(
-    graph: &'ast Graph<'ast>,
-    options: &crate::CompileOptions,
+    graph: &'ast ModuleGraph<'ast>,
+    options: &crate::Compiler,
 ) -> Result<Build, CompileError> {
     let mut session = Session::new();
     // Reserve graph-wide binding IDs before lowering the first declaration.

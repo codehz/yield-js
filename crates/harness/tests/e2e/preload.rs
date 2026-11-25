@@ -1,7 +1,7 @@
 //! Preload initialization and the live bindings rooted by its getters.
 
 use super::support::{TEST_DECLARATIONS, compile_preloaded, declared, json_round_trip};
-use yield_compiler::CompileOptions;
+use yield_compiler::Compiler;
 use yield_harness::TestHost;
 use yield_vm::heap::Property;
 use yield_vm::{JsString, Object, RestoreOptions, SnapshotValidation, Value, Vm, VmError};
@@ -37,7 +37,7 @@ export function run() {
 }
 "#,
         "export let n = 1; export {n as alias}; export function bump() { n++; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let mut host = TestHost::default();
@@ -121,7 +121,7 @@ export { replacement as Math };
 export const shadow = 90;
 "#;
 
-fn options() -> CompileOptions {
+fn options() -> Compiler {
     declared(TEST_DECLARATIONS)
 }
 
@@ -180,7 +180,7 @@ fn preload_can_shadow_global_this_without_recursive_lookup() {
     let build = compile_preloaded(
         "export const result = globalThis + undefined;",
         "const g = 8; const u = 9; export {g as globalThis, u as undefined};",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let vm = Vm::new(build, &mut TestHost::default(), Default::default()).unwrap();

@@ -1,8 +1,6 @@
 //! Source-located compile failures.
 //!
-//! The only Oxc type on the public error surface is [`Span`], a byte range.
-//! Parser diagnostics are mapped here so the rest of the compiler does not
-//! depend on Oxc's diagnostic types.
+//! Parser diagnostics are mapped here without exposing Oxc diagnostic types.
 
 use std::fmt;
 
@@ -12,6 +10,7 @@ use oxc::span::Span;
 pub struct CompileError {
     module: String,
     message: String,
+    stage: Option<String>,
     span: Span,
     line: usize,
     column: usize,
@@ -19,7 +18,15 @@ pub struct CompileError {
 
 impl CompileError {
     pub(crate) fn new(source: &str, span: Span, message: impl Into<String>) -> Self {
-        let start = (span.start as usize).min(source.len());
+        let start = span.start as usize;
+        if span == Span::default()
+            || span.end < span.start
+            || span.end as usize > source.len()
+            || !source.is_char_boundary(start)
+            || !source.is_char_boundary(span.end as usize)
+        {
+            return Self::internal(message);
+        }
         let prefix = &source[..start];
         let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
         let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
@@ -27,6 +34,7 @@ impl CompileError {
         Self {
             module: String::new(),
             message: message.into(),
+            stage: None,
             span,
             line,
             column,
@@ -34,12 +42,28 @@ impl CompileError {
     }
 
     pub(crate) fn internal(message: impl Into<String>) -> Self {
-        Self::new("", Span::default(), message)
+        Self {
+            module: String::new(),
+            message: message.into(),
+            stage: None,
+            span: Span::default(),
+            line: 0,
+            column: 0,
+        }
     }
 
     pub(crate) fn in_module(mut self, module: &str) -> Self {
         self.module = module.to_owned();
         self
+    }
+
+    pub(crate) fn in_stage(mut self, stage: &str) -> Self {
+        self.stage = Some(stage.to_owned());
+        self
+    }
+
+    pub fn stage(&self) -> Option<&str> {
+        self.stage.as_deref()
     }
 
     pub fn module(&self) -> &str {
@@ -65,11 +89,20 @@ impl CompileError {
 
 impl fmt::Display for CompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} at {}:{}:{} (byte {})",
-            self.message, self.module, self.line, self.column, self.span.start
-        )
+        if let Some(stage) = &self.stage {
+            write!(formatter, "{stage}: ")?;
+        }
+        if self.line != 0 {
+            write!(
+                formatter,
+                "{} at {}:{}:{} (byte {})",
+                self.message, self.module, self.line, self.column, self.span.start
+            )
+        } else if !self.module.is_empty() {
+            write!(formatter, "{} in {}", self.message, self.module)
+        } else {
+            formatter.write_str(&self.message)
+        }
     }
 }
 

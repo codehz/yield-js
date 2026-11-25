@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
-use yield_compiler::{CompileOptions, MemoryResolver, compile};
+use yield_compiler::{Compiler, MemoryResolver, Project};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
 use yield_vm::binding::{Bindings, JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
@@ -182,8 +182,8 @@ impl Demo {
     }
 }
 
-fn compile_options() -> CompileOptions {
-    CompileOptions::from_dts(include_str!("../demo.d.ts")).expect("demo declarations parse")
+fn compile_options() -> Compiler {
+    Compiler::from_dts(include_str!("../demo.d.ts")).expect("demo declarations parse")
 }
 
 fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
@@ -203,7 +203,7 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
 fn main() -> Result<(), Box<dyn Error>> {
     let mut host = DemoHost::new()?;
     let resolver = MemoryResolver::new([("main.js", SOURCE)])?;
-    let build: Build = compile("main.js", None, &resolver, &compile_options())?;
+    let build: Build = compile_options().compile(Project::new("main.js", resolver))?;
     let function = build.function_named("run").expect("demo entry function");
     println!("build {} ({})", build.build_id, function.name);
     println!(

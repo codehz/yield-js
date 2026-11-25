@@ -13,7 +13,7 @@ use yield_vm::bytecode::{
 };
 use yield_vm::{BindingId, JsString};
 
-use crate::CompileOptions;
+use crate::Compiler;
 use crate::error::CompileError;
 
 pub(crate) struct Session {
@@ -153,7 +153,7 @@ impl Session {
         modules: Vec<SourceModule>,
         entry: u32,
         preload: Option<u32>,
-        options: &CompileOptions,
+        options: &Compiler,
     ) -> Result<Build, CompileError> {
         let mut build = Build::new(
             self.constants,

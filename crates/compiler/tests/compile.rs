@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use yield_compiler::{CompileError, CompileOptions, FileResolver, MemoryResolver, ModuleResolver};
+use yield_compiler::{
+    CompileError, Compiler, FileResolver, MemoryResolver, ModuleId, ModuleResolver, Project,
+};
 use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
 
-fn compile(source: &str, options: &CompileOptions) -> Result<Build, CompileError> {
+fn compile(source: &str, options: &Compiler) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).unwrap();
-    yield_compiler::compile("main.js", None, &resolver, options)
+    options.compile(Project::new("main.js", resolver))
 }
 
 fn entry_module(build: &Build) -> &SourceModule {
@@ -17,17 +19,17 @@ fn entry_module(build: &Build) -> &SourceModule {
 fn compile_with_preload(
     source: &str,
     preload: &str,
-    options: &CompileOptions,
+    options: &Compiler,
 ) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source), ("preload.js", preload)]).unwrap();
-    yield_compiler::compile("main.js", Some("preload.js"), &resolver, options)
+    options.compile(Project::new("main.js", resolver).with_preload("preload.js"))
 }
 
 #[test]
 fn compiles_overflowing_number_literals() {
     let build = compile(
         "export function run() { return [1e999, -1e999]; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert!(build.constants.iter().any(|constant| matches!(
@@ -39,7 +41,7 @@ fn compiles_overflowing_number_literals() {
 
 #[test]
 fn compiles_preload_and_main_in_separate_module_scopes() {
-    let options = CompileOptions::default();
+    let options = Compiler::default();
     let build = compile_with_preload(
         "export function shared() { return 'same'; }",
         "export function shared() { return 'same'; }",
@@ -82,7 +84,7 @@ fn validates_module_initializers_and_export_bindings() {
     let build = compile_with_preload(
         "export let main = 0; export function run() {}",
         "export let n = 1;",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let entry = build.entry as usize;
@@ -153,7 +155,7 @@ fn validates_module_initializers_and_export_bindings() {
 #[test]
 fn rejects_module_getters_reading_the_wrong_binding() {
     let mut build =
-        compile_with_preload("", "export let x = 1, y = 2;", &CompileOptions::default()).unwrap();
+        compile_with_preload("", "export let x = 1, y = 2;", &Compiler::default()).unwrap();
     let exports = &mut build.modules[build.preload.unwrap() as usize].exports;
     exports.get_mut("x").unwrap().getter = exports["y"].getter;
     assert!(build.validate().unwrap_err().contains("build_id"));
@@ -223,9 +225,9 @@ fn compile_run(source: &str) -> yield_vm::bytecode::Function {
     let source = format!("import {{ inspect, seed, wait }} from \"test\";\n{source}");
     let build = compile(
         &source,
-        &CompileOptions {
+        &Compiler {
             imports: manifest(&[("test", &["inspect", "seed", "wait"])]),
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("source compiles");
@@ -244,7 +246,7 @@ function run({ x = 1 }, [y], z = 2, last, ...tail) {
   return [(a, ...rest) => a, (...rest) => rest, (a = 1, b) => b];
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -274,7 +276,7 @@ function run(key) {
   };
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let methods: Vec<_> = build
@@ -338,7 +340,7 @@ async function run() {
 fn compiles_tagged_templates_as_call_sites() {
     let build = compile(
         "export function run(tag) { return tag`a${1}\\n`; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert_eq!(build.templates.len(), 1);
@@ -362,7 +364,7 @@ fn compiles_tagged_templates_as_call_sites() {
 fn compiles_invalid_tagged_escapes_without_cooked_text() {
     let build = compile(
         "export function run(tag) { return tag`\\unicode`; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert_eq!(build.templates[0].cooked, vec![None]);
@@ -372,7 +374,7 @@ fn compiles_invalid_tagged_escapes_without_cooked_text() {
 
 #[test]
 fn rejects_unsupported_syntax_with_location() {
-    let error = compile("function run() { debugger; }", &CompileOptions::default())
+    let error = compile("function run() { debugger; }", &Compiler::default())
         .expect_err("debugger statements are outside the PoC subset");
     assert!(error.message().contains("unsupported syntax"));
     assert_eq!(error.line(), 1);
@@ -408,7 +410,7 @@ fn rejects_invalid_private_names() {
             "undeclared private name #x",
         ),
     ] {
-        let error = compile(source, &CompileOptions::default()).expect_err(source);
+        let error = compile(source, &Compiler::default()).expect_err(source);
         assert!(
             error.message().to_lowercase().contains(message),
             "{source}: {error}"
@@ -433,7 +435,7 @@ function run(n) {
   return total;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -458,7 +460,7 @@ function run() {
   return out;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -489,7 +491,7 @@ function run() {
   return out;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -521,7 +523,7 @@ function run() {
   return out;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -567,7 +569,7 @@ async function run() {
   return total;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let run = build.function_named("run").expect("missing run");
@@ -665,7 +667,7 @@ function run(source) {
     );
     compile(
         "export { key }; for (var key in {}) {}",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("script scan collects a for-in var");
     for (statement, diagnostic) in [
@@ -682,7 +684,7 @@ function run(source) {
         ),
     ] {
         let source = format!("function run() {{\n  {statement}\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(statement);
+        let error = compile(&source, &Compiler::default()).expect_err(statement);
         assert!(error.message().contains(diagnostic), "{statement}: {error}");
         assert_eq!(error.line(), 2, "{statement}: {error}");
     }
@@ -692,7 +694,7 @@ function run(source) {
 fn rejects_delete_of_identifier_in_strict_modules() {
     for operand in ["x", "((x))"] {
         let source = format!("function run(x) {{\n  return delete {operand};\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        let error = compile(&source, &Compiler::default()).expect_err(&source);
         assert_eq!(error.line(), 2);
         assert!(error.message().contains("delete"), "{error}");
     }
@@ -702,7 +704,7 @@ fn rejects_delete_of_identifier_in_strict_modules() {
 fn rejects_non_lvalue_update_targets() {
     for expression in ["++1", "(1 + 2)--"] {
         let source = format!("function run() {{\n  return {expression};\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        let error = compile(&source, &Compiler::default()).expect_err(&source);
         assert_eq!(error.line(), 2, "{source}: {error}");
     }
 }
@@ -718,7 +720,7 @@ fn rejects_compound_destructuring_assignment() {
         ("{a}", "??="),
     ] {
         let source = format!("function run(a,b) {{\n  ({target} {operator} b);\n}}");
-        let error = compile(&source, &CompileOptions::default()).expect_err(&source);
+        let error = compile(&source, &Compiler::default()).expect_err(&source);
         assert_eq!(error.line(), 2, "{source}: {error}");
         assert!(
             error
@@ -743,7 +745,7 @@ fn rejects_unsupported_optional_chain_syntax_with_location() {
             24,
         ),
     ] {
-        let error = compile(source, &CompileOptions::default()).expect_err(source);
+        let error = compile(source, &Compiler::default()).expect_err(source);
         assert!(error.message().contains(message), "{source}: {error}");
         assert_eq!(error.line(), if source.contains('\n') { 2 } else { 1 });
         assert_eq!(error.column(), column, "{source}: {error}");
@@ -761,7 +763,7 @@ fn rejects_invalid_label_uses_with_location() {
     ];
     for source in cases {
         let error =
-            compile(source, &CompileOptions::default()).expect_err("label misuse must be rejected");
+            compile(source, &Compiler::default()).expect_err("label misuse must be rejected");
         assert!(error.line() >= 1, "{source}: {error}");
     }
 }
@@ -770,7 +772,7 @@ fn rejects_invalid_label_uses_with_location() {
 fn compiles_object_spread() {
     let build = compile(
         "function run(other) { return { before: 1, ...other, after: 2 }; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("object spread compiles");
     let function = build
@@ -790,7 +792,7 @@ fn compiles_object_spread() {
 fn rejects_malformed_property_definition_and_method_metadata() {
     let build = compile(
         "function run() { return { m() {} }; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("method");
     for (operand, message) in ["object", "key", "src"].into_iter().enumerate() {
@@ -846,7 +848,7 @@ fn selects_const_keys_only_for_syntax_known_string_reads() {
         r#"export function run(o, key) {
             return o.field + o[("\u0066ield")] + o[`field`] + o[key];
         }"#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("member reads compile");
     let mut keys = Vec::new();
@@ -901,7 +903,7 @@ function run() {
   return new Promise(function (resolve) { return then(resolve); });
 }
 "#;
-    let build = compile(source, &CompileOptions::default()).expect("promise syntax compiles");
+    let build = compile(source, &Compiler::default()).expect("promise syntax compiles");
     let code: Vec<_> = build
         .functions
         .iter()
@@ -935,7 +937,7 @@ function run() {
 
     let error = compile(
         "function run() {\n  return new Foo();\n}\n",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect_err("new Foo needs a binding");
     assert!(error.message().contains("unknown binding"));
@@ -1070,9 +1072,9 @@ fn rejects_static_use_before_lexical_initialization() {
     for case in cases {
         let error = compile(
             case.source,
-            &CompileOptions {
+            &Compiler {
                 imports: manifest(case.imports),
-                ..CompileOptions::default()
+                ..Compiler::default()
             },
         )
         .expect_err(case.source);
@@ -1112,9 +1114,9 @@ fn allows_lexical_use_after_initialization_and_cross_closure_read() {
         };
         compile(
             source,
-            &CompileOptions {
+            &Compiler {
                 imports,
-                ..CompileOptions::default()
+                ..Compiler::default()
             },
         )
         .expect(source);
@@ -1135,7 +1137,7 @@ export function named() {}
 export async function later() {}
 function run() {}
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert_eq!(
@@ -1162,7 +1164,7 @@ function run() {}
         assert_eq!(exports[name].target, exports["n"].target);
         assert_eq!(exports[name].getter, exports["n"].getter);
     }
-    let unexported = compile("function run() {}", &CompileOptions::default()).unwrap();
+    let unexported = compile("function run() {}", &Compiler::default()).unwrap();
     assert!(entry_module(&unexported).exports.is_empty());
 }
 
@@ -1175,7 +1177,7 @@ fn rejects_exports_of_unknown_local_bindings() {
             "privateName",
         ),
     ] {
-        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        let error = compile(source, &Compiler::default()).unwrap_err();
         assert!(
             error.message().contains("unknown export binding"),
             "{error}"
@@ -1193,9 +1195,9 @@ fn rejects_exports_of_unknown_local_bindings() {
 fn host_import_export_aliases_share_one_binding() {
     let build = compile(
         "import { inspect } from 'test';\nexport { inspect, inspect as check };",
-        &CompileOptions {
+        &Compiler {
             imports: manifest(&[("test", &["inspect"])]),
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .unwrap();
@@ -1209,7 +1211,7 @@ fn rejects_duplicate_public_names() {
         ("export const a = 1;\nexport { a };", "a"),
         ("let a = 1;\nexport { a as one, a as one };", "one"),
     ] {
-        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        let error = compile(source, &Compiler::default()).unwrap_err();
         assert!(
             error.message().to_ascii_lowercase().contains("duplicat"),
             "{error}"
@@ -1228,7 +1230,7 @@ fn registers_default_exports_and_rejects_their_misuses() {
     // `export { x as default }` keeps the live binding.
     let build = compile(
         "let x = 1;\nexport { x as default, x as alias };",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let exports = &entry_module(&build).exports;
@@ -1237,7 +1239,7 @@ fn registers_default_exports_and_rejects_their_misuses() {
     // not auto-exported.
     let build = compile(
         "export default function f() {}\nfunction run() {}",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert!(entry_module(&build).exports.contains_key("default"));
@@ -1245,7 +1247,7 @@ fn registers_default_exports_and_rejects_their_misuses() {
     // A named default class shares one binding with the exported local name.
     let build = compile(
         "export default class C {}\nexport { C };",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let exports = &entry_module(&build).exports;
@@ -1253,7 +1255,7 @@ fn registers_default_exports_and_rejects_their_misuses() {
     // A second default is rejected at its source location.
     let error = compile(
         "let x;\nexport { x as default };\nexport default 2;",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap_err();
     assert!(
@@ -1264,7 +1266,7 @@ fn registers_default_exports_and_rejects_their_misuses() {
     // An unknown local binding is still rejected, under any public name.
     let error = compile(
         "export default 1;\nexport { missing as x };",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap_err();
     assert!(
@@ -1283,7 +1285,7 @@ fn rejects_unsupported_module_syntax() {
         ("import 'dep' with { type: 'json' };", "attributes"),
         ("export * from 'dep' with { type: 'json' };", "attributes"),
     ] {
-        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        let error = compile(&format!("\n{statement}"), &Compiler::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
         assert!(
             error.message().starts_with("unsupported syntax:"),
@@ -1299,7 +1301,7 @@ fn rejects_unreachable_await_using_in_sync_module() {
         ("\nawait using resource = null;", 1),
         ("\nif (false) { await using resource = null; }", 14),
     ] {
-        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        let error = compile(source, &Compiler::default()).unwrap_err();
         assert_eq!((error.line(), error.column()), (2, column), "{error}");
         assert_eq!(
             error.message(),
@@ -1329,7 +1331,7 @@ fn preserves_oxc_resource_diagnostics() {
             "only allowed within async functions",
         ),
     ] {
-        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        let error = compile(&format!("\n{statement}"), &Compiler::default()).unwrap_err();
         assert_eq!(
             (error.line(), error.column()),
             (2, statement.find(marker).unwrap() + 1),
@@ -1355,7 +1357,7 @@ fn accepts_resource_loop_heads() {
     ] {
         for outer in ["", "using outer = null;"] {
             let source = format!("export async function run() {{\n  {outer}\n  {head}\n}}");
-            compile(&source, &CompileOptions::default())
+            compile(&source, &Compiler::default())
                 .unwrap_or_else(|error| panic!("{head}: {error}"));
         }
     }
@@ -1365,7 +1367,7 @@ fn accepts_resource_loop_heads() {
 fn accepts_using_identifier_and_nested_async_resource_declaration() {
     compile(
         "const using = null; export async function run() { await using resource = using; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
 }
@@ -1374,7 +1376,8 @@ fn accepts_using_identifier_and_nested_async_resource_declaration() {
 fn rejects_unresolved_and_ambiguous_exports_at_the_request() {
     let check = |files: &[(&str, &str)], expected_module, expected_line, expected: &str| {
         let resolver = MemoryResolver::new(files.iter().copied()).unwrap();
-        let err = yield_compiler::compile("a.js", None, &resolver, &CompileOptions::default())
+        let err = Compiler::default()
+            .compile(Project::new("a.js", resolver))
             .unwrap_err();
         assert_eq!(err.module(), expected_module, "{err}");
         assert_eq!(err.line(), expected_line, "{err}");
@@ -1419,7 +1422,7 @@ fn rejects_gated_class_features() {
         ("class C { x = arguments; }", "arguments"),
         ("class C { static { (() => arguments)(); } }", "arguments"),
     ] {
-        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        let error = compile(source, &Compiler::default()).unwrap_err();
         assert!(error.message().contains(feature), "{error}");
     }
 }
@@ -1428,7 +1431,7 @@ fn rejects_gated_class_features() {
 fn accepts_synchronous_generator_methods() {
     let build = compile(
         "class C { *m() { yield 1; } static *s() { yield 2; } }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("synchronous generator methods are supported");
     let generators = build
@@ -1451,7 +1454,7 @@ fn rejects_super_calls_outside_derived_constructor_context() {
         "class C extends Object { x = () => super(); }",
         "class C extends Object { static { super(); } }",
     ] {
-        let error = compile(source, &CompileOptions::default()).unwrap_err();
+        let error = compile(source, &Compiler::default()).unwrap_err();
         assert!(
             error.message().to_ascii_lowercase().contains("super"),
             "{source}: {error}"
@@ -1467,10 +1470,7 @@ fn rejects_invalid_super_properties_and_optional_links() {
         "class C extends Object { constructor() { super?.(); } }",
         "class C { m() { function f() { return () => super.x; } } }",
     ] {
-        assert!(
-            compile(source, &CompileOptions::default()).is_err(),
-            "{source}"
-        );
+        assert!(compile(source, &Compiler::default()).is_err(), "{source}");
     }
 }
 
@@ -1487,7 +1487,7 @@ fn derived_constructor_lowering_captures_context_only_in_lexical_arrows() {
            }\n\
          }\n\
          class NoThis extends null { constructor() { return {}; } }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     build.validate().unwrap();
@@ -1543,7 +1543,7 @@ fn derived_constructor_lowering_captures_context_only_in_lexical_arrows() {
 fn class_lowering_keeps_the_inner_name_out_of_ordinary_bindings() {
     let build = compile(
         "export class C { static read() { return () => C; } } C = null;",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     build.validate().unwrap();
@@ -1627,7 +1627,7 @@ function direct(value = new.target) { return value; }
 function capture() { return async () => () => new.target; }
 function outer() { function inner() { return new.target; } return inner; }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     build.validate().unwrap();
@@ -1664,7 +1664,7 @@ fn rejects_new_target_without_an_enclosing_ordinary_function() {
         "const f = () => new.target;",
         "const f = async () => new.target;",
     ] {
-        let error = compile(&format!("\n{statement}"), &CompileOptions::default()).unwrap_err();
+        let error = compile(&format!("\n{statement}"), &Compiler::default()).unwrap_err();
         assert_eq!(error.line(), 2, "{error}");
         assert!(error.message().contains("new.target"), "{error}");
     }
@@ -1680,9 +1680,9 @@ import * as host from "host";
 import "host";
 function run() { return call(item, fallback, empty, host.value); }
 "#,
-        &CompileOptions {
+        &Compiler {
             imports,
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("static host imports compile");
@@ -1703,9 +1703,9 @@ fn delegates_unknown_host_specifiers_and_rejects_missing_host_exports() {
     ] {
         let error = compile(
             source,
-            &CompileOptions {
+            &Compiler {
                 imports: imports.clone(),
-                ..CompileOptions::default()
+                ..Compiler::default()
             },
         )
         .unwrap_err();
@@ -1808,7 +1808,7 @@ fn file_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
     assert_eq!(resolver.resolve(None, "alias.js").unwrap(), "dep.js");
     let error = resolver.resolve(None, "escape.js").unwrap_err();
     assert!(error.contains("outside the source root"), "{error}");
-    let error = resolver.load("escape.js").unwrap_err();
+    let error = resolver.load(&ModuleId::from("escape.js")).unwrap_err();
     assert!(error.contains("outside the source root"), "{error}");
 }
 
@@ -1821,16 +1821,16 @@ fn missing_source_imports_point_to_the_import_specifier() {
     fs::write(root.0.join("src/main.js"), source).unwrap();
     let file = FileResolver::new(&root.0).unwrap();
     let file_reason = file
-        .resolve(Some("src/main.js"), "./missing.js")
+        .resolve(Some(&ModuleId::from("src/main.js")), "./missing.js")
         .unwrap_err();
 
     for (resolver, reason) in [
         (&memory as &dyn ModuleResolver, "source file not found"),
         (&file as &dyn ModuleResolver, file_reason.as_str()),
     ] {
-        let error =
-            yield_compiler::compile("./src/main.js", None, resolver, &CompileOptions::default())
-                .unwrap_err();
+        let error = Compiler::default()
+            .compile(Project::new("./src/main.js", resolver))
+            .unwrap_err();
         let (start, line, column) = access_at(source, "'./missing.js'", 0);
         assert_eq!(error.module(), "src/main.js");
         assert_eq!(error.span().start, start, "{error}");
@@ -1845,12 +1845,12 @@ fn missing_source_imports_point_to_the_import_specifier() {
 fn missing_file_entry_points_to_the_requested_root() {
     let root = TempDir::new();
     let resolver = FileResolver::new(&root.0).unwrap();
-    let error =
-        yield_compiler::compile("./missing.js", None, &resolver, &CompileOptions::default())
-            .unwrap_err();
+    let error = Compiler::default()
+        .compile(Project::new("./missing.js", resolver))
+        .unwrap_err();
     assert_eq!(error.module(), "./missing.js");
-    assert_eq!(error.line(), 1, "{error}");
-    assert_eq!(error.column(), 1, "{error}");
+    assert_eq!(error.line(), 0, "{error}");
+    assert_eq!(error.column(), 0, "{error}");
 }
 
 #[test]
@@ -1858,9 +1858,9 @@ fn imported_bindings_are_readonly_and_shadow_normally() {
     let imports = manifest(&[("host", &["value"])]);
     let build = compile(
         "import { value } from 'host'; value = 1;",
-        &CompileOptions {
+        &Compiler {
             imports: imports.clone(),
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("imports are const; the assignment throws at runtime");
@@ -1873,9 +1873,9 @@ fn imported_bindings_are_readonly_and_shadow_normally() {
     );
     compile(
         "import { value } from 'host'; function run() { let value = 1; return value; }",
-        &CompileOptions {
+        &Compiler {
             imports,
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("local shadowing allowed");
@@ -1885,9 +1885,9 @@ fn imported_bindings_are_readonly_and_shadow_normally() {
 fn imported_values_in_closures_are_direct_operands_not_environment_cells() {
     let build = compile(
         "import { value } from 'host'; function run() { return value; }",
-        &CompileOptions {
+        &Compiler {
             imports: manifest(&[("host", &["value"])]),
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("imported closure reference compiles");
@@ -1912,9 +1912,9 @@ fn imported_values_in_closures_are_direct_operands_not_environment_cells() {
 fn imported_assignments_use_const_throws_without_binding_cells() {
     let build = compile(
         "import { value } from 'host'; value += 1;",
-        &CompileOptions {
+        &Compiler {
             imports: manifest(&[("host", &["value"])]),
-            ..CompileOptions::default()
+            ..Compiler::default()
         },
     )
     .expect("readonly import assignment lowers");
@@ -1946,7 +1946,7 @@ fn interns_repeated_string_constants() {
     use yield_vm::bytecode::Constant;
     let build = compile(
         "function run() { return { foo: \"foo\", value: \"foo\" }.foo; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let matches = build
@@ -1967,7 +1967,7 @@ fn emits_utf16_for_string_literals_templates_and_property_keys() {
             "\r\n",
             r#"${x}\u{DC00}` }; }"#,
         ),
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     for expected in [
@@ -2002,9 +2002,9 @@ fn regexp_literal_lowers_without_reading_the_constructor_binding() {
 #[test]
 fn accepts_ecmascript_regexp_features_and_locates_invalid_literals() {
     for literal in [r"/(a)\1/", "/(?=a)a/", "/a/d"] {
-        compile(&format!("{literal};"), &CompileOptions::default()).unwrap();
+        compile(&format!("{literal};"), &Compiler::default()).unwrap();
     }
-    let error = compile("\n  /(/;", &CompileOptions::default()).unwrap_err();
+    let error = compile("\n  /(/;", &Compiler::default()).unwrap_err();
     assert_eq!((error.line(), error.column()), (2, 3), "{error}");
     assert!(
         error
@@ -2018,7 +2018,7 @@ fn accepts_ecmascript_regexp_features_and_locates_invalid_literals() {
 fn exported_lexical_declarations_keep_the_tdz() {
     for declaration in ["let", "const"] {
         let source = format!("\n  x;\nexport {declaration} x = 1;");
-        let error = compile(&source, &CompileOptions::default()).unwrap_err();
+        let error = compile(&source, &Compiler::default()).unwrap_err();
         assert!(error.message().contains("before initialization"), "{error}");
         assert_eq!((error.line(), error.column()), (2, 3), "{error}");
     }
@@ -2028,7 +2028,7 @@ fn exported_lexical_declarations_keep_the_tdz() {
 fn names_nested_in_exported_patterns_are_public() {
     let build = compile(
         "export const { x: [a], ...rest } = { x: [1] };",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     assert_eq!(
@@ -2050,7 +2050,7 @@ declare module "a" {
     export function id<T extends Box<string>>(x: T): T;
 }
 "#;
-    let options = CompileOptions::from_dts(dts).unwrap();
+    let options = Compiler::from_dts(dts).unwrap();
     compile(
         "import { id } from 'a';\nexport function run() { return id(1); }",
         &options,
@@ -2075,8 +2075,8 @@ declare module "a" {
         );
     }
 
-    let error = CompileOptions::from_dts("declare module \"a\" {\n  export * from \"./b\";\n}")
-        .unwrap_err();
+    let error =
+        Compiler::from_dts("declare module \"a\" {\n  export * from \"./b\";\n}").unwrap_err();
     assert_eq!(error.message(), "unsupported syntax: `export *`");
     assert_eq!(error.line(), 2);
 }
@@ -2084,14 +2084,13 @@ declare module "a" {
 #[test]
 fn host_declaration_type_only_module_keeps_an_empty_manifest_entry() {
     let options =
-        CompileOptions::from_dts("declare module \"types\" { export interface Shape { a: 1 } }")
-            .unwrap();
+        Compiler::from_dts("declare module \"types\" { export interface Shape { a: 1 } }").unwrap();
     assert!(options.imports["types"].is_empty());
     compile("export function run() {}", &options).unwrap();
 }
 
 fn compile_generator(source: &str) -> yield_vm::bytecode::Function {
-    let build = compile(source, &CompileOptions::default()).expect("source compiles");
+    let build = compile(source, &Compiler::default()).expect("source compiles");
     build
         .functions
         .into_iter()
@@ -2212,7 +2211,7 @@ export function* run(a) {
 fn empty_if_leaves_no_branch_or_jump() {
     let build = compile(
         "export function run(flag) { if (flag) {} else {} return 7; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     build.validate().unwrap();
@@ -2233,7 +2232,7 @@ fn pruned_suspensions_do_not_leave_resume_entries() {
             if (enabled) yield await 1;
             yield await 2;
         }"#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("async generator compiles");
     build
@@ -2242,7 +2241,7 @@ fn pruned_suspensions_do_not_leave_resume_entries() {
     let generator = build.functions.iter().find(|f| f.is_generator).unwrap();
     let reference = compile(
         "export async function* run() { yield await 2; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("reference generator compiles");
     let reference = reference.functions.iter().find(|f| f.is_generator).unwrap();
@@ -2304,7 +2303,7 @@ export function* run(iterable) {
 fn lowers_async_generators_with_both_resume_tables() {
     let build = compile(
         "const holder = { async *m() { yield await 1; } };",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("async generators are supported");
     let function = build
@@ -2362,7 +2361,7 @@ export function* run(a) {
         }),
     ];
     for (message, mutate) in mutations {
-        let mut build = compile(source, &CompileOptions::default()).expect("source compiles");
+        let mut build = compile(source, &Compiler::default()).expect("source compiles");
         let position = index(&build);
         mutate(&mut build.functions[position]);
         build.finalize();
@@ -2379,7 +2378,7 @@ export function* run(a) {
   yield a;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("source compiles");
     let before = build.build_id.clone();
@@ -2404,7 +2403,7 @@ export function* run(a) {
 
 #[test]
 fn typeof_missing_global_prunes_dead_function_creation() {
-    let options = CompileOptions::default();
+    let options = Compiler::default();
     let guarded = compile(
         "export function run() { if (typeof Device < 'u') { var saved = () => new Device(); } return saved; }",
         &options,
@@ -2437,10 +2436,10 @@ export function run() {
   return [a, b, c, d];
 }
 "#;
-    let guarded = compile(source, &CompileOptions::default()).expect("guards lower");
+    let guarded = compile(source, &Compiler::default()).expect("guards lower");
     let baseline = compile(
         "export function run() { var a, b, c, d; return [a, b, c, d]; }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect("baseline compiles");
     assert_eq!(
@@ -2451,7 +2450,7 @@ export function run() {
 
     let error = compile(
         "export function run() { if (typeof Device == 'object') import('unsupported'); }",
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .expect_err("the probe pass must validate dead syntax");
     assert!(error.message().contains("dynamic import"), "{error}");
@@ -2460,7 +2459,7 @@ export function run() {
 
 #[test]
 fn typeof_probe_does_not_cross_bindings_modules_or_tdz() {
-    let options = CompileOptions::default();
+    let options = Compiler::default();
     let parameter_shadow = compile(
         "function local(Device) { return typeof Device; } export function run() { return Device; }",
         &options,
@@ -2497,7 +2496,8 @@ fn typeof_probe_does_not_leak_between_modules() {
         ),
     ])
     .expect("valid module paths");
-    let error = yield_compiler::compile("main.js", None, &resolver, &CompileOptions::default())
+    let error = Compiler::default()
+        .compile(Project::new("main.js", resolver))
         .expect_err("the imported module's probe cannot authorize the entry");
     assert!(
         error.message().contains("unknown binding \"Device\""),
@@ -2516,7 +2516,7 @@ export function run() {
   return (2 + 3) * 4 - 1;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let run = build.functions.iter().find(|f| f.name == "run").unwrap();
@@ -2573,7 +2573,7 @@ export function run(flag) {
   return 1 / rhs;
 }
 "#,
-        &CompileOptions::default(),
+        &Compiler::default(),
     )
     .unwrap();
     let run = build.functions.iter().find(|f| f.name == "run").unwrap();
@@ -2593,7 +2593,7 @@ export function run(flag) {
 #[test]
 fn stack_sites_follow_ecmascript_lines_and_parameter_initializers() {
     let source = "/*a*/\r\n/*b*/\r/*c*/\n/*d*/\u{2028}/*e*/\u{2029}export function run(x = /*😀é*/ Error('x')) { return x; }";
-    let build = compile(source, &CompileOptions::default()).unwrap();
+    let build = compile(source, &Compiler::default()).unwrap();
     let run = build.functions.iter().find(|f| f.name == "run").unwrap();
     let pc = run
         .code
