@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -452,7 +453,7 @@ impl CryptoService for DeterministicEntropy {
 }
 
 pub struct TestHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     counters: Arc<Counters>,
     labels: Arc<LabelService>,
     clock: Arc<FakeClock>,
@@ -636,7 +637,7 @@ impl TestHost {
         )
         .expect("test bindings");
         Self {
-            bindings: Arc::new(bindings),
+            bindings: Rc::new(bindings),
             counters,
             labels,
             clock,
@@ -761,7 +762,7 @@ impl TestHost {
 }
 
 impl Host for TestHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.bindings.clone()
     }
 

@@ -9,7 +9,7 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
@@ -622,14 +622,22 @@ type ArmOperation =
     fn(&[u8], OperationToken, &Bindings) -> Result<Box<dyn LiveRegistration>, HostFault>;
 
 /// The stable contract for a host service role, independent of its implementation.
+///
+/// Service values are confined to the thread that builds the [`Bindings`], like
+/// the VM itself. A service that performs work on another thread declares
+/// `Send + Sync` in its own trait or value type; this table does not require it.
 pub trait ServiceKey: 'static {
-    type Value: Any + Send + Sync;
+    type Value: Any;
     const ID: &'static str;
     const VERSION: u32;
     const IN_FINGERPRINT: bool = true;
 }
 
 /// Host resources assembled before linking and borrowed after linking.
+///
+/// The table is owned by one thread, like the VM. Store thread-affine resources
+/// (for example `Rc`) directly; a service that runs work on another thread must
+/// carry `Send + Sync` in its own type or trait.
 #[derive(Default)]
 pub struct Services {
     values: BTreeMap<&'static str, ServiceEntry>,
@@ -638,7 +646,7 @@ pub struct Services {
 struct ServiceEntry {
     version: u32,
     in_fingerprint: bool,
-    value: Box<dyn Any + Send + Sync>,
+    value: Box<dyn Any>,
 }
 
 // Preserve the role's identity even when two keys use the same value type.
@@ -931,10 +939,10 @@ pub mod __macro_support {
     }
 }
 
-/// Immutable declaration table shared by every VM using the same contract.
+/// Immutable declaration table shared by the VMs on one thread.
 #[derive(Clone)]
 pub struct Bindings {
-    inner: Arc<BindingsInner>,
+    inner: Rc<BindingsInner>,
 }
 
 struct BindingsInner {
@@ -1372,7 +1380,7 @@ impl UnlinkedBindings {
             .collect();
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations, &service_ids);
         Ok(Bindings {
-            inner: Arc::new(BindingsInner {
+            inner: Rc::new(BindingsInner {
                 modules: self.modules,
                 classes: self.classes,
                 operations: self.operations,

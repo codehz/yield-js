@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use yield_compiler::{
     CompileError, Compiler, GraphTransform, MemoryResolver, ModuleGraph, ParsedModule, Project,
@@ -15,18 +15,18 @@ fn compile(
     compiler.compile(Project::new("main.jsx", resolver))
 }
 
-struct EmptyHost(Arc<Bindings>);
+struct EmptyHost(Rc<Bindings>);
 
 impl EmptyHost {
     fn new() -> Self {
         let bindings = yield_vm::__macro_support::link([], Default::default(), Default::default());
-        Self(Arc::new(bindings.unwrap()))
+        Self(Rc::new(bindings.unwrap()))
     }
 }
 
 impl Host for EmptyHost {
-    fn bindings(&self) -> Arc<Bindings> {
-        Arc::clone(&self.0)
+    fn bindings(&self) -> Rc<Bindings> {
+        Rc::clone(&self.0)
     }
 
     fn report_error(&mut self, error: JsValue) {

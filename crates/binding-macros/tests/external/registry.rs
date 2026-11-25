@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use yield_vm::{
     Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, Decode, Encode, FromBindings, HostFault,
@@ -207,6 +208,29 @@ impl ServiceKey for CounterKey {
     type Value = u64;
     const ID: &'static str = "counter";
     const VERSION: u32 = 1;
+}
+
+struct LocalKey;
+impl ServiceKey for LocalKey {
+    type Value = Rc<Cell<u32>>;
+    const ID: &'static str = "local";
+    const VERSION: u32 = 1;
+}
+
+#[test]
+fn services_accept_thread_local_values() -> Result<(), String> {
+    let bindings = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [],
+        services: {
+            LocalKey => Rc::new(Cell::new(9)),
+        },
+    }?;
+    assert_eq!(
+        bindings.service::<LocalKey>().map(|value| value.get()),
+        Some(9)
+    );
+    Ok(())
 }
 
 #[test]

@@ -1,5 +1,6 @@
 //! Date behavior with observable host clocks, IANA zones, and snapshot restore.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -26,12 +27,12 @@ impl yield_vm::host::TimeService for CountingTime {
 }
 
 struct CountingHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     time: Arc<CountingTime>,
 }
 
 impl Host for CountingHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.bindings.clone()
     }
 

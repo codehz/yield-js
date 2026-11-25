@@ -1,5 +1,6 @@
 //! Host task ABI and macro-lowered continuations exercised across VM restore.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::support::{compile_main, declared};
@@ -12,7 +13,7 @@ use yield_vm::{
 };
 
 struct TaskHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     labels: Arc<LabelService>,
     errors: Option<Vec<JsValue>>,
 }
@@ -54,7 +55,7 @@ impl TaskHost {
         deps.operation::<Wait>();
         let bindings = abi::link([module], deps, services).unwrap();
         Self {
-            bindings: Arc::new(bindings),
+            bindings: Rc::new(bindings),
             labels,
             errors: None,
         }
@@ -62,8 +63,8 @@ impl TaskHost {
 }
 
 impl Host for TaskHost {
-    fn bindings(&self) -> Arc<Bindings> {
-        Arc::clone(&self.bindings)
+    fn bindings(&self) -> Rc<Bindings> {
+        Rc::clone(&self.bindings)
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -475,7 +476,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     }
     .unwrap();
     let mut host = TaskHost {
-        bindings: Arc::new(bindings),
+        bindings: Rc::new(bindings),
         labels,
         errors: None,
     };
@@ -594,7 +595,7 @@ fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
     .unwrap();
     (
         TaskHost {
-            bindings: Arc::new(bindings),
+            bindings: Rc::new(bindings),
             labels,
             errors: None,
         },

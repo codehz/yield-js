@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
@@ -98,11 +98,11 @@ impl EventModule {
     }
 }
 
-struct EventHost(Arc<Bindings>);
+struct EventHost(Rc<Bindings>);
 
 impl EventHost {
     fn new() -> Self {
-        Self(Arc::new(
+        Self(Rc::new(
             host_bindings! {
                 dts: "../dts/event-fixture.d.ts",
                 modules: [EventModule],
@@ -114,7 +114,7 @@ impl EventHost {
 }
 
 impl Host for EventHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.0.clone()
     }
     fn report_error(&mut self, error: JsValue) {

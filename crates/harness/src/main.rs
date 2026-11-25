@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::{Compiler, MemoryResolver, Project};
@@ -85,7 +86,7 @@ impl Wait {
 }
 
 struct DemoHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     counters: Arc<DemoCounters>,
     labels: Arc<LabelService>,
 }
@@ -98,7 +99,7 @@ impl DemoHost {
         let labels = Arc::new(LabelService::default());
         let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels), time_zone)?;
         Ok(Self {
-            bindings: Arc::new(bindings),
+            bindings: Rc::new(bindings),
             counters,
             labels,
         })
@@ -122,7 +123,7 @@ impl DemoHost {
 }
 
 impl Host for DemoHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.bindings.clone()
     }
 

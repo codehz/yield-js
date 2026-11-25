@@ -206,14 +206,15 @@ impl RepeatTimer {
 #[test]
 fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     use super::support::{compile_main, declared};
+    use std::rc::Rc;
     use std::sync::Arc;
     use yield_harness::FakeClock;
     use yield_vm::{Bindings, Host};
 
-    struct RepeatHost(Arc<Bindings>);
+    struct RepeatHost(Rc<Bindings>);
     impl Host for RepeatHost {
-        fn bindings(&self) -> Arc<Bindings> {
-            Arc::clone(&self.0)
+        fn bindings(&self) -> Rc<Bindings> {
+            Rc::clone(&self.0)
         }
 
         fn report_error(&mut self, error: JsValue) {
@@ -230,7 +231,7 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         },
     }
     .unwrap();
-    let mut host = RepeatHost(Arc::new(bindings));
+    let mut host = RepeatHost(Rc::new(bindings));
     let program = compile_main(
         r#"
         import { start, cancelDelayedTask } from 'repeat_timer';

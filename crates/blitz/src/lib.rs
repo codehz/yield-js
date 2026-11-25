@@ -4,7 +4,7 @@ mod dom;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use blitz_dom::{DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
@@ -40,12 +40,12 @@ impl Dom {
 scoped_tls::scoped_thread_local!(static ACTIVE_DOM: RefCell<Dom>);
 
 struct DomHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     errors: Vec<String>,
 }
 
 impl Host for DomHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.bindings.clone()
     }
 
@@ -81,7 +81,7 @@ pub fn render_module(source: &str) -> Result<HtmlDocument, String> {
         services: {},
     }?;
     let mut host = DomHost {
-        bindings: Arc::new(bindings),
+        bindings: Rc::new(bindings),
         errors: Vec::new(),
     };
     let dom = RefCell::new(Dom::new());

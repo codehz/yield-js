@@ -75,7 +75,7 @@ impl Demo {
 
 - 编译器用 `Compiler::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的名字（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
-- 声明可以在多个 VM 之间共享，但**实例、原型和模块状态每 VM 一份**。声明的数据结构必须 `Send + Sync`。
+- 声明可以在同一线程的多个 VM 之间共享（`Bindings` 用 `Rc` 克隆），但**实例、原型和模块状态每 VM 一份**。`Bindings` 与 VM 一样按线程持有，不作为跨线程协调机制：需要并行工作时，每个线程各自构建 `Bindings`。服务值本身若要在工作线程执行，由对应服务的 trait（例如 `FetchService`、`SubtleCryptoService`）自行要求 `Send + Sync`；服务表不强制。
 
 ### 4.2 类、槽与成员
 
@@ -284,6 +284,7 @@ impl CallCx {
 ### 6.4 重入与执行线程
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
+- `Bindings` 与 VM 同属一个线程（内部用 `Rc`）；不要跨线程传递，需要多线程时各线程独立构建。跨线程的能力与状态由具体服务值自行声明和同步。
 - 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `wintertc.timer`（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
 - `loop`、`while` 和 `while let` 的循环体可使用受支持的 `await`；条件必须同步，`for` 不可挂起。回边不会主动让出执行权；后台循环再次到达同一个外部 `await` 时复用任务 ID 和恢复阶段，但登记新的 operation，必须用新的令牌投递。
@@ -470,7 +471,7 @@ flowchart TB
 7. **TypeScript 定义生成：暂缓。** 待声明和签名模型稳定后再确定生成范围，不引入手工补丁机制。
 8. **payload 编码：继续使用自定义 codec。** 不绑定 postcard、bincode 或 CBOR；规范编码、字段顺序、长度与版本规则由 codec 契约明确。
 9. **流式 payload：暂缓。** 维持整段写入/读取接口；只有实测证明峰值内存构成问题时再改为流式 API。
-10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `Vm::start_recovered_operations` 启动。启动失败按对应 operation 的声明拒绝结算原 Promise，不回滚已恢复的 VM。
+10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。`Bindings` 同样按线程持有，不作为跨线程共享对象；需要并行时每线程各自构建，跨线程的服务能力由服务自身的类型或 trait 声明。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `Vm::start_recovered_operations` 启动。启动失败按对应 operation 的声明拒绝结算原 Promise，不回滚已恢复的 VM。
 11. **恢复资源限制：暂不由 VM 设通用上限。** 前提是快照仅来自可信本地存档；接入方须在读取/解析前限制文件大小。若快照转为导入、同步或其他不可信输入，必须重新评估解析前的大小、对象数、payload 大小和嵌套深度限制。
 12. **BigInt：纳入首版值域。** VM 使用自有任意精度整数表示；`JsValue` 仍为定长句柄，构建常量与快照按规范十进制字符串编码。宿主通过 `JsValue::bigint(&str)` 构造（解析失败按宿主错误处理）、通过 `Inspect` 读取文本，不在宿主侧引入第二套大整数模型。
 

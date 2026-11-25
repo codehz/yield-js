@@ -420,10 +420,10 @@ impl Chain {
     }
 }
 
-struct ChainHost(std::sync::Arc<yield_vm::Bindings>);
+struct ChainHost(std::rc::Rc<yield_vm::Bindings>);
 
 impl yield_vm::Host for ChainHost {
-    fn bindings(&self) -> std::sync::Arc<yield_vm::Bindings> {
+    fn bindings(&self) -> std::rc::Rc<yield_vm::Bindings> {
         self.0.clone()
     }
 
@@ -447,7 +447,7 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
         },
     }
     .unwrap();
-    let mut host = ChainHost(Arc::new(bindings));
+    let mut host = ChainHost(std::rc::Rc::new(bindings));
     let build = compile_main(
         r#"
         import { start, cancel } from 'chain';

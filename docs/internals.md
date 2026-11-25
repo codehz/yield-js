@@ -101,7 +101,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - 每个源码模块有各自同步的声明函数与求值函数。提升函数在正文执行前就闭包于模块环境。只有入口的链接导出表对宿主公开。快照保存模块根，恢复时绝不重跑初始化。嵌套函数是 Oxc 节点 worklist 加捕获的作用域链。
 - 分配物理槽之前，每个 `Slot` 都只是塞进 `SlotKind::Transient` 的逻辑寄存器。优化不改写 PC；最终布局才把块边编码成跳转、恢复表和异常表，保留生成器独占入口，不登记没有存活可抛指令的保护区。槽结果死掉不代表指令可删：属性访问、JS 转换和调用可能执行脚本或抛异常。
 - `compiler/src/instr.rs::may_throw` 必须标出任何可能投递 JavaScript 异常的 opcode，否则异常边不会进入活性分析与 promote。`VmError` 不是 JavaScript 异常。
-- VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
+- VM 持有只读的 `VerifiedBuild`，底层为 `Rc`；VM 是线程内对象，不依赖原子引用计数；`Bindings` 也按线程构建和持有，不作为跨线程共享对象。每次进入 `execute_frame` 只克隆一次构建句柄，循环直接借用指令和变长操作数；不改变字节码、构建摘要或快照格式。
 - 调用实参从调用者帧槽借用（`runtime::Arguments`）：`CallArgs::Slots` 是 `Arc<[Slot]>`，执行时直接借用槽表，序列化形状仍是数组；`Arguments::Slots` 只在被调函数形参绑定前读取，并依赖调用者帧在整个嵌套调用期间留在 `ActiveRoots` 链上。宿主、内建（intrinsic）与 bound 函数边界仍会按需物化为 `Vec`。
 - Error 位置随指令穿过 CFG，最终按 PC 保存位置变化；`(0, 0)` 终止有来源区段，空表隐藏函数。位置表及定义模块索引参与构建摘要和校验，只在分配 Error 时沿 `ActiveRoots` 读取活动帧，使用预增 PC 减一查询。栈文本保留为普通字符串属性，不改变快照记录。
 - `Function::needs_environment` 由形参与代码（`GetBinding` 之类）推导。`VerifiedBuild` 在校验后派生函数 ID 索引、调用环境需求和模块初始化标记；这些元数据不进入字节码、构建摘要或快照。任一初始化函数需要环境时，整个模块使用一份环境。

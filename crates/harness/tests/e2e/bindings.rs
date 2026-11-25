@@ -1,6 +1,7 @@
 //! Host binding contract tests: static declarations, instance state, handles,
 //! operation recovery strategies, and deterministic snapshots.
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -18,21 +19,21 @@ use yield_vm::{
 mod signature_fingerprint;
 
 struct StrategyHost {
-    bindings: Arc<Bindings>,
+    bindings: Rc<Bindings>,
     errors: usize,
 }
 
 impl StrategyHost {
     fn new(bindings: Bindings) -> Self {
         Self {
-            bindings: Arc::new(bindings),
+            bindings: Rc::new(bindings),
             errors: 0,
         }
     }
 }
 
 impl Host for StrategyHost {
-    fn bindings(&self) -> Arc<Bindings> {
+    fn bindings(&self) -> Rc<Bindings> {
         self.bindings.clone()
     }
 
