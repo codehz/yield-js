@@ -675,28 +675,76 @@ impl TestHost {
 
     /// Assembles a VM host that shares this controller's resource handles.
     pub fn host(&self) -> Host {
-        let console = self
-            .console
-            .clone()
-            .map(|sink| -> Arc<dyn ConsoleSink> { sink });
-        host! {
-            dts: "../test.d.ts",
-            modules: [TestModule],
-            services: {
-                CountersKey => self.counters.clone(),
-                NodeFactoryKey => NodeFactory,
-                LabelServiceKey => self.labels.clone(),
-                timer::FakeClockKey => self.clock.clone(),
-                yield_vm::host::TimeKey => self.time.clone(),
-                TimerKey? => self.timers.then(|| self.clock.clone()),
-                FetchKey? => self.fetch.clone(),
-                ConsoleKey? => console,
-                CryptoKey? => self.crypto.clone(),
-                SubtleCryptoKey? => self.subtle.clone(),
-                DiagnosticsKey => self.diagnostics.clone(),
-                GcRootsKey => self.case_result.clone(),
-                UserAgentKey? => self.user_agent.clone(),
-            },
+        macro_rules! host_with_services {
+            ($($key:path => $value:expr),* $(,)?) => {
+                host! {
+                    dts: "../test.d.ts",
+                    modules: [TestModule],
+                    services: {
+                        CountersKey => self.counters.clone(),
+                        NodeFactoryKey => NodeFactory,
+                        LabelServiceKey => self.labels.clone(),
+                        timer::FakeClockKey => self.clock.clone(),
+                        yield_vm::host::TimeKey => self.time.clone(),
+                        DiagnosticsKey => self.diagnostics.clone(),
+                        GcRootsKey => self.case_result.clone(),
+                        $($key => $value,)*
+                    },
+                }
+            };
+        }
+        macro_rules! host_with_user_agent {
+            ($($key:path => $value:expr),* $(,)?) => {
+                match &self.user_agent {
+                    Some(agent) => host_with_services!($($key => $value,)* UserAgentKey => agent.clone()),
+                    None => host_with_services!($($key => $value,)*),
+                }
+            };
+        }
+
+        match (
+            self.timers,
+            self.console.as_ref(),
+            self.fetch.as_ref(),
+            self.crypto.as_ref(),
+            self.subtle.as_ref(),
+        ) {
+            (true, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
+                TimerKey => self.clock.clone(),
+                ConsoleKey => console.clone(),
+                CryptoKey => crypto.clone(),
+                SubtleCryptoKey => subtle.clone(),
+            ),
+            (false, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
+                ConsoleKey => console.clone(),
+                CryptoKey => crypto.clone(),
+                SubtleCryptoKey => subtle.clone(),
+            ),
+            (true, None, None, Some(crypto), Some(subtle)) => host_with_user_agent!(
+                TimerKey => self.clock.clone(),
+                CryptoKey => crypto.clone(),
+                SubtleCryptoKey => subtle.clone(),
+            ),
+            (true, Some(console), None, None, Some(subtle)) => host_with_user_agent!(
+                TimerKey => self.clock.clone(),
+                ConsoleKey => console.clone(),
+                SubtleCryptoKey => subtle.clone(),
+            ),
+            (true, Some(console), None, Some(crypto), None) => host_with_user_agent!(
+                TimerKey => self.clock.clone(),
+                ConsoleKey => console.clone(),
+                CryptoKey => crypto.clone(),
+            ),
+            (true, Some(console), Some(fetch), Some(crypto), Some(subtle)) => {
+                host_with_user_agent!(
+                    TimerKey => self.clock.clone(),
+                    FetchKey => fetch.clone(),
+                    ConsoleKey => console.clone(),
+                    CryptoKey => crypto.clone(),
+                    SubtleCryptoKey => subtle.clone(),
+                )
+            }
+            _ => unreachable!("invalid TestHost service configuration"),
         }
         .expect("test host")
     }
