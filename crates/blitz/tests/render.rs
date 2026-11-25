@@ -22,10 +22,10 @@ fn mounts_react_dom_into_blitz() -> Result<(), String> {
 }
 
 #[test]
-fn keeps_wrapper_identity_and_mutates_the_native_tree() -> Result<(), String> {
+fn keeps_native_node_identity_and_mutates_the_tree() -> Result<(), String> {
     let doc = render_module(
         r#"
-        import { append, first } from 'yield:dom';
+        import { Node, Document, Element, openDocument } from 'yield:dom';
 
         function check(value, message) {
             if (!value) throw new Error(message);
@@ -37,15 +37,42 @@ fn keeps_wrapper_identity_and_mutates_the_native_tree() -> Result<(), String> {
 
         const root = document.getElementById('root');
         const child = document.createElement('P');
+        const frame = document.createElement('IFRAME');
+        check(frame instanceof HTMLIFrameElement && frame instanceof Element &&
+              frame instanceof Node && frame instanceof EventTarget, 'iframe class chain');
+        check(child.style !== frame.style, 'style is per-instance');
+        child.style.color = 'red';
+        child.expando = frame;
+        check(document instanceof Document && document.ownerDocument === null, 'document brand');
+        check(openDocument({}) === document, 'document opens once');
         check(document === window.document && document.defaultView === window, 'default view');
         check(document.documentElement.parentNode === document, 'document identity');
         check(document.activeElement === document.body, 'focus fallback');
         check(child.namespaceURI === 'http://www.w3.org/1999/xhtml', 'namespace');
         check(child.tagName === 'P' && child.nodeName === 'P' && child.nodeType === 1, 'element kind');
-        check(root.appendChild(child) === child && root.firstChild === child, 'wrapper identity');
+        check(root.appendChild(child) === child && root.firstChild === child, 'node identity');
         check(child.parentNode === root && child.ownerDocument === document, 'tree links');
-        child.setAttribute('id', 'child');
-        check(document.getElementById('child') === child, 'attribute updated native ID lookup');
+        child.setAttribute({ toString() { return 'ID'; } }, { toString() { return 'child'; } });
+        const found = document.getElementById({ toString() { return 'child'; } });
+        check(found === child && found.style.color === 'red' && found.expando === frame,
+              'coerced ID lookup preserves fields');
+        const conversionError = new Error('attribute name conversion');
+        let failure;
+        let valueConverted = false;
+        const throwing = { toString() { throw conversionError; } };
+        try {
+            child.setAttribute(throwing, { toString() { valueConverted = true; return 'other'; } });
+        } catch (error) { failure = error; }
+        check(failure === conversionError && !valueConverted, 'name conversion precedes value');
+        check(document.getElementById('child') === child, 'failed conversion leaves id intact');
+        document.textContent = throwing;
+        check(document.textContent === null && document.getElementById('root') === root,
+              'document textContent skips conversion and leaves tree intact');
+        check(document.createTextNode().textContent === 'undefined', 'missing value is stringified');
+        check(document.createElement('straße').tagName === 'STRASSE', 'Unicode tag name');
+        check(!Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute').enumerable &&
+              !Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').enumerable,
+              'shim leaves prototype members non-enumerable');
 
         child.textContent = 'old';
         const old = child.firstChild;
@@ -60,7 +87,11 @@ fn keeps_wrapper_identity_and_mutates_the_native_tree() -> Result<(), String> {
         check(child.textContent === 'new', 'reads from native tree');
         check(rejects(() => old.appendChild(child)), 'text parent must be rejected');
         check(rejects(() => child.appendChild(root)), 'cycle must be rejected');
-        check(rejects(() => first(99999)) && rejects(() => append(NaN, 0)), 'invalid handles');
+        check(rejects(() => child.appendChild(0)) && rejects(() => child.appendChild({})),
+              'appendChild requires native nodes');
+        check(rejects(() => child.appendChild(Object.create(Node.prototype))) &&
+              rejects(() => child.appendChild(new Node())) &&
+              rejects(() => new Document().createElement('p')), 'unbound nodes cannot access tree');
 
         let events = 0;
         const listener = () => { events++; };

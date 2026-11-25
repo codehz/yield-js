@@ -1,42 +1,22 @@
-use blitz_dom::{LocalName, Node, NodeData, NodeId, QualName, local_name, ns};
-use yield_binding_macros::{host_module, module_exports};
-use yield_vm::{JsError, JsResult, JsValue, ModuleCx};
+use blitz_dom::{LocalName, Node as BlitzNode, NodeData, NodeId, QualName, local_name, ns};
+use yield_binding_macros::{host_class, host_module, methods, module_exports};
+use yield_vm::binding::CallCx;
+use yield_vm::{Instance, JsError, JsResult, JsValue, ModuleCx, This};
 
 use super::{Dom, DomKey};
 
-type Cx<'a> = ModuleCx<'a, DomModule>;
 type DomResult<T> = Result<T, &'static str>;
 
 impl Dom {
-    fn node(&self, handle: f64) -> DomResult<&Node> {
-        let index = handle as u32;
-        if f64::from(index) != handle {
-            return Err("invalid DOM node handle");
-        }
+    fn node(&self, index: u32) -> DomResult<&BlitzNode> {
         self.nodes
             .get(index as usize)
             .and_then(|id| self.doc.get_node(*id))
             .ok_or("invalid DOM node handle")
     }
-
-    fn handle(&mut self, id: NodeId) -> DomResult<JsValue> {
-        let index = if let Some(index) = self.handles.get(&id) {
-            *index
-        } else {
-            let index = u32::try_from(self.nodes.len()).map_err(|_| "too many DOM nodes")?;
-            self.nodes.push(id);
-            self.handles.insert(id, index);
-            index
-        };
-        Ok(JsValue::number(f64::from(index)))
-    }
-
-    fn optional_handle(&mut self, id: Option<NodeId>) -> DomResult<JsValue> {
-        id.map_or(Ok(JsValue::null()), |id| self.handle(id))
-    }
 }
 
-fn with_dom<T>(cx: &mut Cx<'_>, f: impl FnOnce(&mut Dom) -> DomResult<T>) -> JsResult<T> {
+fn with_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&mut Dom) -> DomResult<T>) -> JsResult<T> {
     let result = match cx.service::<DomKey>() {
         Some(dom) => f(&mut dom.borrow_mut()),
         None => return Err(JsError::Fault(cx.fault("no active Blitz document"))),
@@ -44,94 +24,123 @@ fn with_dom<T>(cx: &mut Cx<'_>, f: impl FnOnce(&mut Dom) -> DomResult<T>) -> JsR
     result.map_err(|error| cx.type_error(error))
 }
 
-#[host_module(name = "yield:dom")]
-pub(super) struct DomModule;
+#[host_class(tag = "Node", event_target, methods)]
+struct Node {
+    #[js_slot]
+    index: JsValue,
+    #[js_slot]
+    owner: JsValue,
+}
 
-#[module_exports]
-impl DomModule {
-    #[function(name = "byId")]
-    fn by_id(cx: &mut ModuleCx<'_, Self>, id: JsValue) -> JsResult<JsValue> {
-        let id = cx.string(&id)?.to_string();
-        with_dom(cx, |dom| {
-            dom.optional_handle(dom.doc.get_element_by_id(&id))
+#[host_class(tag = "Document", parent = Node, methods)]
+struct Document {
+    #[js_list]
+    nodes: Vec<JsValue>,
+    #[js_slot]
+    window: JsValue,
+}
+
+#[host_class(tag = "Element", parent = Node, methods)]
+struct Element;
+
+fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
+    node.index(cx)?
+        .as_number()
+        .map(|index| index as u32)
+        .ok_or_else(|| cx.type_error("DOM node is not bound to a document"))
+}
+
+fn with_node<T>(
+    cx: &mut CallCx<'_>,
+    node: Instance<Node>,
+    f: impl FnOnce(&Dom, &BlitzNode) -> DomResult<T>,
+) -> JsResult<T> {
+    let index = node_index(cx, node)?;
+    read_dom(cx, |dom| f(dom, dom.node(index)?))
+}
+
+fn related_node(
+    cx: &mut CallCx<'_>,
+    node: Instance<Node>,
+    f: impl FnOnce(&Dom, &BlitzNode) -> Option<NodeId>,
+) -> JsResult<JsValue> {
+    let id = with_node(cx, node, |dom, node| Ok(f(dom, node)))?;
+    resolve_node(cx, node.owner(cx)?, id)
+}
+
+#[methods(Node)]
+impl Node {
+    #[get(name = "nodeType")]
+    fn node_type(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        with_node(cx, this.instance(), |_, node| {
+            Ok(JsValue::number(match node.data {
+                NodeData::Element(_) => 1.0,
+                NodeData::Text(_) => 3.0,
+                NodeData::Comment { .. } => 8.0,
+                NodeData::Document(_) => 9.0,
+                _ => return Err("unsupported DOM node kind"),
+            }))
         })
     }
 
-    #[function(name = "documentElement")]
-    fn document_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<JsValue> {
-        with_dom(cx, |dom| {
-            dom.optional_handle(dom.doc.try_root_element().map(|node| node.id))
+    #[get(name = "nodeName")]
+    fn node_name(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        node_name(cx, this.instance())
+    }
+
+    #[get(name = "firstChild")]
+    fn first_child(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        related_node(cx, this.instance(), |_, node| {
+            node.children.first().copied()
         })
     }
 
-    #[function(name = "body")]
-    fn body(cx: &mut ModuleCx<'_, Self>) -> JsResult<JsValue> {
-        with_dom(cx, |dom| {
-            let id = dom.doc.try_root_element().and_then(|root| {
-                root.children
-                    .iter()
-                    .filter_map(|id| dom.doc.get_node(*id))
-                    .find(|node| {
-                        node.element_data()
-                            .is_some_and(|el| el.name.local == local_name!("body"))
-                    })
-                    .map(|node| node.id)
-            });
-            dom.optional_handle(id)
+    #[get(name = "nextSibling")]
+    fn next_sibling(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        related_node(cx, this.instance(), |dom, node| {
+            let parent = dom.doc.get_node(node.parent?)?;
+            parent
+                .children
+                .get(parent.index_of_child(node.id)? + 1)
+                .copied()
         })
     }
 
-    #[function(name = "element")]
-    fn element(cx: &mut ModuleCx<'_, Self>, tag: JsValue) -> JsResult<JsValue> {
-        let tag = cx.string(&tag)?.to_string().to_ascii_lowercase();
-        with_dom(cx, |dom| {
-            let name = QualName::new(None, ns!(html), LocalName::from(tag));
-            let id = dom.doc.mutate().create_element(name, Vec::new());
-            dom.handle(id)
+    #[get(name = "parentNode")]
+    fn parent_node(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        related_node(cx, this.instance(), |_, node| node.parent)
+    }
+
+    #[get(name = "ownerDocument")]
+    fn owner_document(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        let owner = this.owner(cx)?;
+        Ok(if cx.same_value(&owner, &this.instance().value(cx)) {
+            JsValue::null()
+        } else {
+            owner
         })
     }
 
-    #[function(name = "text")]
-    fn text(cx: &mut ModuleCx<'_, Self>, value: JsValue) -> JsResult<JsValue> {
+    #[get(name = "textContent")]
+    fn text_content(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+        with_node(cx, this.instance(), |_, node| {
+            Ok(match &node.data {
+                NodeData::Document(_) => JsValue::null(),
+                NodeData::Comment { contents } => JsValue::string(contents.as_str()),
+                _ => JsValue::string(node.text_content()),
+            })
+        })
+    }
+
+    #[set(name = "textContent")]
+    fn set_text_content(cx: &mut CallCx<'_>, this: This<Node>, value: JsValue) -> JsResult<()> {
+        let index = node_index(cx, this.instance())?;
+        if index == 0 {
+            return Ok(());
+        }
         let value = cx.string(&value)?.to_string();
         with_dom(cx, |dom| {
-            let id = dom.doc.mutate().create_text_node(&value);
-            dom.handle(id)
-        })
-    }
-
-    #[function(name = "append")]
-    fn append(cx: &mut ModuleCx<'_, Self>, parent: JsValue, child: JsValue) -> JsResult<()> {
-        let parent = cx.number(&parent)?;
-        let child = cx.number(&child)?;
-        with_dom(cx, |dom| {
-            let parent = dom.node(parent)?;
-            let child = dom.node(child)?;
-            if !matches!(parent.data, NodeData::Element(_)) {
-                return Err("append requires an element parent");
-            }
-            if !matches!(child.data, NodeData::Element(_) | NodeData::Text(_)) {
-                return Err("append requires an element or text child");
-            }
-            let mut ancestor = Some(parent);
-            while let Some(node) = ancestor {
-                if node.id == child.id {
-                    return Err("cannot insert a node into itself or its descendants");
-                }
-                ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
-            }
-            let (parent, child) = (parent.id, child.id);
-            dom.doc.mutate().append_children(parent, &[child]);
-            Ok(())
-        })
-    }
-
-    #[function(name = "setText")]
-    fn set_text(cx: &mut ModuleCx<'_, Self>, node: JsValue, value: JsValue) -> JsResult<()> {
-        let handle = cx.number(&node)?;
-        let value = cx.string(&value)?.to_string();
-        with_dom(cx, |dom| {
-            let node = dom.node(handle)?;
+            let node = dom.node(index)?;
             let id = node.id;
             let is_text = matches!(node.data, NodeData::Text(_) | NodeData::Comment { .. });
             if !is_text && !matches!(node.data, NodeData::Element(_)) {
@@ -150,97 +159,293 @@ impl DomModule {
         })
     }
 
-    #[function(name = "setAttr")]
-    fn set_attr(
-        cx: &mut ModuleCx<'_, Self>,
-        node: JsValue,
+    #[method(name = "appendChild")]
+    fn append_child(cx: &mut CallCx<'_>, this: This<Node>, child: JsValue) -> JsResult<JsValue> {
+        let child_node = cx.instance::<Node>(&child)?;
+        if !cx.same_value(&this.owner(cx)?, &child_node.owner(cx)?) {
+            return Err(cx.type_error("appendChild requires nodes from the same document"));
+        }
+        let parent_index = node_index(cx, this.instance())?;
+        let child_index = node_index(cx, child_node)?;
+        with_dom(cx, |dom| {
+            let parent = dom.node(parent_index)?;
+            let child = dom.node(child_index)?;
+            if !matches!(parent.data, NodeData::Element(_)) {
+                return Err("append requires an element parent");
+            }
+            if !matches!(child.data, NodeData::Element(_) | NodeData::Text(_)) {
+                return Err("append requires an element or text child");
+            }
+            let mut ancestor = Some(parent);
+            while let Some(node) = ancestor {
+                if node.id == child.id {
+                    return Err("cannot insert a node into itself or its descendants");
+                }
+                ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
+            }
+            let (parent, child) = (parent.id, child.id);
+            dom.doc.mutate().append_children(parent, &[child]);
+            Ok(())
+        })?;
+        Ok(child)
+    }
+}
+
+fn node_name(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<JsValue> {
+    with_node(cx, node, |_, node| {
+        Ok(match &node.data {
+            NodeData::Element(element) => JsValue::string(element.name.local.to_uppercase()),
+            NodeData::Text(_) => JsValue::string("#text"),
+            NodeData::Comment { .. } => JsValue::string("#comment"),
+            NodeData::Document(_) => JsValue::string("#document"),
+            _ => return Err("unsupported DOM node kind"),
+        })
+    })
+}
+
+#[methods(Element)]
+impl Element {
+    #[get(name = "tagName")]
+    fn tag_name(cx: &mut CallCx<'_>, this: This<Element>) -> JsResult<JsValue> {
+        let node = cx.instance::<Node>(&this.instance().value(cx))?;
+        node_name(cx, node)
+    }
+
+    #[get(name = "namespaceURI")]
+    fn namespace_uri(_cx: &mut CallCx<'_>, _this: This<Element>) -> JsResult<JsValue> {
+        Ok(JsValue::string("http://www.w3.org/1999/xhtml"))
+    }
+
+    #[method(name = "setAttribute")]
+    fn set_attribute(
+        cx: &mut CallCx<'_>,
+        this: This<Element>,
         name: JsValue,
         value: JsValue,
     ) -> JsResult<()> {
-        let handle = cx.number(&node)?;
+        let node = cx.instance::<Node>(&this.instance().value(cx))?;
+        let index = node_index(cx, node)?;
         let name = cx.string(&name)?.to_string().to_ascii_lowercase();
         let value = cx.string(&value)?.to_string();
         with_dom(cx, |dom| {
-            let node = dom.node(handle)?;
-            if !matches!(node.data, NodeData::Element(_)) {
-                return Err("setAttribute requires an element");
-            }
+            let node = dom.node(index)?;
             let id = node.id;
             let name = QualName::new(None, ns!(), LocalName::from(name));
             dom.doc.mutate().set_attribute(id, name, &value);
             Ok(())
         })
     }
+}
 
-    #[function(name = "first")]
-    fn first(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| {
-            dom.optional_handle(dom.node(handle)?.children.first().copied())
-        })
+fn bound_document(cx: &mut CallCx<'_>, this: &This<Document>) -> JsResult<JsValue> {
+    let value = this.instance().value(cx);
+    let node = cx.instance::<Node>(&value)?;
+    node_index(cx, node)?;
+    Ok(value)
+}
+
+#[methods(Document)]
+impl Document {
+    #[get(name = "defaultView")]
+    fn default_view(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+        this.window(cx)
     }
 
-    #[function(name = "next")]
-    fn next(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| {
-            let node = dom.node(handle)?;
-            let id = node
-                .parent
-                .and_then(|id| dom.doc.get_node(id))
-                .and_then(|parent| {
-                    parent
-                        .index_of_child(node.id)
-                        .and_then(|index| parent.children.get(index + 1).copied())
-                });
-            dom.optional_handle(id)
-        })
+    #[get(name = "documentElement")]
+    fn document_element(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let id = read_dom(cx, |dom| Ok(dom.doc.try_root_element().map(|node| node.id)))?;
+        resolve_node(cx, owner, id)
     }
 
-    #[function(name = "parent")]
-    fn parent(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| dom.optional_handle(dom.node(handle)?.parent))
-    }
-
-    #[function(name = "kind")]
-    fn kind(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| {
-            Ok(JsValue::number(f64::from(match dom.node(handle)?.data {
-                NodeData::Element(_) => 1,
-                NodeData::Text(_) => 3,
-                NodeData::Comment { .. } => 8,
-                NodeData::Document(_) => 9,
-                _ => return Err("unsupported DOM node kind"),
-            })))
-        })
-    }
-
-    #[function(name = "name")]
-    fn name(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| {
-            Ok(JsValue::string(match &dom.node(handle)?.data {
-                NodeData::Element(element) => element.name.local.to_string(),
-                NodeData::Text(_) => "#text".to_owned(),
-                NodeData::Comment { .. } => "#comment".to_owned(),
-                NodeData::Document(_) => "#document".to_owned(),
-                _ => return Err("unsupported DOM node kind"),
+    #[get(name = "body")]
+    fn body(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let id = read_dom(cx, |dom| {
+            Ok(dom.doc.try_root_element().and_then(|root| {
+                root.children
+                    .iter()
+                    .filter_map(|id| dom.doc.get_node(*id))
+                    .find(|node| {
+                        node.element_data()
+                            .is_some_and(|el| el.name.local == local_name!("body"))
+                    })
+                    .map(|node| node.id)
             }))
-        })
+        })?;
+        resolve_node(cx, owner, id)
     }
 
-    #[function(name = "readText")]
-    fn read_text(cx: &mut ModuleCx<'_, Self>, node: JsValue) -> JsResult<JsValue> {
-        let handle = cx.number(&node)?;
-        with_dom(cx, |dom| {
-            let node = dom.node(handle)?;
-            Ok(match &node.data {
-                NodeData::Document(_) => JsValue::null(),
-                NodeData::Comment { contents } => JsValue::string(contents.as_str()),
-                _ => JsValue::string(node.text_content()),
-            })
-        })
+    #[get(name = "activeElement")]
+    fn active_element(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+        Self::body(cx, this)
+    }
+
+    #[method(name = "getElementById")]
+    fn get_element_by_id(
+        cx: &mut CallCx<'_>,
+        this: This<Document>,
+        id: JsValue,
+    ) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let id = cx.string(&id)?.to_string();
+        let id = read_dom(cx, |dom| Ok(dom.doc.get_element_by_id(&id)))?;
+        resolve_node(cx, owner, id)
+    }
+
+    #[method(name = "createElement")]
+    fn create_element(
+        cx: &mut CallCx<'_>,
+        this: This<Document>,
+        tag: JsValue,
+    ) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let tag = cx.string(&tag)?.to_string().to_ascii_lowercase();
+        let name = QualName::new(None, ns!(html), LocalName::from(tag));
+        let id = with_dom(cx, |dom| {
+            Ok(dom.doc.mutate().create_element(name, Vec::new()))
+        })?;
+        resolve_node(cx, owner, Some(id))
+    }
+
+    #[method(name = "createTextNode")]
+    fn create_text_node(
+        cx: &mut CallCx<'_>,
+        this: This<Document>,
+        value: JsValue,
+    ) -> JsResult<JsValue> {
+        let owner = bound_document(cx, &this)?;
+        let value = cx.string(&value)?.to_string();
+        let id = with_dom(cx, |dom| Ok(dom.doc.mutate().create_text_node(&value)))?;
+        resolve_node(cx, owner, Some(id))
+    }
+}
+
+#[host_class(tag = "HTMLIFrameElement", parent = Element)]
+struct HTMLIFrameElement;
+
+fn alloc_element<T: yield_vm::HostClass>(cx: &mut CallCx<'_>, class: T) -> JsResult<Instance<T>> {
+    let element = cx.alloc(class)?;
+    element.init_object_field(cx, "style")?;
+    Ok(element)
+}
+
+fn init_node(cx: &mut CallCx<'_>, value: &JsValue, index: u32, owner: JsValue) -> JsResult<()> {
+    let node = cx.instance::<Node>(value)?;
+    node.set_index(cx, JsValue::number(f64::from(index)))?;
+    node.set_owner(cx, owner)
+}
+
+enum NodeClass {
+    Element,
+    IFrame,
+    CharacterData,
+}
+
+fn resolve_node(cx: &mut CallCx<'_>, owner: JsValue, id: Option<NodeId>) -> JsResult<JsValue> {
+    let Some(id) = id else {
+        return Ok(JsValue::null());
+    };
+    let document = cx.instance::<Document>(&owner)?;
+    let lookup = read_dom(cx, |dom| {
+        if let Some(&index) = dom.handles.get(&id) {
+            return Ok((index, None));
+        }
+        let index = u32::try_from(dom.nodes.len()).map_err(|_| "too many DOM nodes")?;
+        let node = dom.doc.get_node(id).ok_or("invalid DOM node handle")?;
+        let class = match &node.data {
+            NodeData::Element(element) if element.name.local == local_name!("iframe") => {
+                NodeClass::IFrame
+            }
+            NodeData::Element(_) => NodeClass::Element,
+            NodeData::Text(_) | NodeData::Comment { .. } => NodeClass::CharacterData,
+            _ => return Err("unsupported DOM node kind"),
+        };
+        Ok((index, Some(class)))
+    })?;
+    let (index, Some(class)) = lookup else {
+        return document.nodes_get(cx, lookup.0 as usize);
+    };
+    let value = match class {
+        NodeClass::Element => alloc_element(cx, Element)?.value(cx),
+        NodeClass::IFrame => alloc_element(cx, HTMLIFrameElement)?.value(cx),
+        NodeClass::CharacterData => cx.alloc(Node)?.value(cx),
+    };
+    init_node(cx, &value, index, owner)?;
+    document.nodes_push(cx, value.clone())?;
+    publish_node(cx, id, index);
+    Ok(value)
+}
+
+fn read_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&Dom) -> DomResult<T>) -> JsResult<T> {
+    let service = cx
+        .service::<DomKey>()
+        .ok_or_else(|| JsError::fault("no active Blitz document"))?;
+    let result = f(&service.borrow());
+    result.map_err(|error| cx.type_error(error))
+}
+
+// No VM operations between publishing the list entry and its native index.
+fn publish_node(cx: &CallCx<'_>, id: NodeId, index: u32) {
+    let mut dom = cx
+        .service::<DomKey>()
+        .expect("active Blitz document")
+        .borrow_mut();
+    debug_assert_eq!(dom.nodes.len(), index as usize);
+    dom.nodes.push(id);
+    dom.handles.insert(id, index);
+}
+
+#[host_module(name = "yield:dom", classes = [Node, Document, Element, HTMLIFrameElement])]
+pub(super) struct DomModule {
+    #[js_slot]
+    document: JsValue,
+}
+
+#[module_exports]
+impl DomModule {
+    #[constructor(name = "Node", class = Node)]
+    fn construct_node(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Node>> {
+        cx.alloc(Node)
+    }
+
+    #[constructor(name = "Document", class = Document)]
+    fn construct_document(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Document>> {
+        cx.alloc(Document)
+    }
+
+    #[constructor(name = "Element", class = Element)]
+    fn construct_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Element>> {
+        alloc_element(cx, Element)
+    }
+
+    #[constructor(name = "HTMLIFrameElement", class = HTMLIFrameElement)]
+    fn construct_iframe(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLIFrameElement>> {
+        alloc_element(cx, HTMLIFrameElement)
+    }
+
+    #[function(name = "openDocument")]
+    fn open_document(cx: &mut ModuleCx<'_, Self>, window: JsValue) -> JsResult<JsValue> {
+        let cached = cx.state_slot(Self::SLOT_DOCUMENT)?;
+        if !cached.is_undefined() {
+            return Ok(cached);
+        }
+        let service = cx
+            .service::<DomKey>()
+            .ok_or_else(|| JsError::fault("no active Blitz document"))?;
+        let id = service
+            .borrow()
+            .doc
+            .try_root_element()
+            .and_then(|root| root.parent)
+            .ok_or_else(|| JsError::fault("Blitz document has no root element parent"))?;
+        let document = cx.alloc(Document)?;
+        let value = document.value(cx);
+        init_node(cx, &value, 0, value.clone())?;
+        document.set_window(cx, window)?;
+        document.nodes_push(cx, value.clone())?;
+        cx.set_state_slot(Self::SLOT_DOCUMENT, value.clone())?;
+        publish_node(cx, id, 0);
+        Ok(value)
     }
 }
