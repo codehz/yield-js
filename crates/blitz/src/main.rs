@@ -3,8 +3,6 @@ use std::process::ExitCode;
 use anyrender_vello::VelloWindowRenderer;
 use blitz_shell::{BlitzApplication, BlitzShellProxy, WindowConfig, create_default_event_loop};
 
-const APP: &str = include_str!("../../../fixtures/npm-react-app/blitz.mjs");
-
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -16,7 +14,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let doc = yield_blitz::render_module(APP)?;
+    let doc = yield_blitz::render_fixture()?;
     let event_loop = create_default_event_loop();
     let (proxy, receiver) = BlitzShellProxy::new(event_loop.create_proxy());
     let mut application = BlitzApplication::new(proxy, receiver);

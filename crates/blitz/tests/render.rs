@@ -1,9 +1,9 @@
 use blitz_dom::NodeData;
-use yield_blitz::render_module;
+use yield_blitz::{render_fixture, render_module};
 
 #[test]
 fn mounts_react_dom_into_blitz() -> Result<(), String> {
-    let doc = render_module(include_str!("../../../fixtures/npm-react-app/blitz.mjs"))?;
+    let doc = render_fixture()?;
     let root = doc
         .get_node(doc.get_element_by_id("root").unwrap())
         .unwrap();

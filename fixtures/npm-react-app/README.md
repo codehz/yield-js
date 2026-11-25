@@ -1,6 +1,6 @@
 # React + TSX 构建输入夹具
 
-对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。本目录是测试素材（fixture），不是可运行示例：当前 compiler 尚不支持 TSX 与 npm 解析（见 docs/gaps.md），待 compiler 侧实现后由此验收。
+对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。`src/blitz.jsx` 用于真实 React DOM 首屏验收；`src/index.tsx`、类型剥离、CSS 与动态 sheet 不在本次首屏验收范围内。
 
 ## 覆盖点
 
@@ -14,7 +14,7 @@
 | CJS 静态可分析子集 + 预设条件选择 | `node_modules/scheduler/index.js`（`process.env.NODE_ENV` 分支 + 字面量 `require`，预设条件取 `cjs/scheduler.production.js`） |
 | 无 `exports` 包的字段回退规则 | `scheduler`（无 `exports`，按预设定义回退到 `main`/`index.js`，不猜测其他字段） |
 | CSS 副作用资源导入，按资源 ID 去重，宿主自行消费 | `src/styles.css` |
-| React DOM 自带 reconciler 的首屏入口 | `src/blitz.jsx`（签入产物 `blitz.mjs`） |
+| React DOM 自带 reconciler 的首屏入口 | `src/blitz.jsx` |
 
 ## 约定
 
@@ -24,20 +24,13 @@
 - CJS 依赖（`scheduler` 生产包为 CJS）用于验收 CJS 静态可分析子集转换；动态 `require` 应在构建期报错，本夹具不含此类用法的成功场景。
 - 资源（CSS）不进入 VM 堆，由宿主从 Build 读取后自行消费。
 
-## 使用方式（compiler 实现后）
-
-```sh
-npm install --prefix fixtures/npm-react-app   # 调用方负责安装依赖
-cargo run -p yield-harness …                  # 以 src/index.tsx 为 entry 构建并执行
-```
-
-预期：构建产出可链接 ESM 字节码；`react/jsx-runtime`、动态到达的 `sheet` 模块与 CSS 资源进入同一构建图。React DOM 的运行验收由下面的 Blitz 入口承担。
-
 ## Blitz 首屏入口
 
-`src/blitz.jsx` 是使用 `react-dom/client` 的首次挂载用例。已生成的 `blitz.mjs` 是 Rust crate 的签入输入；消费者不需要 Node.js 或 `node_modules`。维护 fixture 时在本目录运行：
+`src/blitz.jsx` 使用 `react-dom/client` 的 `createRoot` 和 `react-dom` 的 `flushSync`。调用方从仓库根目录准备锁定依赖并验收：
 
 ```sh
-npm ci
-npx --no-install esbuild src/blitz.jsx --bundle --format=esm --platform=browser --define:process.env.NODE_ENV='"production"' --jsx=automatic --legal-comments=inline --outfile=blitz.mjs
+npm ci --ignore-scripts --prefix fixtures/npm-react-app
+cargo test -p yield-blitz --test render mounts_react_dom_into_blitz
 ```
+
+验收检查 `#root > main > h1` 的文本为 `Hello from React DOM`；缺少 `node_modules` 时测试失败并提示准备命令。

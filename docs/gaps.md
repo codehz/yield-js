@@ -53,6 +53,7 @@
 | `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
 
 `yield-blitz` 首版提供 React DOM 首屏挂载所需的 document、element、text 树读取与修改、原生宿主类身份、样式 expando 和 VM `EventTarget`；没有完整浏览器 DOM、原生输入事件、样式计算 API、点击更新、热更新或 VM/DOM 快照恢复。无窗口测试通过不等于 Vello 目视验收通过。
+首屏路径只编译 `src/blitz.jsx` 及其 npm 依赖，不验收 `src/index.tsx`、TypeScript 类型剥离、CSS 导入或动态样式模块。
 
 未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
 

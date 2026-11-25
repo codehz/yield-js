@@ -2,14 +2,19 @@
 
 mod dom;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use blitz_dom::{DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
 use yield_binding_macros::host_bindings;
-use yield_compiler::{Compiler, MemoryResolver, Project};
+use yield_compiler::{
+    CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
+    ResolvedModule,
+};
 use yield_vm::{Bindings, Host, JsString, JsValue, ServiceKey, Vm, VmError};
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
@@ -76,12 +81,73 @@ impl Host for DomHost {
 /// Execute one self-contained ESM and return the document it mutated.
 /// The VM and the script's event listeners are discarded before returning.
 pub fn render_module(source: &str) -> Result<HtmlDocument, String> {
-    let compiler = Compiler::from_dts(include_str!("dom.d.ts")).map_err(|e| e.to_string())?;
     let resolver =
         MemoryResolver::new([("main.mjs", source), ("dom.mjs", include_str!("dom.mjs"))])?;
-    let build = compiler
-        .compile(Project::new("main.mjs", resolver).with_preload("dom.mjs"))
-        .map_err(|e| e.to_string())?;
+    render(Project::new("main.mjs", resolver).with_preload("dom.mjs"))
+}
+
+const DOM_PRELOAD: &str = "yield:blitz-dom-preload";
+
+struct FixtureResolver(NodeResolver);
+
+impl ModuleResolver for FixtureResolver {
+    fn resolve(
+        &self,
+        referrer: Option<&ModuleId>,
+        specifier: &str,
+    ) -> Result<ResolvedModule, String> {
+        if referrer.is_none() && specifier == DOM_PRELOAD {
+            return Ok(ResolvedModule {
+                id: DOM_PRELOAD.into(),
+                is_framework: false,
+            });
+        }
+        self.0.resolve(referrer, specifier)
+    }
+
+    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
+        if id == DOM_PRELOAD {
+            return Ok(Cow::Borrowed(include_str!("dom.mjs")));
+        }
+        self.0.load(id)
+    }
+
+    fn load_for_compile(
+        &self,
+        id: &ModuleId,
+        locate: &dyn Fn(String) -> CompileError,
+    ) -> Result<Cow<'_, str>, CompileError> {
+        if id == DOM_PRELOAD {
+            return self.load(id).map_err(locate);
+        }
+        self.0.load_for_compile(id, locate)
+    }
+
+    fn generated_source_origin(&self, id: &str) -> Option<ModuleId> {
+        self.0.generated_source_origin(id)
+    }
+}
+
+/// Compile the first-mount JSX fixture against its installed production npm sources.
+pub fn render_fixture() -> Result<HtmlDocument, String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/npm-react-app");
+    let modules = root.join("node_modules");
+    if !modules
+        .try_exists()
+        .map_err(|error| format!("{modules:?}: {error}"))?
+    {
+        return Err(
+            "React fixture dependencies are missing; run `npm ci --prefix fixtures/npm-react-app`"
+                .into(),
+        );
+    }
+    let resolver = FixtureResolver(NodeResolver::web_production(root)?);
+    render(Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD))
+}
+
+fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
+    let compiler = Compiler::from_dts(include_str!("dom.d.ts")).map_err(|e| e.to_string())?;
+    let build = compiler.compile(project).map_err(|e| e.to_string())?;
     let dom = Rc::new(RefCell::new(Dom::new()));
     let bindings = host_bindings! {
         dts: "dom.d.ts",
