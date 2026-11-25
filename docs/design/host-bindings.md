@@ -205,9 +205,9 @@ pub trait Decode: Sized {
 - **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
-服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host!` 的 `services:` 段是一张 `Key => value` 表；`Key? => option` 只在 `option` 为 `Some` 时注册。重复 ID 使整个调用返回错误且不覆盖。`Services::get::<Key>()`、`CallCx::service::<Key>()` 和 `Vm::service::<Key>()` 查询同一个注册表；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host!` 的 `services:` 段只接受 `Key => value`，不接受可选条目；不注册某项服务就省略对应条目。重复 ID 使整个调用返回错误且不覆盖。`Services::get::<Key>()`、`CallCx::service::<Key>()` 和 `Vm::service::<Key>()` 查询同一个注册表；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
-模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host!` 在组装服务表后、返回 `Host` 前检查选中模块：必需服务缺失，或任一已注册服务以同一 ID 使用了不同的 Rust 键类型，都会返回包含模块名和服务 ID 的错误。可选依赖允许服务缺失；注册端的 `Key? => None` 不会满足必需依赖。声明用于链接检查，不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
+模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host!` 在组装服务表后、返回 `Host` 前检查选中模块：服务表缺少必需键会导致链接失败；以同一 ID 注册不同的 Rust 键类型也会失败。两种错误均包含模块名和服务 ID。可选依赖允许服务缺失。声明用于链接检查，不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
 
 `CallCx::service` 返回的引用借自本次原生调用的服务表，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
 
@@ -218,8 +218,8 @@ let host = host! {
     services: {
         CountersKey => counters,
         LabelServiceKey => labels,
-        TimerKey? => timer,          // Option<Arc<dyn TimerService>>
-        ConsoleKey? => console,
+        TimerKey => timer, // Arc<dyn TimerService>
+        // 没有 console 服务，省略 ConsoleKey。
     },
 }?;
 let mut vm = Vm::new(build, host, VmOptions::default())?;

@@ -231,7 +231,7 @@ fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
     let missing = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
-        services: { ClockAlias? => None::<u64> },
+        services: {},
     };
     assert_eq!(
         missing.err().unwrap(),
@@ -251,7 +251,7 @@ fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
     let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
-        services: { ClockAlias? => Some(17), CounterKey? => None::<u64> },
+        services: { ClockAlias => 17 },
     }?;
     let vm = start_vm(host, Default::default());
     assert_eq!(vm.service::<ClockV2>(), Some(&17));
@@ -299,16 +299,6 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
-
-    let absent = host! {
-        modules: [],
-        services: {
-            ClockV2 => 17,
-            CounterKey? => None::<u64>,
-        },
-    }?;
-    let vm = start_vm(absent, Default::default());
-    assert_eq!(vm.service::<CounterKey>(), None);
 
     let duplicate = host! {
         services: {

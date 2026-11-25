@@ -250,23 +250,17 @@ impl Parse for ServiceDependency {
     }
 }
 
-/// One `services:` entry. `Key? => option` registers the value only when the
-/// option is `Some`, letting callers describe optional platform services
-/// inline instead of assembling `Services` before the link.
 struct ServiceBinding {
     key: TypePath,
-    optional: bool,
     value: Expr,
 }
 
 impl Parse for ServiceBinding {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let key = input.parse()?;
-        let optional = input.parse::<Option<Token![?]>>()?.is_some();
         input.parse::<Token![=>]>()?;
         Ok(Self {
             key,
-            optional,
             value: input.parse()?,
         })
     }
@@ -338,16 +332,8 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
     let inserts = services.iter().map(|binding| {
         let key = &binding.key;
         let value = &binding.value;
-        if binding.optional {
-            quote! {
-                if let ::core::option::Option::Some(__yield_service) = #value {
-                    __yield_services.insert::<#key>(__yield_service)?;
-                }
-            }
-        } else {
-            quote! {
-                __yield_services.insert::<#key>(#value)?;
-            }
+        quote! {
+            __yield_services.insert::<#key>(#value)?;
         }
     });
     let mutable = (!modules.is_empty()).then(|| quote!(mut));
@@ -651,8 +637,7 @@ mod tests {
             dts: "tests/dts/empty.d.ts",
             services: {
                 Clock => tick(),
-                Timer? => timer,
-                Console? => ::core::option::Option::None,
+                Timer => timer,
             },
             modules: [api::V1,],
         })
@@ -668,23 +653,17 @@ mod tests {
                 .map(|segment| &segment.ident)
                 .eq(["api", "V1"])
         );
-        let [clock, timer, console] = registry.services.as_slice() else {
-            panic!("expected three service bindings");
+        let [clock, timer] = registry.services.as_slice() else {
+            panic!("expected two service bindings");
         };
-        assert!(clock.key.path.is_ident("Clock") && !clock.optional);
-        assert!(timer.key.path.is_ident("Timer") && timer.optional);
-        assert!(console.key.path.is_ident("Console") && console.optional);
+        assert!(clock.key.path.is_ident("Clock"));
+        assert!(timer.key.path.is_ident("Timer"));
     }
 
     #[test]
     fn host_reports_malformed_service_bindings() {
-        let error = host(quote!(
-            dts: "tests/dts/empty.d.ts",
-            modules: [],
-            services: { Clock tick() }
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("expected `=>`"), "{error}");
+        for binding in [quote!(Clock tick()), quote!(Clock? => Some(17))] {
+            diagnostic(host(quote!(services: { #binding })), "expected `=>`");
+        }
     }
 }
