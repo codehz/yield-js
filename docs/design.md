@@ -2,7 +2,7 @@
 
 ## 目标
 
-构建一个可暂停、可序列化、可快照与恢复的迷你 JavaScript 引擎，作为原生 UI 的脚本执行层。引擎自行实现可恢复虚拟机，不使用 WebAssembly，也不依赖宿主 JS 引擎的调用栈保存执行状态。
+构建一个可暂停、可序列化、可快照与恢复的迷你 JavaScript 引擎，作为 Web 子集与原生 UI 的脚本执行层。引擎自行实现可恢复虚拟机，不使用 WebAssembly，也不依赖宿主 JS 引擎的调用栈保存执行状态。
 
 本文描述目标契约，不代表当前 PoC 已实现。VM 不实现平台 UI；宿主提供绑定实现和平台服务，VM 快照保存重建这些绑定所需的全部运行时状态。
 
@@ -20,11 +20,11 @@
 
 ## 已确认的实现方向
 
-- VM 与 compiler 核心使用 Rust；宿主接口面向 Apple 与 Android，但本项目不实现原生 UI。
+- VM 与 compiler 核心使用 Rust；宿主接口以 Web 子集为主，最终可由 Blitz 一类 Rust Web 渲染引擎承接；Apple 与 Android 等原生宿主仍可接入同一接口，但本项目不实现 UI。
 - Rust 与宿主之间采用手工设计的 C ABI，以不透明 VM 句柄表达跨调用生命周期状态。
 - compiler 复用 Rust JavaScript parser（如 Oxc），转换到项目自有 IR；实现时选择当时最新稳定版本并锁定依赖。Oxc AST 不进入 VM 或字节码契约。
 - VM 堆采用 VM 自有对象表/句柄与 tracing GC，支持对象环、闭包共享状态及快照对象身份。
-- 首版以能运行锁定版本的 React 自定义 renderer 为兼容基线，按[构建产物](design/bytecode.md)与[框架验收用例](design/framework-acceptance.md)验收，而不是按 ECMAScript 年份或 npm 包名宣称兼容。
+- 首版以能运行锁定版本的 React DOM Web 客户端子集为兼容基线；当前用自建 mutation renderer 简化宿主树验收，按[构建产物](design/bytecode.md)与[框架验收用例](design/framework-acceptance.md)验收，而不是按 ECMAScript 年份或 npm 包名宣称兼容。
 - Rust 宏可以生成静态模块描述；编译器、VM 和未来的 TypeScript 声明生成器消费同一份声明，不要求宿主实现统一的字符串分派入口。
 
 ## 总体架构
@@ -58,9 +58,9 @@ flowchart LR
 
 | 文档 | 内容 |
 | --- | --- |
-| [`design/build.md`](design/build.md) | React 锁定基线、构建输入、扩展管线、CJS 互操作与资源表。 |
+| [`design/build.md`](design/build.md) | Web 子集验收目标、构建输入、扩展管线、CJS 互操作与资源表。 |
 | [`design/language.md`](design/language.md) | ESM 模块执行与导出、语法子集、生成器与异步迭代、`using`、VM 内建、BigInt。 |
-| [`design/framework-acceptance.md`](design/framework-acceptance.md) | 非 Web 宿主树能力，以及 React 的运行与恢复验收。 |
+| [`design/framework-acceptance.md`](design/framework-acceptance.md) | Web 宿主子集能力，以及 React 的运行与恢复验收。 |
 | [`design/wintertc.md`](design/wintertc.md) | WinterTC API 范围、全局暴露、快照边界、VM 相对时钟、可选宿主能力、随机 API 与定时器。 |
 | [`design/fetch.md`](design/fetch.md) | Fetch 的 VM 对象与获取算法、单跳宿主传输、背压、环境服务、快照与验收。 |
 | [`design/host-interface.md`](design/host-interface.md) | C ABI 边界、静态模块/类原型、导出可见性、JS 值槽与非 JS payload。 |

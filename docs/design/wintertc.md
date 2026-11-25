@@ -6,7 +6,7 @@
 
 | API 组 | 实现目标与归属 |
 | --- | --- |
-| 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`DOMException`、`AbortController`、`AbortSignal`。监听器、取消原因与信号关系由 VM 持有；`AbortSignal.timeout()` 复用宿主定时器能力。不引入 DOM 节点或事件树。 |
+| 事件与取消 | `EventTarget`、`Event`、`CustomEvent`、`DOMException`、`AbortController`、`AbortSignal`。监听器、取消原因与信号关系由 VM 持有；`AbortSignal.timeout()` 复用宿主定时器能力。本 API 组不引入 DOM 节点或事件树；Web 宿主子集的 DOM 由独立宿主绑定提供。 |
 | 全局错误与拒绝 | `reportError`、`ErrorEvent`、`PromiseRejectionEvent`、`onerror`、`onunhandledrejection`、`onrejectionhandled`。目标全局对象由 VM 实现 `EventTarget`，支持全局监听及上述处理器属性；遵循异常报告和 Promise 拒绝跟踪的通知时机及取消规则。宿主日志是报告出口，不替代脚本通知。 |
 | 消息与克隆 | `structuredClone`。补齐规范所需的克隆与转移类型（如 `Blob`、`File`），不要求 Worker。`MessageChannel`、`MessagePort`、`MessageEvent` 暂不作为开发目标：端口配对与任务投递在可恢复 VM 的语义下不易实现（挂起任务与快照恢复边界难以定义），留待后续重新评估。 |
 | 定时器与时钟 | `setTimeout`、`clearTimeout`、`setInterval`、`clearInterval` 由 VM 实现脚本语义，由可选宿主能力唤醒。`Performance`、`performance.now()`、`performance.timeOrigin` 完全由 VM 提供。禁止运行时编译，故字符串 timer handler 不支持。 |
