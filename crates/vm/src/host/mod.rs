@@ -3,8 +3,6 @@
 //! each is keyed by a zero-sized [`crate::ServiceKey`] and is absent or
 //! defaulted unless the host registers it.
 
-use std::rc::Rc;
-
 use crate::binding::{Bindings, JsValue};
 use crate::value::{JsString, Value};
 
@@ -35,7 +33,7 @@ pub enum Completion {
 /// Drivers from [`Bindings`] register external work. The host delivers
 /// completions through [`crate::Vm::complete_operation`].
 pub trait Host {
-    fn bindings(&self) -> Rc<Bindings>;
+    fn bindings(&self) -> Bindings;
 
     /// Value exposed as `navigator.userAgent`. `None` selects the runtime
     /// default. This identifies the script runtime for compatibility probes

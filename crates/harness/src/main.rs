@@ -86,7 +86,7 @@ impl Wait {
 }
 
 struct DemoHost {
-    bindings: Rc<Bindings>,
+    bindings: Bindings,
     counters: Rc<DemoCounters>,
     labels: Rc<LabelService>,
 }
@@ -99,7 +99,7 @@ impl DemoHost {
         let labels = Rc::new(LabelService::default());
         let bindings = demo_bindings(Rc::clone(&counters), Rc::clone(&labels), time_zone)?;
         Ok(Self {
-            bindings: Rc::new(bindings),
+            bindings,
             counters,
             labels,
         })
@@ -123,7 +123,7 @@ impl DemoHost {
 }
 
 impl Host for DemoHost {
-    fn bindings(&self) -> Rc<Bindings> {
+    fn bindings(&self) -> Bindings {
         self.bindings.clone()
     }
 

@@ -17,7 +17,6 @@ use crate::runtime::{Arguments, VmClock};
 use crate::value::{ObjectId, PropertyKey, Value};
 use crate::{JsString, builtin::BuiltinRoots};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// Settings applied before evaluating the preload and entry modules.
@@ -150,7 +149,7 @@ impl Vm {
         self.run_until_idle(host)
     }
 
-    fn empty(build: VerifiedBuild, bindings: Rc<Bindings>, clock: VmClock) -> Self {
+    fn empty(build: VerifiedBuild, bindings: Bindings, clock: VmClock) -> Self {
         let time = time_source(&bindings);
         let module_states = Vec::new();
         let caches = property_caches(&build);

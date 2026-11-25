@@ -52,12 +52,12 @@ impl ServiceKey for DomKey {
 }
 
 struct DomHost {
-    bindings: Rc<Bindings>,
+    bindings: Bindings,
     errors: Vec<String>,
 }
 
 impl Host for DomHost {
-    fn bindings(&self) -> Rc<Bindings> {
+    fn bindings(&self) -> Bindings {
         self.bindings.clone()
     }
 
@@ -157,7 +157,7 @@ fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
         },
     }?;
     let mut host = DomHost {
-        bindings: Rc::new(bindings),
+        bindings,
         errors: Vec::new(),
     };
     let result = Vm::new(build, &mut host, Default::default())

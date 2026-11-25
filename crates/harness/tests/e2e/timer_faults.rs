@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::sync::Arc;
 
 use super::support::{compile_main, declared, json_round_trip};
@@ -323,11 +322,11 @@ timer_contract!(
     Vec::from([extra])
 );
 
-struct ContractHost(Rc<Bindings>);
+struct ContractHost(Bindings);
 
 impl Host for ContractHost {
-    fn bindings(&self) -> Rc<Bindings> {
-        Rc::clone(&self.0)
+    fn bindings(&self) -> Bindings {
+        self.0.clone()
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -338,7 +337,7 @@ impl Host for ContractHost {
 #[test]
 fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     let source_clock = Arc::new(FakeClock::default());
-    let mut source = ContractHost(Rc::new(original::bindings(&source_clock)));
+    let mut source = ContractHost(original::bindings(&source_clock));
     let build = compile_main(
         r#"
         import { schedule } from 'contract';
@@ -355,7 +354,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     drop(vm);
 
     let changed_clock = Arc::new(FakeClock::default());
-    let mut changed = ContractHost(Rc::new(extra_slot::bindings(&changed_clock)));
+    let mut changed = ContractHost(extra_slot::bindings(&changed_clock));
     // Establish that the alternate binding really saves the extra argument.
     let mut alternate = Vm::new(build.clone(), &mut changed, Default::default()).unwrap();
     alternate.start(&mut changed, "run", vec![]).unwrap();
@@ -365,7 +364,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     drop(alternate);
 
     let rejected_clock = Arc::new(FakeClock::default());
-    let mut rejected = ContractHost(Rc::new(extra_slot::bindings(&rejected_clock)));
+    let mut rejected = ContractHost(extra_slot::bindings(&rejected_clock));
     let error = Vm::restore(
         snapshot.clone(),
         build.clone(),
@@ -381,7 +380,7 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     assert!(rejected_clock.registrations().is_empty());
 
     let restored_clock = Arc::new(FakeClock::default());
-    let mut reordered = ContractHost(Rc::new(reordered::bindings(&restored_clock)));
+    let mut reordered = ContractHost(reordered::bindings(&restored_clock));
     assert_eq!(reordered.0.fingerprint(), snapshot.binding_fingerprint);
     let mut restored = Vm::restore(snapshot, build, &mut reordered, Default::default()).unwrap();
     assert!(restored_clock.registrations().is_empty());

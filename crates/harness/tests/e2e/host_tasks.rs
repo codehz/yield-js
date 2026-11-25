@@ -12,7 +12,7 @@ use yield_vm::{
 };
 
 struct TaskHost {
-    bindings: Rc<Bindings>,
+    bindings: Bindings,
     labels: Rc<LabelService>,
     errors: Option<Vec<JsValue>>,
 }
@@ -54,7 +54,7 @@ impl TaskHost {
         deps.operation::<Wait>();
         let bindings = abi::link([module], deps, services).unwrap();
         Self {
-            bindings: Rc::new(bindings),
+            bindings,
             labels,
             errors: None,
         }
@@ -62,8 +62,8 @@ impl TaskHost {
 }
 
 impl Host for TaskHost {
-    fn bindings(&self) -> Rc<Bindings> {
-        Rc::clone(&self.bindings)
+    fn bindings(&self) -> Bindings {
+        self.bindings.clone()
     }
 
     fn report_error(&mut self, error: JsValue) {
@@ -475,7 +475,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     }
     .unwrap();
     let mut host = TaskHost {
-        bindings: Rc::new(bindings),
+        bindings,
         labels,
         errors: None,
     };
@@ -594,7 +594,7 @@ fn branch_host() -> (TaskHost, Rc<yield_harness::Counters>) {
     .unwrap();
     (
         TaskHost {
-            bindings: Rc::new(bindings),
+            bindings,
             labels,
             errors: None,
         },

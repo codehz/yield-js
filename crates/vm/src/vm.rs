@@ -362,7 +362,7 @@ impl std::ops::Deref for VerifiedBuild {
 #[derive(Debug)]
 pub struct Vm {
     pub(crate) build: VerifiedBuild,
-    pub(crate) bindings: Rc<Bindings>,
+    pub(crate) bindings: Bindings,
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
@@ -1676,11 +1676,7 @@ impl Vm {
         &*self.time.0
     }
 
-    pub(crate) fn restored(
-        build: VerifiedBuild,
-        bindings: Rc<Bindings>,
-        state: RestoredState,
-    ) -> Self {
+    pub(crate) fn restored(build: VerifiedBuild, bindings: Bindings, state: RestoredState) -> Self {
         let RestoredState {
             mut heap,
             continuations,

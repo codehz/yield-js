@@ -453,7 +453,7 @@ impl CryptoService for DeterministicEntropy {
 }
 
 pub struct TestHost {
-    bindings: Rc<Bindings>,
+    bindings: Bindings,
     counters: Rc<Counters>,
     labels: Rc<LabelService>,
     clock: Arc<FakeClock>,
@@ -637,7 +637,7 @@ impl TestHost {
         )
         .expect("test bindings");
         Self {
-            bindings: Rc::new(bindings),
+            bindings,
             counters,
             labels,
             clock,
@@ -762,7 +762,7 @@ impl TestHost {
 }
 
 impl Host for TestHost {
-    fn bindings(&self) -> Rc<Bindings> {
+    fn bindings(&self) -> Bindings {
         self.bindings.clone()
     }
 

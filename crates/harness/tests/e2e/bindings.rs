@@ -19,21 +19,21 @@ use yield_vm::{
 mod signature_fingerprint;
 
 struct StrategyHost {
-    bindings: Rc<Bindings>,
+    bindings: Bindings,
     errors: usize,
 }
 
 impl StrategyHost {
     fn new(bindings: Bindings) -> Self {
         Self {
-            bindings: Rc::new(bindings),
+            bindings,
             errors: 0,
         }
     }
 }
 
 impl Host for StrategyHost {
-    fn bindings(&self) -> Rc<Bindings> {
+    fn bindings(&self) -> Bindings {
         self.bindings.clone()
     }
 

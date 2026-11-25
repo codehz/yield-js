@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
 use yield_vm::{
@@ -98,23 +96,23 @@ impl EventModule {
     }
 }
 
-struct EventHost(Rc<Bindings>);
+struct EventHost(Bindings);
 
 impl EventHost {
     fn new() -> Self {
-        Self(Rc::new(
+        Self(
             host_bindings! {
                 dts: "../dts/event-fixture.d.ts",
                 modules: [EventModule],
                 services: {},
             }
             .unwrap(),
-        ))
+        )
     }
 }
 
 impl Host for EventHost {
-    fn bindings(&self) -> Rc<Bindings> {
+    fn bindings(&self) -> Bindings {
         self.0.clone()
     }
     fn report_error(&mut self, error: JsValue) {

@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use yield_compiler::{
     CompileError, Compiler, GraphTransform, MemoryResolver, ModuleGraph, ParsedModule, Project,
     SourceTransform, TransformError,
@@ -15,18 +13,18 @@ fn compile(
     compiler.compile(Project::new("main.jsx", resolver))
 }
 
-struct EmptyHost(Rc<Bindings>);
+struct EmptyHost(Bindings);
 
 impl EmptyHost {
     fn new() -> Self {
         let bindings = yield_vm::__macro_support::link([], Default::default(), Default::default());
-        Self(Rc::new(bindings.unwrap()))
+        Self(bindings.unwrap())
     }
 }
 
 impl Host for EmptyHost {
-    fn bindings(&self) -> Rc<Bindings> {
-        Rc::clone(&self.0)
+    fn bindings(&self) -> Bindings {
+        self.0.clone()
     }
 
     fn report_error(&mut self, error: JsValue) {
