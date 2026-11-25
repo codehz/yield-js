@@ -13,6 +13,8 @@ use oxc::syntax::xml_entities::decode_entities;
 use crate::{CompileError, ParsedModule};
 
 pub(crate) const STAGE: &str = "JSX transform";
+// Keep generated JSX imports distinguishable from other unlocated imports.
+pub(crate) const IMPORT_SPAN: Span = Span::new(u32::MAX, u32::MAX);
 
 pub(crate) fn lower(module: &mut ParsedModule<'_>, runtime: &str) -> Result<(), CompileError> {
     if !module.program.source_type.is_jsx() {
@@ -46,7 +48,7 @@ pub(crate) fn lower(module: &mut ParsedModule<'_>, runtime: &str) -> Result<(), 
         .filter_map(|(export, local)| {
             Some(ImportDeclarationSpecifier::new_import_specifier(
                 SPAN,
-                ModuleExportName::new_identifier_name(SPAN, export, &pass.ast),
+                ModuleExportName::new_identifier_name(IMPORT_SPAN, export, &pass.ast),
                 BindingIdentifier::new(SPAN, local?, &pass.ast),
                 ImportOrExportKind::Value,
                 &pass.ast,
@@ -54,7 +56,7 @@ pub(crate) fn lower(module: &mut ParsedModule<'_>, runtime: &str) -> Result<(), 
         });
     let specifiers = ArenaVec::from_iter_in(specifiers, &pass.ast);
     let source = StringLiteral::new(
-        SPAN,
+        IMPORT_SPAN,
         JSStr::from_str_in(&format!("{runtime}/jsx-runtime"), &pass.ast),
         None,
         &pass.ast,

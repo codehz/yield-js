@@ -32,6 +32,8 @@ Web 预设固定按客户端生产模式解析：启用浏览器客户端条件�
 
 转换按模块进行，产物必须是核心可链接的 ESM，转换产生的导入照常进入同一图。TypeScript 转换只移除类型语法，不声称类型检查；JSX 按预设配置转换为指定 runtime，Web/React 预设使用 `react/jsx-runtime` 的生产 automatic runtime，不生成对 `React.createElement` 的隐式全局依赖。CJS 转换仅覆盖静态可分析子集：字面量 `require`、常见 `module.exports` / `exports` 赋值与属性访问、受支持的 `process.env.NODE_ENV` 生产分支，以及所覆盖的循环初始化行为；不承诺完整 Node wrapper、Node 内建或任意 CJS 语义。动态或无法静态确定目标的 `require` 必须在构建期报错，不能留下运行时 require。转换不得破坏 ESM 活绑定或所覆盖 CJS 初始化行为；无法安全表达的写法明确拒绝，不以近似行为静默通过。
 
+公开的源码和图转换接口使用 workspace 固定版本的 Oxc AST，不保证跨 Oxc 版本兼容性。转换不直接访问链接表或私有 CFG；图转换后的链接绑定由核心重新计算。VM 和字节码契约保持独立于 Oxc。
+
 对 React 等通过 `process.env.NODE_ENV` 选择生产实现的包，预设按固定 `production` 值折叠受支持的静态比较/分支；不注入完整 `process` 对象，不执行包代码。其余动态分支按 CJS 规则拒绝。
 
 ## Web 资源与样式

@@ -12,7 +12,7 @@ yield-harness  →  yield-compiler  →  yield-vm
                   yield-host-dts   ←  yield-binding-macros  (expansion only)
 ```
 
-`yield-vm` 持有字节码契约，永不导入编译器。自定义源码和图转换可以替换模块源码并重新解析；Oxc AST 和 CFG 保持私有。`yield-host-dts` 对外只暴露普通名字表与字节跨度。
+`yield-vm` 持有字节码契约，永不导入编译器。自定义源码和图转换可通过 `ParsedModule` 直接修改 workspace 固定版本的 Oxc `Program`，也可替换源码并重新解析。转换诊断可引用当前源码中的 Oxc `Span`；无源码位置的生成节点使用 `oxc::span::SPAN`。CFG 保持私有，Oxc 类型不进入 VM、字节码或宿主绑定。`yield-host-dts` 对外只暴露普通名字表与字节跨度。
 
 ```text
 源码根与同步解析器（严格 ES 模块）

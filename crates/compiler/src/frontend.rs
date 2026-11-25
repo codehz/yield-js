@@ -28,16 +28,18 @@ pub(crate) fn parse<'a>(
             .unwrap_or_default();
         return Err(CompileError::new(source, span, diagnostic.to_string()));
     }
+    validate_syntax(&parser_return.program)?;
+    Ok(parser_return.program)
+}
+
+pub(crate) fn validate_syntax(program: &Program<'_>) -> Result<(), CompileError> {
     let mut validator = ResourceSyntax {
-        source,
+        source: program.source_text,
         async_context: false,
         error: None,
     };
-    validator.visit_program(&parser_return.program);
-    if let Some(error) = validator.error {
-        return Err(error);
-    }
-    Ok(parser_return.program)
+    validator.visit_program(program);
+    validator.error.map_or(Ok(()), Err)
 }
 
 pub(crate) fn dynamic_imports<'a>(

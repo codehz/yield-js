@@ -265,7 +265,7 @@ fn require_request<'a>(
         }
     };
     let error = error(module, request.span, message);
-    Err(if request.span == Span::default() {
+    Err(if request.span == super::super::jsx::IMPORT_SPAN {
         error.in_stage(super::super::jsx::STAGE)
     } else {
         error

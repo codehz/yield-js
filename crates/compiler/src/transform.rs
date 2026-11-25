@@ -1,13 +1,15 @@
 //! Public source, graph and build transform contracts.
 
-use std::ops::Range;
-
 use oxc::{allocator::Allocator, ast::ast::Program, span::Span};
 use yield_vm::bytecode::Build;
 
 use crate::{CompileError, ModuleGraph, ModuleId};
 
-/// A canonical source module with a compiler-owned parsed program.
+/// A canonical source module and its arena-backed Oxc program.
+///
+/// The AST API is tied to the workspace-pinned Oxc version. Keep the AST as
+/// well-formed strict ESM and keep its spans relative to [`Self::source`].
+/// Use `oxc::span::SPAN` for new nodes without a source location.
 pub struct ParsedModule<'a> {
     pub(crate) id: ModuleId,
     pub(crate) allocator: &'a Allocator,
@@ -21,6 +23,22 @@ impl<'a> ParsedModule<'a> {
 
     pub fn source(&self) -> &'a str {
         self.program.source_text
+    }
+
+    /// Returns the allocator for nodes inserted into this module's program.
+    pub fn allocator(&self) -> &'a Allocator {
+        self.allocator
+    }
+
+    /// Returns the current Oxc program, including any prior transformations.
+    pub fn program(&self) -> &Program<'a> {
+        &self.program
+    }
+
+    /// Edits the Oxc program in place; the compiler does not reparse these edits.
+    /// Use [`Self::replace_source`] to replace the program and its source together.
+    pub fn program_mut(&mut self) -> &mut Program<'a> {
+        &mut self.program
     }
 
     /// Replaces the module's source and reparses it before the next stage.
@@ -51,7 +69,7 @@ pub trait BuildTransform {
 #[derive(Debug, Clone)]
 pub struct TransformError {
     pub message: String,
-    pub span: Option<Range<u32>>,
+    pub span: Option<Span>,
     pub module: Option<ModuleId>,
     parse_error: Option<Box<CompileError>>,
 }
@@ -66,7 +84,7 @@ impl TransformError {
         }
     }
 
-    pub fn at(mut self, span: Range<u32>) -> Self {
+    pub fn at(mut self, span: Span) -> Self {
         self.span = Some(span);
         self
     }
@@ -81,11 +99,7 @@ impl TransformError {
             return error.in_stage(stage);
         }
         let error = match (module, self.span) {
-            (Some(module), Some(span)) => CompileError::new(
-                module.source(),
-                Span::new(span.start, span.end),
-                self.message,
-            ),
+            (Some(module), Some(span)) => CompileError::new(module.source(), span, self.message),
             _ => CompileError::internal(self.message),
         };
         let error = error.in_stage(stage);

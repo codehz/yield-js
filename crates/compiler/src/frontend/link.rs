@@ -139,6 +139,7 @@ impl<'a> ModuleGraph<'a> {
             .collect();
         let mut records = Vec::with_capacity(self.modules.len());
         for module in &mut self.modules {
+            super::validate_syntax(&module.program).map_err(|err| err.in_module(&module.id))?;
             super::jsx::lower(&mut module.parsed, &options.jsx_runtime)?;
             let mut record = Record::default();
             let mut deps = Vec::new();
@@ -309,7 +310,7 @@ fn dependency_error(
         format!("source dependency {specifier:?} from {referrer:?}: {reason}"),
     )
     .in_module(referrer);
-    if span == Span::default() {
+    if span == super::jsx::IMPORT_SPAN {
         error.in_stage(super::jsx::STAGE)
     } else {
         error
@@ -504,9 +505,12 @@ fn insert<'a>(
         program,
     };
     for (index, transform) in transforms.iter_mut().enumerate() {
-        transform.transform(&mut parsed).map_err(|error| {
-            error.diagnostic(&format!("source transform {}", index + 1), Some(&parsed))
-        })?;
+        let stage = format!("source transform {}", index + 1);
+        transform
+            .transform(&mut parsed)
+            .map_err(|error| error.diagnostic(&stage, Some(&parsed)))?;
+        super::validate_syntax(&parsed.program)
+            .map_err(|error| error.in_module(&id).in_stage(&stage))?;
     }
     super::jsx::lower(&mut parsed, jsx_runtime)?;
     ids.insert(id.clone(), index);

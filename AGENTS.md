@@ -28,7 +28,7 @@ Keep this file an index plus binding rules. Mechanisms, invariants, and per-file
 - After a behavior change, refresh `docs/gaps.md` and `docs/implemented.md` in the same commit; update `README.md` and the affected file under `docs/design.md` / `docs/design/` when the target design is affected.
 - Rust only. No npm, Node, or package manager for the engine; JS files are fixtures compiled by this compiler.
 - Edition 2024, rustfmt and clippy defaults. No `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`, `[lints]`, `[features]`, or `.cargo/config.toml`.
-- Add a dependency only if the bytecode/VM/host boundary needs it. Oxc stays pinned and must not leak past `CompileError`.
+- Add a dependency only if the bytecode/VM/host boundary needs it. Oxc stays pinned; its types may appear in compiler diagnostics and the public compiler transform API, but not in the VM, bytecode, host bindings, or other public APIs.
 - Small public surface: crate internals are `pub(crate)`. Module docs (`//!`) state invariants; code comments are English; README and `docs/` are Chinese.
 - License `MIT OR Apache-2.0`, version `0.1.0`.
 

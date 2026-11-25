@@ -3,7 +3,8 @@
 //! Oxc parses the source, which is lowered to logical-register code and then
 //! decoded into a control-flow IR. Optimizations operate on blocks; only final
 //! layout assigns bytecode PCs and slot allocation produces the VM function.
-//! Built-in syntax transforms operate on the pinned Oxc AST internally.
+//! Source and graph transforms edit the workspace-pinned Oxc AST; the VM and
+//! bytecode contracts are independent of Oxc.
 //!
 //! ```text
 //! source roots and resolver

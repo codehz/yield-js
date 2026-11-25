@@ -1,3 +1,6 @@
+use oxc::ast::ast::{ImportOrExportKind, Statement, StringLiteral};
+use oxc::ast::builder::AstBuilder;
+use oxc::span::{GetSpan, SPAN};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
@@ -90,12 +93,72 @@ fn pipeline_runs_each_stage_in_registration_order_and_relinks_exports() {
 }
 
 #[test]
+fn ast_transforms_discover_imports_and_relink_exports_without_reparsing() {
+    struct InsertImport;
+    impl SourceTransform for InsertImport {
+        fn transform(&mut self, module: &mut ParsedModule<'_>) -> Result<(), TransformError> {
+            if module.id() == "main.js" {
+                let ast = AstBuilder::new(module.allocator());
+                let source = StringLiteral::new(SPAN, "./new.js", None, &ast);
+                module
+                    .program_mut()
+                    .body
+                    .push(Statement::new_import_declaration(
+                        SPAN,
+                        None,
+                        source,
+                        None,
+                        None,
+                        ImportOrExportKind::Value,
+                        &ast,
+                    ));
+            }
+            Ok(())
+        }
+    }
+
+    struct Retarget;
+    impl GraphTransform for Retarget {
+        fn transform(&mut self, graph: &mut ModuleGraph<'_>) -> Result<(), TransformError> {
+            let entry = graph.entry().clone();
+            let module = graph.module_mut(&entry).unwrap();
+            let ast = AstBuilder::new(module.allocator());
+            let Statement::ExportFromDeclaration(export) = &mut module.program_mut().body[0] else {
+                panic!("expected a re-export");
+            };
+            export.source = StringLiteral::new(export.source.span, "./new.js", None, &ast);
+            Ok(())
+        }
+    }
+
+    let resolver = MemoryResolver::new([
+        ("main.js", "export { value } from './old.js';"),
+        ("old.js", "export const value = 1;"),
+        ("new.js", "export const value = 2;"),
+    ])
+    .unwrap();
+    let build = Compiler::default()
+        .compile(
+            Project::new("main.js", resolver)
+                .with_source_transform(InsertImport)
+                .with_graph_transform(Retarget),
+        )
+        .unwrap();
+    assert!(
+        matches!(entry_module(&build).exports["value"].target, ModuleTarget::Binding { module, .. }
+        if build.modules[module as usize].id == "new.js")
+    );
+    assert!(build.modules.iter().all(|module| module.id != "old.js"));
+}
+
+#[test]
 fn pipeline_attributes_transform_failures_and_stops_before_later_stages() {
     struct FailSource;
     impl SourceTransform for FailSource {
         fn transform(&mut self, module: &mut ParsedModule<'_>) -> Result<(), TransformError> {
             module.replace_source("\nexport default 2;")?;
-            Err(TransformError::new("rejected transformed source").at(1..7))
+            let span = module.program().body[0].span();
+            Err(TransformError::new("rejected transformed source").at(span))
         }
     }
     struct InvalidBuild;
