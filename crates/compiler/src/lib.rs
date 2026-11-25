@@ -115,6 +115,7 @@ pub struct Compiler {
     /// Canonical source module IDs whose frames should never be shown.
     pub framework_modules: BTreeSet<String>,
     /// Automatic JSX runtime package (defaults to `react`).
+    /// A `.jsx` module using JSX imports the helpers it needs from this package's `/jsx-runtime`.
     pub jsx_runtime: String,
 }
 
@@ -162,9 +163,13 @@ impl Compiler {
                 let module = error.module.as_ref().and_then(|id| graph.module(id));
                 error.diagnostic(&stage, module)
             })?;
-            graph
-                .relink(resolver, self)
-                .map_err(|error| error.in_stage(&stage))?;
+            graph.relink(resolver, self).map_err(|error| {
+                if error.stage().is_some() {
+                    error
+                } else {
+                    error.in_stage(&stage)
+                }
+            })?;
         }
         let mut build = lower::lower_graph(&graph, self)?;
         for (index, transform) in project.builds.iter_mut().enumerate() {

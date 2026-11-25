@@ -40,6 +40,39 @@ pub(crate) fn parse<'a>(
     Ok(parser_return.program)
 }
 
+pub(crate) fn dynamic_imports<'a>(
+    program: &Program<'a>,
+) -> Result<Vec<(&'a str, Span)>, (Span, &'static str)> {
+    struct Scan<'a> {
+        imports: Vec<(&'a str, Span)>,
+        error: Option<(Span, &'static str)>,
+    }
+    impl<'a> Visit<'a> for Scan<'a> {
+        fn visit_import_expression(&mut self, import: &ImportExpression<'a>) {
+            if self.error.is_none() {
+                if import.options.is_some() || import.phase.is_some() {
+                    self.error = Some((import.span, "dynamic import phases or options"));
+                } else if let Expression::StringLiteral(literal) = &import.source {
+                    if let Some(specifier) = literal.value.as_str() {
+                        self.imports.push((specifier, import.span));
+                    } else {
+                        self.error = Some((import.span, "non-string module specifier"));
+                    }
+                } else {
+                    self.error = Some((import.span, "dynamic import with non-literal specifier"));
+                }
+            }
+            walk::walk_import_expression(self, import);
+        }
+    }
+    let mut scan = Scan {
+        imports: Vec::new(),
+        error: None,
+    };
+    scan.visit_program(program);
+    scan.error.map_or(Ok(scan.imports), Err)
+}
+
 // Run after Oxc's diagnostics but before any lowering can skip dead code.
 struct ResourceSyntax<'src> {
     source: &'src str,

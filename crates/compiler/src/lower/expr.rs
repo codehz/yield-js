@@ -386,11 +386,22 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
             }
             Expression::TemplateLiteral(template) => self.compile_template_literal(template),
             Expression::TaggedTemplateExpression(tagged) => self.compile_tagged_template(tagged),
-            Expression::ImportExpression(import) => Err(unsupported(
-                self.source_text(),
-                import.span,
-                "dynamic import",
-            )),
+            Expression::ImportExpression(import) => {
+                let Expression::StringLiteral(literal) = &import.source else {
+                    return Err(CompileError::internal("unvalidated dynamic import"));
+                };
+                let module = literal
+                    .value
+                    .as_str()
+                    .and_then(|specifier| self.module.dynamic_imports.get(specifier).copied())
+                    .ok_or_else(|| CompileError::internal("unlinked dynamic import"))?;
+                let dst = self.alloc_reg()?;
+                self.emit(Instr::ImportModule {
+                    dst: self.slot(dst),
+                    module,
+                });
+                Ok(dst)
+            }
             Expression::ImportMeta(property) => Err(unsupported(
                 self.source_text(),
                 property.span,

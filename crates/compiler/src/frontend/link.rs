@@ -51,6 +51,8 @@ pub(crate) const DEFAULT_SLOT: &str = "\0default";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DependencyKind {
     Static,
+    /// A literal `import()` expression whose source target is linked eagerly.
+    Dynamic,
     Host,
 }
 
@@ -65,7 +67,7 @@ pub struct Dependency {
 pub(crate) struct Module<'a> {
     parsed: ParsedModule<'a>,
     original_source: &'a str,
-    dependencies: Vec<Dependency>,
+    pub(crate) dependencies: Vec<Dependency>,
     pub(crate) deps: Vec<u32>,
     pub(crate) in_preload: bool,
     pub(crate) locals: BTreeSet<String>,
@@ -82,8 +84,9 @@ impl<'a> Deref for Module<'a> {
 }
 
 /// A reachable source graph. Only parsed ASTs are mutable; dependency and
-/// linker tables are derived again after each graph transform. New requests
-/// must resolve to existing graph modules or the host import manifest.
+/// linker tables are derived again after each graph transform. New source
+/// requests must resolve to existing graph modules. Only static requests can
+/// resolve through the host import manifest.
 pub struct ModuleGraph<'a> {
     pub(crate) modules: Vec<Module<'a>>,
     pub(crate) entry: u32,
@@ -170,6 +173,25 @@ impl<'a> ModuleGraph<'a> {
                 };
                 extract(&mut record, stmt, edge, source)
                     .map_err(|err| err.in_module(&module.id))?;
+            }
+            let dynamic = super::dynamic_imports(&module.program).map_err(|(span, feature)| {
+                unsupported(source, span, feature).in_module(&module.id)
+            })?;
+            for (specifier, span) in dynamic {
+                let locate = |reason| dependency_error(source, span, &module.id, specifier, reason);
+                let target_id =
+                    crate::resolved_id(resolver, Some(&module.id), specifier).map_err(locate)?;
+                let target = *ids
+                    .get(&target_id)
+                    .ok_or_else(|| locate(format!("target {target_id:?} is not in the graph")))?;
+                if seen.insert(target) {
+                    deps.push(target);
+                }
+                dependencies.push(Dependency {
+                    specifier: specifier.to_owned(),
+                    kind: DependencyKind::Dynamic,
+                    target: target_id,
+                });
             }
             record.locals = crate::lower::module_locals(source, &module.program.body)
                 .map_err(|err| err.in_module(&module.id))?;
@@ -309,6 +331,12 @@ pub(crate) fn link<'a>(
         preload: None,
     };
     let mut ids = BTreeMap::new();
+    let mut discovery = Discovery {
+        allocator,
+        resolver,
+        transforms,
+        jsx_runtime: &options.jsx_runtime,
+    };
     let mut records = Vec::new();
     for (root, in_preload) in preload
         .into_iter()
@@ -323,10 +351,7 @@ pub(crate) fn link<'a>(
         let (index, fresh) = insert(
             &mut graph,
             &mut ids,
-            allocator,
-            resolver,
-            transforms,
-            &options.jsx_runtime,
+            &mut discovery,
             id,
             in_preload,
             root_error,
@@ -348,7 +373,35 @@ pub(crate) fn link<'a>(
             let Some(stmt) = current.program.body.get(*cursor) else {
                 records[i].locals = crate::lower::module_locals(source, &current.program.body)
                     .map_err(|error| error.in_module(&current.id))?;
+                let dynamic =
+                    super::dynamic_imports(&current.program).map_err(|(span, feature)| {
+                        unsupported(source, span, feature).in_module(&current.id)
+                    })?;
+                let referrer = current.id.clone();
+                let mut next = Vec::new();
+                for (specifier, span) in dynamic {
+                    let locate =
+                        |reason| dependency_error(source, span, &referrer, specifier, reason);
+                    let id =
+                        crate::resolved_id(resolver, Some(&referrer), specifier).map_err(locate)?;
+                    let (target, fresh) =
+                        insert(&mut graph, &mut ids, &mut discovery, id, in_preload, locate)?;
+                    if seen.insert(target) {
+                        graph.modules[i].deps.push(target);
+                    }
+                    let target_id = graph.modules[target as usize].id.clone();
+                    graph.modules[i].dependencies.push(Dependency {
+                        specifier: specifier.to_owned(),
+                        kind: DependencyKind::Dynamic,
+                        target: target_id,
+                    });
+                    if fresh {
+                        records.push(Record::default());
+                        next.push((target, 0, BTreeSet::new()));
+                    }
+                }
                 work.pop();
+                work.extend(next.into_iter().rev());
                 continue;
             };
             *cursor += 1;
@@ -366,10 +419,7 @@ pub(crate) fn link<'a>(
                     let (target, is_new) = insert(
                         &mut graph,
                         &mut ids,
-                        allocator,
-                        resolver,
-                        transforms,
-                        &options.jsx_runtime,
+                        &mut discovery,
                         id,
                         in_preload,
                         location,
@@ -413,17 +463,28 @@ pub(crate) fn link<'a>(
     Ok(graph)
 }
 
+struct Discovery<'a, 'ctx, 'transform> {
+    allocator: &'a Allocator,
+    resolver: &'ctx dyn ModuleResolver,
+    transforms: &'ctx mut [Box<dyn SourceTransform + 'transform>],
+    jsx_runtime: &'ctx str,
+}
+
 fn insert<'a>(
     graph: &mut ModuleGraph<'a>,
     ids: &mut BTreeMap<ModuleId, u32>,
-    allocator: &'a Allocator,
-    resolver: &dyn ModuleResolver,
-    transforms: &mut [Box<dyn SourceTransform + '_>],
-    jsx_runtime: &str,
+    discovery: &mut Discovery<'a, '_, '_>,
     id: ModuleId,
     in_preload: bool,
     locate: impl Fn(String) -> CompileError,
 ) -> Result<(u32, bool), CompileError> {
+    let Discovery {
+        allocator,
+        resolver,
+        transforms,
+        jsx_runtime,
+    } = discovery;
+    let allocator = *allocator;
     let loaded = resolver.load(&id).map_err(&locate)?;
     if let Some(&index) = ids.get(&id) {
         if graph.modules[index as usize].original_source != loaded.as_ref() {

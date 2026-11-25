@@ -80,6 +80,7 @@ pub(crate) fn may_throw(instruction: &Instr) -> bool {
         | Instr::Move { .. }
         | Instr::GetImport { .. }
         | Instr::GetModuleNamespace { .. }
+        | Instr::ImportModule { .. }
         | Instr::Closure { .. }
         | Instr::SetHome { .. }
         | Instr::SetFunctionName { .. }
@@ -182,7 +183,8 @@ pub(crate) fn uses_defs(instruction: &Instr) -> (BTreeSet<Reg>, BTreeSet<Reg>) {
         }
         Instr::GetImport { dst, .. }
         | Instr::GetModuleBinding { dst, .. }
-        | Instr::GetModuleNamespace { dst, .. } => {
+        | Instr::GetModuleNamespace { dst, .. }
+        | Instr::ImportModule { dst, .. } => {
             defs.insert(dst.index);
         }
         Instr::CallValue {
@@ -533,6 +535,10 @@ pub(crate) fn map_slots(instruction: &Instr, remap: &impl Fn(Slot) -> Slot) -> I
             binding,
         },
         Instr::GetModuleNamespace { dst, module } => Instr::GetModuleNamespace {
+            dst: remap(dst),
+            module,
+        },
+        Instr::ImportModule { dst, module } => Instr::ImportModule {
             dst: remap(dst),
             module,
         },

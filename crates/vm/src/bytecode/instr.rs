@@ -379,6 +379,8 @@ macro_rules! instruction_table {
             IteratorSkip { done: Slot, iterator: Slot, next: Slot } => slots[
                 one(done), one(iterator), one(next)
             ];
+            /// Returns a fresh fulfilled Promise containing a linked module namespace.
+            ImportModule { dst: Slot, module: u32 } => custom;
         }
     };
 }

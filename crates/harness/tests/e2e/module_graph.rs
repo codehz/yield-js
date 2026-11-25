@@ -203,6 +203,41 @@ fn pure_alias_cycle_is_rejected_even_without_an_importer() {
     assert!(error.message().contains("circular export alias"), "{error}");
 }
 
+#[test]
+fn dynamic_import_fulfills_with_the_eagerly_initialized_namespace() {
+    let build = link([
+        ("main.js", r#"
+            export const beforeEntry = globalThis.dynamicInitializations;
+            export async function run() {
+                const NativePromise = Promise;
+                return check(NativePromise, null);
+            }
+            async function check(NativePromise, Promise) {
+                const first = import('./target.js');
+                const second = import('./target.js');
+                if (!(first instanceof NativePromise) || first === second) throw 'not fresh';
+                const namespace = await first;
+                if (namespace !== await second || namespace.initializations !== 1) throw 'wrong namespace';
+                if (beforeEntry !== 1 || globalThis.dynamicInitializations !== 1) throw 'wrong order';
+                return namespace.initializations;
+            }
+        "#),
+        ("target.js", r#"
+            globalThis.dynamicInitializations = (globalThis.dynamicInitializations || 0) + 1;
+            export const initializations = globalThis.dynamicInitializations;
+            export function then() { throw 'namespace must not be assimilated'; }
+        "#),
+    ], None).unwrap();
+    let mut host = TestHost::default();
+    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    assert_eq!(vm.get_export("beforeEntry").unwrap(), Value::number(1.0));
+    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    vm.run_until_idle(&mut host).unwrap();
+    assert!(
+        matches!(vm.promise_state(&result).unwrap(), PromiseState::Fulfilled(value) if value == Value::number(1.0))
+    );
+}
+
 const PRELOADED: [(&str, &str); 4] = [
     (
         "main.js",

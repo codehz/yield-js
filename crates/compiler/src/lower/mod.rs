@@ -75,6 +75,13 @@ pub(crate) fn lower_graph<'ast>(
         .preload
         .map(|index| &graph.modules[index as usize].exports);
     let mut getters = BTreeMap::new();
+    // Resolve canonical dynamic target IDs against the final, possibly pruned graph.
+    let indices: BTreeMap<_, _> = graph
+        .modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.id.as_str(), index as u32))
+        .collect();
     let mut modules = Vec::with_capacity(graph.modules.len());
     for (index, module) in graph.modules.iter().enumerate() {
         let index = index as u32;
@@ -92,6 +99,12 @@ pub(crate) fn lower_graph<'ast>(
                     .imports
                     .iter()
                     .map(|(name, link)| (name.clone(), target(link)))
+                    .collect(),
+                dynamic_imports: module
+                    .dependencies
+                    .iter()
+                    .filter(|dep| dep.kind == crate::DependencyKind::Dynamic)
+                    .map(|dep| (dep.specifier.as_str(), indices[dep.target.as_str()]))
                     .collect(),
                 preload: if module.in_preload {
                     None
@@ -154,6 +167,7 @@ struct ModuleScope<'src> {
     slots: &'src BTreeMap<&'src str, BindingId>,
     module_bindings: BTreeSet<BindingId>,
     imports: BTreeMap<String, ModuleTarget>,
+    dynamic_imports: BTreeMap<&'src str, u32>,
     preload: Option<&'src BTreeMap<String, Target>>,
 }
 

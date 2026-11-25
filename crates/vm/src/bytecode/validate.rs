@@ -488,6 +488,12 @@ impl Build {
                         format!("{location}: GetModuleNamespace at pc {pc}: {err}")
                     })?;
                 }};
+                (ImportModule { $dst:ident, $module:ident }) => {{
+                    check_slot(*$dst, "ImportModule.dst")?;
+                    self.check_module(*$module).map_err(|err| {
+                        format!("{location}: ImportModule at pc {pc}: {err}")
+                    })?;
+                }};
                 (SuperConstruct { $dst:ident, $context:ident, $callee:ident, $args:ident }) => {{
                     check_slot(*$dst, "derived constructor result")?;
                     check_slot(*$context, "derived constructor context")?;

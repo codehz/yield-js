@@ -445,7 +445,7 @@ fn export_target<'a>(exports: &'a Value, subpath: &str) -> Result<&'a str, Strin
         _ => None,
     };
     let missing = || format!("package subpath {key:?} is not exported for import");
-    match select_target(target.ok_or_else(&missing)?)? {
+    match select_target(target.ok_or_else(missing)?)? {
         Target::Path(path) => Ok(path),
         Target::Blocked | Target::Unmatched => Err(missing()),
     }

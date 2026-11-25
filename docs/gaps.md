@@ -69,8 +69,8 @@
 ## 6. 首版范围之外（不是首版缺口）
 
 - 完整 ECMAScript TDZ
-- 运行时加载或编译代码：动态 `import()` 在编译期拒绝；内建 `eval` 无论输入为何均抛 `EvalError`，调用或构造内建 `Function` 均抛 `TypeError`。
-- 默认源码解析器不探测扩展名、目录入口或 npm 包。`import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
+- 不支持运行时加载或编译代码。动态 `import()` 只接受字符串字面量，按依赖图提前求值，不保留惰性加载或原生动态导入时序。内建 `eval` 无论输入为何均抛 `EvalError`，调用或构造内建 `Function` 均抛 `TypeError`。
+- `import.meta` 和导入/导出属性仍在编译期拒绝。跨模块读取有运行时 TDZ 检查，不改变普通函数的 TDZ 规则。
 - `debugger`：不在首版语法表
 - `WeakRef`、`FinalizationRegistry`、共享内存、`Atomics`
 - 代理函数/构造器，以及 design 未点名的其它 Proxy traps；`Proxy.revocable` 与 `new Proxy` 共享当前目标和 trap 限制。

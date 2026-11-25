@@ -8,6 +8,7 @@ use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::{Object, object_id};
 use crate::host::Host;
+use crate::runtime::Settlement;
 use crate::value::Value;
 use crate::vm::Vm;
 
@@ -48,6 +49,15 @@ impl Vm {
             }
             Instr::GetModuleNamespace { dst, module } => {
                 frame.write(dst, self.module_namespace(module)?)?;
+                Ok(Step::Next)
+            }
+            Instr::ImportModule { dst, module } => {
+                let namespace = self.module_namespace(module)?;
+                let promise = self.heap.alloc_promise();
+                // Fulfill directly: a namespace can itself export a callable `then`.
+                self.heap.promise_mut(promise)?.locked = true;
+                self.settle(promise, Settlement::Fulfilled(namespace))?;
+                frame.write(dst, Value::object(promise))?;
                 Ok(Step::Next)
             }
             Instr::GetBuiltin { dst, builtin } => {

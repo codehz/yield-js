@@ -671,6 +671,7 @@ impl Vm {
             Instr::GetImport { .. }
             | Instr::GetModuleBinding { .. }
             | Instr::GetModuleNamespace { .. }
+            | Instr::ImportModule { .. }
             | Instr::GetBuiltin { .. }
             | Instr::GetTemplate { .. }
             | Instr::GetBinding { .. }

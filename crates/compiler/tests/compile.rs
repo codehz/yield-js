@@ -3,7 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yield_compiler::{
-    CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
+    CompileError, Compiler, DependencyKind, GraphTransform, MemoryResolver, ModuleGraph, ModuleId,
+    ModuleResolver, NodeResolver, ParsedModule, Project, SourceTransform, TransformError,
 };
 use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
 
@@ -1276,11 +1277,145 @@ fn registers_default_exports_and_rejects_their_misuses() {
 }
 
 #[test]
+fn discovers_dynamic_imports_after_source_transforms_and_remaps_after_pruning() {
+    struct Source;
+    impl SourceTransform for Source {
+        fn transform(&mut self, module: &mut ParsedModule<'_>) -> Result<(), TransformError> {
+            if module.id() == "main.js" {
+                module.replace_source(
+                    "import './pruned.js'; if (false) { (() => import('./dep.js')); } \
+                     export default import('./dep.js');",
+                )?;
+            }
+            Ok(())
+        }
+    }
+
+    struct Graph;
+    impl GraphTransform for Graph {
+        fn transform(&mut self, graph: &mut ModuleGraph<'_>) -> Result<(), TransformError> {
+            let entry = graph.entry().clone();
+            let deps = graph.dependencies(&entry).unwrap();
+            assert_eq!(deps[0].kind, DependencyKind::Static);
+            assert_eq!(deps[1].kind, DependencyKind::Dynamic);
+            assert_eq!(deps[1].target, "dep.js");
+            graph
+                .module_mut(&entry)
+                .unwrap()
+                .replace_source("export function load() { return import('./dep.js'); }")?;
+            Ok(())
+        }
+    }
+
+    let resolver = MemoryResolver::new([
+        ("main.js", ""),
+        ("pruned.js", ""),
+        ("dep.js", "export const value = 42;"),
+    ])
+    .unwrap();
+    let build = Compiler::default()
+        .compile(
+            Project::new("main.js", resolver)
+                .with_source_transform(Source)
+                .with_graph_transform(Graph),
+        )
+        .unwrap();
+    assert_eq!(build.modules.len(), 2);
+    assert_eq!(entry_module(&build).dependencies, [1]);
+    assert_eq!(build.modules[1].id, "dep.js");
+    let load = build.functions.iter().find(|f| f.name == "load").unwrap();
+    assert!(
+        load.code
+            .iter()
+            .any(|op| matches!(op, Instr::ImportModule { module: 1, .. }))
+    );
+}
+
+#[test]
+fn dynamic_imports_bypass_hosts_even_in_dead_code() {
+    let options = Compiler {
+        imports: manifest(&[("dep", &[])]),
+        ..Compiler::default()
+    };
+    let error = compile("\nif (false) { () => import('dep'); }", &options).unwrap_err();
+    assert_eq!((error.line(), error.column()), (2, 20));
+    assert!(error.message().contains("dep"), "{error}");
+}
+
+#[test]
+fn dynamic_edges_deduplicate_with_static_edges_and_extend_preload_scope() {
+    let resolver = MemoryResolver::new([
+        (
+            "main.js",
+            "import './dep.js'; import('./dep.js'); import('././dep.js');",
+        ),
+        (
+            "preload.js",
+            "export const shared = 1; if (false) import('./dep.js');",
+        ),
+        ("dep.js", ""),
+    ])
+    .unwrap();
+    let build = Compiler::default()
+        .compile(Project::new("main.js", resolver).with_preload("preload.js"))
+        .unwrap();
+    let preload = &build.modules[build.preload.unwrap() as usize];
+    assert_eq!(preload.dependencies.len(), 1);
+    assert_eq!(entry_module(&build).dependencies, preload.dependencies);
+    assert_eq!(build.modules[preload.dependencies[0] as usize].id, "dep.js");
+
+    let resolver = MemoryResolver::new([
+        ("main.js", "shared;"),
+        ("preload.js", "export const shared = 1; import('./dep.js');"),
+        ("dep.js", "shared;"),
+    ])
+    .unwrap();
+    let error = Compiler::default()
+        .compile(Project::new("main.js", resolver).with_preload("preload.js"))
+        .unwrap_err();
+    assert_eq!(error.module(), "dep.js");
+    assert!(error.message().contains("shared"), "{error}");
+}
+
+#[test]
+fn graph_transforms_revalidate_dynamic_imports() {
+    struct Graph(&'static str);
+    impl GraphTransform for Graph {
+        fn transform(&mut self, graph: &mut ModuleGraph<'_>) -> Result<(), TransformError> {
+            let entry = graph.entry().clone();
+            graph.module_mut(&entry).unwrap().replace_source(self.0)?;
+            Ok(())
+        }
+    }
+
+    for (source, message) in [
+        ("\nimport('./other.js');", "not in the graph"),
+        (
+            "\nimport(other);",
+            "dynamic import with non-literal specifier",
+        ),
+    ] {
+        let resolver = MemoryResolver::new([("main.js", ""), ("other.js", "")]).unwrap();
+        let error = Compiler::default()
+            .compile(Project::new("main.js", resolver).with_graph_transform(Graph(source)))
+            .unwrap_err();
+        assert!(error.message().contains(message), "{error}");
+        assert_eq!((error.line(), error.column()), (2, 1));
+    }
+}
+
+#[test]
 fn rejects_unsupported_module_syntax() {
     for (statement, feature) in [
         ("await 1;", "top-level await"),
         ("for await (const value of []) {}", "top-level await"),
-        ("import('dep');", "dynamic import"),
+        ("import(dep);", "dynamic import with non-literal specifier"),
+        (
+            "import(`dep`);",
+            "dynamic import with non-literal specifier",
+        ),
+        ("import('dep', {});", "dynamic import phases or options"),
+        ("import.source('dep');", "dynamic import phases or options"),
         ("import.meta;", "import.meta"),
         ("import 'dep' with { type: 'json' };", "attributes"),
         ("export * from 'dep' with { type: 'json' };", "attributes"),
@@ -2716,10 +2851,10 @@ export function run() {
     );
 
     let error = compile(
-        "export function run() { if (typeof Device == 'object') import('unsupported'); }",
+        "export function run() { if (typeof Device == 'object') import(unsupported); }",
         &Compiler::default(),
     )
-    .expect_err("the probe pass must validate dead syntax");
+    .expect_err("discovery must validate dead syntax");
     assert!(error.message().contains("dynamic import"), "{error}");
     assert_eq!((error.line(), error.column()), (1, 56));
 }

@@ -21,7 +21,7 @@ mod validate;
 
 pub use instr::Instr;
 
-pub const BYTECODE_VERSION: u32 = 57;
+pub const BYTECODE_VERSION: u32 = 58;
 pub const BUILD_FORMAT_VERSION: u32 = 1;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
