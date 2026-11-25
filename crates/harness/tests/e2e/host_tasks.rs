@@ -231,14 +231,10 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-yield_vm::service_scope! {
-    BranchServices { counters: Rc<Counters> }
-}
-
 #[yield_vm::host_module(
     name = "branch",
     operations = [Wait],
-    services = BranchServices,
+    services = [counters: Rc<Counters>],
 )]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
@@ -479,7 +475,7 @@ fn next_match(
 }
 
 fn hit(cx: &yield_vm::ModuleCx<'_, Branch>, name: &str) {
-    BranchServices::bind(cx.services()).counters().hit(name);
+    Branch::counters(cx.services()).hit(name);
 }
 
 #[test]

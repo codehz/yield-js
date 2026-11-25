@@ -27,7 +27,11 @@ fn entries(
     Ok(())
 }
 
-fn set<T>(slot: &mut Option<T>, key: &Ident, parse: impl FnOnce() -> Result<T>) -> Result<()> {
+pub(super) fn set<T>(
+    slot: &mut Option<T>,
+    key: &Ident,
+    parse: impl FnOnce() -> Result<T>,
+) -> Result<()> {
     if slot.is_some() {
         return Err(Error::new(key.span(), format!("duplicate `{key}`")));
     }
@@ -82,7 +86,7 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
                 Ok(Ident::new(variant, value.span()))
             }),
             "rejection" => set(&mut rejection, &key, || attribute_value::<LitStr>(input)),
-            "services" => set(&mut services, &key, || attribute_value::<TypePath>(input)),
+            "services" => set(&mut services, &key, || service_fields(input)),
             _ => Err(Error::new(key.span(), "unknown operation option")),
         })
     })
@@ -90,14 +94,14 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let name = required(name, span, "name")?;
     let recovery = required(recovery, span, "recovery")?;
     let rejection = rejection.map(|value| quote!(const REJECTION: &'static str = #value;));
-    let service_scope = services.as_ref().map(service_scope_const);
+    let services = service_owner(ty, &item.vis, services.unwrap_or_default());
 
     Ok(quote! {
         #item
+        #services
         impl ::yield_vm::Operation for #ty {
             const NAME: &'static str = #name;
             const RECOVERY: ::yield_vm::Recovery = ::yield_vm::Recovery::#recovery;
-            #service_scope
             #rejection
         }
     })
@@ -124,7 +128,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 input.parse::<Token![=]>()?;
                 list::<TypePath>(input)
             }),
-            "services" => set(&mut services, &key, || attribute_value::<TypePath>(input)),
+            "services" => set(&mut services, &key, || service_fields(input)),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
     })
@@ -140,7 +144,6 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             }
         }
     });
-    let service_scope = services.as_ref().map(service_scope_const);
     let slots = extract_slots(&mut item)?;
     let empty = match &item.fields {
         syn::Fields::Unit => Some(quote!(Self)),
@@ -150,6 +153,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     };
     let decls = slot_decls(&slots);
     let ty = &item.ident;
+    let services = service_owner(ty, &item.vis, services.unwrap_or_default());
     let mut names = std::collections::HashSet::new();
     let mut constants = Vec::new();
     for (index, slot) in slots.iter().enumerate() {
@@ -172,6 +176,11 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let constants = (!constants.is_empty()).then(|| quote!(impl #ty { #(#constants)* }));
     let (mut default, mut encode, mut decode) = (None, None, None);
     if let Some(empty) = empty {
+        let owner = if ty == "__YieldOwner" {
+            Ident::new("__YieldOwner_", MacroSpan::mixed_site())
+        } else {
+            Ident::new("__YieldOwner", MacroSpan::mixed_site())
+        };
         let mut derives = BTreeSet::new();
         for attr in &item.attrs {
             if attr.path().is_ident("derive") {
@@ -187,15 +196,15 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         }
         default = (!derives.contains("Default")).then(|| quote!(#[derive(Default)]));
         encode = (!derives.contains("Encode")).then(|| quote! {
-            impl ::yield_vm::Encode for #ty {
-                fn encode(&self, _: &mut ::std::vec::Vec<u8>, _: &::yield_vm::Services) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
+            impl<#owner> ::yield_vm::Encode<#owner> for #ty {
+                fn encode(&self, _: &mut ::std::vec::Vec<u8>, _: &::yield_vm::Services<'_, #owner>) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
                     Ok(())
                 }
             }
         });
         decode = (!derives.contains("Decode")).then(|| quote! {
-            impl ::yield_vm::Decode for #ty {
-                fn decode(_: &mut &[u8], _: &::yield_vm::Services) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
+            impl<#owner> ::yield_vm::Decode<#owner> for #ty {
+                fn decode(_: &mut &[u8], _: &::yield_vm::Services<'_, #owner>) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
                     Ok(#empty)
                 }
             }
@@ -205,12 +214,12 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     Ok(quote! {
         #default
         #item
+        #services
         #constants
         impl ::yield_vm::HostModule for #ty {
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
             #dependencies
-            #service_scope
         }
         #encode
         #decode
@@ -226,102 +235,61 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .collect())
 }
 
-pub(super) fn service_scope_const(scope: &TypePath) -> TokenStream {
-    quote! {
-        const SERVICE_SCOPE: ::yield_vm::__macro_support::ServiceScope =
-            ::yield_vm::__macro_support::ServiceScope::of::<#scope<'static>>();
+pub(super) fn service_fields(input: ParseStream<'_>) -> Result<Vec<ServiceField>> {
+    input.parse::<Token![=]>()?;
+    let fields: Vec<ServiceField> = list(input)?;
+    let mut names = BTreeSet::new();
+    for field in &fields {
+        if !names.insert(field.name.unraw().to_string()) {
+            return Err(Error::new(field.name.span(), "duplicate service accessor"));
+        }
     }
+    Ok(fields)
 }
 
-struct ScopeField {
+pub(super) struct ServiceField {
     name: Ident,
     ty: Type,
-    optional: bool,
 }
 
-impl Parse for ScopeField {
+impl Parse for ServiceField {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let mut name: Ident = input.parse()?;
-        let optional = name == "optional" && !input.peek(Token![:]);
-        if optional {
-            name = input.parse()?;
-        }
+        let name = input.parse()?;
         input.parse::<Token![:]>()?;
         Ok(Self {
             name,
             ty: input.parse()?,
-            optional,
         })
     }
 }
 
-pub(super) struct ServiceScope {
-    vis: Visibility,
-    name: Ident,
-    fields: Vec<ScopeField>,
-}
-
-impl Parse for ServiceScope {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let vis = input.parse()?;
-        let name = input.parse()?;
-        let fields;
-        braced!(fields in input);
-        let fields = fields.parse_terminated(ScopeField::parse, Token![,])?;
-        Ok(Self {
-            vis,
-            name,
-            fields: fields.into_iter().collect(),
-        })
-    }
-}
-
-pub(super) fn service_scope(scope: ServiceScope) -> TokenStream {
-    let ServiceScope { vis, name, fields } = scope;
+pub(super) fn service_owner(
+    ty: &Ident,
+    vis: &Visibility,
+    fields: Vec<ServiceField>,
+) -> TokenStream {
     let lifetime = syn::Lifetime::new("'__yield_service", MacroSpan::mixed_site());
     let dependencies = fields.iter().map(|field| {
         let name = &field.name;
-        if field.optional {
-            quote!(::yield_vm::__macro_support::ServiceDependency::for_optional(Self::#name))
-        } else {
-            quote!(::yield_vm::__macro_support::ServiceDependency::for_required(Self::#name))
-        }
+        quote!(::yield_vm::__macro_support::ServiceDependency::of_accessor(Self::#name))
     });
-    let accessors = fields.iter().enumerate().map(|(index, field)| {
-        let ScopeField { name, ty, optional } = field;
-        if *optional {
-            quote! {
-                #vis fn #name(&self) -> ::core::option::Option<&#lifetime #ty> {
-                    // SAFETY: this index and type match the dependency table below.
-                    unsafe { self.0.get(#index) }
-                }
-            }
-        } else {
-            quote! {
-                #vis fn #name(&self) -> &#lifetime #ty {
-                    // SAFETY: the required dependency is resolved at link time.
-                    unsafe { self.0.get_required(#index) }
-                }
+    let accessors = fields.iter().enumerate().map(|(index, ServiceField { name, ty })| {
+        quote! {
+            #vis fn #name<#lifetime>(services: &::yield_vm::Services<#lifetime, Self>) -> &#lifetime #ty {
+                // SAFETY: metadata infers this return type from this accessor at the same index.
+                unsafe { services.__get(#index) }
             }
         }
     });
+    let accessors = (!fields.is_empty()).then(|| quote!(impl #ty { #(#accessors)* }));
     quote! {
-        #vis struct #name<#lifetime>(::yield_vm::__macro_support::BoundServices<#lifetime, #name<'static>>);
-
-        // SAFETY: the accessors use the same ordered fields and types as this table.
-        unsafe impl ::yield_vm::__macro_support::ServiceSet for #name<'static> {
-            const DEPENDENCIES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
+        // SAFETY: each accessor and its dependency share an index and type.
+        unsafe impl ::yield_vm::__macro_support::ServiceOwner for #ty {
+            const SERVICE_DEPENDENCIES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
                 #(#dependencies),*
             ];
         }
-
-        impl<#lifetime> #name<#lifetime> {
-            #vis fn bind(services: &::yield_vm::Services<#lifetime>) -> Self {
-                Self(services.bind::<#name<'static>>())
-            }
-
-            #(#accessors)*
-        }
+        #accessors
     }
 }
 
@@ -658,7 +626,7 @@ mod tests {
                 operations = [work::Wait,],
                 name = "counter",
                 classes = [crate::Point,],
-                services = crate::Timers,
+                services = [timers: crate::Timers],
             ),
         ] {
             host_module(args, item.clone()).unwrap();
@@ -685,11 +653,7 @@ mod tests {
         );
         for key in ["classes", "operations", "services"] {
             let ident = Ident::new(key, MacroSpan::call_site());
-            let value = if key == "services" {
-                quote!(Scope)
-            } else {
-                quote!([])
-            };
+            let value = quote!([]);
             diagnostic(
                 host_module(
                     quote!(name = "counter", #ident = #value, #ident = #value),
@@ -821,32 +785,74 @@ mod tests {
     }
 
     #[test]
-    fn operation_emits_service_scope() {
-        let output = operation(
-            quote!(name = "wait", recovery = pause, services = api::ClockScope),
-            quote!(
-                struct Wait;
+    fn owner_declarations_infer_service_type_from_accessor() {
+        let args = quote!(services = [clock: <Self as api::Config>::Clock, log: api::Log<Self>]);
+        for expanded in [
+            operation(
+                quote!(name = "wait", recovery = pause, #args),
+                quote!(
+                    pub struct Owner;
+                ),
             ),
-        )
-        .unwrap()
-        .to_string();
-        assert!(
-            output.contains(&quote!(ServiceScope::of::<api::ClockScope<'static>>()).to_string())
-        );
+            host_module(
+                quote!(name = "wait", #args),
+                quote!(
+                    pub struct Owner;
+                ),
+            ),
+            super::super::typed::host_class(
+                quote!(tag = "wait", #args),
+                quote!(
+                    pub struct Owner;
+                ),
+            ),
+        ] {
+            let output = expanded.unwrap().to_string();
+            assert!(output.contains("ServiceOwner for Owner"));
+            assert!(output.contains("of_accessor (Self :: clock)"));
+            assert!(output.contains("of_accessor (Self :: log)"));
+            assert!(output.contains("pub fn clock"));
+            assert_eq!(
+                output.matches("< Self as api :: Config > :: Clock").count(),
+                1
+            );
+            assert!(output.contains("services . __get (0usize)"));
+            assert!(output.contains("services . __get (1usize)"));
+        }
     }
 
     #[test]
-    fn class_emits_service_scope() {
-        let output = super::super::typed::host_class(
-            quote!(tag = "clock", services = api::ClockScope),
+    fn empty_module_has_an_owner_and_owner_generic_codecs() {
+        let output = host_module(
+            quote!(name = "empty"),
             quote!(
-                struct Clock;
+                struct Empty;
             ),
         )
         .unwrap()
         .to_string();
-        assert!(
-            output.contains(&quote!(ServiceScope::of::<api::ClockScope<'static>>()).to_string())
-        );
+        assert!(output.contains("ServiceOwner for Empty"));
+        assert!(!output.contains("of_accessor"));
+        for codec in ["Encode", "Decode"] {
+            assert!(output.contains(&format!("{codec} < __YieldOwner > for Empty")));
+        }
+    }
+
+    #[test]
+    fn rejects_optional_and_duplicate_accessors() {
+        for args in [
+            quote!(services = [optional log: Log]),
+            quote!(services = [log: Log, r#log: Log]),
+        ] {
+            assert!(
+                operation(
+                    quote!(name = "wait", recovery = pause, #args),
+                    quote!(
+                        struct Wait;
+                    )
+                )
+                .is_err()
+            );
+        }
     }
 }

@@ -196,15 +196,11 @@ impl TimerService for FakeClock {
     }
 }
 
-yield_vm::service_scope! {
-    TimerServices { clock: Arc<FakeClock> }
-}
-
 #[operation(
     name = "timer",
     recovery = resume,
     rejection = "timer unavailable",
-    services = TimerServices,
+    services = [clock: Arc<FakeClock>],
 )]
 #[derive(Encode, Decode)]
 pub struct Timer {
@@ -229,10 +225,10 @@ impl OperationDriver for Timer {
     fn start(
         &self,
         token: OperationToken,
-        services: &Services<'_>,
+        services: &Services<'_, Self>,
     ) -> Result<ArmedTimer, HostFault> {
         FakeClock::arm(
-            TimerServices::bind(services).clock(),
+            Self::clock(services),
             token,
             u64::from(self.remaining_ms),
             false,
@@ -243,10 +239,10 @@ impl OperationDriver for Timer {
     fn resume(
         &self,
         token: OperationToken,
-        services: &Services<'_>,
+        services: &Services<'_, Self>,
     ) -> Result<ArmedTimer, HostFault> {
         FakeClock::arm(
-            TimerServices::bind(services).clock(),
+            Self::clock(services),
             token,
             u64::from(self.remaining_ms),
             true,

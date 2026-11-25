@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = TestServices)]` 中的 `classes` 和 `operations` 可省略，默认为空列表；`services` 省略时没有服务依赖。模块、类和 operation 各声明自己使用的服务 scope。宏不扫描函数体，也不会因此新增 JS 导出。
+`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [counters: Rc<Counters>])]` 的三个列表均可省略。模块、类和 operation 各声明自己的必需服务；宏不扫描函数体，也不会因此新增 JS 导出。
 
 `host!` 接受 `dts`、`modules`、`services` 三段，或只有 `services`，返回 `Result<Host, String>`。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
@@ -190,17 +190,17 @@ this.pending(cx).push(callback);              // JsList 槽
 ### 5.4 非 JS payload 与 codec
 
 ```rust
-pub trait Encode {
-    fn encode(&self, out: &mut Vec<u8>, services: &Services) -> Result<(), CodecError>;
+pub trait Encode<Owner = ()> {
+    fn encode(&self, out: &mut Vec<u8>, services: &Services<'_, Owner>) -> Result<(), CodecError>;
 }
-pub trait Decode: Sized {
-    fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError>;
+pub trait Decode<Owner = ()>: Sized {
+    fn decode(input: &mut &[u8], services: &Services<'_, Owner>) -> Result<Self, CodecError>;
 }
 ```
 
 规则：
 
-- **服务提供能力，快照提供状态。** 编码与解码通过当前回调的 `&Services` 绑定声明的 scope，例如 `NodeServices::bind(services).factory()`。解码绝不能依赖「旧宿主里的节点 42」。
+- **服务提供能力，快照提供状态。** 手写 codec 可以用 `Decode<Node>` 和 `Node::factory(services)` 访问当前宿主的服务。派生 codec 将同一消费者的 `&Services<'_, Owner>` 传给嵌套字段。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
 - **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
@@ -208,19 +208,12 @@ pub trait Decode: Sized {
 
 `host!` 的 `services:` 段使用 `Type => value`。显式类型决定生成的字段类型并允许强制转换，例如把 `Arc<PlatformTimer>` 转成 `Arc<dyn TimerService>`。结构体整体擦除，`Host` 和 `Vm` 不带布局类型参数。同一宿主的确切 Rust 类型（含别名）只能注册一次，重复时报错。嵌入方通过 `host.bind_service::<T>()` 或 `vm.bind_service::<T>()` 在冷路径解析并借用服务；回调不使用此查询接口。
 
-`service_scope! { TestServices { counters: Rc<Counters>, optional labels: Rc<LabelService> } }` 生成命名访问器，通过 `services = TestServices` 声明在 `#[host_module]`、`#[host_class]` 或 `#[operation]` 上。链接将依赖按确切类型解析为该宿主布局的字段偏移；缺少必需服务时报声明名和服务类型，缺少可选服务则访问器返回 `None`。模块回调和状态 codec 用模块 scope；类方法和访问器（包括继承调用）及 payload codec 用声明类的 scope；operation 的启动、恢复和 checkpoint codec 用 operation 的 scope。VM 内建独立解析自己的可选服务。
+模块、类和 operation 在各自的属性宏里用 `services = [name: Type, …]` 声明依赖，生成 `Owner::name(services)` 访问器。所有依赖都必需；链接按确切类型解析到该宿主布局的字段偏移，缺失时报消费者名和服务类型。模块导出从 `ModuleCx::services()` 读取，类方法和访问器从 `ClassCx::services()` 读取声明类的服务（包括继承调用）。初始化、codec、operation 驱动则直接收到所属类型的服务视图。VM 内建独立解析自身可能缺席的宿主能力，不使用这套依赖声明。
 
-例如 `TestServices::bind(cx.services()).counters()` 返回的引用借自当前宿主，不占用对 `CallCx` 的借用。绑定可以在持有服务引用或借用守卫时用 `&mut CallCx` 分配对象或写入槽。`bind` 校验一次 scope 身份，之后各访问器只读取预解析的槽，不查类型表、不做 `Any` downcast。返回 `HostStep::Suspend` 后，续体须从新的 `CallCx` 重新绑定，不能保存本次调用的借用。
+例如 `Self::counters(cx.services())` 直接读取链接期解析的字段，不查类型表、不做 `Any` downcast。服务借用不占用对上下文的借用；可以持有它并用 `&mut CallCx` 分配对象或写槽。返回 `HostStep::Suspend` 后，不能保存本次调用的借用；续体从新的上下文取得服务。
 
 ```rust
-service_scope! {
-    TestServices {
-        counters: Rc<Counters>,
-        optional labels: Rc<LabelService>,
-    }
-}
-
-#[host_module(name = "test", services = TestServices)]
+#[host_module(name = "test", services = [counters: Rc<Counters>, labels: Rc<LabelService>])]
 struct TestModule;
 
 let host = host! {
@@ -272,7 +265,6 @@ impl CallCx {
     fn throw(&mut self, value: JsValue) -> JsError;        // 可捕获脚本异常
     fn fault(&mut self, message: &str) -> HostFault;       // 不可捕获，终止执行
     fn inspect(&self, value: JsValue) -> Inspect<'_>;      // 只读自有数据视图
-    fn services(&self) -> &Services<'a>;
     fn promise<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue>;
     fn cancel_task(&mut self, handle: &JsValue) -> JsResult<()>;
 }

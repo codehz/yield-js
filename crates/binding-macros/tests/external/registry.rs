@@ -7,7 +7,7 @@ use yield_vm::binding::CodecError;
 use yield_vm::{
     __macro_support::decode_operation, ConsoleEvent, ConsoleSink, Decode, Encode, Host, HostFault,
     HostModule, Operation, OperationDriver, OperationToken, Recovery, Registration, Services, host,
-    host_class, host_module, module_exports, operation, service_scope,
+    host_class, host_module, module_exports, operation,
 };
 
 fn fingerprint(host: Host) -> String {
@@ -17,11 +17,7 @@ fn fingerprint(host: Host) -> String {
         .binding_fingerprint
 }
 
-service_scope! {
-    StateServices { clock: Clock }
-}
-
-#[host_module(name = "state", operations = [Work], services = StateServices)]
+#[host_module(name = "state", operations = [Work], services = [clock: Clock])]
 #[derive(Encode, Decode)]
 struct State {
     #[js_slot]
@@ -51,7 +47,7 @@ impl Registration<Work> for Live {}
 impl OperationDriver for Work {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services<'_, Self>) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -108,7 +104,7 @@ impl Registration<ConflictingWork> for Live {}
 impl OperationDriver for ConflictingWork {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services<'_, Self>) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -272,13 +268,15 @@ fn registers_state_operation_and_services() -> Result<(), String> {
         },
     }?;
     assert_eq!(evaluations.get(), 1);
-    let empty = Services::default();
-    assert_eq!(
-        <State as yield_vm::FromServices>::from_services(&empty).count,
-        3
-    );
     let vm = start_vm(host, Default::default());
     assert_eq!(vm.bind_service::<ClockAlias>(), Some(&Clock(17)));
+    let snapshot = vm.snapshot(&[]).unwrap();
+    let state = snapshot
+        .module_states
+        .iter()
+        .find(|state| state.module == "state")
+        .expect("snapshot includes the linked module state");
+    assert_eq!(state.bytes.as_slice(), &[3]);
     assert_eq!(vm.bind_service::<OtherClock>(), Some(&OtherClock(23)));
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
@@ -361,36 +359,29 @@ impl Drop for AlignedService {
 
 struct Marker;
 
-service_scope! {
-    LayoutServices {
-        clock: Clock,
-        optional aligned: AlignedService,
-        optional marker: Marker,
-    }
-}
-
 #[host_module(name = "layout", operations = [ProbeLayout])]
 struct LayoutModule;
 
 #[module_exports]
 impl LayoutModule {}
 
-#[operation(name = "probe-layout", recovery = pause, services = LayoutServices)]
+#[operation(
+    name = "probe-layout",
+    recovery = pause,
+    services = [clock: Clock, aligned: AlignedService, marker: Marker],
+)]
 #[derive(Encode)]
 struct ProbeLayout;
 
-impl Decode for ProbeLayout {
-    fn decode(input: &mut &[u8], services: &Services<'_>) -> Result<Self, CodecError> {
+impl Decode<ProbeLayout> for ProbeLayout {
+    fn decode(input: &mut &[u8], services: &Services<'_, Self>) -> Result<Self, CodecError> {
         let clock = u64::decode(input, services)?;
-        let has_extras = bool::decode(input, services)?;
-        let scope = LayoutServices::bind(services);
-        assert_eq!(scope.clock(), &Clock(clock));
-        assert_eq!(scope.marker().is_some(), has_extras);
-        assert_eq!(scope.aligned().is_some(), has_extras);
-        if let Some(aligned) = scope.aligned() {
-            assert_eq!(std::ptr::from_ref(aligned).addr() % 128, 0);
-            assert_eq!(aligned.0.get(), 0);
-        }
+        assert_eq!(Self::clock(services), &Clock(clock));
+        let aligned = Self::aligned(services);
+        assert_eq!(std::ptr::from_ref(aligned).addr() % 128, 0);
+        assert_eq!(aligned.0.get(), clock as u32);
+        let marker = std::hint::black_box(Self::marker(services));
+        assert_eq!(std::mem::size_of_val(marker), 0);
         Ok(Self)
     }
 }
@@ -400,19 +391,21 @@ impl Registration<ProbeLayout> for () {}
 impl OperationDriver for ProbeLayout {
     type Live = ();
 
-    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<(), HostFault> {
+    fn start(&self, _: OperationToken, _: &Services<'_, Self>) -> Result<(), HostFault> {
         Ok(())
     }
 }
 
 #[test]
-fn resolves_the_same_scope_against_each_host_layout() -> Result<(), String> {
-    let drops = Rc::new(Cell::new(0));
+fn resolves_the_same_dependencies_against_each_host_layout() -> Result<(), String> {
+    let wide_drops = Rc::new(Cell::new(17));
+    let narrow_drops = Rc::new(Cell::new(23));
     let wide = host! {
         dts: "../dts/empty.d.ts",
         modules: [LayoutModule],
         services: {
-            AlignedService => AlignedService(Rc::clone(&drops)),
+            OtherClock => OtherClock(99),
+            AlignedService => AlignedService(Rc::clone(&wide_drops)),
             Marker => Marker,
             Clock => Clock(17),
         },
@@ -420,21 +413,44 @@ fn resolves_the_same_scope_against_each_host_layout() -> Result<(), String> {
     let narrow = host! {
         dts: "../dts/empty.d.ts",
         modules: [LayoutModule],
-        services: { Clock => Clock(23) },
+        services: {
+            Clock => Clock(23),
+            Marker => Marker,
+            AlignedService => AlignedService(Rc::clone(&narrow_drops)),
+        },
     }?;
-    let decode = |host: &Host, clock: u64, has_extras: bool| {
-        let mut bytes = Vec::new();
-        let empty = Services::default();
-        clock.encode(&mut bytes, &empty).unwrap();
-        has_extras.encode(&mut bytes, &empty).unwrap();
-        decode_operation(host, "probe-layout", &bytes).unwrap();
+    let decode = |host: &Host, clock: u64| {
+        decode_operation(host, "probe-layout", &clock.to_le_bytes()).unwrap();
     };
-    decode(&wide, 17, true);
-    decode(&narrow, 23, false);
-    decode(&wide, 17, true);
-    assert_eq!(drops.get(), 0);
+    decode(&wide, 17);
+    decode(&narrow, 23);
+    decode(&wide, 17);
+    assert_eq!(wide_drops.get(), 17);
+    assert_eq!(narrow_drops.get(), 23);
     drop(wide);
-    assert_eq!(drops.get(), 1);
-    decode(&narrow, 23, false);
+    assert_eq!(wide_drops.get(), 18);
+    decode(&narrow, 23);
+    drop(narrow);
+    assert_eq!(narrow_drops.get(), 24);
     Ok(())
+}
+
+#[test]
+fn rejects_a_missing_required_layout_service_during_linking() {
+    let missing = host! {
+        dts: "../dts/empty.d.ts",
+        modules: [LayoutModule],
+        services: {
+            Clock => Clock(17),
+            AlignedService => AlignedService(Rc::new(Cell::new(0))),
+        },
+    };
+    assert_eq!(
+        missing.err().unwrap(),
+        format!(
+            "host operation {:?}: missing host service {:?}",
+            "probe-layout",
+            type_name::<Marker>(),
+        ),
+    );
 }

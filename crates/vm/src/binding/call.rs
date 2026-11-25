@@ -291,10 +291,12 @@ pub fn with_module<'a, M: HostModule>(
             Err(JsError::fault("module state payload type mismatch")),
         );
     }
+    // SAFETY: the module declaration above was checked to belong to M.
+    let services = unsafe { call.bindings.state_services(module).for_owner::<M>() };
     let mut cx = ModuleCx {
         call,
         module,
-        marker: std::marker::PhantomData,
+        services,
     };
     let result = run(&mut cx);
     (cx.call, result)
@@ -304,7 +306,7 @@ pub fn with_module<'a, M: HostModule>(
 pub struct ModuleCx<'a, M: HostModule> {
     call: CallCx<'a>,
     module: usize,
-    marker: std::marker::PhantomData<M>,
+    services: Services<'a, M>,
 }
 
 impl<'a, M: HostModule> std::ops::Deref for ModuleCx<'a, M> {
@@ -318,6 +320,13 @@ impl<'a, M: HostModule> std::ops::Deref for ModuleCx<'a, M> {
 impl<M: HostModule> std::ops::DerefMut for ModuleCx<'_, M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.call
+    }
+}
+
+impl<'a, M: HostModule> ModuleCx<'a, M> {
+    /// The required services declared by this module.
+    pub fn services(&self) -> &Services<'a, M> {
+        &self.services
     }
 }
 
@@ -386,11 +395,49 @@ impl<M: HostModule> ModuleCx<'_, M> {
     }
 }
 
+/// A class callback with access to the declaring class's linked services.
+pub struct ClassCx<'call, 'a, C: HostClass> {
+    call: &'call mut CallCx<'a>,
+    services: Services<'a, C>,
+}
+
+impl<'a, C: HostClass> ClassCx<'_, 'a, C> {
+    pub fn services(&self) -> &Services<'a, C> {
+        &self.services
+    }
+}
+
+impl<'a, C: HostClass> std::ops::Deref for ClassCx<'_, 'a, C> {
+    type Target = CallCx<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.call
+    }
+}
+
+impl<C: HostClass> std::ops::DerefMut for ClassCx<'_, '_, C> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.call
+    }
+}
+
+#[doc(hidden)]
+pub fn with_class<'a, C: HostClass, R>(
+    call: &mut CallCx<'a>,
+    run: impl FnOnce(&mut ClassCx<'_, 'a, C>) -> JsResult<R>,
+) -> JsResult<R> {
+    let services = call
+        .bindings
+        .class_callback_services::<C>(call.owner)
+        .ok_or_else(|| JsError::fault("class callback owner mismatch"))?;
+    run(&mut ClassCx { call, services })
+}
+
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
     pub(crate) bindings: &'a Bindings,
-    pub(crate) services: Services<'a>,
+    pub(crate) owner: NativeTarget,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
     pub(crate) args: Vec<JsValue>,
@@ -651,12 +698,6 @@ impl<'a> CallCx<'a> {
         crate::ops::same_value(&left.value, &right.value)
     }
 
-    /// The declaring module or class's services for this activation.
-    /// Typed accessors borrow the host independently of the context borrow.
-    pub fn services(&self) -> &Services<'a> {
-        &self.services
-    }
-
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {
         let class = self
             .bindings
@@ -762,8 +803,10 @@ impl<'a> CallCx<'a> {
             .operation_index::<O>()
             .map_err(JsError::Fault)?;
         let mut bytes = Vec::new();
+        // SAFETY: operation_index validated the declared Rust type.
+        let services = unsafe { self.bindings.typed_operation_services::<O>(declaration) };
         state
-            .encode(&mut bytes, &self.bindings.operation_services(declaration))
+            .encode(&mut bytes, &services)
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
         Ok((declaration, bytes))
     }
@@ -827,10 +870,11 @@ impl<'a> CallCx<'a> {
                 crate::snapshot::DeliveryTarget::Promise(promise),
                 signal,
                 |token, bindings, _| {
-                    Ok(Box::new(TypedRegistration::<O>(state.start(
-                        token,
-                        &bindings.operation_services(declaration),
-                    )?)))
+                    // SAFETY: encode_operation checked O against this declaration.
+                    let services = unsafe { bindings.typed_operation_services::<O>(declaration) };
+                    Ok(Box::new(TypedRegistration::<O>(
+                        state.start(token, &services)?,
+                    )))
                 },
             )
             .map_err(JsError::Fault)?;

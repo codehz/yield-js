@@ -164,7 +164,7 @@ impl yield_vm::OperationDriver for MixedWork {
     fn start(
         &self,
         _: yield_vm::OperationToken,
-        _: &Services<'_>,
+        _: &Services<'_, Self>,
     ) -> Result<(), yield_vm::HostFault> {
         Ok(())
     }

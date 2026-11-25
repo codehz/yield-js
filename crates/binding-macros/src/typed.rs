@@ -12,11 +12,21 @@ use syn::{
     spanned::Spanned,
 };
 
-use super::state_machine;
+use super::{registry, state_machine};
 
 fn options(tokens: TokenStream, allowed: &[&str]) -> Result<HashMap<String, Meta>> {
+    checked_options(
+        Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)?,
+        allowed,
+    )
+}
+
+fn checked_options(
+    metas: impl IntoIterator<Item = Meta>,
+    allowed: &[&str],
+) -> Result<HashMap<String, Meta>> {
     let mut options = HashMap::new();
-    for meta in Punctuated::<Meta, Token![,]>::parse_terminated.parse2(tokens)? {
+    for meta in metas {
         let key = meta.path().get_ident().map(ToString::to_string);
         let Some(key) = key.filter(|key| allowed.contains(&key.as_str())) else {
             return Err(Error::new_spanned(meta.path(), "unknown attribute option"));
@@ -164,14 +174,20 @@ fn lower_binding(
         .then_some((spawn, prefix))
     });
     let Some((spawn, prefix)) = spawn else {
-        if let Some(module) = module.filter(|_| sig.asyncness.is_some()) {
-            if kind != "function" {
+        if sig.asyncness.is_some()
+            && (module.is_some() || class.is_some_and(|_| has_class_context(sig)))
+        {
+            if !matches!(kind, "function" | "method") {
                 return Err(Error::new_spanned(
                     sig,
                     "async is only supported on #[function] and #[method]",
                 ));
             }
-            let (body, stages) = state_machine::lower_module(sig, &[], block, module, false)?;
+            let (body, stages) = if let Some(module) = module {
+                state_machine::lower_module(sig, &[], block, module, false)?
+            } else {
+                state_machine::lower_class(sig, block, class.expect("class context"))?
+            };
             *block = syn::parse2(body)?;
             sig.asyncness = None;
             let call = call(sig)?;
@@ -247,9 +263,16 @@ enum Output {
     Step,
 }
 
+pub(super) fn has_class_context(sig: &Signature) -> bool {
+    matches!(sig.inputs.first(), Some(FnArg::Typed(first))
+        if matches!(first.ty.as_ref(), Type::Reference(reference)
+            if last(&reference.elem).is_some_and(|segment| segment.ident == "ClassCx")))
+}
+
 struct Call {
     optional: Vec<bool>,
     output: Output,
+    class_context: bool,
 }
 
 impl Call {
@@ -272,8 +295,11 @@ impl Call {
                 "Rust self receivers are not supported; use This<Class>",
             )),
         });
+        let class_context = receiver.is_some() && has_class_context(sig);
         let expected = if module {
             "first parameter must be &mut ModuleCx<'_, Self>"
+        } else if receiver.is_some() {
+            "first parameter must be &mut CallCx<'_> or &mut ClassCx<'_, '_, Self>"
         } else {
             "first parameter must be &mut CallCx<'_>"
         };
@@ -283,11 +309,20 @@ impl Call {
         let valid_cx = match cx {
             Type::Reference(reference) if reference.mutability.is_some() && reference.lifetime.is_none() => {
                 last(&reference.elem).is_some_and(|segment| {
-                    segment.ident == if module { "ModuleCx" } else { "CallCx" }
+                    let (name, lifetimes) = if module {
+                        ("ModuleCx", 1)
+                    } else if class_context {
+                        ("ClassCx", 2)
+                    } else {
+                        ("CallCx", 1)
+                    };
+                    let owner = module || class_context;
+                    segment.ident == name
                         && matches!(&segment.arguments, PathArguments::AngleBracketed(args)
-                            if args.args.len() == if module { 2 } else { 1 }
-                            && matches!(args.args.first(), Some(GenericArgument::Lifetime(lt)) if lt.ident == "_")
-                            && (!module || matches!(args.args.last(), Some(GenericArgument::Type(ty)) if simple(ty, "Self"))))
+                            if args.args.len() == lifetimes + usize::from(owner)
+                            && args.args.iter().take(lifetimes).all(|arg| matches!(arg, GenericArgument::Lifetime(lt) if lt.ident == "_"))
+                            && (!owner || matches!(args.args.last(), Some(GenericArgument::Type(ty))
+                                if simple(ty, "Self") || (class_context && receiver.is_some_and(|class| same_type(ty, class))))))
                 })
             }
             _ => false,
@@ -350,7 +385,11 @@ impl Call {
                 ));
             }
         };
-        Ok(Self { optional, output })
+        Ok(Self {
+            optional,
+            output,
+            class_context,
+        })
     }
 
     fn signature(&self) -> TokenStream {
@@ -399,6 +438,12 @@ impl Call {
                 }
             });
         let call = quote!(#target(cx, #pass_this #(#names),*));
+        let call = if self.class_context {
+            let class = receiver.expect("class context has a receiver");
+            quote!(::yield_vm::__macro_support::with_class::<#class, _>(cx, |cx| #call))
+        } else {
+            call
+        };
         let result = match &self.output {
             Output::Value if body_returns_step => call,
             Output::Value => quote!(#call.map(::yield_vm::HostStep::Return)),
@@ -1245,31 +1290,31 @@ fn slot_trait(item: &ItemStruct, slots: &[Slot]) -> Result<TokenStream> {
 pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut item: ItemStruct = syn::parse2(item)?;
     generics(&item.generics)?;
-    let opts = options(
-        args,
-        &[
-            "tag",
-            "methods",
-            "parent",
-            "event_target",
-            "event_parent",
-            "services",
-        ],
-    )?;
+    let (opts, fields) = (|input: ParseStream<'_>| {
+        let mut opts = Vec::new();
+        let mut fields = None;
+        while !input.is_empty() {
+            let key = input.fork().call(Ident::parse_any)?;
+            if key == "services" {
+                input.call(Ident::parse_any)?;
+                registry::set(&mut fields, &key, || registry::service_fields(input))?;
+            } else {
+                opts.push(input.parse::<Meta>()?);
+            }
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        let opts = checked_options(
+            opts,
+            &["tag", "methods", "parent", "event_target", "event_parent"],
+        )?;
+        Ok((opts, fields.unwrap_or_default()))
+    })
+    .parse2(args)?;
     let span = item.ident.span();
     let tag = string(required(&opts, "tag", span)?)?;
-    let service_scope = opts
-        .get("services")
-        .map(|meta| {
-            let Expr::Path(expr) = value(meta)? else {
-                return Err(Error::new_spanned(meta, "expected a service scope path"));
-            };
-            Ok(super::registry::service_scope_const(&syn::TypePath {
-                qself: expr.qself.clone(),
-                path: expr.path.clone(),
-            }))
-        })
-        .transpose()?;
+    let services = registry::service_owner(&item.ident, &item.vis, fields);
     let parent = opts.get("parent").map(path).transpose()?.map(|parent| {
         quote! {
             const PARENT: Option<&'static str> = Some(<#parent as ::yield_vm::HostClass>::TAG);
@@ -1326,11 +1371,11 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     let class = &item.ident;
     Ok(quote! {
         #item
+        #services
         #helpers
         impl ::yield_vm::HostClass for #class {
             const TAG: &'static str = #tag;
             const SLOTS: &'static [::yield_vm::binding::SlotDecl] = #declarations;
-            #service_scope
             #parent
             #event_target
             #event_parent

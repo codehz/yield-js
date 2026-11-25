@@ -18,10 +18,6 @@ use yield_vm::{
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
 
-yield_vm::service_scope! {
-    StrategyServices { labels: Rc<LabelService> }
-}
-
 macro_rules! label_driver {
     ($operation:ty, $wire:tt) => {
         impl OperationDriver for $operation {
@@ -30,21 +26,17 @@ macro_rules! label_driver {
             fn start(
                 &self,
                 token: OperationToken,
-                services: &Services<'_>,
+                services: &Services<'_, Self>,
             ) -> Result<Self::Live, HostFault> {
-                StrategyServices::bind(services)
-                    .labels()
-                    .register($wire.to_owned(), token, false)
+                <$operation>::labels(services).register($wire.to_owned(), token, false)
             }
 
             fn resume(
                 &self,
                 token: OperationToken,
-                services: &Services<'_>,
+                services: &Services<'_, Self>,
             ) -> Result<Self::Live, HostFault> {
-                StrategyServices::bind(services)
-                    .labels()
-                    .register($wire.to_owned(), token, true)
+                <$operation>::labels(services).register($wire.to_owned(), token, true)
             }
         }
     };
@@ -55,7 +47,7 @@ mod strategy_fixture {
 
     macro_rules! strategy_operation {
         ($name:ident, $wire:tt, $recovery:ident, $message:tt) => {
-            #[operation(name = $wire, recovery = $recovery, rejection = $message, services = StrategyServices)]
+            #[operation(name = $wire, recovery = $recovery, rejection = $message, services = [labels: Rc<LabelService>])]
             #[derive(Encode, Decode)]
             struct $name;
 
@@ -393,26 +385,21 @@ mod stale_fixture {
 
     type Stash = Rc<RefCell<Option<JsValue>>>;
 
-    yield_vm::service_scope! {
-        StaleServices { stash: Stash }
-    }
-
-    #[host_module(name = "stale", classes = [Sink], services = StaleServices)]
+    #[host_module(name = "stale", classes = [Sink], services = [stash_service: Stash])]
     struct Stale;
 
     #[module_exports]
     impl Stale {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<()> {
-            let stash = StaleServices::bind(cx.services()).stash();
+            let stash = Self::stash_service(cx.services());
             *stash.borrow_mut() = Some(value);
             Ok(())
         }
 
         #[function(name = "unstash")]
         fn unstash(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Sink>> {
-            let value = StaleServices::bind(cx.services())
-                .stash()
+            let value = Self::stash_service(cx.services())
                 .borrow()
                 .clone()
                 .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
@@ -461,11 +448,7 @@ mod guest_call_fixture {
 
     type Stash = Mutex<Option<HostStep>>;
 
-    yield_vm::service_scope! {
-        GuestServices { stash: Stash, runs: Rc<Cell<usize>> }
-    }
-
-    #[host_module(name = "guest", services = GuestServices)]
+    #[host_module(name = "guest", services = [stash_service: Stash, runs: Rc<Cell<usize>>])]
     struct Guest;
 
     #[module_exports]
@@ -484,21 +467,20 @@ mod guest_call_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, callee: JsValue) -> JsResult<()> {
             let request = Self::later(cx, callee)?;
-            *GuestServices::bind(cx.services()).stash().lock().unwrap() = Some(request);
+            *Self::stash_service(cx.services()).lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "stashGc")]
         fn stash_gc(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             let request = cx.request_gc(vec![], unexpected_resume)?;
-            *GuestServices::bind(cx.services()).stash().lock().unwrap() = Some(request);
+            *Self::stash_service(cx.services()).lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "replay")]
         fn replay(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
-            Ok(GuestServices::bind(cx.services())
-                .stash()
+            Ok(Self::stash_service(cx.services())
                 .lock()
                 .unwrap()
                 .take()
@@ -512,7 +494,7 @@ mod guest_call_fixture {
 
         #[function(name = "mark")]
         fn mark(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
-            let runs = GuestServices::bind(cx.services()).runs();
+            let runs = Self::runs(cx.services());
             runs.set(runs.get() + 1);
             Ok(())
         }
@@ -762,27 +744,30 @@ mod counter_fixture {
         pub(super) initialized: Cell<usize>,
     }
 
-    yield_vm::service_scope! {
-        PayloadServices { payload: Rc<PayloadService> }
-    }
-
     struct ServiceField(u32);
 
-    impl Encode for ServiceField {
-        fn encode(&self, out: &mut Vec<u8>, services: &Services<'_>) -> Result<(), CodecError> {
-            let service = PayloadServices::bind(services).payload();
+    impl Encode<ServiceCounter> for ServiceField {
+        fn encode(
+            &self,
+            out: &mut Vec<u8>,
+            services: &Services<'_, ServiceCounter>,
+        ) -> Result<(), CodecError> {
+            let service = ServiceCounter::payload(services);
             (self.0 + service.offset).encode(out, services)
         }
     }
 
-    impl Decode for ServiceField {
-        fn decode(input: &mut &[u8], services: &Services<'_>) -> Result<Self, CodecError> {
-            let service = PayloadServices::bind(services).payload();
+    impl Decode<ServiceCounter> for ServiceField {
+        fn decode(
+            input: &mut &[u8],
+            services: &Services<'_, ServiceCounter>,
+        ) -> Result<Self, CodecError> {
+            let service = ServiceCounter::payload(services);
             Ok(Self(u32::decode(input, services)? + service.offset))
         }
     }
 
-    #[host_module(name = "counter", services = PayloadServices)]
+    #[host_module(name = "counter", services = [payload: Rc<PayloadService>])]
     #[derive(Encode, Decode)]
     struct ServiceCounter {
         count: ServiceField,
@@ -791,8 +776,8 @@ mod counter_fixture {
     }
 
     impl FromServices for ServiceCounter {
-        fn from_services(services: &Services<'_>) -> Self {
-            let service = PayloadServices::bind(services).payload();
+        fn from_services(services: &Services<'_, Self>) -> Self {
+            let service = Self::payload(services);
             service.initialized.set(service.initialized.get() + 1);
             Self {
                 count: ServiceField(service.initial),
@@ -1097,13 +1082,13 @@ fn linking_harness_operations_requires_driver_services() {
 mod inherit_fixture {
     use super::*;
 
-    #[operation(name = "inherit-wait", recovery = resume, services = StrategyServices)]
+    #[operation(name = "inherit-wait", recovery = resume, services = [labels: Rc<LabelService>])]
     #[derive(Encode, Decode)]
     struct InheritWait;
 
     label_driver!(InheritWait, "inherit-wait");
 
-    #[host_class(tag = "Base", methods)]
+    #[host_class(tag = "Base", methods, services = [offset: u8])]
     #[derive(Encode, Decode)]
     struct Base {
         payload_value: u8,
@@ -1118,6 +1103,22 @@ mod inherit_fixture {
         #[method(name = "read")]
         fn read(cx: &mut CallCx<'_>, this: This<Base>) -> JsResult<JsValue> {
             this.base(cx)
+        }
+
+        #[method(name = "readAfter")]
+        async fn read_after(
+            cx: &mut yield_vm::ClassCx<'_, '_, Self>,
+            this: This<Self>,
+            callback: JsValue,
+        ) -> JsResult<HostStep> {
+            let outcome = cx.call(callback, JsValue::undefined(), Vec::new()).await;
+            if let GuestOutcome::Thrown(value) = outcome {
+                return Err(JsError::Throw(value));
+            }
+            if *Self::offset(cx.services()) != 40 {
+                return Err(cx.type_error("unexpected base class service"));
+            }
+            Ok(HostStep::Return(this.base(cx)?))
         }
 
         #[method(name = "readPayload")]
@@ -1208,6 +1209,7 @@ mod inherit_fixture {
             modules: [Inherit],
             services: {
                 Rc<LabelService> => Rc::clone(labels),
+                u8 => 40,
             },
         }
         .expect("derived bindings")
@@ -1236,6 +1238,7 @@ export async function run() {
   assert(forged);
   assert(derived.value() === 2);
   assert(base.read() === 1);
+  assert(derived.readAfter(() => 0) === derived.field);
   assert(base instanceof Base);
   assert(derived instanceof Base);
   assert(derived instanceof Derived);

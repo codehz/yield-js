@@ -13,68 +13,30 @@ use crate::host::{
 
 const MISSING: usize = usize::MAX;
 
-/// The service dependencies of a module, class, or operation.
-#[doc(hidden)]
-#[derive(Clone, Copy)]
-pub struct ServiceScope {
-    owner: Option<TypeId>,
-    dependencies: &'static [ServiceDependency],
-}
-
-impl ServiceScope {
-    pub(crate) const EMPTY: Self = Self {
-        owner: None,
-        dependencies: &[],
-    };
-
-    pub const fn of<S: ServiceSet>() -> Self {
-        Self {
-            owner: Some(TypeId::of::<S>()),
-            dependencies: S::DEPENDENCIES,
-        }
-    }
-}
-
+/// The single ordered dependency declaration for a host binding type.
+///
 /// # Safety
-/// The dependency at each generated accessor's index must have the exact
-/// accessor type and requiredness. A set's type identifies that one ordered
-/// dependency list.
+/// Each generated accessor must use the slot matching its exact return type.
 #[doc(hidden)]
-pub unsafe trait ServiceSet: 'static {
-    const DEPENDENCIES: &'static [ServiceDependency];
+pub unsafe trait ServiceOwner: 'static {
+    const SERVICE_DEPENDENCIES: &'static [ServiceDependency];
 }
 
 #[doc(hidden)]
 pub struct ServiceDependency {
     type_id: TypeId,
     type_name: fn() -> &'static str,
-    required: bool,
 }
 
 impl ServiceDependency {
-    pub const fn required<T: Any>() -> Self {
-        Self {
-            required: true,
-            ..Self::optional::<T>()
-        }
-    }
-
-    pub const fn optional<T: Any>() -> Self {
+    // Infer the type from the accessor instead of expanding its type twice.
+    pub const fn of_accessor<Owner, T: Any>(
+        _: fn(&Services<'static, Owner>) -> &'static T,
+    ) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
             type_name: type_name::<T>,
-            required: false,
         }
-    }
-
-    // Infer the type from the accessor so its declaration and this metadata
-    // cannot disagree, even if its return type comes from another macro.
-    pub const fn for_required<S, T: Any>(_: fn(&S) -> &'static T) -> Self {
-        Self::required::<T>()
-    }
-
-    pub const fn for_optional<S, T: Any>(_: fn(&S) -> Option<&'static T>) -> Self {
-        Self::optional::<T>()
     }
 }
 
@@ -152,20 +114,18 @@ impl ServiceStorage {
         Some(unsafe { project(base(self.layout.as_ref()), offset) })
     }
 
-    pub(crate) fn resolve(&self, scope: ServiceScope) -> Result<ResolvedServices, &'static str> {
-        let offsets = scope
-            .dependencies
-            .iter()
-            .map(|dependency| match self.offset(dependency.type_id) {
-                Some(offset) => Ok(offset),
-                None if dependency.required => Err((dependency.type_name)()),
-                None => Ok(MISSING),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ResolvedServices {
-            owner: scope.owner,
-            offsets,
-        })
+    pub(crate) fn resolve(
+        &self,
+        dependencies: &[ServiceDependency],
+    ) -> Result<ResolvedServices, &'static str> {
+        let mut offsets = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            offsets.push(
+                self.offset(dependency.type_id)
+                    .ok_or_else(dependency.type_name)?,
+            );
+        }
+        Ok(ResolvedServices(offsets))
     }
 
     /// # Safety
@@ -173,21 +133,16 @@ impl ServiceStorage {
     pub(crate) unsafe fn view<'a>(&'a self, resolved: &'a ResolvedServices) -> Services<'a> {
         Services {
             layout: self.layout.as_ref(),
-            resolved,
+            offsets: &resolved.0,
+            owner: PhantomData,
         }
     }
 }
 
-pub(crate) struct ResolvedServices {
-    owner: Option<TypeId>,
-    offsets: Vec<usize>,
-}
+pub(crate) struct ResolvedServices(Vec<usize>);
 
 impl ResolvedServices {
-    pub(crate) const EMPTY: Self = Self {
-        owner: None,
-        offsets: Vec::new(),
-    };
+    pub(crate) const EMPTY: Self = Self(Vec::new());
 }
 
 // Built-in consumers have a closed, fixed set of optional offsets. Keep it
@@ -239,69 +194,51 @@ builtin_services! {
     user_agent: UserAgent,
 }
 
-/// The already-resolved service dependencies for the current callback.
-/// Obtain typed accessors with the scope declared on that callback's owner.
-#[derive(Clone, Copy)]
-pub struct Services<'a> {
+/// The linked services for `Owner`. Accessors are generated next to its declaration.
+pub struct Services<'a, Owner = ()> {
     layout: &'a dyn Any,
-    resolved: &'a ResolvedServices,
+    offsets: &'a [usize],
+    owner: PhantomData<fn(Owner) -> Owner>,
+}
+
+impl<Owner> Copy for Services<'_, Owner> {}
+
+impl<Owner> Clone for Services<'_, Owner> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl Default for Services<'_> {
     fn default() -> Self {
-        const EMPTY: &ResolvedServices = &ResolvedServices::EMPTY;
         Self {
             layout: &(),
-            resolved: EMPTY,
+            offsets: &[],
+            owner: PhantomData,
         }
     }
 }
 
 impl<'a> Services<'a> {
+    /// # Safety
+    /// The view must have been linked from `Owner::SERVICE_DEPENDENCIES`.
+    pub(crate) unsafe fn for_owner<Owner: ServiceOwner>(self) -> Services<'a, Owner> {
+        Services {
+            layout: self.layout,
+            offsets: self.offsets,
+            owner: PhantomData,
+        }
+    }
+}
+
+impl<'a, Owner: ServiceOwner> Services<'a, Owner> {
+    /// # Safety
+    /// `index` must be the declared slot for `T` in `Owner`.
     #[doc(hidden)]
     #[inline]
-    pub fn bind<S: ServiceSet>(&self) -> BoundServices<'a, S> {
-        assert_eq!(
-            self.resolved.owner,
-            Some(TypeId::of::<S>()),
-            "wrong host service scope"
-        );
-        // SAFETY: the resolved descriptor has just been checked to belong to S.
-        BoundServices {
-            base: base(self.layout),
-            offsets: &self.resolved.offsets,
-            scope: PhantomData,
-        }
-    }
-}
-
-/// Typed proof of a scope bound to one particular host allocation.
-#[doc(hidden)]
-pub struct BoundServices<'a, S> {
-    base: *const u8,
-    offsets: &'a [usize],
-    scope: PhantomData<fn(S) -> S>,
-}
-
-impl<'a, S: ServiceSet> BoundServices<'a, S> {
-    /// # Safety
-    /// `index` must be a dependency on `T` in `S`.
-    pub unsafe fn get<T: Any>(&self, index: usize) -> Option<&'a T> {
-        let offset = unsafe { *self.offsets.get_unchecked(index) };
-        if offset == MISSING {
-            None
-        } else {
-            // SAFETY: the slot is for T and was resolved against this layout.
-            Some(unsafe { project(self.base, offset) })
-        }
-    }
-
-    /// # Safety
-    /// `index` must be a required dependency on `T` in `S`.
-    pub unsafe fn get_required<T: Any>(&self, index: usize) -> &'a T {
-        let offset = unsafe { *self.offsets.get_unchecked(index) };
-        // SAFETY: linking rejects a missing required slot; this slot is for T.
-        unsafe { project(self.base, offset) }
+    pub unsafe fn __get<T: Any>(&self, index: usize) -> &'a T {
+        // SAFETY: linking populated this required slot for T in this layout.
+        unsafe { project(base(self.layout), *self.offsets.get_unchecked(index)) }
     }
 }
 

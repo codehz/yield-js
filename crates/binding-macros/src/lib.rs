@@ -52,16 +52,6 @@ pub fn module_exports(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(typed::module_exports(args.into(), item.into()))
 }
 
-/// Declares the named, typed services available to a host binding.
-///
-/// `service_scope! { MyServices { clock: Clock, optional log: Log } }`
-/// generates named accessors. Declare `services = MyServices` on the module,
-/// class, or operation, then call `MyServices::bind(services)` in its callback.
-#[proc_macro]
-pub fn service_scope(input: TokenStream) -> TokenStream {
-    expand(syn::parse(input).map(registry::service_scope))
-}
-
 /// Links host modules, classes, operations and services into a host.
 ///
 /// A nonempty `modules` section requires `dts`. Omit both sections for a

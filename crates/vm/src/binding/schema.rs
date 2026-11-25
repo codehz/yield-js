@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use super::services::{
-    BuiltinOffsets, BuiltinServices, ResolvedServices, ServiceScope, ServiceStorage, Services,
+    BuiltinOffsets, BuiltinServices, ResolvedServices, ServiceDependency, ServiceOwner,
+    ServiceStorage, Services,
 };
 use crate::digest::Digest;
 use crate::host::Host;
@@ -487,7 +488,7 @@ impl AccessorCall {
 
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
 /// hidden typed slots, and an optional non-JS payload.
-pub trait HostClass: Sized + 'static {
+pub trait HostClass: ServiceOwner + Sized {
     const TAG: &'static str;
     /// Tag of the class whose prototype and slot layout this class extends.
     /// A derived instance is accepted by base-class methods, and base slots
@@ -504,8 +505,6 @@ pub trait HostClass: Sized + 'static {
     const SLOTS: &'static [SlotDecl] = &[];
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
-    #[doc(hidden)]
-    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
     #[doc(hidden)]
     // Payload bytes never contain VM object ids; JavaScript references belong in slots.
     const CODEC: Option<ClassCodec> = None;
@@ -526,22 +525,19 @@ pub enum Recovery {
 
 /// Construct fresh host module state using the services of the new VM.
 pub trait FromServices: Sized {
-    fn from_services(services: &Services) -> Self;
+    fn from_services(services: &Services<'_, Self>) -> Self;
 }
 
 impl<T: Default> FromServices for T {
-    fn from_services(_: &Services) -> Self {
+    fn from_services(_: &Services<'_, Self>) -> Self {
         Self::default()
     }
 }
 
 /// The name, VM-managed slots, and service dependencies of a host module.
-pub trait HostModule: FromServices + Encode + Decode + 'static {
+pub trait HostModule: ServiceOwner + FromServices + Encode<Self> + Decode<Self> {
     const NAME: &'static str;
     const SLOTS: &'static [SlotDecl] = &[];
-
-    #[doc(hidden)]
-    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
 
     #[doc(hidden)]
     fn register_dependencies(_deps: &mut __macro_support::ModuleDependencies) {}
@@ -556,12 +552,10 @@ pub trait ModuleExports: HostModule {
 }
 
 /// One recoverable asynchronous operation type.
-pub trait Operation: Encode + Decode + 'static {
+pub trait Operation: ServiceOwner + Encode<Self> + Decode<Self> {
     const NAME: &'static str;
     const RECOVERY: Recovery;
     const REJECTION: &'static str = "operation rejected during restore";
-    #[doc(hidden)]
-    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
 }
 
 /// Capability handed to the host when an operation starts. A restored VM has a
@@ -583,9 +577,17 @@ impl OperationToken {
 pub trait OperationDriver: Operation {
     type Live: Registration<Self>;
 
-    fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault>;
+    fn start(
+        &self,
+        token: OperationToken,
+        services: &Services<'_, Self>,
+    ) -> Result<Self::Live, HostFault>;
 
-    fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+    fn resume(
+        &self,
+        token: OperationToken,
+        services: &Services<'_, Self>,
+    ) -> Result<Self::Live, HostFault> {
         self.start(token, services)
     }
 }
@@ -601,7 +603,9 @@ pub trait Registration<O: Operation>: 'static {
 
 /// Erased platform registration; dropping it cancels the registration.
 pub trait LiveRegistration: 'static {
-    fn checkpoint(
+    /// # Safety
+    /// The services must come from the operation declaration that started this registration.
+    unsafe fn checkpoint(
         &self,
         original: &[u8],
         out: &mut Vec<u8>,
@@ -615,15 +619,17 @@ pub trait LiveRegistration: 'static {
 pub(crate) struct TypedRegistration<O: OperationDriver>(pub(crate) O::Live);
 
 impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
-    fn checkpoint(
+    unsafe fn checkpoint(
         &self,
         original: &[u8],
         out: &mut Vec<u8>,
         services: &Services,
     ) -> Result<(), HostFault> {
         if let Some(state) = self.0.checkpoint()? {
+            // SAFETY: the caller pairs this registration with its operation declaration.
+            let services = unsafe { services.for_owner::<O>() };
             state
-                .encode(out, services)
+                .encode(out, &services)
                 .map_err(|error| HostFault(error.0))?;
         } else {
             out.extend_from_slice(original);
@@ -641,20 +647,27 @@ type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Services) -> Result<(), CodecError>;
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct ClassCodec {
+    owner: TypeId,
     decode: DecodeFn,
     encode: EncodeFn,
 }
 
 impl ClassCodec {
     #[doc(hidden)]
-    pub const fn of<T: Encode + Decode + 'static>() -> Self {
+    pub const fn of<T: HostClass + Encode<T> + Decode<T>>() -> Self {
         Self {
-            decode: |input, services| Ok(Box::new(decode_exact::<T>(input, services)?)),
+            owner: TypeId::of::<T>(),
+            decode: |input, services| {
+                // SAFETY: linking checks that the codec belongs to its class.
+                let services = unsafe { services.for_owner::<T>() };
+                Ok(Box::new(decode_exact::<T, T>(input, &services)?))
+            },
             encode: |payload, out, services| {
                 let payload = payload
                     .downcast_ref::<T>()
                     .ok_or_else(|| CodecError::new("payload type mismatch"))?;
-                payload.encode(out, services)
+                // SAFETY: linking checks that the codec belongs to its class.
+                payload.encode(out, &unsafe { services.for_owner::<T>() })
             },
         }
     }
@@ -678,7 +691,8 @@ struct ClassDecl {
     accessors: Vec<AccessorDecl>,
     codec: Option<ClassCodec>,
     empty: EmptyFn,
-    service_scope: ServiceScope,
+    rust_type: TypeId,
+    service_dependencies: &'static [ServiceDependency],
     services: ResolvedServices,
 }
 
@@ -698,7 +712,7 @@ struct OperationDecl {
     rust_type: TypeId,
     start: ArmOperation,
     resume: ArmOperation,
-    service_scope: ServiceScope,
+    service_dependencies: &'static [ServiceDependency],
     services: ResolvedServices,
 }
 
@@ -707,7 +721,7 @@ pub struct ModuleDecl {
     name: String,
     exports: Vec<ExportDecl>,
     state: StateDecl,
-    service_scope: ServiceScope,
+    service_dependencies: &'static [ServiceDependency],
     services: ResolvedServices,
 }
 
@@ -716,9 +730,9 @@ pub mod __macro_support {
     use std::any::TypeId;
     use std::collections::BTreeSet;
 
-    pub use super::super::call::with_module;
+    pub use super::super::call::{with_class, with_module};
     pub use super::super::services::{
-        BoundServices, ServiceDependency, ServiceField, ServiceScope, ServiceSet, ServiceStorage,
+        ServiceDependency, ServiceField, ServiceOwner, ServiceStorage,
     };
     use super::{AccessorCall, CodecError, Host, ResolvedServices, UnlinkedBindings};
     pub use super::{
@@ -776,7 +790,7 @@ pub mod __macro_support {
             name: M::NAME.to_owned(),
             exports: M::exports(),
             state: StateDecl::of::<M>(),
-            service_scope: M::SERVICE_SCOPE,
+            service_dependencies: M::SERVICE_DEPENDENCIES,
             services: ResolvedServices::EMPTY,
         }
     }
@@ -786,13 +800,18 @@ pub mod __macro_support {
             name: name.to_owned(),
             exports,
             state: StateDecl::of::<RawModule>(),
-            service_scope: ServiceScope::EMPTY,
+            service_dependencies: &[],
             services: ResolvedServices::EMPTY,
         }
     }
 
     #[derive(Default, crate::Encode, crate::Decode)]
     struct RawModule;
+
+    // SAFETY: there are no service accessors.
+    unsafe impl ServiceOwner for RawModule {
+        const SERVICE_DEPENDENCIES: &'static [ServiceDependency] = &[];
+    }
 
     impl super::HostModule for RawModule {
         const NAME: &'static str = "";
@@ -956,20 +975,37 @@ impl Bindings {
         unsafe { self.services.view(services) }
     }
 
-    pub(crate) fn call_services(&self, target: NativeTarget) -> Services<'_> {
-        let resolved = match target {
-            NativeTarget::Export(id) => &self.modules[id.module as usize].services,
-            NativeTarget::Method(id) => &self.classes[id.class as usize].services,
-            NativeTarget::Accessor { class, .. } => &self.classes[class as usize].services,
+    pub(crate) fn class_callback_services<C: HostClass>(
+        &self,
+        target: NativeTarget,
+    ) -> Option<Services<'_, C>> {
+        let index = match target {
+            NativeTarget::Method(id) => id.class,
+            NativeTarget::Accessor { class, .. } => class,
+            NativeTarget::Export(_) => return None,
         };
-        self.service_view(resolved)
+        let class = self.classes.get(index as usize)?;
+        if class.rust_type != TypeId::of::<C>() {
+            return None;
+        }
+        // SAFETY: the declaring class is C; the slots were linked for C.
+        Some(unsafe { self.service_view(&class.services).for_owner::<C>() })
+    }
+
+    /// # Safety
+    /// `index` must refer to an operation of type `O`.
+    pub(crate) unsafe fn typed_operation_services<O: OperationDriver>(
+        &self,
+        index: usize,
+    ) -> Services<'_, O> {
+        unsafe { self.operation_services(index).for_owner::<O>() }
     }
 
     pub(crate) fn operation_services(&self, index: usize) -> Services<'_> {
         self.service_view(&self.operations[index].services)
     }
 
-    fn state_services(&self, index: usize) -> Services<'_> {
+    pub(crate) fn state_services(&self, index: usize) -> Services<'_> {
         self.service_view(&self.modules[index].services)
     }
 
@@ -1246,7 +1282,8 @@ impl ClassDecl {
             methods: T::METHODS.to_vec(),
             accessors: T::ACCESSORS.to_vec(),
             codec: T::CODEC,
-            service_scope: T::SERVICE_SCOPE,
+            rust_type: TypeId::of::<T>(),
+            service_dependencies: T::SERVICE_DEPENDENCIES,
             services: ResolvedServices::EMPTY,
             empty: |payload| {
                 payload
@@ -1262,13 +1299,18 @@ impl StateDecl {
         Self {
             rust_type: TypeId::of::<S>(),
             slots: S::SLOTS,
-            new: |services| Box::new(S::from_services(services)),
-            decode: |input, services| Ok(Box::new(decode_exact::<S>(input, services)?)),
+            // SAFETY: state callbacks and dependencies are installed together for S.
+            new: |services| Box::new(S::from_services(&unsafe { services.for_owner::<S>() })),
+            decode: |input, services| {
+                Ok(Box::new(decode_exact::<S, S>(input, &unsafe {
+                    services.for_owner::<S>()
+                })?))
+            },
             encode: |payload, out, services| {
                 let payload = payload
                     .downcast_ref::<S>()
                     .ok_or_else(|| CodecError::new("module state payload type mismatch"))?;
-                payload.encode(out, services)
+                payload.encode(out, &unsafe { services.for_owner::<S>() })
             },
         }
     }
@@ -1280,20 +1322,25 @@ impl OperationDecl {
             name: O::NAME.to_owned(),
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
-            decode: |input, services| decode_exact::<O>(input, services).map(|_| ()),
+            // SAFETY: operation callbacks and dependencies are installed together for O.
+            decode: |input, services| {
+                decode_exact::<O, O>(input, &unsafe { services.for_owner::<O>() }).map(|_| ())
+            },
             rust_type: TypeId::of::<O>(),
-            service_scope: O::SERVICE_SCOPE,
+            service_dependencies: O::SERVICE_DEPENDENCIES,
             services: ResolvedServices::EMPTY,
             start: |bytes, token, services| {
+                let services = unsafe { services.for_owner::<O>() };
                 let state =
-                    decode_exact::<O>(bytes, services).map_err(|error| HostFault(error.0))?;
-                let live = state.start(token, services)?;
+                    decode_exact::<O, O>(bytes, &services).map_err(|error| HostFault(error.0))?;
+                let live = state.start(token, &services)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },
             resume: |bytes, token, services| {
+                let services = unsafe { services.for_owner::<O>() };
                 let state =
-                    decode_exact::<O>(bytes, services).map_err(|error| HostFault(error.0))?;
-                let live = state.resume(token, services)?;
+                    decode_exact::<O, O>(bytes, &services).map_err(|error| HostFault(error.0))?;
+                let live = state.resume(token, &services)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },
         }
@@ -1312,12 +1359,15 @@ impl UnlinkedBindings {
             }
         }
         for module in &mut self.modules {
-            module.services = self.services.resolve(module.service_scope).map_err(|ty| {
-                format!(
-                    "host module {:?}: missing host service {:?}",
-                    module.name, ty
-                )
-            })?;
+            module.services = self
+                .services
+                .resolve(module.service_dependencies)
+                .map_err(|ty| {
+                    format!(
+                        "host module {:?}: missing host service {:?}",
+                        module.name, ty
+                    )
+                })?;
         }
         self.classes.sort_by(|a, b| a.tag.cmp(&b.tag));
         for pair in self.classes.windows(2) {
@@ -1327,9 +1377,21 @@ impl UnlinkedBindings {
         }
         resolve_class_layouts(&mut self.classes)?;
         for class in &mut self.classes {
-            class.services = self.services.resolve(class.service_scope).map_err(|ty| {
-                format!("host class {:?}: missing host service {:?}", class.tag, ty)
-            })?;
+            if class
+                .codec
+                .is_some_and(|codec| codec.owner != class.rust_type)
+            {
+                return Err(format!(
+                    "host class {:?}: payload codec belongs to a different class",
+                    class.tag
+                ));
+            }
+            class.services = self
+                .services
+                .resolve(class.service_dependencies)
+                .map_err(|ty| {
+                    format!("host class {:?}: missing host service {:?}", class.tag, ty)
+                })?;
             class.methods.sort_by_key(|method| method.name);
             class.accessors.sort_by_key(|accessor| accessor.name);
             let mut names = BTreeSet::new();
@@ -1359,7 +1421,7 @@ impl UnlinkedBindings {
             }
             operation.services = self
                 .services
-                .resolve(operation.service_scope)
+                .resolve(operation.service_dependencies)
                 .map_err(|ty| {
                     format!(
                         "host operation {:?}: missing host service {:?}",

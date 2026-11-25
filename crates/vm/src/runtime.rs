@@ -124,11 +124,15 @@ impl PendingOperation {
             return Ok(self.state.clone());
         };
         let mut state = Vec::new();
-        live.checkpoint(
-            &self.state,
-            &mut state,
-            &bindings.operation_services(declaration),
-        )?;
+        // SAFETY: registration and declaration are installed together when
+        // starting (or restoring) the pending operation.
+        unsafe {
+            live.checkpoint(
+                &self.state,
+                &mut state,
+                &bindings.operation_services(declaration),
+            )?
+        };
         Ok(state)
     }
 }

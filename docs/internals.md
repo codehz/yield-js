@@ -44,7 +44,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `RestoreOptions::default()` 使用 `SnapshotValidation::Trusted`，只接收由 VM 捕获、未经篡改的有效镜像，不重查堆图。开发、测试和诊断可传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }` 执行完整不变量审计。两种模式都要求调用方保证来源和完整性并限制读入大小；完整审计并不使不可信输入变得安全。
 - `Vm::new` 和 `Vm::restore` 都直接接受 `Build` 或 `VerifiedBuild`。传入 `Build` 时当次完整校验；`VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表，可在线程内克隆复用。两种输入都为每个 VM 独立链接宿主、持有堆和缓存；恢复仍要求精确匹配构建身份与绑定指纹。
 - `CallCx::promise(op)` 以原生 Promise 为目标启动外部工作。链接的后台任务走同一注册路径，各自拥有可取消的数字句柄。通过 `Vm::complete_operation(token, completion)` 与当前 VM 代际 token 交付。注册在 drop 时释放平台资源。恢复后先发布 VM，再调用 `Vm::start_recovered_operations()`。
-- `host!` 构造 `Result<Host, String>`；服务值装进宏生成的类型化结构体，整体擦除。链接按确切 Rust 类型将每个 `service_scope!` 的固定槽解析到该宿主的字段；回调从 `&Services` 绑定 scope 后直接投影字段。字段偏移与同一 `Bindings` 所拥有的存储配对，不得跨宿主使用。嵌入方在冷路径用 `vm.bind_service::<T>()` 解析并借用。scope、布局和服务实例不进入绑定指纹或快照。
+- `host!` 构造 `Result<Host, String>`；服务值装进宏生成的类型化结构体，整体擦除。链接按确切 Rust 类型将消费者属性宏的必需依赖解析到该宿主的字段。分派入口将预解析视图绑定到声明类型，命名访问器直接投影字段。偏移与同一 `Bindings` 所拥有的存储配对，不得跨宿主使用。嵌入方在冷路径用 `vm.bind_service::<T>()` 解析并借用。依赖、布局和实例不进入绑定指纹或快照。
 - 内部的 `VmCore` 持有执行状态；公开的 `Vm` 将 core 与 `Host` 绑定，调用内部入口时借用宿主。销毁 VM 时先释放 core 及其活动登记，再释放宿主资源。快照从 core 捕获持久记录，捕获时可借用服务执行 codec 或 checkpoint，但不序列化运行时宿主。
 
 ## 2. 挂起、恢复与快照不变量（不得弱化）

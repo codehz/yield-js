@@ -81,7 +81,7 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices, GuestOutcome,
+    ClassCx, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices, GuestOutcome,
     HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
     MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
     Recovery, Registration, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
@@ -111,5 +111,4 @@ pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, 
 pub use vm::{PendingOperationInfo, VerifiedBuild, Vm};
 pub use yield_binding_macros::{
     Decode, Encode, host, host_class, host_module, methods, module_exports, operation,
-    service_scope,
 };

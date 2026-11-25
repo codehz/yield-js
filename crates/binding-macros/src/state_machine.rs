@@ -20,6 +20,14 @@ pub(super) fn lower_method(
     lower_impl(signature, &[], block, Some(class), None, false).map(|(body, _)| body)
 }
 
+pub(super) fn lower_class(
+    signature: &Signature,
+    block: &Block,
+    class: &Type,
+) -> syn::Result<(TokenStream, TokenStream)> {
+    lower_impl(signature, &[], block, Some(class), None, false)
+}
+
 pub(super) fn lower_spawn(
     signature: &Signature,
     prefix: &[Stmt],
@@ -108,12 +116,13 @@ fn lower_impl<'a>(
     if !spawn && graph.boundaries.is_empty() {
         return Ok((quote!(#block), quote!(&[])));
     }
+    let class_context = class.filter(|_| super::typed::has_class_context(signature));
     let live = graph.liveness()?;
     let r = Render {
         graph: &graph,
         live: &live,
         cx: cx_ident,
-        linked: spawn || module.is_some(),
+        linked: spawn || module.is_some() || class_context.is_some(),
         runner: generated("run", 0),
         state: generated("state", 0),
         pending: generated("pending", 0),
@@ -128,9 +137,10 @@ fn lower_impl<'a>(
     let pending = &r.pending;
     let cx_pat = &first.pat;
     let step = quote!(::yield_vm::HostStep);
-    let context = match module {
-        Some(ty) => quote!(&mut ::yield_vm::ModuleCx<'_, #ty>),
-        None => quote!(&mut ::yield_vm::binding::CallCx<'_>),
+    let context = match (module, class_context) {
+        (Some(ty), _) => quote!(&mut ::yield_vm::ModuleCx<'_, #ty>),
+        (None, Some(ty)) => quote!(&mut ::yield_vm::ClassCx<'_, '_, #ty>),
+        (None, None) => quote!(&mut ::yield_vm::binding::CallCx<'_>),
     };
     let guest = quote!(::yield_vm::GuestOutcome);
     let mut used_slots = std::collections::BTreeSet::new();
@@ -268,6 +278,10 @@ fn lower_impl<'a>(
                 quote!(::yield_vm::__macro_support::ResumeCall::Module(|cx, outcome| {
                     ::yield_vm::__macro_support::with_module::<#ty>(cx, |cx| #runner(cx, None, #index, outcome))
                 }))
+            } else if let Some(ty) = class_context {
+                quote!(::yield_vm::__macro_support::ResumeCall::Plain(|cx, outcome| {
+                    ::yield_vm::__macro_support::with_class::<#ty, _>(cx, |cx| #runner(cx, None, #index, outcome))
+                }))
             } else {
                 quote!(::yield_vm::__macro_support::ResumeCall::Plain(|cx, outcome| #runner(cx, None, #index, outcome)))
             };
@@ -278,7 +292,7 @@ fn lower_impl<'a>(
                 receiver: #receiver,
             })
         });
-    let descriptor = if spawn || module.is_some() {
+    let descriptor = if r.linked {
         let stages_ident = generated("stages", 0);
         quote!({ #helper const #stages_ident: &[::yield_vm::__macro_support::CpsStage] = &[#(#stages),*]; #stages_ident })
     } else {

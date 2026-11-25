@@ -1,10 +1,10 @@
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use blitz_dom::{LocalName, Node as BlitzNode, NodeData, NodeId, QualName, local_name, ns};
 use yield_binding_macros::{host_class, host_module, methods, module_exports};
 use yield_vm::binding::CallCx;
-use yield_vm::{Instance, JsError, JsResult, JsValue, ModuleCx, This};
+use yield_vm::{ClassCx, Instance, JsError, JsResult, JsValue, ModuleCx, This};
 
 use super::Dom;
 
@@ -17,19 +17,7 @@ impl Dom {
     }
 }
 
-yield_vm::service_scope! {
-    DomServices { dom: Rc<RefCell<Dom>> }
-}
-
-fn dom_ref<'a>(cx: &CallCx<'a>) -> Ref<'a, Dom> {
-    DomServices::bind(cx.services()).dom().borrow()
-}
-
-fn dom_mut<'a>(cx: &CallCx<'a>) -> RefMut<'a, Dom> {
-    DomServices::bind(cx.services()).dom().borrow_mut()
-}
-
-#[host_class(tag = "Node", event_target, methods, services = DomServices)]
+#[host_class(tag = "Node", event_target, methods, services = [dom: Rc<RefCell<Dom>>])]
 struct Node {
     #[js_slot]
     index: JsValue,
@@ -37,7 +25,7 @@ struct Node {
     owner: JsValue,
 }
 
-#[host_class(tag = "Document", parent = Node, methods, services = DomServices)]
+#[host_class(tag = "Document", parent = Node, methods, services = [dom: Rc<RefCell<Dom>>])]
 struct Document {
     #[js_list]
     nodes: Vec<JsValue>,
@@ -45,7 +33,7 @@ struct Document {
     window: JsValue,
 }
 
-#[host_class(tag = "Element", parent = Node, methods, services = DomServices)]
+#[host_class(tag = "Element", parent = Node, methods, services = [dom: Rc<RefCell<Dom>>])]
 struct Element;
 
 fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
@@ -58,9 +46,9 @@ fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
 #[methods(Node)]
 impl Node {
     #[get(name = "nodeType")]
-    fn node_type(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+    fn node_type(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
         let index = node_index(cx, this.instance())?;
-        let dom = dom_ref(cx);
+        let dom = Self::dom(cx.services()).borrow();
         let node = dom.node(index)?;
         Ok(JsValue::number(match node.data {
             NodeData::Element(_) => 1.0,
@@ -72,24 +60,25 @@ impl Node {
     }
 
     #[get(name = "nodeName")]
-    fn node_name(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
-        node_name(cx, this.instance())
+    fn node_name(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
+        let index = node_index(cx, this.instance())?;
+        node_name(Self::dom(cx.services()), index)
     }
 
     #[get(name = "firstChild")]
-    fn first_child(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+    fn first_child(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.children.first().copied();
         dom.resolve_node(cx, owner, id)
     }
 
     #[get(name = "nextSibling")]
-    fn next_sibling(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+    fn next_sibling(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let node = dom.node(index)?;
         let id = node
             .parent
@@ -104,10 +93,10 @@ impl Node {
     }
 
     #[get(name = "parentNode")]
-    fn parent_node(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+    fn parent_node(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.parent;
         dom.resolve_node(cx, owner, id)
     }
@@ -123,9 +112,9 @@ impl Node {
     }
 
     #[get(name = "textContent")]
-    fn text_content(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
+    fn text_content(cx: &mut ClassCx<'_, '_, Self>, this: This<Node>) -> JsResult<JsValue> {
         let index = node_index(cx, this.instance())?;
-        let dom = dom_ref(cx);
+        let dom = Self::dom(cx.services()).borrow();
         let node = dom.node(index)?;
         Ok(match &node.data {
             NodeData::Document(_) => JsValue::null(),
@@ -135,13 +124,17 @@ impl Node {
     }
 
     #[set(name = "textContent")]
-    fn set_text_content(cx: &mut CallCx<'_>, this: This<Node>, value: JsValue) -> JsResult<()> {
+    fn set_text_content(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Node>,
+        value: JsValue,
+    ) -> JsResult<()> {
         let index = node_index(cx, this.instance())?;
         if index == 0 {
             return Ok(());
         }
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let node = dom.node(index)?;
         let id = node.id;
         let is_text = matches!(node.data, NodeData::Text(_) | NodeData::Comment { .. });
@@ -163,14 +156,20 @@ impl Node {
     }
 
     #[method(name = "appendChild")]
-    fn append_child(cx: &mut CallCx<'_>, this: This<Node>, child: JsValue) -> JsResult<JsValue> {
+    fn append_child(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Node>,
+        child: JsValue,
+    ) -> JsResult<JsValue> {
         let child_node = cx.instance::<Node>(&child)?;
-        if !cx.same_value(&this.owner(cx)?, &child_node.owner(cx)?) {
+        let owner = this.owner(cx)?;
+        let child_owner = child_node.owner(cx)?;
+        if !cx.same_value(&owner, &child_owner) {
             return Err(cx.type_error("appendChild requires nodes from the same document"));
         }
         let parent_index = node_index(cx, this.instance())?;
         let child_index = node_index(cx, child_node)?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let parent = dom.node(parent_index)?;
         let child_node = dom.node(child_index)?;
         if !matches!(parent.data, NodeData::Element(_)) {
@@ -196,9 +195,8 @@ impl Node {
     }
 }
 
-fn node_name(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<JsValue> {
-    let index = node_index(cx, node)?;
-    let dom = dom_ref(cx);
+fn node_name(dom: &Rc<RefCell<Dom>>, index: u32) -> JsResult<JsValue> {
+    let dom = dom.borrow();
     let node = dom.node(index)?;
     Ok(match &node.data {
         NodeData::Element(element) => JsValue::string(element.name.local.to_uppercase()),
@@ -212,9 +210,11 @@ fn node_name(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<JsValue> {
 #[methods(Element)]
 impl Element {
     #[get(name = "tagName")]
-    fn tag_name(cx: &mut CallCx<'_>, this: This<Element>) -> JsResult<JsValue> {
-        let node = cx.instance::<Node>(&this.instance().value(cx))?;
-        node_name(cx, node)
+    fn tag_name(cx: &mut ClassCx<'_, '_, Self>, this: This<Element>) -> JsResult<JsValue> {
+        let value = this.instance().value(cx);
+        let node = cx.instance::<Node>(&value)?;
+        let index = node_index(cx, node)?;
+        node_name(Self::dom(cx.services()), index)
     }
 
     #[get(name = "namespaceURI")]
@@ -224,16 +224,17 @@ impl Element {
 
     #[method(name = "setAttribute")]
     fn set_attribute(
-        cx: &mut CallCx<'_>,
+        cx: &mut ClassCx<'_, '_, Self>,
         this: This<Element>,
         name: JsValue,
         value: JsValue,
     ) -> JsResult<()> {
-        let node = cx.instance::<Node>(&this.instance().value(cx))?;
+        let instance = this.instance().value(cx);
+        let node = cx.instance::<Node>(&instance)?;
         let index = node_index(cx, node)?;
         let name = cx.string(&name)?.to_string().to_ascii_lowercase();
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.node(index)?.id;
         let name = QualName::new(None, ns!(), LocalName::from(name));
         dom.doc.mutate().set_attribute(id, name, &value);
@@ -256,17 +257,17 @@ impl Document {
     }
 
     #[get(name = "documentElement")]
-    fn document_element(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+    fn document_element(cx: &mut ClassCx<'_, '_, Self>, this: This<Document>) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.try_root_element().map(|node| node.id);
         dom.resolve_node(cx, owner, id)
     }
 
     #[get(name = "body")]
-    fn body(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+    fn body(cx: &mut ClassCx<'_, '_, Self>, this: This<Document>) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.try_root_element().and_then(|root| {
             root.children
                 .iter()
@@ -281,46 +282,46 @@ impl Document {
     }
 
     #[get(name = "activeElement")]
-    fn active_element(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
+    fn active_element(cx: &mut ClassCx<'_, '_, Self>, this: This<Document>) -> JsResult<JsValue> {
         Self::body(cx, this)
     }
 
     #[method(name = "getElementById")]
     fn get_element_by_id(
-        cx: &mut CallCx<'_>,
+        cx: &mut ClassCx<'_, '_, Self>,
         this: This<Document>,
         id: JsValue,
     ) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
         let id = cx.string(&id)?.to_string();
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.get_element_by_id(&id);
         dom.resolve_node(cx, owner, id)
     }
 
     #[method(name = "createElement")]
     fn create_element(
-        cx: &mut CallCx<'_>,
+        cx: &mut ClassCx<'_, '_, Self>,
         this: This<Document>,
         tag: JsValue,
     ) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
         let tag = cx.string(&tag)?.to_string().to_ascii_lowercase();
         let name = QualName::new(None, ns!(html), LocalName::from(tag));
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.mutate().create_element(name, Vec::new());
         dom.resolve_node(cx, owner, Some(id))
     }
 
     #[method(name = "createTextNode")]
     fn create_text_node(
-        cx: &mut CallCx<'_>,
+        cx: &mut ClassCx<'_, '_, Self>,
         this: This<Document>,
         value: JsValue,
     ) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom.doc.mutate().create_text_node(&value);
         dom.resolve_node(cx, owner, Some(id))
     }
@@ -386,7 +387,7 @@ impl Dom {
 #[host_module(
     name = "yield:dom",
     classes = [Node, Document, Element, HTMLIFrameElement],
-    services = DomServices,
+    services = [dom: Rc<RefCell<Dom>>],
 )]
 pub(super) struct DomModule {
     #[js_slot]
@@ -421,7 +422,7 @@ impl DomModule {
         if !cached.is_undefined() {
             return Ok(cached);
         }
-        let mut dom = dom_mut(cx);
+        let mut dom = Self::dom(cx.services()).borrow_mut();
         let id = dom
             .doc
             .try_root_element()

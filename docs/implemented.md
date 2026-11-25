@@ -17,11 +17,11 @@
 - 静态宿主模块支持 named（含别名）、default 和 namespace 导入。导入绑定只读，宿主导出函数是 VM 自有的函数对象；命名空间由 VM 创建，其导出属性不可写、不可配置。Rust 宿主用 `#[host_module]` / `#[module_exports]`、`#[host_class]` / `#[methods]` 和 `#[operation]` 声明绑定，`host!` 一次性链接，并在展开时按声明的 `dts` 文件校验每个声明的值名（缺名即编译错误，实现可更宽，纯类型声明不产生要求）。`#[function]` / `#[method]` 的 `async fn -> JsResult<HostStep>` 可用受限 CPS 语法表达 guest 调用续接，不创建 Rust Future。VM 链接期校验模块、导出种类，把类原型、实例槽、payload、模块状态和 operation 的持久记录保存在 VM 的堆与快照中；运行时按声明 ID 分派，不按字符串查表。
 - 具体的 `Host` 不可克隆；新建和恢复按值接管 `Host`，执行和投递不再传入宿主。`host!` 也支持仅注册服务，空宿主用 `Host::default()`。宿主和服务实例只在运行时存在，不进入快照。嵌入方通过 `vm.bind_service::<T>()` 解析并只读借用确切类型的服务；服务支持 `Rc`，在工作线程执行的服务由自身 trait 声明线程约束。
 - `host!` 只链接选中模块在 `#[host_module]` 中声明的类与 operation。链接按 Rust 类型去重；不同类型的重名冲突仍报错，类型身份不进入指纹或快照。
-- `host!` 将 `Type => value` 生成类型化字段并整体擦除；同一类型（含别名）重复注册报错。模块、类和 operation 通过 `services = Scope` 声明由 `service_scope!` 生成的访问器。必需依赖缺失时报链接错误，可选依赖缺失时访问器返回 `None`；回调使用链接期解析的字段槽，不按类型查表或 downcast。
+- `host!` 将 `Type => value` 生成类型化字段并整体擦除；同一类型（含别名）重复注册报错。模块、类和 operation 直接用 `services = [name: Type, …]` 声明必需依赖，缺失时报链接错误。生成的访问器读取链接期解析的字段槽，不按类型查表或 downcast。
 - 每个注册模块的快照状态包括 `Js` / `JsList` 槽和无 schema 版本的 codec 字节。新建用 `FromServices`（`Default` 类型自动实现），恢复只用 `Decode`。模块、类 payload 及 operation 共用 `Encode` / `Decode` 字段协议。`#[host_module]` 剥离 VM 槽后，仅为空类型自动补默认初始化和空 codec。快照格式 **91** 删除了模块状态记录中的 `schema` 字段。
 - 宿主类实例是普通 JS 对象：每个 VM 为每个类创建一份原型，同类实例共享方法函数；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。带 `class` 的 `#[constructor]` 导出暴露类原型的虚拟 `prototype` 属性，支持 `new` 与 `instanceof`。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并；基类方法与访问器接受派生实例。payload 仍属于具体实例类。脚本类可继承宿主构造器：只对本次构造中与声明类匹配的宿主分配使用派生原型，不修改其他分配或构造器返回的替换对象。宿主接收者仍校验声明类标签；脚本私元素与宿主槽和 payload 独立，均可跨快照恢复。
-- `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec、模块初始化与 operation driver 使用当前 `&Services` 的 `get::<T>()` 借用服务。服务不参与绑定指纹；恢复仍检查镜像实际需要的能力。
+- `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec、模块初始化与 operation driver 通过当前的 `&Services<'_, Owner>` 读取已链接的字段。服务不参与绑定指纹；恢复仍检查镜像实际需要的能力。
 - 宿主函数和方法用 `HostStep::Suspend` 交还受校验的请求；VM 在当前 `CallCx` 结束后同步执行 guest 调用或 GC。恢复使用新的调用 ID、原始 `this` 和显式保存的值。后台宿主任务还可等待外部 operation；其完成入队，不在投递调用中执行脚本。旧调用创建的请求不能重放。
 - 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
 - 每个 `HostModule` 类型声明模块身份和每 VM 一份的状态。导出通过 `ModuleCx` 只访问本模块的状态；JS 引用写入状态槽，非 JS 数据经 codec 编码。每个模块的状态都进入快照，槽是持久根。

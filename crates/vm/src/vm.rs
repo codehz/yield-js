@@ -669,7 +669,6 @@ impl VmCore {
         };
         let context = (receiver, prototype);
         let roots = &roots.with(&context);
-        let services = bindings.call_services(owner);
         loop {
             if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
                 return Ok(None);
@@ -682,7 +681,7 @@ impl VmCore {
                 vm: self,
                 roots,
                 bindings,
-                services,
+                owner,
                 epoch,
                 call: call_id,
                 args: args.into_iter().map(wrap).collect(),
