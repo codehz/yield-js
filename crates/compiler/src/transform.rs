@@ -50,7 +50,7 @@ pub struct TransformError {
     pub message: String,
     pub span: Option<Range<u32>>,
     pub module: Option<ModuleId>,
-    parse_error: Option<CompileError>,
+    parse_error: Option<Box<CompileError>>,
 }
 
 impl TransformError {
@@ -102,7 +102,7 @@ impl From<CompileError> for TransformError {
             message: error.message().to_owned(),
             span: None,
             module: None,
-            parse_error: Some(error),
+            parse_error: Some(Box::new(error)),
         }
     }
 }

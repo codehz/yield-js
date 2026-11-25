@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yield_compiler::{
-    CompileError, Compiler, FileResolver, MemoryResolver, ModuleId, ModuleResolver, Project,
+    CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
 };
 use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
 
@@ -1771,14 +1771,14 @@ impl Drop for TempDir {
 }
 
 #[test]
-fn file_resolver_resolves_relative_and_root_relative_paths() {
+fn node_resolver_resolves_relative_paths_and_explicit_roots() {
     let root = TempDir::new();
     fs::create_dir(root.0.join("src")).unwrap();
     fs::write(root.0.join("src/main.js"), "export const main = 1;").unwrap();
     fs::write(root.0.join("src/dep.js"), "export const local = 2;").unwrap();
     fs::write(root.0.join("dep.js"), "export const shared = 3;").unwrap();
 
-    let resolver = FileResolver::new(&root.0).unwrap();
+    let resolver = NodeResolver::new(&root.0).unwrap();
     let entry = resolver.resolve(None, "./src/main.js").unwrap();
     assert_eq!(entry, "src/main.js");
     let local = resolver.resolve(Some(&entry), "./dir/../dep.js").unwrap();
@@ -1786,14 +1786,15 @@ fn file_resolver_resolves_relative_and_root_relative_paths() {
     assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
     let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap();
     assert_eq!(shared, "dep.js");
-    assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap(), shared);
+    assert!(resolver.resolve(Some(&entry), "dep.js").is_err());
+    assert_eq!(resolver.resolve(None, "dep.js").unwrap(), shared);
     assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
     assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
 }
 
 #[cfg(unix)]
 #[test]
-fn file_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
+fn node_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
     use std::os::unix::fs::symlink;
 
     let dir = TempDir::new();
@@ -1804,7 +1805,7 @@ fn file_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
     symlink("dep.js", root.join("alias.js")).unwrap();
     symlink("../outside.js", root.join("escape.js")).unwrap();
 
-    let resolver = FileResolver::new(&root).unwrap();
+    let resolver = NodeResolver::new(&root).unwrap();
     assert_eq!(resolver.resolve(None, "alias.js").unwrap(), "dep.js");
     let error = resolver.resolve(None, "escape.js").unwrap_err();
     assert!(error.contains("outside the source root"), "{error}");
@@ -1819,7 +1820,7 @@ fn missing_source_imports_point_to_the_import_specifier() {
     let root = TempDir::new();
     fs::create_dir(root.0.join("src")).unwrap();
     fs::write(root.0.join("src/main.js"), source).unwrap();
-    let file = FileResolver::new(&root.0).unwrap();
+    let file = NodeResolver::new(&root.0).unwrap();
     let file_reason = file
         .resolve(Some(&ModuleId::from("src/main.js")), "./missing.js")
         .unwrap_err();
@@ -1844,13 +1845,279 @@ fn missing_source_imports_point_to_the_import_specifier() {
 #[test]
 fn missing_file_entry_points_to_the_requested_root() {
     let root = TempDir::new();
-    let resolver = FileResolver::new(&root.0).unwrap();
+    let resolver = NodeResolver::new(&root.0).unwrap();
     let error = Compiler::default()
         .compile(Project::new("./missing.js", resolver))
         .unwrap_err();
     assert_eq!(error.module(), "./missing.js");
     assert_eq!(error.line(), 0, "{error}");
     assert_eq!(error.column(), 0, "{error}");
+}
+
+fn fixture(root: &TempDir, relative: &str, source: &str) {
+    let path = root.0.join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, source).unwrap();
+}
+
+#[test]
+fn node_resolver_probes_exports_and_package_relative_imports() {
+    let root = TempDir::new();
+    fixture(
+        &root,
+        "src/main.js",
+        "import { value } from '@scope/pkg'; value;",
+    );
+    fixture(&root, "src/which.js", "");
+    fixture(&root, "src/which.mjs", "");
+    fixture(&root, "src/dir/index.mjs", "");
+    fixture(
+        &root,
+        "node_modules/@scope/pkg/package.json",
+        r#"{
+        "type": "module",
+        "metadata": [true, false, null, -1.5e+2, {"extra": "\ud83d\ude00"}],
+        "exports": {
+            ".": {"default": "./fallback.js", "import": "./\u0065ntry"},
+            "./public": {"require": "./private.js", "default": "./dir"},
+            "./blocked": null,
+            "./nested-block": {"import": {"default": null}, "default": "./private.js"},
+            "./wild/*": "./private.js"
+        }
+    }"#,
+    );
+    fixture(
+        &root,
+        "node_modules/@scope/pkg/entry.mjs",
+        "export { value } from './private';",
+    );
+    fixture(
+        &root,
+        "node_modules/@scope/pkg/private.js",
+        "export const value = 1;",
+    );
+    fixture(&root, "node_modules/@scope/pkg/dir/index.js", "");
+    let resolver = NodeResolver::new(&root.0).unwrap();
+    let entry = resolver.resolve(None, "src/main").unwrap();
+    assert_eq!(
+        resolver.resolve(Some(&entry), "./which").unwrap(),
+        "src/which.js"
+    );
+    assert_eq!(
+        resolver.resolve(Some(&entry), "./dir").unwrap(),
+        "src/dir/index.mjs"
+    );
+    let package = resolver.resolve(Some(&entry), "@scope/pkg").unwrap();
+    assert_eq!(package, "npm:node_modules/@scope/pkg/entry.mjs");
+    let private = resolver.resolve(Some(&package), "./private").unwrap();
+    assert_eq!(resolver.load(&private).unwrap(), "export const value = 1;");
+    assert!(
+        resolver
+            .resolve(Some(&entry), "@scope/pkg/public")
+            .unwrap()
+            .ends_with("dir/index.js")
+    );
+    for request in [
+        "@scope/pkg/private.js",
+        "@scope/pkg/blocked",
+        "@scope/pkg/nested-block",
+        "@scope/pkg/wild/file",
+    ] {
+        assert!(
+            resolver
+                .resolve(Some(&entry), request)
+                .unwrap_err()
+                .contains("not exported")
+        );
+    }
+    for request in [
+        "../node_modules/@scope/pkg/private.js",
+        "../node_modules/@scope/pkg",
+    ] {
+        assert!(
+            resolver
+                .resolve(Some(&entry), request)
+                .unwrap_err()
+                .contains("node_modules")
+        );
+    }
+    assert!(
+        resolver
+            .resolve(None, "node_modules/@scope/pkg/private.js")
+            .is_err()
+    );
+    Compiler::default()
+        .compile(Project::from_directory(&root.0, "src/main").unwrap())
+        .unwrap();
+}
+
+#[test]
+fn node_resolver_retains_installation_context_for_package_collisions() {
+    let root = TempDir::new();
+    fixture(&root, "src/main.js", "");
+    for prefix in ["node_modules/", "node_modules/dep/node_modules/"] {
+        fixture(
+            &root,
+            &format!("{prefix}dep/package.json"),
+            r#"{"exports":"./index.mjs"}"#,
+        );
+        fixture(&root, &format!("{prefix}dep/index.mjs"), prefix);
+        fixture(
+            &root,
+            &format!("{prefix}sibling/package.json"),
+            r#"{"exports":"./index.mjs"}"#,
+        );
+        fixture(&root, &format!("{prefix}sibling/index.mjs"), prefix);
+    }
+    let resolver = NodeResolver::new(&root.0).unwrap();
+    let entry = resolver.resolve(None, "src/main").unwrap();
+    let outer = resolver.resolve(Some(&entry), "dep").unwrap();
+    let inner = resolver.resolve(Some(&outer), "dep").unwrap();
+    assert_ne!(outer, inner);
+    let outer_sibling = resolver.resolve(Some(&entry), "sibling").unwrap();
+    let inner_sibling = resolver.resolve(Some(&inner), "sibling").unwrap();
+    assert_ne!(outer_sibling, inner_sibling);
+    assert_eq!(resolver.load(&outer_sibling).unwrap(), "node_modules/");
+    assert_eq!(
+        resolver.load(&inner_sibling).unwrap(),
+        "node_modules/dep/node_modules/"
+    );
+}
+
+#[test]
+fn node_resolver_rejects_unsupported_targets_at_the_import_span() {
+    let root = TempDir::new();
+    fixture(
+        &root,
+        "node_modules/legacy/package.json",
+        r#"{"main":"./index.mjs"}"#,
+    );
+    fixture(&root, "node_modules/legacy/index.mjs", "");
+    fixture(
+        &root,
+        "node_modules/untyped/package.json",
+        r#"{"exports":"./entry.js"}"#,
+    );
+    fixture(
+        &root,
+        "node_modules/untyped/entry.js",
+        "module.exports = 1;",
+    );
+    fixture(
+        &root,
+        "node_modules/malformed/package.json",
+        r#"{"exports":"./entry.mjs",}"#,
+    );
+    fixture(
+        &root,
+        "node_modules/pkg/package.json",
+        r#"{
+        "type": "commonjs",
+        "exports": {
+            ".": "./entry.js", "./cjs": "./entry.cjs", "./json": "./data",
+            "./missing": {"import":"./absent.js", "default":"./okay.mjs"},
+            "./directory": "./empty", "./array": ["./okay.mjs"],
+            "./escape": "./../legacy/index.mjs", "./okay": "./okay.mjs"
+        }
+    }"#,
+    );
+    for path in ["entry.js", "entry.cjs", "data.json", "okay.mjs"] {
+        fixture(&root, &format!("node_modules/pkg/{path}"), "");
+    }
+    fs::create_dir(root.0.join("node_modules/pkg/empty")).unwrap();
+    for (request, reason) in [
+        ("pkg", "CommonJS"),
+        ("pkg/cjs", "CommonJS"),
+        ("pkg/json", "JSON"),
+        ("pkg/missing", "source file not found"),
+        ("pkg/directory", "source file not found"),
+        ("pkg/array", "unsupported package export target"),
+        ("pkg/escape", "invalid path segment"),
+        ("legacy", "no exports"),
+        ("node:fs", "Node built-ins"),
+        ("fs/promises", "Node built-ins"),
+        ("untyped", "CommonJS"),
+        ("malformed", "invalid package manifest JSON"),
+    ] {
+        let source = format!("\n  import '{request}';\n");
+        fixture(&root, "main.js", &source);
+        let error = Compiler::default()
+            .compile(Project::from_directory(&root.0, "main.js").unwrap())
+            .unwrap_err();
+        let (start, line, column) = access_at(&source, &format!("'{request}'"), 0);
+        assert_eq!(error.module(), "main.js");
+        assert_eq!(
+            (error.span().start, error.line(), error.column()),
+            (start, line, column)
+        );
+        assert!(error.message().contains(reason), "{error}");
+    }
+    fixture(&root, "main.js", "import 'pkg/okay';");
+    Compiler::default()
+        .compile(Project::from_directory(&root.0, "main.js").unwrap())
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn node_resolver_rejects_symlink_exports_and_relative_package_bypasses() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new();
+    let outside = TempDir::new();
+    fixture(&outside, "outside.mjs", "");
+    fixture(&root, "src/main.js", "");
+    fixture(&root, "src/inside.mjs", "");
+    fixture(
+        &root,
+        "node_modules/pkg/package.json",
+        r#"{
+        "exports": {".": "./good.mjs", "./outside": "./outside.mjs", "./escape": "./escape.mjs"}
+    }"#,
+    );
+    fixture(&root, "node_modules/pkg/actual.mjs", "");
+    symlink("actual.mjs", root.0.join("node_modules/pkg/good.mjs")).unwrap();
+    symlink(
+        outside.0.join("outside.mjs"),
+        root.0.join("node_modules/pkg/outside.mjs"),
+    )
+    .unwrap();
+    symlink(
+        "../../src/inside.mjs",
+        root.0.join("node_modules/pkg/escape.mjs"),
+    )
+    .unwrap();
+    symlink(
+        "../node_modules/pkg/actual.mjs",
+        root.0.join("src/alias.mjs"),
+    )
+    .unwrap();
+    let resolver = NodeResolver::new(&root.0).unwrap();
+    let entry = resolver.resolve(None, "src/main.js").unwrap();
+    let package = resolver.resolve(Some(&entry), "pkg").unwrap();
+    assert_eq!(package, "npm:node_modules/pkg/actual.mjs");
+    assert_eq!(
+        resolver.resolve(Some(&package), "./good.mjs").unwrap(),
+        package
+    );
+    assert!(
+        resolver
+            .resolve(Some(&entry), "pkg/outside")
+            .unwrap_err()
+            .contains("outside the source root")
+    );
+    assert!(
+        resolver
+            .resolve(Some(&entry), "pkg/escape")
+            .unwrap_err()
+            .contains("package boundary")
+    );
+    assert!(
+        resolver
+            .resolve(Some(&entry), "./alias.mjs")
+            .unwrap_err()
+            .contains("package boundary")
+    );
 }
 
 #[test]

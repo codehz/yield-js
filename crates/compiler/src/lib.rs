@@ -46,7 +46,7 @@ use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
 pub use frontend::link::{Dependency, DependencyKind, ModuleGraph};
-pub use resolver::{FileResolver, MemoryResolver, ModuleResolver};
+pub use resolver::{MemoryResolver, ModuleResolver, NodeResolver};
 pub use transform::{
     BuildTransform, GraphTransform, ParsedModule, SourceTransform, TransformError,
 };
@@ -74,6 +74,14 @@ impl<'a> Project<'a> {
             graphs: Vec::new(),
             builds: Vec::new(),
         }
+    }
+
+    /// Uses the rooted filesystem and installed Node packages as source modules.
+    pub fn from_directory(
+        root: &std::path::Path,
+        entry: impl Into<ModuleId>,
+    ) -> Result<Self, String> {
+        Ok(Self::new(entry, NodeResolver::new(root)?))
     }
 
     pub fn with_preload(mut self, id: impl Into<ModuleId>) -> Self {

@@ -2,7 +2,11 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+
+mod manifest;
+mod node;
+
+pub use node::NodeResolver;
 
 use crate::ModuleId;
 
@@ -51,60 +55,6 @@ impl ModuleResolver for MemoryResolver<'_> {
             .copied()
             .map(Cow::Borrowed)
             .ok_or_else(|| format!("source file not found: {id:?}"))
-    }
-}
-
-pub struct FileResolver {
-    root: PathBuf,
-}
-
-impl FileResolver {
-    pub fn new(root: &Path) -> Result<Self, String> {
-        let root = root.canonicalize().map_err(|err| err.to_string())?;
-        if !root.is_dir() {
-            return Err(format!("source root is not a directory: {root:?}"));
-        }
-        Ok(Self { root })
-    }
-
-    fn file(&self, id: &str) -> Result<PathBuf, String> {
-        let path = self
-            .root
-            .join(id)
-            .canonicalize()
-            .map_err(|err| err.to_string())?;
-        if !path.starts_with(&self.root) {
-            return Err(format!("source file is outside the source root: {id:?}"));
-        }
-        if !path.is_file() {
-            return Err(format!("source path is not a file: {id:?}"));
-        }
-        Ok(path)
-    }
-}
-
-impl ModuleResolver for FileResolver {
-    fn resolve(&self, referrer: Option<&ModuleId>, specifier: &str) -> Result<ModuleId, String> {
-        let path = self.file(&normalize(referrer.map(String::as_str), specifier)?)?;
-        let relative = path.strip_prefix(&self.root).expect("checked source root");
-        let mut id = String::new();
-        for part in relative.components() {
-            let part = part.as_os_str().to_str().ok_or("source ID is not UTF-8")?;
-            if part.contains('\\') {
-                return Err("backslash in canonical source ID".into());
-            }
-            if !id.is_empty() {
-                id.push('/');
-            }
-            id.push_str(part);
-        }
-        Ok(id)
-    }
-
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
-        std::fs::read_to_string(self.file(&normalize(None, id)?)?)
-            .map(Cow::Owned)
-            .map_err(|err| err.to_string())
     }
 }
 
