@@ -1,0 +1,5 @@
+/* 副作用资源导入：CSS 作为 entry 可达图中的副作用资源，
+   按规范化资源 ID 去重，不进入 VM 堆，宿主从 Build 读取后自行消费。 */
+button {
+  padding: 4px 8px;
+}

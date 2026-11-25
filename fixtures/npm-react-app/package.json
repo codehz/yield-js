@@ -1,0 +1,17 @@
+{
+  "name": "yield-react-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "docs/design/build.md 的验收输入夹具：React 非 Web + TSX 编译场景",
+  "type": "module",
+  "main": "src/index.tsx",
+  "dependencies": {
+    "react": "19.2.0",
+    "react-reconciler": "0.33.0",
+    "scheduler": "0.27.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "typescript": "5.9.3"
+  }
+}
