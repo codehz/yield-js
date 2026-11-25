@@ -2,7 +2,7 @@
 
 > 本文是[总体设计](../design.md)的专题文档：WinterTC 目标范围、VM 相对时钟、可选宿主能力、随机 API 与定时器。Fetch 的完整契约见 [fetch.md](fetch.md)。
 
-以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为固定基线：**除 WebAssembly 外，列出的所有接口、全局方法和属性均为实现目标**。目标包括上游规范定义的成员及可观察行为，不只是同名全局；解码标签范围按下表有意收窄。纯 VM 功能不依赖宿主接入；有外部依赖的功能仍提供 JS 接口，由可选宿主能力承接外部工作。此目标不改变首版 Solid/React 的验收清单，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。
+以 WinterTC 的 [ECMA-429 第一版（2025 年 12 月）](https://ecma-international.org/publications-and-standards/standards/ecma-429/) §§5–7 为固定基线：**除 WebAssembly 外，列出的所有接口、全局方法和属性均为实现目标**。目标包括上游规范定义的成员及可观察行为，不只是同名全局；解码标签范围按下表有意收窄。纯 VM 功能不依赖宿主接入；有外部依赖的功能仍提供 JS 接口，由可选宿主能力承接外部工作。此目标不改变首版框架验收清单，也不声明 ECMA-429 合规（该标准还要求完整的 ECMA-262 合规）。
 
 | API 组 | 实现目标与归属 |
 | --- | --- |
