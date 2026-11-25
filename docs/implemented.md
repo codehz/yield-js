@@ -159,6 +159,7 @@
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
 - `CallCx::type_error(message)` 创建可由脚本捕获的 `TypeError`：`message` 原样保留，`stack` 首行只加一次 `TypeError: `，随后记录可见的同步脚本调用帧。
+- `CallCx::instance<T>` 通过 VM 品牌检查已有宿主实例，接受派生类以访问继承槽，不改变实际 payload 类型。`Instance::init_object_field` 在新实例上定义独立的普通对象数据字段，不调用 setter，也不覆盖已有自有属性。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `reportError(value)` 同步向 `globalThis` 派发可信、可取消的 `ErrorEvent`；监听器、后台宿主任务及 `queueMicrotask` 的未捕获异常走同一入口。消息和位置不经脚本 getter 或转换；仅未取消的报告交给 `Host::report_error`。错误报告期间再次抛出的异常直接进入宿主报告，不递归派发。
 - 微任务成功排空后，VM 将仍未观察的拒绝移入普通 FIFO 任务，批次中不穿插微任务。每项派发前重新检查，仍未观察的项收到可信且可取消的 `unhandledrejection`；仅未取消的事件触发 `Host::unhandled_rejection`。报告后首次观察会排入独立的非可取消 `rejectionhandled` 任务，不调用宿主日志。`.then()` 即使未提供拒绝回调也算观察，透传给子 Promise 的拒绝独立判定。

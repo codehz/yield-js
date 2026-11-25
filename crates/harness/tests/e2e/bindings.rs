@@ -1189,11 +1189,17 @@ mod inherit_fixture {
             Err(cx.throw_string("assert failed".to_owned()))
         }
 
+        #[function(name = "readBase")]
+        fn read_base(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<JsValue> {
+            cx.instance::<Base>(&value)?.base(cx)
+        }
+
         #[constructor(name = "Base", class = Base)]
         fn base(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Base>> {
             let sidecar = cx.alloc(Derived)?;
             sidecar.set_value(cx, JsValue::number(2.0))?;
             let base = cx.alloc(Base { payload_value: 9 })?;
+            base.init_object_field(cx, "field")?;
             base.set_base(cx, JsValue::number(1.0))?;
             let sidecar = sidecar.value(cx);
             base.set_sidecar(cx, sidecar)?;
@@ -1203,6 +1209,14 @@ mod inherit_fixture {
         #[constructor(name = "Derived", class = Derived)]
         fn derived(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Derived>> {
             let derived = cx.alloc(Derived)?;
+            derived.init_object_field(cx, "field")?;
+            let value = derived.value(cx);
+            let field = cx
+                .inspect(value.clone())?
+                .get(&yield_vm::binding::InspectKey::String("field".into()))
+                .and_then(|field| field.data())
+                .expect("initialized object field");
+            cx.instance::<Base>(&value)?.set_base(cx, field)?;
             derived.set_value(cx, JsValue::number(2.0))?;
             Ok(derived)
         }
@@ -1225,12 +1239,21 @@ fn derived_host_classes_inherit_prototypes_and_slot_layout() {
     let labels = Rc::new(LabelService::default());
     let bindings = inherit_fixture::bindings(&labels);
     let source = r#"
-import { assert, Base, Derived, wait } from "inherit";
+import { assert, Base, Derived, readBase, wait } from "inherit";
 export async function run() {
   const derived = new Derived();
   const base = new Base();
   await wait();
-  assert(derived.read() === undefined);
+  assert(derived.field !== base.field);
+  assert(Object.getPrototypeOf(derived.field) === Object.prototype);
+  const field = Object.getOwnPropertyDescriptor(derived, 'field');
+  assert(field.enumerable && field.writable && field.configurable);
+  assert(derived.read() === derived.field);
+  assert(readBase(derived) === derived.field);
+  let forged = false;
+  try { readBase(Object.create(Base.prototype)); }
+  catch (error) { forged = error instanceof TypeError; }
+  assert(forged);
   assert(derived.value() === 2);
   assert(base.read() === 1);
   assert(base instanceof Base);

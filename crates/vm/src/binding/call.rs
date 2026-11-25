@@ -185,6 +185,27 @@ impl<T: HostClass> Instance<T> {
         self.id as u64
     }
 
+    /// Initialize an own ordinary object field on a newly allocated instance.
+    /// This does not invoke inherited setters or replace an existing field.
+    pub fn init_object_field(&self, cx: &mut CallCx<'_>, name: &str) -> JsResult<()> {
+        let key = PropertyKey::from(name);
+        let object = cx
+            .vm
+            .heap
+            .get(self.id)
+            .map_err(|error| JsError::fault(error.to_string()))?;
+        if object.own_property(key.borrowed()).is_some() {
+            return Err(JsError::fault(format!(
+                "host instance already has field {name}"
+            )));
+        }
+        let value = cx.vm.heap.alloc_plain();
+        cx.vm
+            .heap
+            .define_data(self.id, key, Value::object(value), Attributes::ORDINARY)
+            .map_err(|error| JsError::fault(error.to_string()))
+    }
+
     pub fn slot(&self, cx: &CallCx<'_>, index: usize) -> JsResult<JsValue> {
         cx.slot_value(self.id, cx.instance_slot::<T>(index)?)
     }
@@ -688,7 +709,27 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn this<T: HostClass>(&mut self) -> JsResult<This<T>> {
-        let ValueRef::Object(id) = self.this.value.view() else {
+        let id = Self::instance_id(&self.this);
+        Ok(This {
+            instance: self.branded_instance(id)?,
+        })
+    }
+
+    /// Resolve an existing host instance by its VM brand, including subclasses.
+    pub fn instance<T: HostClass>(&mut self, value: &JsValue) -> JsResult<Instance<T>> {
+        self.check_value(value)?;
+        self.branded_instance(Self::instance_id(value))
+    }
+
+    fn instance_id(value: &JsValue) -> Option<ObjectId> {
+        match value.value.view() {
+            ValueRef::Object(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn branded_instance<T: HostClass>(&mut self, id: Option<ObjectId>) -> JsResult<Instance<T>> {
+        let Some(id) = id else {
             return Err(self.type_error(format!("{} called on incompatible receiver", T::TAG)));
         };
         let Some(class) = self.bindings.class_by_tag(T::TAG) else {
@@ -702,9 +743,7 @@ impl<'a> CallCx<'a> {
         if !self.bindings.class_is_a(instance.class, class) {
             return Err(self.type_error(format!("{} called on incompatible receiver", T::TAG)));
         }
-        Ok(This {
-            instance: Instance::new(id),
-        })
+        Ok(Instance::new(id))
     }
 
     pub fn inspect(&self, value: JsValue) -> JsResult<Inspect<'_>> {
@@ -834,7 +873,7 @@ impl<'a> CallCx<'a> {
         }
     }
 
-    fn instance(&self, id: ObjectId) -> JsResult<&crate::runtime::HostInstance> {
+    fn instance_record(&self, id: ObjectId) -> JsResult<&crate::runtime::HostInstance> {
         self.vm
             .host_instances
             .get(&id)
@@ -842,7 +881,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub(crate) fn slot_value(&self, id: ObjectId, index: usize) -> JsResult<JsValue> {
-        let instance = self.instance(id)?;
+        let instance = self.instance_record(id)?;
         match instance.slots.get(index) {
             Some(crate::runtime::HostSlot::Js(value)) => Ok(self.js_value(value.clone())),
             Some(crate::runtime::HostSlot::JsList(_)) => {
@@ -878,7 +917,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub(crate) fn list_len_value(&self, id: ObjectId, index: usize) -> JsResult<usize> {
-        let instance = self.instance(id)?;
+        let instance = self.instance_record(id)?;
         match instance.slots.get(index) {
             Some(crate::runtime::HostSlot::JsList(values)) => Ok(values.len()),
             Some(crate::runtime::HostSlot::Js(_)) => Err(JsError::Fault(HostFault::new(
@@ -894,7 +933,7 @@ impl<'a> CallCx<'a> {
         index: usize,
         position: usize,
     ) -> JsResult<JsValue> {
-        let instance = self.instance(id)?;
+        let instance = self.instance_record(id)?;
         match instance.slots.get(index) {
             Some(crate::runtime::HostSlot::JsList(values)) => values
                 .get(position)
@@ -955,7 +994,7 @@ impl<'a> CallCx<'a> {
         let class = self.bindings.class_by_tag(T::TAG).ok_or_else(|| {
             JsError::Fault(HostFault::new(format!("unregistered class {}", T::TAG)))
         })?;
-        let instance = self.instance(id)?;
+        let instance = self.instance_record(id)?;
         if instance.class != class {
             return Err(JsError::Fault(HostFault::new(format!(
                 "instance is not a {}",
