@@ -7,7 +7,7 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Error, Expr, Ident, ItemStruct, LitStr, Path, Result, Token, TypePath, braced, bracketed,
+    Error, Expr, Ident, ItemStruct, LitStr, Path, Result, Token, Type, TypePath, braced, bracketed,
 };
 
 use super::typed::{extract_slots, slot_decls};
@@ -122,7 +122,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             }),
             "services" => set(&mut services, &key, || {
                 input.parse::<Token![=]>()?;
-                list::<ServiceDependency>(input)
+                list::<Type>(input)
             }),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
@@ -141,13 +141,9 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     });
     let services = services.unwrap_or_default();
     let service_dependencies = (!services.is_empty()).then(|| {
-        let declarations = services.iter().map(|service| {
-            let ServiceDependency { key, optional } = service;
-            quote!(::yield_vm::__macro_support::ServiceDependency::of::<#key>(#optional))
-        });
         quote! {
             const SERVICES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
-                #(#declarations),*
+                #(::yield_vm::__macro_support::ServiceDependency::of::<#services>()),*
             ];
         }
     });
@@ -236,31 +232,17 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .collect())
 }
 
-struct ServiceDependency {
-    key: TypePath,
-    optional: bool,
-}
-
-impl Parse for ServiceDependency {
-    fn parse(input: ParseStream<'_>) -> Result<Self> {
-        Ok(Self {
-            key: input.parse()?,
-            optional: input.parse::<Option<Token![?]>>()?.is_some(),
-        })
-    }
-}
-
 struct ServiceBinding {
-    key: TypePath,
+    ty: Type,
     value: Expr,
 }
 
 impl Parse for ServiceBinding {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let key = input.parse()?;
+        let ty = input.parse()?;
         input.parse::<Token![=>]>()?;
         Ok(Self {
-            key,
+            ty,
             value: input.parse()?,
         })
     }
@@ -330,10 +312,10 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
         TokenStream::new()
     };
     let inserts = services.iter().map(|binding| {
-        let key = &binding.key;
+        let ty = &binding.ty;
         let value = &binding.value;
         quote! {
-            __yield_services.insert::<#key>(#value)?;
+            __yield_services.insert::<#ty>(#value)?;
         }
     });
     let mutable = (!modules.is_empty()).then(|| quote!(mut));
@@ -544,11 +526,17 @@ mod tests {
         );
         for args in [
             quote!(name = "counter"),
-            quote!(name = "counter", classes = [], operations = []),
+            quote!(
+                name = "counter",
+                classes = [],
+                operations = [],
+                services = []
+            ),
             quote!(
                 operations = [work::Wait,],
                 name = "counter",
-                classes = [crate::Point,]
+                classes = [crate::Point,],
+                services = [Arc<dyn TimerService>,]
             ),
         ] {
             host_module(args, item.clone()).unwrap();
@@ -556,11 +544,24 @@ mod tests {
     }
 
     #[test]
+    fn host_module_rejects_optional_services() {
+        diagnostic(
+            host_module(
+                quote!(name = "counter", services = [Clock?]),
+                quote!(
+                    struct Counter;
+                ),
+            ),
+            "expected `,`",
+        );
+    }
+
+    #[test]
     fn host_module_rejects_duplicate_dependency_keys() {
         let item = quote!(
             struct Counter;
         );
-        for key in ["classes", "operations"] {
+        for key in ["classes", "operations", "services"] {
             let ident = Ident::new(key, MacroSpan::call_site());
             diagnostic(
                 host_module(
@@ -637,7 +638,7 @@ mod tests {
             dts: "tests/dts/empty.d.ts",
             services: {
                 Clock => tick(),
-                Timer => timer,
+                Arc<dyn TimerService> => timer,
             },
             modules: [api::V1,],
         })
@@ -656,8 +657,13 @@ mod tests {
         let [clock, timer] = registry.services.as_slice() else {
             panic!("expected two service bindings");
         };
-        assert!(clock.key.path.is_ident("Clock"));
-        assert!(timer.key.path.is_ident("Timer"));
+        let clock = &clock.ty;
+        let timer = &timer.ty;
+        assert_eq!(quote!(#clock).to_string(), quote!(Clock).to_string());
+        assert_eq!(
+            quote!(#timer).to_string(),
+            quote!(Arc<dyn TimerService>).to_string()
+        );
     }
 
     #[test]

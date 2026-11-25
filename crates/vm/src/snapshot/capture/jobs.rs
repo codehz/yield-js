@@ -1,6 +1,7 @@
 //! Microtask job, combine, operation, and host task validation and loading.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::binding::{Bindings, CpsBoundary, ExportDecl, NativeTarget, Recovery};
 use crate::builtin::is_callable_object;
@@ -9,7 +10,7 @@ use crate::heap::GeneratorStatus;
 use crate::heap::{
     AbortStep, CombineKind, Heap, Object, PromiseCallback, PromiseState, ReactionJob,
 };
-use crate::host::TimerKey;
+use crate::host::TimerService;
 use crate::runtime::{HOST_TASK_ID_LIMIT, HostInstance, HostTask, HostTaskState, PendingOperation};
 use crate::value::{ObjectId, ValueRef};
 
@@ -429,10 +430,10 @@ pub(super) fn load_operations(
     if operations
         .values()
         .any(|op| matches!(op.target, DeliveryTarget::Timeout { .. }))
-        && bindings.service::<TimerKey>().is_none()
+        && bindings.service::<Arc<dyn TimerService>>().is_none()
     {
         return Err(VmError::InvalidSnapshot(
-            "pending timeout operations require the wintertc.timer service".to_owned(),
+            "pending timeout operations require the TimerService".to_owned(),
         ));
     }
     Ok(operations)
@@ -542,9 +543,11 @@ pub(super) fn validate_timers(
     if matched.len() != timers.len() {
         return Err(invalid());
     }
-    if timers.values().any(|timer| timer.repeat) && bindings.service::<TimerKey>().is_none() {
+    if timers.values().any(|timer| timer.repeat)
+        && bindings.service::<Arc<dyn TimerService>>().is_none()
+    {
         return Err(VmError::InvalidSnapshot(
-            "restored intervals require the wintertc.timer service".into(),
+            "restored intervals require the TimerService".into(),
         ));
     }
     Ok(())

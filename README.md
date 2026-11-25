@@ -38,7 +38,7 @@ restored.start_recovered_operations()?;
 restored.run_until_idle()?;
 ```
 
-快照保存 VM 状态，不保存 `Host` 或服务实例；恢复时提供兼容的新宿主。服务、根和恢复启动的契约见[宿主接口](docs/design/host-interface.md)与[快照设计](docs/design/snapshot.md)。
+宿主通过 `host!` 按 Rust 值类型注册服务。快照只保存 VM 状态；恢复时提供满足运行需要的新宿主。服务、根和恢复启动的契约见[宿主接口](docs/design/host-interface.md)与[快照设计](docs/design/snapshot.md)。
 
 ## 目录
 

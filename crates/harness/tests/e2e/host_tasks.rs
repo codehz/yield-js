@@ -4,12 +4,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::support::{compile_main, declared};
-use yield_harness::{CountersKey, LabelService, LabelServiceKey, Wait};
+use yield_harness::{Counters, LabelService, Wait};
 use yield_vm::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::{
-    Completion, Diagnostic, Diagnostics, DiagnosticsKey, GuestOutcome, Host, HostStep, JsResult,
-    JsValue, RestoreOptions, SnapshotValidation, Value, Vm, VmError,
+    Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsResult, JsValue,
+    RestoreOptions, SnapshotValidation, Value, Vm, VmError,
 };
 
 #[derive(Default)]
@@ -55,12 +55,12 @@ fn task_host(labels: &Rc<LabelService>) -> Host {
     );
     let mut services = yield_vm::Services::default();
     services
-        .insert::<LabelServiceKey>(Rc::clone(labels))
+        .insert::<Rc<LabelService>>(Rc::clone(labels))
         .unwrap();
     let mut deps = abi::ModuleDependencies::default();
     deps.operation::<Wait>();
     services
-        .insert::<DiagnosticsKey>(Rc::new(TaskDiagnostics::default()))
+        .insert::<Rc<dyn Diagnostics>>(Rc::new(TaskDiagnostics::default()))
         .unwrap();
     abi::link([module], deps, services).unwrap()
 }
@@ -216,7 +216,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
 #[yield_vm::host_module(
     name = "branch",
     operations = [Wait],
-    services = [LabelServiceKey, CountersKey],
+    services = [Rc<LabelService>, Rc<Counters>],
 )]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
@@ -454,7 +454,7 @@ fn next_match(cx: &mut CallCx<'_>, count: &mut JsValue) -> JsResult<Option<JsVal
 }
 
 fn hit(cx: &CallCx<'_>, name: &str) {
-    cx.service::<CountersKey>().unwrap().hit(name);
+    cx.service::<Rc<Counters>>().unwrap().hit(name);
 }
 
 #[test]
@@ -567,9 +567,9 @@ fn branch_fixture() -> (
                 dts: "../dts/branch.d.ts",
                 modules: [Branch, Mirror],
                 services: {
-                    LabelServiceKey => labels.clone(),
-                    CountersKey => counters.clone(),
-                    DiagnosticsKey => diagnostics.clone() as Rc<dyn Diagnostics>,
+                    Rc<LabelService> => labels.clone(),
+                    Rc<Counters> => counters.clone(),
+                    Rc<dyn Diagnostics> => diagnostics.clone(),
                 },
             }
             .unwrap()

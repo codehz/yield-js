@@ -84,7 +84,7 @@ pub use binding::{
     ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices, GuestOutcome,
     HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
     MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
-    Recovery, Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
+    Recovery, Registration, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
@@ -93,15 +93,14 @@ pub use bytecode::{
 pub use console::ConsoleEvent;
 pub use error::VmError;
 pub use fetch::{
-    CredentialsMode, FETCH_PROTOCOL_VERSION, FetchEnvironment, FetchEvent, FetchFailure, FetchKey,
-    FetchRegistration, FetchService, HopRequest, Origin, ResponseHead, UploadBody,
+    CredentialsMode, FetchEnvironment, FetchEvent, FetchFailure, FetchRegistration, FetchService,
+    HopRequest, Origin, ResponseHead, UploadBody,
 };
 pub use heap::{Object, PromiseState};
 pub use host::{
-    CRYPTO_SUBTLE_PROTOCOL_VERSION, Completion, ConsoleKey, ConsoleSink, CryptoKey, CryptoService,
-    Diagnostic, Diagnostics, DiagnosticsKey, DummyTimeService, GcRoots, GcRootsKey, Host,
-    SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService, SystemTimeService, TimeKey,
-    TimeService, TimerKey, UserAgentKey,
+    Completion, ConsoleSink, CryptoService, Diagnostic, Diagnostics, DummyTimeService, GcRoots,
+    Host, SubtleCryptoRequest, SubtleCryptoService, SystemTimeService, TimeService, TimerService,
+    UserAgent,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};

@@ -37,7 +37,7 @@
 
 ### Web Crypto 随机 API
 
-`crypto` 全局始终存在。`host!` 可用 `CryptoKey`（稳定 ID `wintertc.crypto`）注册 `Arc<dyn CryptoService>`；同步 `fill_random(&mut [u8]) -> Result<(), HostFault>` 成功时须填满切片，既不接收脚本值，也不重入 VM。两种随机方法仅在调用时查找服务，不回退到 `Math.random` 或进程全局熵源。无匹配服务（包括类型不符）时抛出 `NotSupportedError`；宿主失败时抛出 `OperationError`，不提交部分写入。快照不保存服务实例、熵源状态或内部临时字节；脚本保留的返回值和缓冲区仍按普通值保存。
+`crypto` 全局始终存在。`host!` 可注册 `Arc<dyn CryptoService>`；同步 `fill_random(&mut [u8]) -> Result<(), HostFault>` 成功时须填满切片，既不接收脚本值，也不重入 VM。两种随机方法仅在调用时查找服务，不回退到 `Math.random` 或进程全局熵源。缺少服务时抛出 `NotSupportedError`；宿主失败时抛出 `OperationError`，不提交部分写入。快照不保存服务实例、熵源状态或内部临时字节；脚本保留的返回值和缓冲区仍按普通值保存。
 
 ### 定时器
 

@@ -169,7 +169,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
 #[yield_vm::host_module(
     name = "repeat_timer",
     operations = [yield_harness::Timer],
-    services = [yield_harness::timer::FakeClockKey],
+    services = [std::sync::Arc<yield_harness::FakeClock>],
 )]
 struct RepeatTimer;
 
@@ -216,8 +216,8 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         dts: "../dts/repeat_timer.d.ts",
         modules: [RepeatTimer],
         services: {
-            yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
-            yield_harness::timer::FakeClockKey => Arc::clone(&clock),
+            std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught),
+            std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
         },
     }
     .unwrap()

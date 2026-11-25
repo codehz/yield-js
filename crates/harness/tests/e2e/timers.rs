@@ -368,7 +368,7 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
 #[yield_vm::host_module(
     name = "chain",
     operations = [yield_harness::Timer],
-    services = [yield_harness::timer::FakeClockKey],
+    services = [std::sync::Arc<yield_harness::FakeClock>],
 )]
 struct Chain;
 
@@ -421,8 +421,8 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
         dts: "../dts/chain.d.ts",
         modules: [Chain],
         services: {
-            yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
-            yield_harness::timer::FakeClockKey => Arc::clone(&clock),
+            std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught),
+            std::sync::Arc<yield_harness::FakeClock> => Arc::clone(&clock),
         },
     }
     .unwrap()
@@ -757,7 +757,7 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
     let host = TestHost::without_timer_service();
     assert!(matches!(
         Vm::restore(image, build.clone(), host.host(), Default::default()),
-        Err(VmError::InvalidSnapshot(message)) if message.contains("wintertc.timer")
+        Err(VmError::InvalidSnapshot(message)) if message.contains("TimerService")
     ));
 
     let token = source.clock().registrations()[0].0;
@@ -791,7 +791,7 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
     let queued = vm.snapshot(&[]).unwrap();
     assert!(matches!(
         Vm::restore(queued, build, host.host(), Default::default()),
-        Err(VmError::InvalidSnapshot(message)) if message.contains("wintertc.timer")
+        Err(VmError::InvalidSnapshot(message)) if message.contains("TimerService")
     ));
 }
 

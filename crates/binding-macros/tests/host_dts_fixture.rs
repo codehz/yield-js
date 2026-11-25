@@ -167,7 +167,7 @@ fn service_only_hosts_need_no_dts_but_still_check_supplied_declarations() {
     let fixture = Fixture::new("service-only-host");
     let source = r#"
 pub fn make_host() -> Result<yield_vm::Host, String> {
-    yield_vm::host! { services: {} }
+    yield_vm::host! { services: { u64 => 17 } }
 }
 "#;
     fixture.write("src/lib.rs", source);
@@ -183,7 +183,7 @@ pub fn make_host() -> Result<yield_vm::Host, String> {
     );
     fixture.write(
         "src/lib.rs",
-        &source.replace("services: {}", "dts: \"host.d.ts\", services: {}"),
+        &source.replace("services:", "dts: \"host.d.ts\", services:"),
     );
     let (ok, output) = fixture.check();
     assert!(
@@ -247,21 +247,46 @@ pub fn make_host() -> Result<Host, String> {
 }
 
 #[test]
-fn timer_key_rejects_the_wrong_value_type() {
-    let fixture = Fixture::new("timer-key");
+fn explicit_service_registration_rejects_the_wrong_value_type() {
+    let fixture = Fixture::new("service-type");
     fixture.write(
         "src/lib.rs",
-        r#"use yield_vm::{Services, TimerKey};
+        r#"use std::sync::Arc;
+use yield_vm::{Host, TimerService, host};
 
-pub fn services() -> Result<(), String> {
-    Services::default().insert::<TimerKey>(17u64)
+pub fn make_host() -> Result<Host, String> {
+    host! { services: { Arc<dyn TimerService> => 17u64 } }
 }
 "#,
     );
     let (ok, output) = fixture.check();
-    assert!(!ok, "invalid TimerKey value must fail:\n{output}");
+    assert!(
+        !ok,
+        "a value of the wrong service type must fail:\n{output}"
+    );
     assert!(
         output.contains("E0308") && output.contains("TimerService") && output.contains("u64"),
+        "{output}"
+    );
+}
+
+#[test]
+fn services_cannot_be_moved_to_another_thread() {
+    let fixture = Fixture::new("thread-affine-services");
+    fixture.write(
+        "src/lib.rs",
+        r#"use yield_vm::Services;
+
+fn require_send<T: Send>() {}
+
+pub fn move_services() {
+    require_send::<Services>();
+}
+"#,
+    );
+    let (ok, output) = fixture.check();
+    assert!(
+        !ok && output.contains("E0277") && output.contains("cannot be sent between threads"),
         "{output}"
     );
 }

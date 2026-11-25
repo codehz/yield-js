@@ -2,7 +2,6 @@
 //! deterministic fallback and system-clock implementations.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 /// Supplies wall-clock time and the local time zone to `Date` and file
 /// timestamps. Implementations must not reenter the VM.
@@ -14,17 +13,7 @@ pub trait TimeService: Send + Sync {
     fn time_zone(&self) -> Cow<'_, str>;
 }
 
-/// Optional wall-clock time for the `Date` global and file timestamps.
-pub struct TimeKey;
-
-impl crate::ServiceKey for TimeKey {
-    type Value = Arc<dyn TimeService>;
-    const ID: &'static str = "wintertc.time";
-    const VERSION: u32 = 1;
-    const IN_FINGERPRINT: bool = false;
-}
-
-/// Fallback time source for VMs without a `wintertc.time` service: a fixed
+/// Fallback time source for VMs without a `TimeService`: a fixed
 /// instant at the Unix epoch in `Etc/UTC`, so runs stay deterministic.
 pub struct DummyTimeService;
 

@@ -4,6 +4,7 @@
 //! been validated. Unreachable IDs are never reused within the same VM.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -13,6 +14,7 @@ use crate::heap::{
     OwnedEdge, REPLACE_SYMBOL, SEARCH_SYMBOL, SPECIES_SYMBOL, SPLIT_SYMBOL, TO_PRIMITIVE_SYMBOL,
     TO_STRING_TAG_SYMBOL, WeakKey,
 };
+use crate::host::GcRoots;
 use crate::runtime::{Continuation, HostInstance, HostSlot};
 use crate::value::{
     ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
@@ -191,7 +193,7 @@ impl VmCore {
         self.collect_with_roots(
             |tracer| {
                 let mut status = Ok(());
-                let Some(roots) = host.services().get::<crate::host::GcRootsKey>() else {
+                let Some(roots) = host.services().get::<Rc<dyn GcRoots>>() else {
                     return Ok(());
                 };
                 roots.visit(&mut |value| {

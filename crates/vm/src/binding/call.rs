@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt;
 
 use crate::gc::ActiveRoots;
@@ -651,8 +652,8 @@ impl<'a> CallCx<'a> {
 
     /// Borrows a linked service for the activation, independent of the VM borrow.
     /// Holding the reference does not prevent mutable access to this context.
-    pub fn service<K: ServiceKey>(&self) -> Option<&'a K::Value> {
-        self.bindings.service::<K>()
+    pub fn service<T: Any>(&self) -> Option<&'a T> {
+        self.bindings.service::<T>()
     }
 
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {

@@ -40,7 +40,7 @@
 | Web Crypto | 支持随机方法及 `crypto.subtle` 的 SHA-256、raw 密钥导入/导出、PBKDF2-SHA-256 派生 AES-GCM、AES-GCM 加解密、HMAC-SHA-256 签名/校验子集。无全局 `Crypto` 接口对象，无不可导出密钥（因此 PBKDF2 只接受本实现的可导出 raw 密码），无其他格式、算法或用途；不提供 `generateKey`、`deriveBits`、`wrapKey`、`unwrapKey`。 |
 | `Number` | 非十进制 `toString` 只转换整数部分；`toLocaleString` 仅沿用默认十进制 `toString`，不支持区域设置 |
 | `BigInt` | `toLocaleString` 与十进制 `toString` 相同，不支持区域设置；其余语义见 [`implemented.md`](implemented.md) |
-| `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数。未注册 `wintertc.time` 服务时使用固定 epoch 0 与 `Etc/UTC` 的 dummy 时间源 |
+| `Date` | 不提供 Intl；`toLocale*` 复用本地日期或时间格式。`parse` 支持标准 Date Time String Format 和自身 `toString` / `toUTCString` 的输出，不接受其它非标准格式。`GMT±HHMM` 不含偏移秒数；解析这种历史本地字符串时借助当前宿主时区恢复偏移秒数。未注册 `Arc<dyn TimeService>` 时使用固定 epoch 0 与 `Etc/UTC` 的 dummy 时间源 |
 | `Math` | 浮点数学函数依赖 Rust `f64` 实现；`random` 使用固定种子的非加密 PRNG |
 | `RegExp` | 匹配语法取决于固定版本的 `regress`；支持 `d` / `g` / `i` / `m` / `s` / `u` / `v` / `y`（`u` 与 `v` 互斥）。不实现 Annex B 的 `compile` 和旧式静态匹配属性，不保证覆盖全部 Annex B 兼容语法。 |
 | `Map` / `Set` | 查找、删除与集合运算按活槽线性扫描，删除保留空槽 |
@@ -62,9 +62,9 @@
 1. **代理仅覆盖六种 trap**，不等同于完整 ECMAScript Proxy。
 2. **新的堆种类仍要改可达性**。常规强边由 `Heap::write_edges` 提供；宿主实例的隐藏槽和模块状态槽由 GC 和快照共享的追踪器显式遍历，`WeakMap` 条目由 ephemeron 追踪单独处理，`WeakSet` 成员不参与标记。快照布局变化调整 `SNAPSHOT_FORMAT_VERSION`；仅执行语义变化可更新构建摘要的语义修订号来拒绝旧快照，不必因此调整 `BYTECODE_VERSION`。
 3. **宿主绑定首版仍有未决项。** 尚未实现弱引用槽、`JsMap` 槽、C ABI、TypeScript 定义生成、payload 流式/资源上限和跨线程交付。非空模块需显式选择初始化及 codec；可为普通 Rust 字段派生 `Encode` / `Decode`。宿主绑定与脚本继承的已支持范围见 [`implemented.md`](implemented.md)。
-   宿主模块的类、operation 与服务依赖必须显式列出，不从导出签名或函数体推断；清单也覆盖继承、间接调用及恢复路径。`host!` 的服务表不接受可选注册条目：不注册就省略该键。模块依赖仍可用 `OptionalKey?` 声明为可选；依赖声明只做链接期检查，不限制调用时的服务访问。
+   宿主模块的类、operation 与必需服务类型必须显式列出，不从导出签名或函数体推断；清单也覆盖继承、间接调用及恢复路径。可选服务不列入模块依赖，由调用方处理缺失。依赖声明只做链接期检查，不限制调用时的服务访问。
 4. **宿主续体不能等待任意 Rust Future。** `loop` / `while` / `while let` 的循环体可挂起；`while` / `while let` 的条件和 `for` 循环不能挂起。Guest 调用与 GC 同步恢复；只有正在等待外部 operation 的宿主任务可写入快照。Rust 栈、函数指针和 `ModuleCx` 不序列化；模块续体只在分派时重获本模块的状态能力。
-5. **GC 不会自动触发。** 嵌入方可在调用之间排空微任务后调用 `vm.collect_garbage(roots)`，或用 `CallCx::request_gc` 向脚本暴露同步收集。只有后者使用可选的 `GcRootsKey` 服务访问宿主持有的本 VM 值。没有默认的脚本 `gc` 全局函数。
+5. **GC 不会自动触发。** 嵌入方可在调用之间排空微任务后调用 `vm.collect_garbage(roots)`，或用 `CallCx::request_gc` 向脚本暴露同步收集。只有后者使用可选的 `Rc<dyn GcRoots>` 服务访问宿主持有的本 VM 值。没有默认的脚本 `gc` 全局函数。
 6. **瞬时槽复用不是精确 GC。** 分配器使用覆盖所有活性位置与写入点的连续区间，不利用区间内部的空洞。活动帧的 GC 仍扫描所有非空槽，未被覆盖的死引用可能继续保留对象。
 7. **静态属性键不缓存读取。** 专用读取指令只跳过字符串键的槽读写和转换；`SetMember` 对普通对象的自有可写数据属性有写侧单态缓存，但读取、计算键、复合赋值和 `super` 仍走通用属性路径。
 8. **CFG 常量传播不折叠通用 JS 运算。** 只传播已有字面量和槽复制、判断已知字面量的真假值；不做跨函数常量传播或运行时类型专用化。

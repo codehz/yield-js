@@ -13,9 +13,6 @@ use url::Url;
 
 use crate::binding::{HostFault, OperationToken};
 
-/// Version of the event and registration contract below.
-pub const FETCH_PROTOCOL_VERSION: u32 = 1;
-
 /// Network permission and origin policy recorded with the VM.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FetchEnvironment {
@@ -124,16 +121,6 @@ pub trait FetchService: Send + Sync {
         token: OperationToken,
         request: HopRequest,
     ) -> Result<Box<dyn FetchRegistration>, HostFault>;
-}
-
-/// Optional HTTP exchange adapter.
-pub struct FetchKey;
-
-impl crate::ServiceKey for FetchKey {
-    type Value = Arc<dyn FetchService>;
-    const ID: &'static str = "wintertc.fetch";
-    const VERSION: u32 = FETCH_PROTOCOL_VERSION;
-    const IN_FINGERPRINT: bool = false;
 }
 
 impl std::fmt::Debug for dyn FetchRegistration {

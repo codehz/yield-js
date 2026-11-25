@@ -17,7 +17,7 @@ use crate::builtin::{
 };
 use crate::error::VmError;
 use crate::fetch::{
-    CredentialsMode, FetchEvent, FetchFailure, FetchKey, FetchRegistration, HopRequest, Origin,
+    CredentialsMode, FetchEvent, FetchFailure, FetchRegistration, FetchService, HopRequest, Origin,
     ResponseHead, UploadBody,
 };
 use crate::gc::ActiveRoots;
@@ -467,7 +467,7 @@ impl VmCore {
         if let Err(message) = self.configure_hop(&data, &mut hop) {
             return reject(self, message);
         }
-        if host.services().get::<FetchKey>().is_none() {
+        if host.services().get::<Arc<dyn FetchService>>().is_none() {
             return reject(self, "Fetch service unavailable");
         }
         let upload = match &data.body {
@@ -574,17 +574,20 @@ impl VmCore {
                 .push(AbortStep::Operation(id));
         }
         self.fetch_state.transactions.insert(id, tx);
-        let registration = host.services().get::<FetchKey>().and_then(|service| {
-            Arc::clone(service)
-                .start(
-                    OperationToken {
-                        epoch: self.epoch,
-                        id,
-                    },
-                    outgoing,
-                )
-                .ok()
-        });
+        let registration = host
+            .services()
+            .get::<Arc<dyn FetchService>>()
+            .and_then(|service| {
+                Arc::clone(service)
+                    .start(
+                        OperationToken {
+                            epoch: self.epoch,
+                            id,
+                        },
+                        outgoing,
+                    )
+                    .ok()
+            });
         if let Some(registration) = registration {
             self.fetch_live.insert(id, registration);
             let tx = &self.fetch_state.transactions[&id];

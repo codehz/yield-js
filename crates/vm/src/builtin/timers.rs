@@ -1,5 +1,7 @@
 //! WindowOrWorkerGlobalScope timers; the platform supplies wakeups only.
 
+use std::sync::Arc;
+
 use super::{
     FUNCTION_PARENT,
     globals::Owner,
@@ -7,7 +9,7 @@ use super::{
 };
 use crate::VmError;
 use crate::gc::ActiveRoots;
-use crate::host::{Host, TimerKey};
+use crate::host::{Host, TimerService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::Value;
@@ -59,7 +61,7 @@ fn set(
         Ok(number) => number.max(0) as u32,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
-    if host.services().get::<TimerKey>().is_none() {
+    if host.services().get::<Arc<dyn TimerService>>().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),

@@ -291,7 +291,7 @@ macro_rules! timer_contract {
             #[host_module(
                 name = "contract",
                 operations = [Timer],
-                services = [yield_harness::timer::FakeClockKey],
+                services = [std::sync::Arc<yield_harness::FakeClock>],
             )]
             struct Api;
 
@@ -317,8 +317,8 @@ macro_rules! timer_contract {
                     dts: "../dts/contract.d.ts",
                     modules: [Api],
                     services: {
-                        yield_vm::DiagnosticsKey => std::rc::Rc::new(UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
-                        yield_harness::timer::FakeClockKey => Arc::clone(clock),
+                        std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(UnexpectedUncaught),
+                        std::sync::Arc<yield_harness::FakeClock> => Arc::clone(clock),
                     },
                 }.unwrap()
             }

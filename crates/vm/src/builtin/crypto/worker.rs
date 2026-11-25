@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use crate::builtin::binary::{ARRAY_BUFFER_PROTOTYPE, MAX_BYTE_LENGTH};
 use crate::error::VmError;
 use crate::heap::{ArrayBufferObject, CryptoKeyAlgorithm, CryptoKeyUsage, Object, PlainObject};
-use crate::host::{SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService};
+use crate::host::{SubtleCryptoRequest, SubtleCryptoService};
 use crate::runtime::Settlement;
 use crate::value::{ObjectId, Value};
 use crate::vm::VmCore;
@@ -111,7 +111,7 @@ impl VmCore {
     ) -> Result<(), VmError> {
         let state = &mut self.subtle_state;
         if state.worker.is_none() {
-            let Some(service) = host.services().get::<SubtleCryptoKey>() else {
+            let Some(service) = host.services().get::<Arc<dyn SubtleCryptoService>>() else {
                 let reason = self.alloc_dom_exception(
                     "NotSupportedError".into(),
                     "SubtleCrypto service unavailable".into(),

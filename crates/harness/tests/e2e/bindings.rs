@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use super::support::{UnexpectedUncaught, compile_main, declared};
-use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
+use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{CallCx, CodecError, HostFault, OperationToken};
 use yield_vm::{
     Completion, Decode, Encode, FromServices, GuestOutcome, Host, HostStep, Instance, JsError,
@@ -25,7 +25,7 @@ fn register_label(
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
     services
-        .get::<LabelServiceKey>()
+        .get::<Rc<LabelService>>()
         .ok_or_else(|| HostFault::new("missing labels service"))?
         .register(label.to_owned(), token, restoring)
 }
@@ -75,7 +75,7 @@ mod strategy_fixture {
     #[host_module(
         name = "ops",
         operations = [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
-        services = [LabelServiceKey],
+        services = [Rc<LabelService>],
     )]
     struct Ops;
 
@@ -123,8 +123,8 @@ mod strategy_fixture {
             dts: "../dts/ops.d.ts",
             modules: [Ops],
             services: {
-                yield_vm::DiagnosticsKey => Rc::new(UnexpectedUncaught) as Rc<dyn yield_vm::Diagnostics>,
-                LabelServiceKey => Rc::clone(labels),
+                Rc<dyn yield_vm::Diagnostics> => Rc::new(UnexpectedUncaught),
+                Rc<LabelService> => Rc::clone(labels),
             },
         }
         .expect("strategy bindings")
@@ -397,14 +397,8 @@ mod stale_fixture {
     }
 
     type Stash = Rc<RefCell<Option<JsValue>>>;
-    struct StashKey;
-    impl yield_vm::ServiceKey for StashKey {
-        type Value = Stash;
-        const ID: &'static str = "stash";
-        const VERSION: u32 = 1;
-    }
 
-    #[host_module(name = "stale", classes = [Sink], services = [StashKey])]
+    #[host_module(name = "stale", classes = [Sink], services = [Stash])]
     struct Stale;
 
     #[module_exports]
@@ -412,7 +406,7 @@ mod stale_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<()> {
             let stash = cx
-                .service::<StashKey>()
+                .service::<Stash>()
                 .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
             *stash.borrow_mut() = Some(value);
             Ok(())
@@ -421,7 +415,7 @@ mod stale_fixture {
         #[function(name = "unstash")]
         fn unstash(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Sink>> {
             let value = cx
-                .service::<StashKey>()
+                .service::<Stash>()
                 .and_then(|stash| stash.borrow().clone())
                 .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
             let sink = cx.alloc(Sink)?;
@@ -435,7 +429,7 @@ mod stale_fixture {
             dts: "../dts/stale.d.ts",
             modules: [Stale],
             services: {
-                StashKey => Stash::default(),
+                Stash => Stash::default(),
             },
         }
         .expect("stale bindings")
@@ -468,21 +462,7 @@ mod guest_call_fixture {
     use super::*;
 
     type Stash = Mutex<Option<HostStep>>;
-    struct StashKey;
-    impl yield_vm::ServiceKey for StashKey {
-        type Value = Stash;
-        const ID: &'static str = "stash";
-        const VERSION: u32 = 1;
-    }
-
-    struct RunsKey;
-    impl yield_vm::ServiceKey for RunsKey {
-        type Value = Rc<Cell<usize>>;
-        const ID: &'static str = "runs";
-        const VERSION: u32 = 1;
-    }
-
-    #[host_module(name = "guest", services = [StashKey, RunsKey])]
+    #[host_module(name = "guest", services = [Stash, Rc<Cell<usize>>])]
     struct Guest;
 
     #[module_exports]
@@ -501,21 +481,21 @@ mod guest_call_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, callee: JsValue) -> JsResult<()> {
             let request = Self::later(cx, callee)?;
-            *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
+            *cx.service::<Stash>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "stashGc")]
         fn stash_gc(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             let request = cx.request_gc(vec![], unexpected_resume)?;
-            *cx.service::<StashKey>().unwrap().lock().unwrap() = Some(request);
+            *cx.service::<Stash>().unwrap().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "replay")]
         fn replay(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
             Ok(cx
-                .service::<StashKey>()
+                .service::<Stash>()
                 .unwrap()
                 .lock()
                 .unwrap()
@@ -530,7 +510,7 @@ mod guest_call_fixture {
 
         #[function(name = "mark")]
         fn mark(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
-            let runs = cx.service::<RunsKey>().unwrap();
+            let runs = cx.service::<Rc<Cell<usize>>>().unwrap();
             runs.set(runs.get() + 1);
             Ok(())
         }
@@ -600,8 +580,8 @@ mod guest_call_fixture {
             dts: "../dts/guest.d.ts",
             modules: [Guest],
             services: {
-                StashKey => Stash::default(),
-                RunsKey => runs.clone(),
+                Stash => Stash::default(),
+                Rc<Cell<usize>> => runs.clone(),
             },
         }
         .expect("guest bindings");
@@ -729,7 +709,7 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "test", operations = [Wait], services = [LabelServiceKey])]
+    #[host_module(name = "test", operations = [Wait], services = [Rc<LabelService>])]
     struct TestModule;
 
     #[module_exports]
@@ -768,7 +748,7 @@ mod counter_fixture {
             dts: "../dts/counter-test.d.ts",
             modules: [Counter, TestModule],
             services: {
-                LabelServiceKey => Rc::clone(labels),
+                Rc<LabelService> => Rc::clone(labels),
             },
         }
         .expect("counter bindings")
@@ -780,31 +760,23 @@ mod counter_fixture {
         pub(super) initialized: Cell<usize>,
     }
 
-    struct PayloadKey;
-
-    impl yield_vm::ServiceKey for PayloadKey {
-        type Value = Rc<PayloadService>;
-        const ID: &'static str = "payload-service";
-        const VERSION: u32 = 1;
-    }
-
     struct ServiceField(u32);
 
     impl Encode for ServiceField {
         fn encode(&self, out: &mut Vec<u8>, services: &Services) -> Result<(), CodecError> {
-            let service = services.get::<PayloadKey>().unwrap();
+            let service = services.get::<Rc<PayloadService>>().unwrap();
             (self.0 + service.offset).encode(out, services)
         }
     }
 
     impl Decode for ServiceField {
         fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
-            let service = services.get::<PayloadKey>().unwrap();
+            let service = services.get::<Rc<PayloadService>>().unwrap();
             Ok(Self(u32::decode(input, services)? + service.offset))
         }
     }
 
-    #[host_module(name = "counter", services = [PayloadKey])]
+    #[host_module(name = "counter", services = [Rc<PayloadService>])]
     #[derive(Encode, Decode)]
     struct ServiceCounter {
         count: ServiceField,
@@ -814,7 +786,7 @@ mod counter_fixture {
 
     impl FromServices for ServiceCounter {
         fn from_services(services: &Services) -> Self {
-            let service = services.get::<PayloadKey>().unwrap();
+            let service = services.get::<Rc<PayloadService>>().unwrap();
             service.initialized.set(service.initialized.get() + 1);
             Self {
                 count: ServiceField(service.initial),
@@ -841,7 +813,7 @@ mod counter_fixture {
         host! {
             dts: "../dts/counter-test.d.ts",
             modules: [ServiceCounter, TestModuleWithoutWait],
-            services: { PayloadKey => service },
+            services: { Rc<PayloadService> => service },
         }
         .unwrap()
     }
@@ -1207,7 +1179,7 @@ mod inherit_fixture {
             dts: "../dts/inherit.d.ts",
             modules: [Inherit],
             services: {
-                LabelServiceKey => Rc::clone(labels),
+                Rc<LabelService> => Rc::clone(labels),
             },
         }
         .expect("derived bindings")

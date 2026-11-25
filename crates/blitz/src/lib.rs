@@ -15,7 +15,7 @@ use yield_compiler::{
     CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
     ResolvedModule,
 };
-use yield_vm::{Diagnostic, Diagnostics, DiagnosticsKey, ServiceKey, Vm, VmError};
+use yield_vm::{Diagnostic, Diagnostics, Vm, VmError};
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
 
@@ -39,16 +39,6 @@ impl Dom {
             handles: BTreeMap::new(),
         }
     }
-}
-
-struct DomKey;
-
-impl ServiceKey for DomKey {
-    type Value = Rc<RefCell<Dom>>;
-    const ID: &'static str = "yield:dom/document";
-    const VERSION: u32 = 1;
-    // Live per-run state, not a platform capability that snapshots restore.
-    const IN_FINGERPRINT: bool = false;
 }
 
 #[derive(Default)]
@@ -143,8 +133,8 @@ fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
         dts: "dom.d.ts",
         modules: [dom::DomModule],
         services: {
-            DomKey => dom.clone(),
-            DiagnosticsKey => diagnostics.clone(),
+            Rc<RefCell<Dom>> => dom.clone(),
+            Rc<dyn Diagnostics> => diagnostics.clone(),
         },
     }?;
     // Keep diagnostics outside the VM so they survive failed startup and teardown.

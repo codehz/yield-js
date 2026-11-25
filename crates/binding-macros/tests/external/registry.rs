@@ -1,12 +1,12 @@
 use super::start_vm;
+use std::any::type_name;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use yield_vm::{
-    __macro_support::decode_operation, ConsoleEvent, ConsoleKey, ConsoleSink, Decode, Encode,
-    FromServices, Host, HostFault, HostModule, Operation, OperationDriver, OperationToken,
-    Recovery, Registration, ServiceKey, Services, host, host_class, host_module, module_exports,
-    operation,
+    __macro_support::decode_operation, ConsoleEvent, ConsoleSink, Decode, Encode, FromServices,
+    Host, HostFault, HostModule, Operation, OperationDriver, OperationToken, Recovery,
+    Registration, Services, host, host_class, host_module, module_exports, operation,
 };
 
 fn fingerprint(host: Host) -> String {
@@ -16,7 +16,7 @@ fn fingerprint(host: Host) -> String {
         .binding_fingerprint
 }
 
-#[host_module(name = "state", operations = [Work], services = [ClockV2, CounterKey?])]
+#[host_module(name = "state", operations = [Work], services = [Clock])]
 #[derive(Encode, Decode)]
 struct State {
     #[js_slot]
@@ -189,42 +189,13 @@ fn duplicate_modules_are_not_deduplicated() {
     assert_eq!(duplicate.err().unwrap(), "duplicate host module \"first\"");
 }
 
-struct ClockV2;
-impl ServiceKey for ClockV2 {
-    type Value = u64;
-    const ID: &'static str = "clock";
-    const VERSION: u32 = 2;
-}
+#[derive(Debug, PartialEq)]
+struct Clock(u64);
 
-struct OtherClock;
-impl ServiceKey for OtherClock {
-    type Value = u64;
-    const ID: &'static str = ClockV2::ID;
-    const VERSION: u32 = ClockV2::VERSION;
-}
+#[derive(Debug, PartialEq)]
+struct OtherClock(u64);
 
-struct ClockV3;
-impl ServiceKey for ClockV3 {
-    type Value = u64;
-    const ID: &'static str = ClockV2::ID;
-    const VERSION: u32 = 3;
-}
-
-struct CounterKey;
-impl ServiceKey for CounterKey {
-    type Value = u64;
-    const ID: &'static str = "counter";
-    const VERSION: u32 = 1;
-}
-
-struct LocalKey;
-impl ServiceKey for LocalKey {
-    type Value = Rc<Cell<u32>>;
-    const ID: &'static str = "local";
-    const VERSION: u32 = 1;
-}
-
-type ClockAlias = ClockV2;
+type ClockAlias = Clock;
 
 #[test]
 fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
@@ -235,125 +206,146 @@ fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
     };
     assert_eq!(
         missing.err().unwrap(),
-        "host module \"state\": missing host service \"clock\""
+        format!(
+            "host module {:?}: missing host service {:?}",
+            "state",
+            type_name::<Clock>()
+        )
     );
 
-    let wrong_key = host! {
+    let wrong_type = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
-        services: { OtherClock => 17 },
+        services: { OtherClock => OtherClock(17) },
     };
     assert_eq!(
-        wrong_key.err().unwrap(),
-        "host module \"state\": wrong key type for host service \"clock\""
+        wrong_type.err().unwrap(),
+        format!(
+            "host module {:?}: missing host service {:?}",
+            "state",
+            type_name::<Clock>()
+        )
     );
 
     let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
-        services: { ClockAlias => 17 },
+        services: { ClockAlias => Clock(17) },
     }?;
     let vm = start_vm(host, Default::default());
-    assert_eq!(vm.service::<ClockV2>(), Some(&17));
-    assert_eq!(vm.service::<CounterKey>(), None);
+    assert_eq!(vm.service::<Clock>(), Some(&Clock(17)));
+    assert_eq!(vm.service::<OtherClock>(), None);
     Ok(())
 }
 
 #[test]
 fn services_accept_thread_local_values() -> Result<(), String> {
+    let local = Rc::new(Cell::new(9u32));
     let host = host! {
         services: {
-            LocalKey => Rc::new(Cell::new(9)),
+            Rc<Cell<u32>> => Rc::clone(&local),
         },
     }?;
     let vm = start_vm(host, Default::default());
-    assert_eq!(vm.service::<LocalKey>().map(|value| value.get()), Some(9));
+    local.set(11);
+    assert_eq!(
+        vm.service::<Rc<Cell<u32>>>().map(|value| value.get()),
+        Some(11)
+    );
     Ok(())
 }
 
 #[test]
 fn registers_state_operation_and_services() -> Result<(), String> {
     let mut services = Services::default();
-    services.insert::<ClockV2>(17)?;
-    assert_eq!(services.get::<OtherClock>(), None);
-    assert_eq!(services.get::<CounterKey>(), None);
+    services.insert(Clock(17))?;
+    services.insert(OtherClock(23))?;
+    assert_eq!(services.get::<OtherClock>(), Some(&OtherClock(23)));
     assert_eq!(
-        services.insert::<ClockV3>(23).unwrap_err(),
-        "duplicate host service \"clock\""
+        services.insert(Clock(42)).unwrap_err(),
+        format!("duplicate host service {:?}", type_name::<Clock>())
     );
-    assert_eq!(services.get::<ClockV2>(), Some(&17));
+    assert_eq!(services.get::<ClockAlias>(), Some(&Clock(17)));
 
     let evaluations = Cell::new(0);
     let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: {
-            ClockV2 => { evaluations.set(evaluations.get() + 1); 17 },
+            Clock => { evaluations.set(evaluations.get() + 1); Clock(17) },
         },
     }?;
     assert_eq!(evaluations.get(), 1);
     assert_eq!(<State as FromServices>::from_services(&services).count, 3);
     let vm = start_vm(host, Default::default());
-    assert_eq!(vm.service::<ClockV2>(), Some(&17));
+    assert_eq!(vm.service::<Clock>(), Some(&Clock(17)));
     assert_eq!(vm.service::<OtherClock>(), None);
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
-
-    let duplicate = host! {
-        services: {
-            ClockV2 => 17,
-            ClockV3 => 23,
-        },
-    };
-    assert_eq!(duplicate.err().unwrap(), "duplicate host service \"clock\"");
     Ok(())
 }
 
 #[test]
-fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
+fn rejects_duplicate_service_registrations_through_a_type_alias() {
+    let duplicate = host! {
+        services: {
+            Clock => Clock(17),
+            ClockAlias => Clock(23),
+        },
+    };
+    assert_eq!(
+        duplicate.err().unwrap(),
+        format!("duplicate host service {:?}", type_name::<Clock>())
+    );
+}
+
+#[test]
+fn explicit_service_type_coerces_to_a_trait_object() -> Result<(), String> {
     struct Sink;
     impl ConsoleSink for Sink {
         fn write(&self, _: &ConsoleEvent) {}
     }
 
+    let sink = Arc::new(Sink);
+    let host = host! {
+        services: { Arc<dyn ConsoleSink> => sink.clone() },
+    }?;
+    let vm = start_vm(host, Default::default());
+    let expected: Arc<dyn ConsoleSink> = sink;
+    assert!(Arc::ptr_eq(
+        vm.service::<Arc<dyn ConsoleSink>>().unwrap(),
+        &expected
+    ));
+    assert!(vm.service::<Arc<Sink>>().is_none());
+    Ok(())
+}
+
+#[test]
+fn fingerprints_ignore_services() -> Result<(), String> {
     let baseline = fingerprint(host! {
         services: {
-            ClockV2 => 17,
-            CounterKey => 0,
+            Clock => Clock(17),
+            OtherClock => OtherClock(0),
         },
     }?);
     let reordered = fingerprint(host! {
         services: {
-            CounterKey => 0,
-            ClockV2 => 17,
+            OtherClock => OtherClock(0),
+            Clock => Clock(17),
         },
     }?);
     assert_eq!(baseline, reordered);
 
-    let other_clock = fingerprint(host! {
+    let changed_value = fingerprint(host! {
         services: {
-            ClockV2 => 42,
-            CounterKey => 0,
+            Clock => Clock(42),
+            OtherClock => OtherClock(0),
         },
     }?);
-    assert_eq!(baseline, other_clock);
+    assert_eq!(baseline, changed_value);
 
-    let with_console = fingerprint(host! {
-        services: {
-            ClockV2 => 17,
-            CounterKey => 0,
-            ConsoleKey => Arc::new(Sink),
-        },
-    }?);
-    assert_eq!(baseline, with_console);
-
-    let upgraded = fingerprint(host! {
-        services: {
-            ClockV3 => 17,
-            CounterKey => 0,
-        },
-    }?);
-    assert_ne!(baseline, upgraded);
+    let empty = fingerprint(host! { services: {} }?);
+    assert_eq!(baseline, empty);
     Ok(())
 }

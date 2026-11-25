@@ -30,7 +30,7 @@
 | 实例（instance） | VM 堆中的对象，带类标签、槽和 payload。对象身份、原型和属性由 VM 持有。 |
 | 槽（slot） | 实例上声明的、不可从 JS 伪装的强引用，保存任意 `JsValue`。 |
 | payload | 实例上声明的非 JS 数据，由绑定提供的 codec 编解码，随快照保存。 |
-| 服务（service） | VM 接管的 `Host` 按键提供的运行时能力，例如节点工厂、时钟、网络客户端、错误报告。不随快照保存。 |
+| 服务（service） | VM 接管的 `Host` 按值类型提供的运行时能力，例如节点工厂、时钟、网络客户端、错误报告。不随快照保存。 |
 | operation | 一次可由中断恢复的异步工作。VM 为其创建 Promise 并保存持久记录。 |
 | 声明指纹（fingerprint） | 由静态声明语义字段计算出的稳定标识，用于恢复时精确匹配绑定契约。 |
 
@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [LabelServiceKey])]` 中的三个依赖列表可省略，省略等同于空列表。每个模块要列出自身的完整依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
+`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [Rc<LabelService>])]` 中的三个依赖列表可省略，省略等同于空列表。每个模块要列出自身的必需依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
 
 `host!` 接受 `dts`、`modules`、`services` 三段，或只有 `services`，返回 `Result<Host, String>`。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
@@ -115,7 +115,7 @@ impl Matcher {
 
 `cx.abort_reason(&signal)` 检查信号品牌并返回已有原因。`cx.promise_with_signal(op, &signal)` 对已取消信号直接拒绝原生 Promise，不启动 driver；否则将登记绑定到信号。取消先删除 pending 记录并释放登记，再以同一原因拒绝 Promise。完成和恢复失败也解除关联。
 
-可选服务 `wintertc.timer` 注册为 `Arc<dyn TimerService>`，接收 operation token 和 `u64` 相对延迟，返回可 drop 的一次性登记。平台只投递 token；在 VM 线程调用 `vm.wake_timer(token)` 后，用 `vm.run_until_idle()` 完成独立轮次。恢复发布后调用 `vm.start_recovered_operations()`；有活动 timeout 的镜像在缺少该服务时拒绝恢复。测试时钟与唤醒服务应使用同一计时域。
+定时器唤醒服务注册为 `Arc<dyn TimerService>`，接收 operation token 和 `u64` 相对延迟，返回可 drop 的一次性登记。平台只投递 token；在 VM 线程调用 `vm.wake_timer(token)` 后，用 `vm.run_until_idle()` 完成独立轮次。恢复发布后调用 `vm.start_recovered_operations()`；待唤醒的 timeout 或需续订的 interval 在缺少该服务时拒绝恢复。测试时钟与唤醒服务应使用同一计时域。
 
 ### 4.3 稳定标识与契约指纹
 
@@ -124,10 +124,11 @@ impl Matcher {
 - 模块名、导出名及种类、每个模块的状态槽名字/顺序/种类；
 - 类标签、槽名字/顺序/种类、codec 标识；
 - 成员名、种类（方法/访问器/数据）、参数与返回种类；
-- operation 类型、恢复策略；
-- 参与指纹的服务契约，按 `id:version` 排序。
+- operation 类型、恢复策略。
 
 指纹不含 Rust 类型名、函数地址、宏展开细节或调试名称，因此重命名内部符号不会使快照失效；删除槽、改变顺序、更换 codec 或改变恢复策略会使快照失效。变更策略沿用项目的精确版本约定：不自动迁移，报告具体不匹配项。
+
+服务的注册、值类型、实现和依赖列表都不进入指纹。恢复仍要求新宿主满足模块的必需依赖及镜像实际需要的能力。
 
 ### 4.4 与编译器的接口
 
@@ -199,15 +200,15 @@ pub trait Decode: Sized {
 
 规则：
 
-- **服务提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Services` 按键读取服务，例如 `services.get::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
+- **服务提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Services` 按值类型读取服务，例如 `services.get::<NodeFactory>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
 - **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
-服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host!` 的 `services:` 段只接受 `Key => value`，不接受可选条目；不注册某项服务就省略对应条目。重复 ID 使整个调用返回错误且不覆盖。`Services::get::<Key>()`、`CallCx::service::<Key>()` 和 `Vm::service::<Key>()` 查询同一个注册表；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+`host!` 的 `services:` 段使用 `Type => value`。显式类型决定存储类型并允许表达式强制转换，例如把 `Arc<PlatformTimer>` 转成 `Arc<dyn TimerService>`。同一宿主按确切的 Rust 值类型存储，每个类型只允许注册一次，类型别名仍是同一类型；重复注册报错且不覆盖。`Services::get::<T>()`、`CallCx::service::<T>()` 和 `Vm::service::<T>()` 查询同一个注册表。
 
-模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host!` 在组装服务表后、返回 `Host` 前检查选中模块：服务表缺少必需键会导致链接失败；以同一 ID 注册不同的 Rust 键类型也会失败。两种错误均包含模块名和服务 ID。可选依赖允许服务缺失。声明用于链接检查，不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
+模块用 `services = [Type, …]` 声明必需服务。`host!` 在组装服务表后、返回 `Host` 前检查选中模块，缺失时报模块名和服务类型。可选服务不列入依赖，调用方处理查询返回的 `None`；没有服务时省略对应注册项。依赖列表不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
 
 `CallCx::service` 返回的引用借自本次原生调用的服务表，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
 
@@ -216,10 +217,9 @@ let host = host! {
     dts: "test.d.ts",
     modules: [TestModule],
     services: {
-        CountersKey => counters,
-        LabelServiceKey => labels,
-        TimerKey => timer, // Arc<dyn TimerService>
-        // 没有 console 服务，省略 ConsoleKey。
+        Rc<Counters> => counters,
+        Rc<LabelService> => labels,
+        Arc<dyn TimerService> => timer,
     },
 }?;
 let mut vm = Vm::new(build, host, VmOptions::default())?;
@@ -227,17 +227,17 @@ vm.start("run", vec![])?;
 vm.run_until_idle()?;
 
 // 没有宿主模块时不需要 .d.ts。
-let console_host = host! { services: { ConsoleKey => console_sink } }?;
+let console_host = host! { services: { Arc<dyn ConsoleSink> => console_sink } }?;
 ```
 
 
-服务实例不进入快照。默认只有契约的 ID 和版本进入绑定指纹；参与指纹的服务缺失或版本不匹配会拒绝恢复。运行时适配器 `DiagnosticsKey`、`GcRootsKey` 和 `UserAgentKey` 不参与指纹，分别用于诊断、绑定触发的同步 GC 和新建时的 `navigator.userAgent`，见[宿主接口](host-interface.md)。六种可选内建适配器同样不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；`TimeKey`（`wintertc.time`，版本 `1`）注册 `Arc<dyn TimeService>`，为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区；未注册时 VM 回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）；其余三种如下。
+服务实例不进入快照。诊断、绑定触发的同步 GC 与新建时的 `navigator.userAgent` 各自使用可选的运行时服务，见[宿主接口](host-interface.md)。恢复逻辑根据定时器记录检查 `Arc<dyn TimerService>`；`Arc<dyn CryptoService>` 提供同步熵；`Arc<dyn TimeService>` 为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区，未注册时回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）。
 
-`FetchKey`（`wintertc.fetch`，协议版本 `1`）注册 `Arc<dyn FetchService>`。快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
+网络适配器注册为 `Arc<dyn FetchService>`。快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
 
-`ConsoleKey`（`wintertc.console`，版本 `1`）注册 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
+输出适配器注册为 `Arc<dyn ConsoleSink>`。`ConsoleSink::write(&ConsoleEvent)` 不得重入 VM；事件不含 JS 句柄，宿主可复制或自行渲染。服务不登记 operation；恢复到有或无 sink 的宿主都不会重放历史输出。未安装 sink 时，仅实际调用 Printer 才会抛出脚本 `NotSupportedError`。
 
-`SubtleCryptoKey`（`wintertc.crypto.subtle`，协议版本 `1`）注册独立于同步熵的 `Arc<dyn SubtleCryptoService>`。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行，只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
+`Arc<dyn SubtleCryptoService>` 独立于同步熵服务。`execute(SubtleCryptoRequest) -> Result<Vec<u8>, HostFault>` 在 VM 外的工作线程执行，只收发拥有所有权的字节和参数，不得保存 VM 引用或重入 VM。PBKDF2 输出长度和 GCM 标签长度以位为单位；GCM 密文的末尾包含认证标签，认证失败返回 `HostFault`，不得返回明文。VM 在 `run_until_idle` 的微任务检查点之后非阻塞地交付结果；宿主可用 `Vm::has_pending_subtle_operations` 判断是否需要继续驱动。待交付的原语操作使快照捕获失败；服务对象和 worker 不进入快照。服务失败以脚本 `OperationError` 拒绝，不暴露宿主诊断。
 
 ### 5.5 模块状态
 
@@ -295,7 +295,7 @@ impl CallCx {
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
 - `Host` 随 VM 在同一线程持有；并行时各线程独立构造宿主。跨线程的能力与状态由具体服务值自行声明和同步。
-- 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `wintertc.timer`（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
+- 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `Arc<dyn TimerService>`（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
 - `loop`、`while` 和 `while let` 的循环体可使用受支持的 `await`；条件必须同步，`for` 不可挂起。回边不会主动让出执行权；后台循环再次到达同一个外部 `await` 时复用任务 ID 和恢复阶段，但登记新的 operation，必须用新的令牌投递。
 

@@ -1,9 +1,7 @@
 //! Per-VM host declarations and resources. All platform capabilities are
-//! installed through typed service keys before the VM starts.
+//! installed through the typed service registry before the VM starts.
 
-use std::rc::Rc;
-
-use crate::binding::{Bindings, JsValue, ServiceKey, Services};
+use crate::binding::{Bindings, JsValue, Services};
 use crate::value::{JsString, Value};
 
 mod console;
@@ -11,13 +9,10 @@ mod crypto;
 mod time;
 mod timer;
 
-pub use console::{ConsoleEvent, ConsoleKey, ConsoleSink};
-pub use crypto::{
-    CRYPTO_SUBTLE_PROTOCOL_VERSION, CryptoKey, CryptoService, SubtleCryptoKey, SubtleCryptoRequest,
-    SubtleCryptoService,
-};
-pub use time::{DummyTimeService, SystemTimeService, TimeKey, TimeService};
-pub use timer::{TimerKey, TimerService};
+pub use console::{ConsoleEvent, ConsoleSink};
+pub use crypto::{CryptoService, SubtleCryptoRequest, SubtleCryptoService};
+pub use time::{DummyTimeService, SystemTimeService, TimeService};
+pub use timer::TimerService;
 
 /// How a host operation completed. Values are produced outside a call, so
 /// they must be constants; host code cannot mint object handles after the
@@ -79,37 +74,12 @@ pub trait Diagnostics {
     fn report(&self, event: Diagnostic<'_>);
 }
 
-pub struct DiagnosticsKey;
-
-impl ServiceKey for DiagnosticsKey {
-    type Value = Rc<dyn Diagnostics>;
-    const ID: &'static str = "yield:host/diagnostics";
-    const VERSION: u32 = 1;
-    const IN_FINGERPRINT: bool = false;
-}
-
 pub trait GcRoots {
     /// Visits only values from this VM, without re-entering it. Used for
     /// collection during execution, not explicit collection or snapshots.
     fn visit(&self, visit: &mut dyn FnMut(&Value));
 }
 
-pub struct GcRootsKey;
-
-impl ServiceKey for GcRootsKey {
-    type Value = Rc<dyn GcRoots>;
-    const ID: &'static str = "yield:host/gc-roots";
-    const VERSION: u32 = 1;
-    const IN_FINGERPRINT: bool = false;
-}
-
 /// Overrides the fresh VM's `navigator.userAgent`, not Fetch request headers.
 /// Restore retains the value from the snapshot.
-pub struct UserAgentKey;
-
-impl ServiceKey for UserAgentKey {
-    type Value = String;
-    const ID: &'static str = "yield:host/user-agent";
-    const VERSION: u32 = 1;
-    const IN_FINGERPRINT: bool = false;
-}
+pub struct UserAgent(pub String);

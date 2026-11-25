@@ -5,7 +5,7 @@
 //! [`JsValue`] carries the calling VM generation and call id, and slot writes
 //! are the only way to retain a value across calls.
 
-use std::any::{Any, TypeId};
+use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -628,18 +628,6 @@ impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
 type ArmOperation =
     fn(&[u8], OperationToken, &Services) -> Result<Box<dyn LiveRegistration>, HostFault>;
 
-/// The stable contract for a host service role, independent of its implementation.
-///
-/// Service values are confined to the thread that builds the [`Host`], like
-/// the VM itself. A service that performs work on another thread declares
-/// `Send + Sync` in its own trait or value type; this table does not require it.
-pub trait ServiceKey: 'static {
-    type Value: Any;
-    const ID: &'static str;
-    const VERSION: u32;
-    const IN_FINGERPRINT: bool = true;
-}
-
 /// Host resources assembled before linking and borrowed after linking.
 ///
 /// The table is owned by one thread, like the VM. Store thread-affine resources
@@ -647,56 +635,40 @@ pub trait ServiceKey: 'static {
 /// carry `Send + Sync` in its own type or trait.
 #[derive(Default)]
 pub struct Services {
-    values: BTreeMap<&'static str, ServiceEntry>,
+    values: BTreeMap<TypeId, Box<dyn Any>>,
 }
-
-struct ServiceEntry {
-    version: u32,
-    in_fingerprint: bool,
-    value: Box<dyn Any>,
-}
-
-// Preserve the role's identity even when two keys use the same value type.
-struct Stored<K: ServiceKey>(K::Value);
 
 impl Services {
     #[doc(hidden)]
-    pub fn insert<K: ServiceKey>(&mut self, value: K::Value) -> Result<(), String> {
+    pub fn insert<T: Any>(&mut self, value: T) -> Result<(), String> {
         use std::collections::btree_map::Entry;
 
-        let id = K::ID;
-        match self.values.entry(id) {
+        match self.values.entry(TypeId::of::<T>()) {
             Entry::Vacant(entry) => {
-                entry.insert(ServiceEntry {
-                    version: K::VERSION,
-                    in_fingerprint: K::IN_FINGERPRINT,
-                    value: Box::new(Stored::<K>(value)),
-                });
+                entry.insert(Box::new(value));
                 Ok(())
             }
-            Entry::Occupied(_) => Err(format!("duplicate host service {id:?}")),
+            Entry::Occupied(_) => Err(format!("duplicate host service {:?}", type_name::<T>())),
         }
     }
 
-    /// Looks up an installed resource by its exact service key type.
-    pub fn get<K: ServiceKey>(&self) -> Option<&K::Value> {
-        Some(&self.values.get(K::ID)?.value.downcast_ref::<Stored<K>>()?.0)
+    /// Looks up an installed resource by its exact stored type.
+    pub fn get<T: Any>(&self) -> Option<&T> {
+        self.values.get(&TypeId::of::<T>())?.downcast_ref::<T>()
     }
 }
 
 #[doc(hidden)]
 pub struct ServiceDependency {
-    id: &'static str,
-    optional: bool,
-    matches: fn(&dyn Any) -> bool,
+    type_id: TypeId,
+    type_name: fn() -> &'static str,
 }
 
 impl ServiceDependency {
-    pub const fn of<K: ServiceKey>(optional: bool) -> Self {
+    pub const fn of<T: Any>() -> Self {
         Self {
-            id: K::ID,
-            optional,
-            matches: |value| value.is::<Stored<K>>(),
+            type_id: TypeId::of::<T>(),
+            type_name: type_name::<T>,
         }
     }
 }
@@ -999,7 +971,7 @@ impl Bindings {
             classes: Vec::new(),
             operations: Vec::new(),
             services: Services::default(),
-            fingerprint: fingerprint(&[], &[], &[], &BTreeSet::new()),
+            fingerprint: fingerprint(&[], &[], &[]),
         }
     }
 
@@ -1225,8 +1197,8 @@ impl Bindings {
         (self.modules[module].state.encode)(payload, out, &self.services)
     }
 
-    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
-        self.services.get::<K>()
+    pub fn service<T: Any>(&self) -> Option<&T> {
+        self.services.get::<T>()
     }
 
     pub(crate) fn class_decode(
@@ -1344,16 +1316,13 @@ impl UnlinkedBindings {
         }
         for module in &self.modules {
             for service in module.services {
-                let id = service.id;
-                let problem = match self.services.values.get(id) {
-                    Some(entry) if !(service.matches)(entry.value.as_ref()) => "wrong key type for",
-                    None if !service.optional => "missing",
-                    _ => continue,
-                };
-                return Err(format!(
-                    "host module {:?}: {problem} host service {id:?}",
-                    module.name
-                ));
+                if !self.services.values.contains_key(&service.type_id) {
+                    return Err(format!(
+                        "host module {:?}: missing host service {:?}",
+                        module.name,
+                        (service.type_name)(),
+                    ));
+                }
             }
         }
         self.classes.sort_by(|a, b| a.tag.cmp(&b.tag));
@@ -1392,14 +1361,7 @@ impl UnlinkedBindings {
                 return Err(format!("duplicate host operation {:?}", operation.name));
             }
         }
-        let service_ids = self
-            .services
-            .values
-            .iter()
-            .filter(|(_, entry)| entry.in_fingerprint)
-            .map(|(id, entry)| format!("{id}:{}", entry.version))
-            .collect();
-        let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations, &service_ids);
+        let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations);
         Ok(Bindings {
             modules: self.modules,
             classes: self.classes,
@@ -1563,7 +1525,6 @@ fn fingerprint(
     modules: &[ModuleDecl],
     classes: &[ClassDecl],
     operations: &[OperationDecl],
-    services: &BTreeSet<String>,
 ) -> String {
     let mut hasher = Digest::new();
     for module in modules {
@@ -1656,9 +1617,6 @@ fn fingerprint(
                 format!("state-slot {} {:?}", slot.name, slot.kind),
             );
         }
-    }
-    for service in services {
-        hash_line(&mut hasher, format!("service {service}"));
     }
     hasher.finish()
 }

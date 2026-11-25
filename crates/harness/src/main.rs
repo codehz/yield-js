@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use yield_compiler::{Compiler, MemoryResolver, Project};
-use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
+use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Services, Vm};
@@ -24,14 +24,6 @@ export async function run(input) {
 
 #[derive(Default)]
 struct DemoCounters(Mutex<BTreeMap<String, usize>>);
-
-struct DemoCountersKey;
-
-impl yield_vm::ServiceKey for DemoCountersKey {
-    type Value = Rc<DemoCounters>;
-    const ID: &'static str = "demo-counters";
-    const VERSION: u32 = 1;
-}
 
 impl DemoCounters {
     fn hit(&self, name: &str) {
@@ -79,7 +71,7 @@ impl Wait {
         restoring: bool,
     ) -> Result<LabelRegistration, HostFault> {
         let labels = services
-            .get::<LabelServiceKey>()
+            .get::<Rc<LabelService>>()
             .ok_or_else(|| HostFault::new("missing labels service"))?;
         labels.register(self.label.clone(), token, restoring)
     }
@@ -109,9 +101,9 @@ impl DemoHost {
             dts: "../demo.d.ts",
             modules: [Demo],
             services: {
-                DemoCountersKey => self.counters.clone(),
-                LabelServiceKey => self.labels.clone(),
-                yield_vm::host::TimeKey => self.time.clone(),
+                Rc<DemoCounters> => self.counters.clone(),
+                Rc<LabelService> => self.labels.clone(),
+                Arc<dyn yield_vm::TimeService> => self.time.clone(),
             },
         }
     }
@@ -136,7 +128,7 @@ impl DemoHost {
 #[host_module(
     name = "demo",
     operations = [Wait],
-    services = [LabelServiceKey, DemoCountersKey?],
+    services = [Rc<LabelService>],
 )]
 struct Demo;
 
@@ -145,7 +137,7 @@ impl Demo {
     #[function(name = "inspect")]
     fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
         println!("  host call: inspect({:?})", cx.args());
-        if let Some(counters) = cx.service::<DemoCountersKey>() {
+        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
             counters.hit("inspect");
         }
         Ok(())
@@ -154,7 +146,7 @@ impl Demo {
     #[function(name = "seed")]
     fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
         println!("  host call: seed()");
-        if let Some(counters) = cx.service::<DemoCountersKey>() {
+        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -167,7 +159,7 @@ impl Demo {
             .to_utf8()
             .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
         println!("  host call: wait({label:?})");
-        if let Some(counters) = cx.service::<DemoCountersKey>() {
+        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
             counters.hit("wait");
         }
         cx.promise(Wait { label })

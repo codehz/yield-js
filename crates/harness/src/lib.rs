@@ -12,9 +12,8 @@ use yield_vm::binding::{
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
-    ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, Diagnostic, Diagnostics,
-    DiagnosticsKey, FetchKey, GcRoots, GcRootsKey, GuestOutcome, Host, HostStep, JsString,
-    Services, SubtleCryptoKey, SubtleCryptoService, TimerKey, UserAgentKey, Vm, VmError,
+    ConsoleEvent, ConsoleSink, CryptoService, Diagnostic, Diagnostics, GcRoots, GuestOutcome, Host,
+    HostStep, JsString, Services, SubtleCryptoService, TimerService, UserAgent, Vm, VmError,
 };
 use yield_vm::{Decode, Encode, host, host_class, host_module, methods, module_exports, operation};
 
@@ -28,14 +27,6 @@ pub use timer::{FakeClock, Timer};
 
 #[derive(Default)]
 pub struct Counters(Mutex<BTreeMap<String, usize>>);
-
-pub struct CountersKey;
-
-impl yield_vm::ServiceKey for CountersKey {
-    type Value = Rc<Counters>;
-    const ID: &'static str = "counters";
-    const VERSION: u32 = 1;
-}
 
 impl Counters {
     pub fn hit(&self, name: &str) {
@@ -58,14 +49,6 @@ impl Counters {
 }
 
 pub struct NodeFactory;
-
-pub struct NodeFactoryKey;
-
-impl yield_vm::ServiceKey for NodeFactoryKey {
-    type Value = NodeFactory;
-    const ID: &'static str = "node-factory";
-    const VERSION: u32 = 1;
-}
 
 #[host_class(tag = "Node", methods)]
 #[derive(Encode)]
@@ -104,7 +87,7 @@ impl Node {
 
 impl Decode for Node {
     fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
-        if services.get::<NodeFactoryKey>().is_none() {
+        if services.get::<NodeFactory>().is_none() {
             return Err(CodecError::new("node factory service is unavailable"));
         }
         let label = String::decode(input, services)
@@ -314,14 +297,6 @@ pub struct Reissue {
 #[derive(Default)]
 pub struct LabelService(Mutex<LabelState>);
 
-pub struct LabelServiceKey;
-
-impl yield_vm::ServiceKey for LabelServiceKey {
-    type Value = Rc<LabelService>;
-    const ID: &'static str = "labels";
-    const VERSION: u32 = 1;
-}
-
 #[derive(Default)]
 struct LabelState {
     pending: BTreeMap<String, OperationToken>,
@@ -421,7 +396,7 @@ fn register_label<O: Operation>(
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
     let service = services
-        .get::<LabelServiceKey>()
+        .get::<Rc<LabelService>>()
         .ok_or_else(|| HostFault::new("missing labels service"))?;
     service.register(format!("{}:{label}", O::NAME), token, restoring)
 }
@@ -545,7 +520,7 @@ impl TestHost {
         )
     }
 
-    /// A host whose `wintertc.time` service is the supplied adapter.
+    /// A host whose time service is the supplied adapter.
     pub fn with_time_service(time: Arc<dyn yield_vm::TimeService>) -> Self {
         Self::with_services(
             Some(time),
@@ -676,28 +651,28 @@ impl TestHost {
     /// Assembles a VM host that shares this controller's resource handles.
     pub fn host(&self) -> Host {
         macro_rules! host_with_services {
-            ($($key:path => $value:expr),* $(,)?) => {
+            ($($service:ty => $value:expr),* $(,)?) => {
                 host! {
                     dts: "../test.d.ts",
                     modules: [TestModule],
                     services: {
-                        CountersKey => self.counters.clone(),
-                        NodeFactoryKey => NodeFactory,
-                        LabelServiceKey => self.labels.clone(),
-                        timer::FakeClockKey => self.clock.clone(),
-                        yield_vm::host::TimeKey => self.time.clone(),
-                        DiagnosticsKey => self.diagnostics.clone(),
-                        GcRootsKey => self.case_result.clone(),
-                        $($key => $value,)*
+                        Rc<Counters> => self.counters.clone(),
+                        NodeFactory => NodeFactory,
+                        Rc<LabelService> => self.labels.clone(),
+                        Arc<FakeClock> => self.clock.clone(),
+                        Arc<dyn yield_vm::TimeService> => self.time.clone(),
+                        Rc<dyn Diagnostics> => self.diagnostics.clone(),
+                        Rc<dyn GcRoots> => self.case_result.clone(),
+                        $($service => $value,)*
                     },
                 }
             };
         }
         macro_rules! host_with_user_agent {
-            ($($key:path => $value:expr),* $(,)?) => {
+            ($($service:ty => $value:expr),* $(,)?) => {
                 match &self.user_agent {
-                    Some(agent) => host_with_services!($($key => $value,)* UserAgentKey => agent.clone()),
-                    None => host_with_services!($($key => $value,)*),
+                    Some(agent) => host_with_services!($($service => $value,)* UserAgent => UserAgent(agent.clone())),
+                    None => host_with_services!($($service => $value,)*),
                 }
             };
         }
@@ -710,38 +685,38 @@ impl TestHost {
             self.subtle.as_ref(),
         ) {
             (true, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                TimerKey => self.clock.clone(),
-                ConsoleKey => console.clone(),
-                CryptoKey => crypto.clone(),
-                SubtleCryptoKey => subtle.clone(),
+                Arc<dyn TimerService> => self.clock.clone(),
+                Arc<dyn ConsoleSink> => console.clone(),
+                Arc<dyn CryptoService> => crypto.clone(),
+                Arc<dyn SubtleCryptoService> => subtle.clone(),
             ),
             (false, Some(console), None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                ConsoleKey => console.clone(),
-                CryptoKey => crypto.clone(),
-                SubtleCryptoKey => subtle.clone(),
+                Arc<dyn ConsoleSink> => console.clone(),
+                Arc<dyn CryptoService> => crypto.clone(),
+                Arc<dyn SubtleCryptoService> => subtle.clone(),
             ),
             (true, None, None, Some(crypto), Some(subtle)) => host_with_user_agent!(
-                TimerKey => self.clock.clone(),
-                CryptoKey => crypto.clone(),
-                SubtleCryptoKey => subtle.clone(),
+                Arc<dyn TimerService> => self.clock.clone(),
+                Arc<dyn CryptoService> => crypto.clone(),
+                Arc<dyn SubtleCryptoService> => subtle.clone(),
             ),
             (true, Some(console), None, None, Some(subtle)) => host_with_user_agent!(
-                TimerKey => self.clock.clone(),
-                ConsoleKey => console.clone(),
-                SubtleCryptoKey => subtle.clone(),
+                Arc<dyn TimerService> => self.clock.clone(),
+                Arc<dyn ConsoleSink> => console.clone(),
+                Arc<dyn SubtleCryptoService> => subtle.clone(),
             ),
             (true, Some(console), None, Some(crypto), None) => host_with_user_agent!(
-                TimerKey => self.clock.clone(),
-                ConsoleKey => console.clone(),
-                CryptoKey => crypto.clone(),
+                Arc<dyn TimerService> => self.clock.clone(),
+                Arc<dyn ConsoleSink> => console.clone(),
+                Arc<dyn CryptoService> => crypto.clone(),
             ),
             (true, Some(console), Some(fetch), Some(crypto), Some(subtle)) => {
                 host_with_user_agent!(
-                    TimerKey => self.clock.clone(),
-                    FetchKey => fetch.clone(),
-                    ConsoleKey => console.clone(),
-                    CryptoKey => crypto.clone(),
-                    SubtleCryptoKey => subtle.clone(),
+                    Arc<dyn TimerService> => self.clock.clone(),
+                    Arc<dyn yield_vm::fetch::FetchService> => fetch.clone(),
+                    Arc<dyn ConsoleSink> => console.clone(),
+                    Arc<dyn CryptoService> => crypto.clone(),
+                    Arc<dyn SubtleCryptoService> => subtle.clone(),
                 )
             }
             _ => unreachable!("invalid TestHost service configuration"),
@@ -796,7 +771,7 @@ impl TestHost {
         &self.clock
     }
 
-    /// The `wintertc.time` service registered in each assembled host.
+    /// The time service registered in each assembled host.
     pub fn time_service(&self) -> &Arc<dyn yield_vm::TimeService> {
         &self.time
     }
@@ -863,7 +838,7 @@ impl TestHost {
     name = "test",
     classes = [Node, Matcher],
     operations = [Wait, Pause, Reject, Reissue, Timer],
-    services = [NodeFactoryKey, LabelServiceKey, timer::FakeClockKey, CountersKey?],
+    services = [NodeFactory, Rc<LabelService>, Arc<FakeClock>],
 )]
 struct TestModule;
 
@@ -914,7 +889,7 @@ impl TestModule {
 
     #[function(name = "inspect")]
     fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
-        if let Some(counters) = cx.service::<CountersKey>() {
+        if let Some(counters) = cx.service::<Rc<Counters>>() {
             counters.hit("inspect");
         }
         Ok(())
@@ -922,7 +897,7 @@ impl TestModule {
 
     #[function(name = "seed")]
     fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<CountersKey>() {
+        if let Some(counters) = cx.service::<Rc<Counters>>() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -930,7 +905,7 @@ impl TestModule {
 
     #[function(name = "wait")]
     fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: Option<JsValue>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<CountersKey>() {
+        if let Some(counters) = cx.service::<Rc<Counters>>() {
             counters.hit("wait");
         }
         let arg = match arg {
@@ -989,7 +964,7 @@ impl TestModule {
         _node: Option<JsValue>,
         _label: Option<JsValue>,
     ) -> JsResult<()> {
-        if let Some(counters) = cx.service::<CountersKey>() {
+        if let Some(counters) = cx.service::<Rc<Counters>>() {
             counters.hit("setLabel");
         }
         Ok(())
@@ -1000,13 +975,13 @@ impl TestModule {
         cx: &mut yield_vm::ModuleCx<'_, Self>,
         actual: Option<JsValue>,
     ) -> JsResult<Instance<Matcher>> {
-        if let Some(counters) = cx.service::<CountersKey>() {
+        if let Some(counters) = cx.service::<Rc<Counters>>() {
             counters.hit("expect");
         }
         let actual = actual.unwrap_or_else(JsValue::undefined);
         let matcher = cx.alloc(Matcher)?;
         if !actual.is_undefined()
-            && let Some(counters) = cx.service::<CountersKey>()
+            && let Some(counters) = cx.service::<Rc<Counters>>()
         {
             counters.hit("expect:value");
         }

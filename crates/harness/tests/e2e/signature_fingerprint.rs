@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use super::super::support::{compile_main, declared};
-use yield_harness::{LabelService, LabelServiceKey, Wait};
+use yield_harness::{LabelService, Wait};
 use yield_vm::binding::CallCx;
 use yield_vm::{
     Completion, Host, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
@@ -35,7 +35,7 @@ mod original {
         name = "contract",
         classes = [Entity],
         operations = [Wait],
-        services = [LabelServiceKey],
+        services = [Rc<LabelService>],
     )]
     struct Api;
 
@@ -59,7 +59,7 @@ mod original {
             dts: "../dts/auxiliary-contract.d.ts",
             modules: [Api, ExtraModule],
             services: {
-                LabelServiceKey => Rc::clone(labels),
+                Rc<LabelService> => Rc::clone(labels),
             },
         }
     }
@@ -93,7 +93,7 @@ macro_rules! independent_contract {
                 name = "contract",
                 classes = [Entity],
                 operations = [Wait],
-                services = [LabelServiceKey],
+                services = [Rc<LabelService>],
             )]
             struct AlternateApi;
 
@@ -113,7 +113,7 @@ macro_rules! independent_contract {
                     dts: "../dts/auxiliary-contract.d.ts",
                     modules: [ExtraModule, AlternateApi],
                     services: {
-                        LabelServiceKey => Rc::clone(labels),
+                        Rc<LabelService> => Rc::clone(labels),
                     },
                 }
             }

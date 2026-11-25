@@ -96,7 +96,7 @@ fn event_host() -> Host {
     host! {
         dts: "../dts/event-fixture.d.ts",
         modules: [EventModule],
-        services: { yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics> },
+        services: { std::rc::Rc<dyn yield_vm::Diagnostics> => std::rc::Rc::new(super::support::UnexpectedUncaught) },
     }
     .unwrap()
 }

@@ -1,11 +1,12 @@
 use std::cell::{Ref, RefCell, RefMut};
+use std::rc::Rc;
 
 use blitz_dom::{LocalName, Node as BlitzNode, NodeData, NodeId, QualName, local_name, ns};
 use yield_binding_macros::{host_class, host_module, methods, module_exports};
 use yield_vm::binding::CallCx;
 use yield_vm::{Instance, JsError, JsResult, JsValue, ModuleCx, This};
 
-use super::{Dom, DomKey};
+use super::Dom;
 
 impl Dom {
     fn node(&self, index: u32) -> JsResult<&BlitzNode> {
@@ -17,7 +18,7 @@ impl Dom {
 }
 
 fn dom_service<'a>(cx: &CallCx<'a>) -> JsResult<&'a RefCell<Dom>> {
-    cx.service::<DomKey>()
+    cx.service::<Rc<RefCell<Dom>>>()
         .map(|dom| dom.as_ref())
         .ok_or_else(|| JsError::fault("no active Blitz document"))
 }
@@ -387,7 +388,7 @@ impl Dom {
 #[host_module(
     name = "yield:dom",
     classes = [Node, Document, Element, HTMLIFrameElement],
-    services = [DomKey],
+    services = [Rc<RefCell<Dom>>],
 )]
 pub(super) struct DomModule {
     #[js_slot]

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::event::{TARGET_PROTOTYPE, TARGET_ROOT, install_accessor, new_target_prototype};
 use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
@@ -10,7 +11,7 @@ use crate::heap::{
     AbortSignalState, AbortStep, Attributes, EventListener, EventState, EventTargetState, Object,
     PlainObject, TO_STRING_TAG_SYMBOL,
 };
-use crate::host::{Host, TimerKey};
+use crate::host::{Host, TimerService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
@@ -324,7 +325,7 @@ fn signal_timeout(
     if !(0.0..=MAX_DELAY).contains(&delay) {
         return vm.throw_type_error(roots, "AbortSignal.timeout delay is out of range");
     }
-    if host.services().get::<TimerKey>().is_none() {
+    if host.services().get::<Arc<dyn TimerService>>().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),

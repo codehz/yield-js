@@ -1,3 +1,4 @@
+use crate::JsString;
 use crate::binding::{
     Action, Bindings, CallCx, CpsBoundary, CpsStage, ExportCall, ExportDecl, ExportId,
     GuestOutcome, HostFault, HostStep, JsError, JsValue, LiveRegistration, ModuleDispatch,
@@ -12,14 +13,14 @@ use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
-use crate::host::{Completion, Host, TimerKey};
+use crate::host::{Completion, Diagnostics, Host, TimerService};
 use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
 use crate::snapshot::{DeliveryTarget, OrdinaryTask, ScriptTimer, Snapshot, TimerTarget};
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::{JsString, ServiceKey};
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -170,19 +171,18 @@ pub(crate) struct RestoredState {
     pub(crate) module_namespaces: Vec<ObjectId>,
 }
 
-/// Picks the `wintertc.time` service from the linked bindings, falling back to
-/// the deterministic [`crate::host::DummyTimeService`].
+/// Looks up the linked time service, falling back to the deterministic
+/// [`crate::host::DummyTimeService`].
 pub(crate) fn time_source(bindings: &crate::binding::Bindings) -> TimeSource {
     TimeSource(
         bindings
-            .service::<crate::host::TimeKey>()
+            .service::<Arc<dyn crate::host::TimeService>>()
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::host::DummyTimeService)),
     )
 }
 
-/// Wall-clock source linked into a VM. Owns the `wintertc.time` service or the
-/// deterministic dummy fallback; `Debug` hides the trait object.
+/// Wall-clock source linked into a VM. `Debug` hides the trait object.
 pub(crate) struct TimeSource(Arc<dyn crate::host::TimeService>);
 
 impl std::fmt::Debug for TimeSource {
@@ -369,8 +369,8 @@ pub struct Vm {
 
 impl Vm {
     /// Borrows a service installed in this VM's host.
-    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
-        self.host.services().get::<K>()
+    pub fn service<T: Any>(&self) -> Option<&T> {
+        self.host.services().get::<T>()
     }
 
     pub fn build_id(&self) -> &str {
@@ -1219,7 +1219,7 @@ impl VmCore {
         }
         if result?
             && !handled
-            && let Some(sink) = host.services().get::<crate::host::DiagnosticsKey>()
+            && let Some(sink) = host.services().get::<Rc<dyn Diagnostics>>()
         {
             sink.report(crate::host::Diagnostic::UnhandledRejection {
                 promise: self.host_value(Value::object(id)),
@@ -1430,7 +1430,7 @@ impl VmCore {
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
         host.services()
-            .get::<TimerKey>()
+            .get::<Arc<dyn TimerService>>()
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
             .clone()
             .arm(token, delay_ms)
