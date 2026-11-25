@@ -5,23 +5,20 @@ use yield_vm::{Instance, JsError, JsResult, JsValue, ModuleCx, This};
 
 use super::{Dom, DomKey};
 
-type DomResult<T> = Result<T, &'static str>;
-
 impl Dom {
-    fn node(&self, index: u32) -> DomResult<&BlitzNode> {
+    fn node(&self, index: u32) -> JsResult<&BlitzNode> {
         self.nodes
             .get(index as usize)
             .and_then(|id| self.doc.get_node(*id))
-            .ok_or("invalid DOM node handle")
+            .ok_or_else(|| JsError::type_error("invalid DOM node handle"))
     }
 }
 
-fn with_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&mut Dom) -> DomResult<T>) -> JsResult<T> {
-    let result = match cx.service::<DomKey>() {
+fn with_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&mut Dom) -> JsResult<T>) -> JsResult<T> {
+    match cx.service::<DomKey>() {
         Some(dom) => f(&mut dom.borrow_mut()),
-        None => return Err(JsError::Fault(cx.fault("no active Blitz document"))),
-    };
-    result.map_err(|error| cx.type_error(error))
+        None => Err(JsError::fault("no active Blitz document")),
+    }
 }
 
 #[host_class(tag = "Node", event_target, methods)]
@@ -53,7 +50,7 @@ fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
 fn with_node<T>(
     cx: &mut CallCx<'_>,
     node: Instance<Node>,
-    f: impl FnOnce(&Dom, &BlitzNode) -> DomResult<T>,
+    f: impl FnOnce(&Dom, &BlitzNode) -> JsResult<T>,
 ) -> JsResult<T> {
     let index = node_index(cx, node)?;
     read_dom(cx, |dom| f(dom, dom.node(index)?))
@@ -78,7 +75,7 @@ impl Node {
                 NodeData::Text(_) => 3.0,
                 NodeData::Comment { .. } => 8.0,
                 NodeData::Document(_) => 9.0,
-                _ => return Err("unsupported DOM node kind"),
+                _ => return Err(JsError::type_error("unsupported DOM node kind")),
             }))
         })
     }
@@ -144,7 +141,9 @@ impl Node {
             let id = node.id;
             let is_text = matches!(node.data, NodeData::Text(_) | NodeData::Comment { .. });
             if !is_text && !matches!(node.data, NodeData::Element(_)) {
-                return Err("textContent requires an element or character data node");
+                return Err(JsError::type_error(
+                    "textContent requires an element or character data node",
+                ));
             }
             let mut mutation = dom.doc.mutate();
             if is_text {
@@ -171,15 +170,19 @@ impl Node {
             let parent = dom.node(parent_index)?;
             let child = dom.node(child_index)?;
             if !matches!(parent.data, NodeData::Element(_)) {
-                return Err("append requires an element parent");
+                return Err(JsError::type_error("append requires an element parent"));
             }
             if !matches!(child.data, NodeData::Element(_) | NodeData::Text(_)) {
-                return Err("append requires an element or text child");
+                return Err(JsError::type_error(
+                    "append requires an element or text child",
+                ));
             }
             let mut ancestor = Some(parent);
             while let Some(node) = ancestor {
                 if node.id == child.id {
-                    return Err("cannot insert a node into itself or its descendants");
+                    return Err(JsError::type_error(
+                        "cannot insert a node into itself or its descendants",
+                    ));
                 }
                 ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
             }
@@ -198,7 +201,7 @@ fn node_name(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<JsValue> {
             NodeData::Text(_) => JsValue::string("#text"),
             NodeData::Comment { .. } => JsValue::string("#comment"),
             NodeData::Document(_) => JsValue::string("#document"),
-            _ => return Err("unsupported DOM node kind"),
+            _ => return Err(JsError::type_error("unsupported DOM node kind")),
         })
     })
 }
@@ -351,15 +354,19 @@ fn resolve_node(cx: &mut CallCx<'_>, owner: JsValue, id: Option<NodeId>) -> JsRe
         if let Some(&index) = dom.handles.get(&id) {
             return Ok((index, None));
         }
-        let index = u32::try_from(dom.nodes.len()).map_err(|_| "too many DOM nodes")?;
-        let node = dom.doc.get_node(id).ok_or("invalid DOM node handle")?;
+        let index = u32::try_from(dom.nodes.len())
+            .map_err(|_| JsError::type_error("too many DOM nodes"))?;
+        let node = dom
+            .doc
+            .get_node(id)
+            .ok_or_else(|| JsError::type_error("invalid DOM node handle"))?;
         let class = match &node.data {
             NodeData::Element(element) if element.name.local == local_name!("iframe") => {
                 NodeClass::IFrame
             }
             NodeData::Element(_) => NodeClass::Element,
             NodeData::Text(_) | NodeData::Comment { .. } => NodeClass::CharacterData,
-            _ => return Err("unsupported DOM node kind"),
+            _ => return Err(JsError::type_error("unsupported DOM node kind")),
         };
         Ok((index, Some(class)))
     })?;
@@ -377,12 +384,11 @@ fn resolve_node(cx: &mut CallCx<'_>, owner: JsValue, id: Option<NodeId>) -> JsRe
     Ok(value)
 }
 
-fn read_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&Dom) -> DomResult<T>) -> JsResult<T> {
+fn read_dom<T>(cx: &mut CallCx<'_>, f: impl FnOnce(&Dom) -> JsResult<T>) -> JsResult<T> {
     let service = cx
         .service::<DomKey>()
         .ok_or_else(|| JsError::fault("no active Blitz document"))?;
-    let result = f(&service.borrow());
-    result.map_err(|error| cx.type_error(error))
+    f(&service.borrow())
 }
 
 // No VM operations between publishing the list entry and its native index.

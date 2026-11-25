@@ -95,6 +95,11 @@ impl JsError {
     pub fn fault(message: impl Into<String>) -> Self {
         Self::Fault(HostFault::new(message))
     }
+
+    /// Catchable TypeError allocated lazily when crossing into script.
+    pub fn type_error(message: impl Into<String>) -> Self {
+        Self::TypeError(message.into())
+    }
 }
 
 pub type HostCall = fn(&mut CallCx<'_>) -> JsResult<HostStep>;
