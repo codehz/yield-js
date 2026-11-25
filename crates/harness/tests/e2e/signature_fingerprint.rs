@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use super::super::support::{compile_main, declared};
 use super::StrategyHost;
@@ -50,12 +50,12 @@ mod original {
         }
     }
 
-    pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
+    pub(super) fn bindings(labels: &Rc<LabelService>) -> Result<Bindings, String> {
         host_bindings! {
             dts: "../dts/auxiliary-contract.d.ts",
             modules: [Api, ExtraModule],
             services: {
-                LabelServiceKey => Arc::clone(labels),
+                LabelServiceKey => Rc::clone(labels),
             },
         }
     }
@@ -99,12 +99,12 @@ macro_rules! independent_contract {
                 fn renamed_probe($probe_cx: &mut yield_vm::ModuleCx<'_, Self>, $value: $($arg)+) -> JsResult<$($result)+> $probe
             }
 
-            pub(super) fn bindings(labels: &Arc<LabelService>) -> Result<Bindings, String> {
+            pub(super) fn bindings(labels: &Rc<LabelService>) -> Result<Bindings, String> {
                 host_bindings! {
                     dts: "../dts/auxiliary-contract.d.ts",
                     modules: [ExtraModule, AlternateApi],
                     services: {
-                        LabelServiceKey => Arc::clone(labels),
+                        LabelServiceKey => Rc::clone(labels),
                     },
                 }
             }
@@ -134,7 +134,7 @@ fn assert_probe_arity(bindings: &Bindings) {
 
 #[test]
 fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration_order() {
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let bindings = original::bindings(&labels).expect("original bindings");
     assert_probe_arity(&bindings);
     let build = compile_main(
@@ -161,13 +161,13 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     for (change, bind) in [
         (
             "function return kind",
-            instance_result::bindings as fn(&Arc<LabelService>) -> Result<Bindings, String>,
+            instance_result::bindings as fn(&Rc<LabelService>) -> Result<Bindings, String>,
         ),
         ("step return kind", step_result::bindings),
         ("function parameter kind", optional_argument::bindings),
         ("getter return kind", instance_getter::bindings),
     ] {
-        let labels = Arc::new(LabelService::default());
+        let labels = Rc::new(LabelService::default());
         let bindings = bind(&labels).expect("compatible export shape");
         assert_probe_arity(&bindings);
         let mut changed_host = StrategyHost::new(bindings);
@@ -192,7 +192,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
         );
     }
 
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let mut reordered_host =
         StrategyHost::new(reordered::bindings(&labels).expect("reordered bindings"));
     let mut restored = Vm::restore(snapshot, build, &mut reordered_host, Default::default())

@@ -1,7 +1,6 @@
 //! Host task ABI and macro-lowered continuations exercised across VM restore.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use super::support::{compile_main, declared};
 use yield_harness::{CountersKey, LabelService, LabelServiceKey, Wait};
@@ -14,13 +13,13 @@ use yield_vm::{
 
 struct TaskHost {
     bindings: Rc<Bindings>,
-    labels: Arc<LabelService>,
+    labels: Rc<LabelService>,
     errors: Option<Vec<JsValue>>,
 }
 
 impl TaskHost {
     fn new() -> Self {
-        let labels = Arc::new(LabelService::default());
+        let labels = Rc::new(LabelService::default());
         let module = abi::raw_module(
             "task",
             vec![
@@ -49,7 +48,7 @@ impl TaskHost {
         );
         let mut services = yield_vm::Services::default();
         services
-            .insert::<LabelServiceKey>(Arc::clone(&labels))
+            .insert::<LabelServiceKey>(Rc::clone(&labels))
             .unwrap();
         let mut deps = abi::ModuleDependencies::default();
         deps.operation::<Wait>();
@@ -464,14 +463,14 @@ fn hit(cx: &CallCx<'_>, name: &str) {
 
 #[test]
 fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
-    let labels = Arc::new(LabelService::default());
-    let counters = Arc::new(yield_harness::Counters::default());
+    let labels = Rc::new(LabelService::default());
+    let counters = Rc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
         modules: [Branch, Mirror],
         services: {
-            LabelServiceKey => Arc::clone(&labels),
-            CountersKey => Arc::clone(&counters),
+            LabelServiceKey => Rc::clone(&labels),
+            CountersKey => Rc::clone(&counters),
         },
     }
     .unwrap();
@@ -581,15 +580,15 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(counters.count("tail"), 1);
 }
 
-fn branch_host() -> (TaskHost, Arc<yield_harness::Counters>) {
-    let labels = Arc::new(LabelService::default());
-    let counters = Arc::new(yield_harness::Counters::default());
+fn branch_host() -> (TaskHost, Rc<yield_harness::Counters>) {
+    let labels = Rc::new(LabelService::default());
+    let counters = Rc::new(yield_harness::Counters::default());
     let bindings = yield_vm::host_bindings! {
         dts: "../dts/branch.d.ts",
         modules: [Branch, Mirror],
         services: {
-            LabelServiceKey => Arc::clone(&labels),
-            CountersKey => Arc::clone(&counters),
+            LabelServiceKey => Rc::clone(&labels),
+            CountersKey => Rc::clone(&counters),
         },
     }
     .unwrap();

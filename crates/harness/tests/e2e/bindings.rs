@@ -1,9 +1,9 @@
 //! Host binding contract tests: static declarations, instance state, handles,
 //! operation recovery strategies, and deterministic snapshots.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use super::support::{compile_main, declared};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
@@ -141,12 +141,12 @@ mod strategy_fixture {
         }
     }
 
-    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/ops.d.ts",
             modules: [Ops],
             services: {
-                LabelServiceKey => Arc::clone(labels),
+                LabelServiceKey => Rc::clone(labels),
             },
         }
         .expect("strategy bindings")
@@ -188,13 +188,13 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
         }
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).unwrap();
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let mut host = StrategyHost::new(strategy_fixture::bindings(&labels));
     let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
     let result = vm.start(&mut host, "run", vec![]).unwrap();
     let old = labels.token("resume").unwrap();
     let image = vm.snapshot(std::slice::from_ref(&result)).unwrap();
-    let restored_labels = Arc::new(LabelService::default());
+    let restored_labels = Rc::new(LabelService::default());
     let mut restored_host = StrategyHost::new(strategy_fixture::bindings(&restored_labels));
     let mut no_backlink = image.clone();
     no_backlink.operations[0].signal = None;
@@ -298,7 +298,7 @@ export async function run() {
   return seen;
 }
 "#;
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let bindings = strategy_fixture::bindings(&labels);
     let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).expect("compile");
     let mut host = StrategyHost::new(bindings);
@@ -427,7 +427,7 @@ mod stale_fixture {
         value: JsValue,
     }
 
-    type Stash = Arc<Mutex<Option<JsValue>>>;
+    type Stash = Rc<RefCell<Option<JsValue>>>;
     struct StashKey;
     impl yield_vm::ServiceKey for StashKey {
         type Value = Stash;
@@ -445,7 +445,7 @@ mod stale_fixture {
             let stash = cx
                 .service::<StashKey>()
                 .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
-            *stash.lock().expect("stash lock") = Some(value);
+            *stash.borrow_mut() = Some(value);
             Ok(())
         }
 
@@ -453,7 +453,7 @@ mod stale_fixture {
         fn unstash(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Sink>> {
             let value = cx
                 .service::<StashKey>()
-                .and_then(|stash| stash.lock().expect("stash lock").clone())
+                .and_then(|stash| stash.borrow().clone())
                 .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
             let sink = cx.alloc(Sink)?;
             sink.set_value(cx, value)?;
@@ -509,7 +509,7 @@ mod guest_call_fixture {
 
     struct RunsKey;
     impl yield_vm::ServiceKey for RunsKey {
-        type Value = Arc<AtomicUsize>;
+        type Value = Rc<Cell<usize>>;
         const ID: &'static str = "runs";
         const VERSION: u32 = 1;
     }
@@ -562,9 +562,8 @@ mod guest_call_fixture {
 
         #[function(name = "mark")]
         fn mark(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
-            cx.service::<RunsKey>()
-                .unwrap()
-                .fetch_add(1, Ordering::Relaxed);
+            let runs = cx.service::<RunsKey>().unwrap();
+            runs.set(runs.get() + 1);
             Ok(())
         }
 
@@ -628,7 +627,7 @@ mod guest_call_fixture {
     }
 
     pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
-        let runs = Arc::new(AtomicUsize::new(0));
+        let runs = Rc::new(Cell::new(0));
         let bindings = host_bindings! {
             dts: "../dts/guest.d.ts",
             modules: [Guest],
@@ -643,7 +642,7 @@ mod guest_call_fixture {
         let mut host = StrategyHost::new(bindings);
         let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
         let result = vm.start(&mut host, "run", vec![]);
-        (result, runs.load(Ordering::Relaxed))
+        (result, runs.get())
     }
 }
 
@@ -797,12 +796,12 @@ mod counter_fixture {
         cx.promise(Wait { label })
     }
 
-    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
             modules: [Counter, TestModule],
             services: {
-                LabelServiceKey => Arc::clone(labels),
+                LabelServiceKey => Rc::clone(labels),
             },
         }
         .expect("counter bindings")
@@ -811,13 +810,13 @@ mod counter_fixture {
     pub(super) struct PayloadService {
         pub(super) initial: u32,
         pub(super) offset: u32,
-        pub(super) initialized: AtomicUsize,
+        pub(super) initialized: Cell<usize>,
     }
 
     struct PayloadKey;
 
     impl yield_vm::ServiceKey for PayloadKey {
-        type Value = Arc<PayloadService>;
+        type Value = Rc<PayloadService>;
         const ID: &'static str = "payload-service";
         const VERSION: u32 = 1;
     }
@@ -849,7 +848,7 @@ mod counter_fixture {
     impl FromBindings for ServiceCounter {
         fn from_bindings(bindings: &Bindings) -> Self {
             let service = bindings.service::<PayloadKey>().unwrap();
-            service.initialized.fetch_add(1, Ordering::Relaxed);
+            service.initialized.set(service.initialized.get() + 1);
             Self {
                 count: ServiceField(service.initial),
             }
@@ -871,7 +870,7 @@ mod counter_fixture {
         }
     }
 
-    pub(super) fn service_bindings(service: Arc<PayloadService>) -> Bindings {
+    pub(super) fn service_bindings(service: Rc<PayloadService>) -> Bindings {
         host_bindings! {
             dts: "../dts/counter-test.d.ts",
             modules: [ServiceCounter, TestModuleWithoutWait],
@@ -885,15 +884,15 @@ mod counter_fixture {
 fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
     use counter_fixture::{PayloadService, service_bindings};
 
-    let a = Arc::new(PayloadService {
+    let a = Rc::new(PayloadService {
         initial: 3,
         offset: 10,
-        initialized: AtomicUsize::new(0),
+        initialized: Cell::new(0),
     });
-    let b = Arc::new(PayloadService {
+    let b = Rc::new(PayloadService {
         initial: 100,
         offset: 20,
-        initialized: AtomicUsize::new(0),
+        initialized: Cell::new(0),
     });
     let mut source = StrategyHost::new(service_bindings(a.clone()));
     let mut target = StrategyHost::new(service_bindings(b.clone()));
@@ -916,8 +915,8 @@ fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
         vm.start(&mut target, "read", vec![]).unwrap(),
         Value::number(40.0)
     );
-    assert_eq!(a.initialized.load(Ordering::Relaxed), 1);
-    assert_eq!(b.initialized.load(Ordering::Relaxed), 0);
+    assert_eq!(a.initialized.get(), 1);
+    assert_eq!(b.initialized.get(), 0);
 }
 
 #[test]
@@ -934,7 +933,7 @@ export async function run() {
   return value();
 }
 "#;
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let bindings = counter_fixture::bindings(&labels);
     let build =
         compile_main(source, &declared(include_str!("../dts/counter-test.d.ts"))).expect("compile");
@@ -1209,12 +1208,12 @@ mod inherit_fixture {
         }
     }
 
-    pub(super) fn bindings(labels: &Arc<LabelService>) -> Bindings {
+    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
         host_bindings! {
             dts: "../dts/inherit.d.ts",
             modules: [Inherit],
             services: {
-                LabelServiceKey => Arc::clone(labels),
+                LabelServiceKey => Rc::clone(labels),
             },
         }
         .expect("derived bindings")
@@ -1223,7 +1222,7 @@ mod inherit_fixture {
 
 #[test]
 fn derived_host_classes_inherit_prototypes_and_slot_layout() {
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let bindings = inherit_fixture::bindings(&labels);
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";
@@ -1276,7 +1275,7 @@ export async function run() {
 
 #[test]
 fn script_subclass_of_host_class_survives_restore() {
-    let labels = Arc::new(LabelService::default());
+    let labels = Rc::new(LabelService::default());
     let bindings = inherit_fixture::bindings(&labels);
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";

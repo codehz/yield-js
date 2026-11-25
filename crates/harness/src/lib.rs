@@ -32,7 +32,7 @@ pub struct Counters(Mutex<BTreeMap<String, usize>>);
 pub struct CountersKey;
 
 impl yield_vm::ServiceKey for CountersKey {
-    type Value = Arc<Counters>;
+    type Value = Rc<Counters>;
     const ID: &'static str = "counters";
     const VERSION: u32 = 1;
 }
@@ -317,7 +317,7 @@ pub struct LabelService(Mutex<LabelState>);
 pub struct LabelServiceKey;
 
 impl yield_vm::ServiceKey for LabelServiceKey {
-    type Value = Arc<LabelService>;
+    type Value = Rc<LabelService>;
     const ID: &'static str = "labels";
     const VERSION: u32 = 1;
 }
@@ -358,7 +358,7 @@ impl LabelService {
     }
 
     pub fn register(
-        self: &Arc<Self>,
+        self: &Rc<Self>,
         label: String,
         token: OperationToken,
         restoring: bool,
@@ -372,7 +372,7 @@ impl LabelService {
         }
         state.pending.insert(label.clone(), token);
         Ok(LabelRegistration {
-            service: Arc::clone(self),
+            service: Rc::clone(self),
             label,
             token,
         })
@@ -380,7 +380,7 @@ impl LabelService {
 }
 
 pub struct LabelRegistration {
-    service: Arc<LabelService>,
+    service: Rc<LabelService>,
     label: String,
     token: OperationToken,
 }
@@ -454,8 +454,8 @@ impl CryptoService for DeterministicEntropy {
 
 pub struct TestHost {
     bindings: Rc<Bindings>,
-    counters: Arc<Counters>,
-    labels: Arc<LabelService>,
+    counters: Rc<Counters>,
+    labels: Rc<LabelService>,
     clock: Arc<FakeClock>,
     console: Option<Arc<CapturedConsole>>,
     time: Arc<dyn yield_vm::TimeService>,
@@ -612,8 +612,8 @@ impl TestHost {
         crypto: Option<Arc<dyn CryptoService>>,
         subtle: Option<Arc<dyn SubtleCryptoService>>,
     ) -> Self {
-        let counters = Arc::new(Counters::default());
-        let labels = Arc::new(LabelService::default());
+        let counters = Rc::new(Counters::default());
+        let labels = Rc::new(LabelService::default());
         let clock = Arc::new(FakeClock::default());
         let test_time = time
             .is_none()
@@ -626,7 +626,7 @@ impl TestHost {
         let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
         let sink = console.clone().map(|sink| -> Arc<dyn ConsoleSink> { sink });
         let bindings = test_bindings(
-            (Arc::clone(&counters), Arc::clone(&labels)),
+            (Rc::clone(&counters), Rc::clone(&labels)),
             &clock,
             timers,
             fetch,
@@ -690,7 +690,7 @@ impl TestHost {
         self.case_result.as_ref()
     }
 
-    pub fn labels(&self) -> &Arc<LabelService> {
+    pub fn labels(&self) -> &Rc<LabelService> {
         &self.labels
     }
 
@@ -786,7 +786,7 @@ impl Host for TestHost {
 
 #[allow(clippy::too_many_arguments)]
 fn test_bindings(
-    (counters, labels): (Arc<Counters>, Arc<LabelService>),
+    (counters, labels): (Rc<Counters>, Rc<LabelService>),
     clock: &Arc<FakeClock>,
     timers: bool,
     fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,

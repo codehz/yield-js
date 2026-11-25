@@ -28,7 +28,7 @@ struct DemoCounters(Mutex<BTreeMap<String, usize>>);
 struct DemoCountersKey;
 
 impl yield_vm::ServiceKey for DemoCountersKey {
-    type Value = Arc<DemoCounters>;
+    type Value = Rc<DemoCounters>;
     const ID: &'static str = "demo-counters";
     const VERSION: u32 = 1;
 }
@@ -87,17 +87,17 @@ impl Wait {
 
 struct DemoHost {
     bindings: Rc<Bindings>,
-    counters: Arc<DemoCounters>,
-    labels: Arc<LabelService>,
+    counters: Rc<DemoCounters>,
+    labels: Rc<LabelService>,
 }
 
 impl DemoHost {
     fn new() -> Result<Self, String> {
         let time_zone = iana_time_zone::get_timezone()
             .map_err(|error| format!("failed to determine the system IANA time zone: {error}"))?;
-        let counters = Arc::new(DemoCounters::default());
-        let labels = Arc::new(LabelService::default());
-        let bindings = demo_bindings(Arc::clone(&counters), Arc::clone(&labels), time_zone)?;
+        let counters = Rc::new(DemoCounters::default());
+        let labels = Rc::new(LabelService::default());
+        let bindings = demo_bindings(Rc::clone(&counters), Rc::clone(&labels), time_zone)?;
         Ok(Self {
             bindings: Rc::new(bindings),
             counters,
@@ -131,8 +131,8 @@ impl Host for DemoHost {
 }
 
 fn demo_bindings(
-    counters: Arc<DemoCounters>,
-    labels: Arc<LabelService>,
+    counters: Rc<DemoCounters>,
+    labels: Rc<LabelService>,
     time_zone: String,
 ) -> Result<Bindings, String> {
     host_bindings! {
