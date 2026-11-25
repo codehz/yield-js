@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use yield_compiler::{Compiler, MemoryResolver, Project};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
-use yield_vm::binding::{Bindings, JsResult, JsValue, OperationDriver, OperationToken};
+use yield_vm::binding::{JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
-use yield_vm::{Completion, Host, HostFault, PromiseState, Vm};
-use yield_vm::{Decode, Encode, host_bindings, host_module, module_exports, operation};
+use yield_vm::{Completion, Host, HostFault, PromiseState, Services, Vm};
+use yield_vm::{Decode, Encode, host, host_module, module_exports, operation};
 
 const SOURCE: &str = r#"
 import { inspect, seed, wait } from 'demo';
@@ -62,12 +62,12 @@ struct Wait {
 impl OperationDriver for Wait {
     type Live = LabelRegistration;
 
-    fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
-        self.register(token, bindings, false)
+    fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+        self.register(token, services, false)
     }
 
-    fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
-        self.register(token, bindings, true)
+    fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+        self.register(token, services, true)
     }
 }
 
@@ -75,18 +75,18 @@ impl Wait {
     fn register(
         &self,
         token: OperationToken,
-        bindings: &Bindings,
+        services: &Services,
         restoring: bool,
     ) -> Result<LabelRegistration, HostFault> {
-        let labels = bindings
-            .service::<LabelServiceKey>()
+        let labels = services
+            .get::<LabelServiceKey>()
             .ok_or_else(|| HostFault::new("missing labels service"))?;
         labels.register(self.label.clone(), token, restoring)
     }
 }
 
 struct DemoHost {
-    bindings: Bindings,
+    time: Arc<yield_vm::host::SystemTimeService>,
     counters: Rc<DemoCounters>,
     labels: Rc<LabelService>,
 }
@@ -97,12 +97,23 @@ impl DemoHost {
             .map_err(|error| format!("failed to determine the system IANA time zone: {error}"))?;
         let counters = Rc::new(DemoCounters::default());
         let labels = Rc::new(LabelService::default());
-        let bindings = demo_bindings(Rc::clone(&counters), Rc::clone(&labels), time_zone)?;
         Ok(Self {
-            bindings,
+            time: Arc::new(yield_vm::host::SystemTimeService::new(time_zone)),
             counters,
             labels,
         })
+    }
+
+    fn host(&self) -> Result<Host, String> {
+        host! {
+            dts: "../demo.d.ts",
+            modules: [Demo],
+            services: {
+                DemoCountersKey => self.counters.clone(),
+                LabelServiceKey => self.labels.clone(),
+                yield_vm::host::TimeKey => self.time.clone(),
+            },
+        }
     }
 
     fn calls(&self, name: &str) -> usize {
@@ -119,30 +130,6 @@ impl DemoHost {
             .ok_or_else(|| format!("unknown operation {label:?}"))?;
         vm.complete_operation(token, Completion::Fulfilled(value))
             .map_err(|error| error.to_string())
-    }
-}
-
-impl Host for DemoHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn report_error(&mut self, _error: JsValue) {}
-}
-
-fn demo_bindings(
-    counters: Rc<DemoCounters>,
-    labels: Rc<LabelService>,
-    time_zone: String,
-) -> Result<Bindings, String> {
-    host_bindings! {
-        dts: "../demo.d.ts",
-        modules: [Demo],
-        services: {
-            DemoCountersKey => counters,
-            LabelServiceKey => labels,
-            yield_vm::host::TimeKey => Arc::new(yield_vm::host::SystemTimeService::new(time_zone)),
-        },
     }
 }
 
@@ -206,7 +193,7 @@ fn describe_continuations(snapshot: &yield_vm::Snapshot) -> String {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut host = DemoHost::new()?;
+    let host = DemoHost::new()?;
     let resolver = MemoryResolver::new([("main.js", SOURCE)])?;
     let build: Build = compile_options().compile(Project::new("main.js", resolver))?;
     let function = build.function_named("run").expect("demo entry function");
@@ -222,9 +209,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default())?;
-    let result = vm.start(&mut host, "run", vec![JsValue::string("input")])?;
-    vm.run_until_idle(&mut host)?;
+    let mut vm = Vm::new(build.clone(), host.host()?, Default::default())?;
+    let result = vm.start("run", vec![JsValue::string("input")])?;
+    vm.run_until_idle()?;
     println!(
         "\nafter first await: pending {:?}",
         host.labels.pending_labels()
@@ -237,7 +224,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     drop(vm);
 
-    let mut vm = Vm::restore(first, build.clone(), &mut host, Default::default())?;
+    let mut vm = Vm::restore(first, build.clone(), host.host()?, Default::default())?;
     vm.start_recovered_operations()?;
     println!(
         "restored snapshot 1; inspect/seed calls = {}/{}",
@@ -245,7 +232,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         host.calls("seed")
     );
     host.complete(&mut vm, "a", JsValue::number(2.0))?;
-    vm.run_until_idle(&mut host)?;
+    vm.run_until_idle()?;
     println!(
         "after second await: pending {:?}",
         host.labels.pending_labels()
@@ -258,10 +245,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     drop(vm);
 
-    let mut vm = Vm::restore(second, build, &mut host, Default::default())?;
+    let mut vm = Vm::restore(second, build, host.host()?, Default::default())?;
     vm.start_recovered_operations()?;
     host.complete(&mut vm, "b", JsValue::number(3.0))?;
-    vm.run_until_idle(&mut host)?;
+    vm.run_until_idle()?;
     match vm.promise_state(&result)? {
         PromiseState::Pending => println!("result: pending (unexpected)"),
         PromiseState::Fulfilled(value) => println!("result: {}", render_value(&value)),

@@ -46,14 +46,14 @@ export async function run() {
 
     let mut host = TestHost::default();
     let mut vm =
-        Vm::new(build.clone(), &mut host, Default::default()).expect("load sparse function IDs");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+        Vm::new(build.clone(), host.host(), Default::default()).expect("load sparse function IDs");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let snapshot = json_round_trip(
         &vm.snapshot(std::slice::from_ref(&result))
             .expect("snapshot"),
     );
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default())
+    let mut vm = Vm::restore(snapshot, build, host.host(), Default::default())
         .expect("restore sparse function IDs");
     vm.start_recovered_operations().expect("restart operation");
     host.complete(
@@ -62,7 +62,7 @@ export async function run() {
         Completion::Fulfilled(JsValue::number(20.0)),
     )
     .expect("complete operation");
-    vm.run_until_idle(&mut host).expect("resume");
+    vm.run_until_idle().expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(42.0))
@@ -73,34 +73,22 @@ export async function run() {
 fn verified_build_shares_code_but_not_module_state() {
     let source = "let n = 0; export function run() { return ++n; }";
     let program = VerifiedBuild::new(build(source)).expect("verify build once");
-    let mut host_a = TestHost::default();
-    let mut host_b = TestHost::default();
-    let mut a = Vm::new(program.clone(), &mut host_a, Default::default()).unwrap();
-    let mut b = Vm::new(program.clone(), &mut host_b, Default::default()).unwrap();
-    assert_eq!(
-        a.start(&mut host_a, "run", vec![]).unwrap(),
-        Value::number(1.0)
-    );
-    assert_eq!(
-        a.start(&mut host_a, "run", vec![]).unwrap(),
-        Value::number(2.0)
-    );
-    assert_eq!(
-        b.start(&mut host_b, "run", vec![]).unwrap(),
-        Value::number(1.0)
-    );
+    let host_a = TestHost::default();
+    let host_b = TestHost::default();
+    let mut a = Vm::new(program.clone(), host_a.host(), Default::default()).unwrap();
+    let mut b = Vm::new(program.clone(), host_b.host(), Default::default()).unwrap();
+    assert_eq!(a.start("run", vec![]).unwrap(), Value::number(1.0));
+    assert_eq!(a.start("run", vec![]).unwrap(), Value::number(2.0));
+    assert_eq!(b.start("run", vec![]).unwrap(), Value::number(1.0));
 
     let snapshot = json_round_trip(&a.snapshot(&[]).unwrap());
     let different = VerifiedBuild::new(build("export function run() { return 0; }")).unwrap();
     assert!(matches!(
-        Vm::restore(snapshot.clone(), different, &mut host_b, Default::default()),
+        Vm::restore(snapshot.clone(), different, host_b.host(), Default::default()),
         Err(VmError::InvalidSnapshot(detail)) if detail.contains("build id mismatch")
     ));
-    let mut restored = Vm::restore(snapshot, program, &mut host_b, Default::default()).unwrap();
-    assert_eq!(
-        restored.start(&mut host_b, "run", vec![]).unwrap(),
-        Value::number(3.0)
-    );
+    let mut restored = Vm::restore(snapshot, program, host_b.host(), Default::default()).unwrap();
+    assert_eq!(restored.start("run", vec![]).unwrap(), Value::number(3.0));
 }
 
 #[test]
@@ -212,7 +200,7 @@ fn loader_rejects_private_index_outside_its_lexical_class() {
     *index = 1; // An index in B, but not in the class this instruction belongs to.
     corrupt.finalize();
     assert!(
-        matches!(Vm::new(corrupt, &mut TestHost::default(), Default::default()),
+        matches!(Vm::new(corrupt, TestHost::default().host(), Default::default()),
         Err(VmError::InvalidBuild(detail)) if detail.contains("invalid class private index"))
     );
 }
@@ -235,7 +223,7 @@ fn loader_rejects_invalid_class_constructor_reference() {
     *constructor = u32::MAX;
     corrupt.finalize();
     assert!(
-        matches!(Vm::new(corrupt, &mut TestHost::default(), Default::default()),
+        matches!(Vm::new(corrupt, TestHost::default().host(), Default::default()),
         Err(VmError::InvalidBuild(detail)) if detail.contains("invalid class constructor"))
     );
 }
@@ -254,20 +242,18 @@ export async function run(value) {
 }
 "#;
     let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("bindings");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).expect("bindings");
     let lone = JsValue::string(JsString::from_units(vec![0xD800]));
-    let result = vm.start(&mut host, "run", vec![lone]).expect("start");
-    vm.run_until_idle(&mut host).expect("drain");
+    let result = vm.start("run", vec![lone]).expect("start");
+    vm.run_until_idle().expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::boolean(true))
     );
 
-    let _result = vm
-        .start(&mut host, "run", vec![JsValue::string("😀")])
-        .expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let _result = vm.start("run", vec![JsValue::string("😀")]).expect("start");
+    vm.run_until_idle().expect("suspend");
     assert_eq!(host.pending_labels(), vec!["wait:😀".to_owned()]);
 }
 
@@ -290,8 +276,7 @@ export async function run() {
     s.host.labels().set_reject_restore_operation(true);
     s.restore(snapshot.clone())
         .expect("restore publishes the VM");
-    s.vm.run_until_idle(&mut s.host)
-        .expect("settle rejected start");
+    s.vm.run_until_idle().expect("settle rejected start");
     assert_eq!(
         s.state(),
         PromiseState::Rejected(Value::string("wait rejected".into()))
@@ -339,9 +324,9 @@ export async function run() {
 }
 "#;
     let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).expect("bindings");
+    let result = vm.start("run", Vec::new()).expect("start");
     let error = vm
         .snapshot(&[result])
         .expect_err("await on a plain value queues a resume microtask");
@@ -350,11 +335,11 @@ export async function run() {
 
 #[test]
 fn loader_rejects_corrupt_builds_and_resume_tables() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
 
     let mut corrupt = build("function run() { return 1; }");
     corrupt.bytecode_version = 5;
-    let error = Vm::new(corrupt, &mut host, Default::default()).expect_err("bytecode version");
+    let error = Vm::new(corrupt, host.host(), Default::default()).expect_err("bytecode version");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("bytecode version"))
     );
@@ -370,7 +355,7 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
         constant: 0,
     };
     corrupt.finalize();
-    let error = Vm::new(corrupt, &mut host, Default::default()).expect_err("out-of-range slot");
+    let error = Vm::new(corrupt, host.host(), Default::default()).expect_err("out-of-range slot");
     assert!(matches!(error, VmError::InvalidBuild(message) if message.contains("out-of-range")));
 
     let mut corrupt = build(RUN);
@@ -383,7 +368,7 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
         .saved_slots
         .push(u16::MAX);
     corrupt.finalize();
-    let error = Vm::new(corrupt, &mut host, Default::default()).expect_err("bad saved slot");
+    let error = Vm::new(corrupt, host.host(), Default::default()).expect_err("bad saved slot");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("saves persistent slot") || message.contains("not strictly"))
     );
@@ -396,7 +381,7 @@ fn loader_rejects_corrupt_builds_and_resume_tables() {
         .unwrap();
     run.code[0] = Instr::Jump { target: u32::MAX };
     corrupt.finalize();
-    let error = Vm::new(corrupt, &mut host, Default::default()).expect_err("bad jump target");
+    let error = Vm::new(corrupt, host.host(), Default::default()).expect_err("bad jump target");
     assert!(matches!(error, VmError::InvalidBuild(message) if message.contains("targets pc")));
 }
 
@@ -427,7 +412,7 @@ fn loader_rejects_duplicate_generator_start_boundaries() {
 
 #[test]
 fn loader_rejects_out_of_range_import_indices() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let mut corrupt = build("import { inspect } from 'test'; inspect(1);");
     let get_import = corrupt
         .functions
@@ -441,7 +426,7 @@ fn loader_rejects_out_of_range_import_indices() {
     import.module = u32::MAX;
     corrupt.finalize();
     assert!(matches!(
-        Vm::new(corrupt, &mut host, Default::default()),
+        Vm::new(corrupt, host.host(), Default::default()),
         Err(VmError::InvalidBuild(message)) if message.contains("GetImport") && message.contains("module")
     ));
 
@@ -458,7 +443,7 @@ fn loader_rejects_out_of_range_import_indices() {
     import.export = Some(u32::MAX);
     corrupt.finalize();
     assert!(matches!(
-        Vm::new(corrupt, &mut host, Default::default()),
+        Vm::new(corrupt, host.host(), Default::default()),
         Err(VmError::InvalidBuild(message)) if message.contains("GetImport") && message.contains("export")
     ));
 }
@@ -503,8 +488,9 @@ fn loader_rejects_handler_target_inside_its_protected_range() {
     let handler = &mut function.handlers[0];
     handler.target_pc = handler.start_pc;
     corrupt.finalize();
-    let mut host = TestHost::default();
-    let error = Vm::new(corrupt, &mut host, Default::default()).expect_err("bad exception target");
+    let host = TestHost::default();
+    let error =
+        Vm::new(corrupt, host.host(), Default::default()).expect_err("bad exception target");
     assert!(
         matches!(error, VmError::InvalidBuild(message) if message.contains("inside its own protected range"))
     );
@@ -1053,16 +1039,16 @@ export function run() {
   return inspect(Symbol("hidden"));
 }
 "#;
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
-    let value = vm.start(&mut host, "run", Vec::new()).expect("start");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build(source), host.host(), Default::default()).expect("create VM");
+    let value = vm.start("run", Vec::new()).expect("start");
     assert_eq!(value, Value::UNDEFINED);
     assert_eq!(host.count("inspect"), 1);
 }
 
 #[test]
 fn script_startup_validates_before_calling_the_host() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let mut invalid = build("import { inspect } from 'test'; inspect(1); export function run() {}");
     invalid.modules[invalid.entry as usize]
         .exports
@@ -1074,7 +1060,7 @@ fn script_startup_validates_before_calling_the_host() {
     };
     invalid.finalize();
     assert!(matches!(
-        Vm::new(invalid, &mut host, Default::default()),
+        Vm::new(invalid, host.host(), Default::default()),
         Err(VmError::InvalidBuild(_))
     ));
 
@@ -1085,7 +1071,7 @@ fn script_startup_validates_before_calling_the_host() {
         .expect("test declarations")
         .insert("missing".to_owned());
     let missing = compile_main("import { missing } from 'test';", &options).unwrap();
-    let error = Vm::new(missing, &mut host, Default::default())
+    let error = Vm::new(missing, host.host(), Default::default())
         .expect_err("missing module export is rejected eagerly");
     assert!(
         matches!(error, VmError::MissingImport(detail) if detail.contains("test") && detail.contains("missing"))
@@ -1094,17 +1080,17 @@ fn script_startup_validates_before_calling_the_host() {
 
     let throws = build("import { inspect } from 'test'; throw 7; inspect(1);");
     assert!(matches!(
-        Vm::new(throws, &mut host, Default::default()),
+        Vm::new(throws, host.host(), Default::default()),
         Err(VmError::Thrown(value)) if value == Value::number(7.0)
     ));
     assert_eq!(host.count("inspect"), 0);
 
     let standalone = build("import { inspect } from 'test'; inspect(2);");
-    let vm = Vm::new(standalone.clone(), &mut host, Default::default()).unwrap();
+    let vm = Vm::new(standalone.clone(), host.host(), Default::default()).unwrap();
     Vm::restore(
         vm.snapshot(&[]).unwrap(),
         standalone,
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
@@ -1124,14 +1110,14 @@ export async function run() {
     let build = build(source);
     let mut host = TestHost::default();
     let mut vm =
-        Vm::new(build.clone(), &mut host, Default::default()).expect("resolve host imports");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+        Vm::new(build.clone(), host.host(), Default::default()).expect("resolve host imports");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let snapshot = json_round_trip(
         &vm.snapshot(std::slice::from_ref(&result))
             .expect("snapshot"),
     );
-    vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore imports");
+    vm = Vm::restore(snapshot, build, host.host(), Default::default()).expect("restore imports");
     vm.start_recovered_operations()
         .expect("start recovered operations");
     host.complete(
@@ -1140,7 +1126,7 @@ export async function run() {
         Completion::Fulfilled(JsValue::undefined()),
     )
     .expect("complete operation");
-    vm.run_until_idle(&mut host).expect("resume");
+    vm.run_until_idle().expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::boolean(true))
@@ -1149,15 +1135,15 @@ export async function run() {
 
 #[test]
 fn import_bindings_and_namespace_properties_are_readonly() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let local_write = build("import { wait } from 'test'; wait = 1;");
     assert!(matches!(
-        Vm::new(local_write, &mut host, Default::default()),
+        Vm::new(local_write, host.host(), Default::default()),
         Err(VmError::Thrown(_))
     ));
     let namespace_write = build("import * as test from 'test'; test.wait = 1;");
     assert!(matches!(
-        Vm::new(namespace_write, &mut host, Default::default()),
+        Vm::new(namespace_write, host.host(), Default::default()),
         Err(VmError::Thrown(_))
     ));
 }
@@ -1208,8 +1194,8 @@ entry = () => ++count;
 export function dropEntry() { entry = 0; }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     assert_eq!(vm.get_export("total").unwrap(), Value::number(10.0));
     for name in ["entry", "count"] {
         let expected = format!("unknown export {name:?}");
@@ -1217,13 +1203,10 @@ export function dropEntry() { entry = 0; }
             matches!(vm.get_export(name), Err(VmError::InvalidState(message)) if message == expected)
         );
         assert!(
-            matches!(vm.start(&mut host, name, vec![]), Err(VmError::InvalidState(message)) if message == expected)
+            matches!(vm.start(name, vec![]), Err(VmError::InvalidState(message)) if message == expected)
         );
     }
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(11.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(11.0));
     assert_eq!(vm.get_export("total").unwrap(), Value::number(11.0));
 
     let snapshot = vm.snapshot(&[]).unwrap();
@@ -1234,7 +1217,7 @@ export function dropEntry() { entry = 0; }
         Vm::restore(
             missing,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1248,7 +1231,7 @@ export function dropEntry() { entry = 0; }
         Vm::restore(
             incorrect,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1276,7 +1259,7 @@ export function dropEntry() { entry = 0; }
         Vm::restore(
             absent_export,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1285,46 +1268,38 @@ export function dropEntry() { entry = 0; }
         Err(VmError::InvalidSnapshot(_))
     ));
 
-    let mut vm = Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
+    let mut vm = Vm::restore(snapshot, build.clone(), host.host(), Default::default()).unwrap();
     assert_eq!(vm.get_export("total").unwrap(), Value::number(11.0));
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(12.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(12.0));
     assert_eq!(vm.get_export("total").unwrap(), Value::number(12.0));
 
-    vm.start(&mut host, "dropEntry", vec![]).unwrap();
+    vm.start("dropEntry", vec![]).unwrap();
     let mut vm = Vm::restore(
         vm.snapshot(&[]).unwrap(),
         build,
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
     assert_eq!(vm.get_export("run").unwrap(), Value::number(0.0));
-    assert!(matches!(
-        vm.start(&mut host, "run", vec![]),
-        Err(VmError::Thrown(_))
-    ));
+    assert!(matches!(vm.start("run", vec![]), Err(VmError::Thrown(_))));
     assert_eq!(host.count("inspect"), 1);
     assert_eq!(host.count("seed"), 1);
 }
 
 #[test]
 fn imported_function_identity_survives_snapshot_restore() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let build = build("import { wait } from 'test'; export function run() { return wait; }");
     let mut vm =
-        Vm::new(build.clone(), &mut host, Default::default()).expect("resolve host imports");
-    let before = vm.start(&mut host, "run", vec![]).expect("start");
+        Vm::new(build.clone(), host.host(), Default::default()).expect("resolve host imports");
+    let before = vm.start("run", vec![]).expect("start");
     let snapshot = vm.snapshot(&[]).expect("snapshot");
-    vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    vm = Vm::restore(snapshot, build, host.host(), Default::default()).expect("restore");
     let yield_vm::ValueRef::Object(function) = before.view() else {
         panic!("host function import is an object");
     };
-    let value = vm
-        .start(&mut host, "run", vec![])
-        .expect("start after restore");
+    let value = vm.start("run", vec![]).expect("start after restore");
     assert_eq!(
         value,
         Value::object(function),
@@ -1347,10 +1322,10 @@ export async function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start run");
-    vm.run_until_idle(&mut host).expect("suspend run");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start run");
+    vm.run_until_idle().expect("suspend run");
     let snapshot = vm.snapshot(&[result]).expect("capture template");
     assert_eq!(snapshot.templates.len(), 1);
 
@@ -1360,7 +1335,7 @@ export async function run() {
         Vm::restore(
             shortened,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1375,7 +1350,7 @@ export async function run() {
         Vm::restore(
             wrong,
             build,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()

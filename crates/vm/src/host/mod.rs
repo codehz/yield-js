@@ -1,9 +1,9 @@
-//! Host contract: the driver that owns bindings, host-retained values, and
-//! default error reporting. Optional platform services live in submodules;
-//! each is keyed by a zero-sized [`crate::ServiceKey`] and is absent or
-//! defaulted unless the host registers it.
+//! Per-VM host declarations and resources. All platform capabilities are
+//! installed through typed service keys before the VM starts.
 
-use crate::binding::{Bindings, JsValue};
+use std::rc::Rc;
+
+use crate::binding::{Bindings, JsValue, ServiceKey, Services};
 use crate::value::{JsString, Value};
 
 mod console;
@@ -28,44 +28,88 @@ pub enum Completion {
     Rejected(JsValue),
 }
 
-/// Host-side resources and delivery endpoint.
+/// The declarations and resources consumed by one VM at startup or restore.
 ///
-/// Drivers from [`Bindings`] register external work. The host delivers
-/// completions through [`crate::Vm::complete_operation`].
-pub trait Host {
-    fn bindings(&self) -> Bindings;
+/// Use [`crate::host!`] to register modules and services, or `Host::default()`
+/// to run a VM with no external capabilities.
+#[derive(Debug)]
+pub struct Host {
+    bindings: Bindings,
+}
 
-    /// Value exposed as `navigator.userAgent`. `None` selects the runtime
-    /// default. This identifies the script runtime for compatibility probes
-    /// and is unrelated to the Fetch `User-Agent` request header.
-    fn user_agent(&self) -> Option<&str> {
-        None
+impl Host {
+    pub(crate) fn linked(bindings: Bindings) -> Self {
+        Self { bindings }
     }
 
-    /// Visits host-retained roots when a host binding requests collection.
-    /// Explicit collection and snapshots take their own root slices instead.
-    ///
-    /// Pass borrowed values directly from host fields, for example:
-    /// `self.pending.iter().chain(self.cache.values()).for_each(visit)`.
-    /// Report only values from this VM. Duplicates are allowed; do not re-enter
-    /// the VM while visiting. The VM handles any marking errors.
-    fn visit_gc_roots(&self, _visit: &mut dyn FnMut(&Value)) {}
-
-    /// Default report for an exception whose global error event was not canceled.
-    /// This callback must not re-enter the VM.
-    fn report_error(&mut self, error: JsValue);
-
-    /// Same report, with an Error stack or message inspected without running script.
-    /// Hosts that only need the thrown value can implement `report_error` alone.
-    fn report_error_with_diagnostic(&mut self, error: JsValue, _diagnostic: &JsString) {
-        self.report_error(error);
+    pub(crate) fn bindings(&self) -> &Bindings {
+        &self.bindings
     }
 
-    /// Diagnostic for a module initialization exception, before the VM is discarded.
-    /// This does not dispatch an event or change the error returned by construction.
-    fn report_startup_exception(&mut self, _diagnostic: &JsString) {}
+    pub(crate) fn services(&self) -> &Services {
+        self.bindings.services()
+    }
+}
 
-    /// Default report for a Promise rejection whose notification was not canceled.
-    /// This callback must not re-enter the VM.
-    fn unhandled_rejection(&mut self, _promise: JsValue, _reason: JsValue) {}
+impl Default for Host {
+    fn default() -> Self {
+        Self::linked(Bindings::empty())
+    }
+}
+
+/// Default host reporting after script error and rejection event handling, or
+/// a diagnostic for a module initialization exception.
+pub enum Diagnostic<'a> {
+    Uncaught {
+        error: JsValue,
+        diagnostic: &'a JsString,
+    },
+    StartupException {
+        diagnostic: &'a JsString,
+    },
+    UnhandledRejection {
+        promise: JsValue,
+        reason: JsValue,
+    },
+}
+
+pub trait Diagnostics {
+    /// Reports an event synchronously. Do not re-enter the VM or retain its
+    /// temporary object handles for use in a later binding call.
+    fn report(&self, event: Diagnostic<'_>);
+}
+
+pub struct DiagnosticsKey;
+
+impl ServiceKey for DiagnosticsKey {
+    type Value = Rc<dyn Diagnostics>;
+    const ID: &'static str = "yield:host/diagnostics";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
+}
+
+pub trait GcRoots {
+    /// Visits only values from this VM, without re-entering it. Used for
+    /// collection during execution, not explicit collection or snapshots.
+    fn visit(&self, visit: &mut dyn FnMut(&Value));
+}
+
+pub struct GcRootsKey;
+
+impl ServiceKey for GcRootsKey {
+    type Value = Rc<dyn GcRoots>;
+    const ID: &'static str = "yield:host/gc-roots";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
+}
+
+/// Overrides the fresh VM's `navigator.userAgent`, not Fetch request headers.
+/// Restore retains the value from the snapshot.
+pub struct UserAgentKey;
+
+impl ServiceKey for UserAgentKey {
+    type Value = String;
+    const ID: &'static str = "yield:host/user-agent";
+    const VERSION: u32 = 1;
+    const IN_FINGERPRINT: bool = false;
 }

@@ -1,12 +1,11 @@
 use std::rc::Rc;
 
 use super::super::support::{compile_main, declared};
-use super::StrategyHost;
 use yield_harness::{LabelService, LabelServiceKey, Wait};
-use yield_vm::binding::{CallCx, ExportDecl};
+use yield_vm::binding::CallCx;
 use yield_vm::{
-    Bindings, Completion, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
-    VmError, host_bindings, host_class, host_module, methods, module_exports,
+    Completion, Host, HostStep, Instance, JsResult, JsValue, PromiseState, This, Value, Vm,
+    VmError, host, host_class, host_module, methods, module_exports,
 };
 
 mod original {
@@ -55,8 +54,8 @@ mod original {
         }
     }
 
-    pub(super) fn bindings(labels: &Rc<LabelService>) -> Result<Bindings, String> {
-        host_bindings! {
+    pub(super) fn make_host(labels: &Rc<LabelService>) -> Result<Host, String> {
+        host! {
             dts: "../dts/auxiliary-contract.d.ts",
             modules: [Api, ExtraModule],
             services: {
@@ -109,8 +108,8 @@ macro_rules! independent_contract {
                 fn renamed_probe($probe_cx: &mut yield_vm::ModuleCx<'_, Self>, $value: $($arg)+) -> JsResult<$($result)+> $probe
             }
 
-            pub(super) fn bindings(labels: &Rc<LabelService>) -> Result<Bindings, String> {
-                host_bindings! {
+            pub(super) fn make_host(labels: &Rc<LabelService>) -> Result<Host, String> {
+                host! {
                     dts: "../dts/auxiliary-contract.d.ts",
                     modules: [ExtraModule, AlternateApi],
                     services: {
@@ -133,23 +132,14 @@ independent_contract!(optional_argument, probe(_cx, value): [Option<JsValue>] ->
 independent_contract!(instance_getter, probe(_cx, value): [JsValue] -> [JsValue] { Ok(value) },
     getter(cx) -> [Instance<Entity>] { cx.alloc(Entity) });
 
-fn assert_probe_arity(bindings: &Bindings) {
-    let (_, ExportDecl::Function(probe)) =
-        bindings.export("contract", "probe").expect("probe export")
-    else {
-        panic!("probe must be a function");
-    };
-    assert_eq!(probe.arity, 1);
-}
-
 #[test]
 fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration_order() {
     let labels = Rc::new(LabelService::default());
-    let bindings = original::bindings(&labels).expect("original bindings");
-    assert_probe_arity(&bindings);
+    let host = original::make_host(&labels).expect("original bindings");
     let build = compile_main(
         r#"
         import { probe, wait } from 'contract';
+        export function arity() { return probe.length; }
         export async function run() {
           await wait();
           return probe(42);
@@ -158,10 +148,10 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
         &declared(include_str!("../dts/auxiliary-contract.d.ts")),
     )
     .expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let mut vm = Vm::new(build.clone(), host, Default::default()).expect("create VM");
+    assert_eq!(vm.start("arity", vec![]).unwrap(), Value::number(1.0));
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     assert!(labels.token("wait:pending").is_some());
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
@@ -171,23 +161,19 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     for (change, bind) in [
         (
             "function return kind",
-            instance_result::bindings as fn(&Rc<LabelService>) -> Result<Bindings, String>,
+            instance_result::make_host as fn(&Rc<LabelService>) -> Result<Host, String>,
         ),
-        ("step return kind", step_result::bindings),
-        ("function parameter kind", optional_argument::bindings),
-        ("getter return kind", instance_getter::bindings),
+        ("step return kind", step_result::make_host),
+        ("function parameter kind", optional_argument::make_host),
+        ("getter return kind", instance_getter::make_host),
     ] {
         let labels = Rc::new(LabelService::default());
-        let bindings = bind(&labels).expect("compatible export shape");
-        assert_probe_arity(&bindings);
-        let mut changed_host = StrategyHost::new(bindings);
-        let error = Vm::restore(
-            snapshot.clone(),
-            build.clone(),
-            &mut changed_host,
-            Default::default(),
-        )
-        .expect_err("signature change must invalidate the snapshot");
+        let host = bind(&labels).expect("compatible export shape");
+        let mut probe_vm =
+            Vm::new(build.clone(), bind(&labels).unwrap(), Default::default()).unwrap();
+        assert_eq!(probe_vm.start("arity", vec![]).unwrap(), Value::number(1.0));
+        let error = Vm::restore(snapshot.clone(), build.clone(), host, Default::default())
+            .expect_err("signature change must invalidate the snapshot");
         assert!(
             matches!(&error, VmError::InvalidSnapshot(message) if message.contains("binding fingerprint")),
             "{change}: {error:?}"
@@ -203,9 +189,8 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
     }
 
     let labels = Rc::new(LabelService::default());
-    let mut reordered_host =
-        StrategyHost::new(reordered::bindings(&labels).expect("reordered bindings"));
-    let mut restored = Vm::restore(snapshot, build, &mut reordered_host, Default::default())
+    let reordered = reordered::make_host(&labels).expect("reordered bindings");
+    let mut restored = Vm::restore(snapshot, build, reordered, Default::default())
         .expect("restore with renamed and reordered declarations");
     assert!(labels.pending_labels().is_empty());
     restored
@@ -218,9 +203,7 @@ fn snapshot_restore_checks_signatures_without_hashing_rust_names_or_registration
             Completion::Fulfilled(JsValue::undefined()),
         )
         .expect("complete wait");
-    restored
-        .run_until_idle(&mut reordered_host)
-        .expect("resume");
+    restored.run_until_idle().expect("resume");
     assert_eq!(
         restored.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(42.0))

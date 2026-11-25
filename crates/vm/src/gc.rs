@@ -17,7 +17,7 @@ use crate::runtime::{Continuation, HostInstance, HostSlot};
 use crate::value::{
     ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef,
 };
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Default)]
 pub(crate) struct LiveSet {
@@ -152,7 +152,7 @@ trace_tuple!(A a, B b);
 trace_tuple!(A a, B b, C c);
 trace_tuple!(A a, B b, C c, D d);
 
-impl Vm {
+impl VmCore {
     /// Collects unreachable heap objects, returning the number removed.
     ///
     /// Call only between VM calls, after draining microtasks. No microtasks
@@ -185,13 +185,16 @@ impl Vm {
 
     pub(crate) fn collect_active(
         &mut self,
-        host: &dyn crate::Host,
+        host: &crate::Host,
         active: &ActiveRoots<'_>,
     ) -> Result<usize, VmError> {
         self.collect_with_roots(
             |tracer| {
                 let mut status = Ok(());
-                host.visit_gc_roots(&mut |value| {
+                let Some(roots) = host.services().get::<crate::host::GcRootsKey>() else {
+                    return Ok(());
+                };
+                roots.visit(&mut |value| {
                     if status.is_ok() {
                         status = tracer.mark_value(value);
                     }

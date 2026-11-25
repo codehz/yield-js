@@ -8,13 +8,14 @@ use crate::gc::ActiveRoots;
 use crate::heap::Property;
 use crate::host::Host;
 use crate::value::{PropertyKey, ValueRef};
-use crate::{JsString, Object, Value, Vm};
+use crate::vm::VmCore;
+use crate::{JsString, Object, Value};
 
 use super::logging::Completion;
 
 pub(super) fn build(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     data: &Value,
     properties: Option<&Value>,
@@ -124,7 +125,7 @@ pub(super) fn build(
     }))))
 }
 
-fn tabular_object<'a>(vm: &'a Vm, value: &Value) -> Option<&'a Object> {
+fn tabular_object<'a>(vm: &'a VmCore, value: &Value) -> Option<&'a Object> {
     let ValueRef::Object(id) = value.view() else {
         return None;
     };

@@ -8,14 +8,14 @@ use crate::heap::object_id;
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::Value;
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::Step;
 
-impl Vm {
+impl VmCore {
     pub(super) fn step_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

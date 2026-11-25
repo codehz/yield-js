@@ -78,9 +78,9 @@ fn build_stack(options: &Compiler) -> Build {
 }
 
 fn stack_text(build: Build, entry: &str) -> String {
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let stack = vm.start(&mut host, entry, vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let stack = vm.start(entry, vec![]).unwrap();
     text(&stack)
 }
 
@@ -138,15 +138,15 @@ fn stack_traces_flag_disables_every_site() {
 fn retains_creation_stack_across_snapshot_restore() {
     let build = build_stack(&declared(TEST_DECLARATIONS));
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", Vec::<JsValue>::new()).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", Vec::<JsValue>::new()).unwrap();
+    vm.run_until_idle().unwrap();
     let snapshot = vm.snapshot(std::slice::from_ref(&result)).unwrap();
     let decoded = Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap();
     let finish = |mut vm: Vm, host: &mut TestHost| {
         host.complete(&mut vm, "wait:stack", Completion::Fulfilled(string("done")))
             .unwrap();
-        vm.run_until_idle(host).unwrap();
+        vm.run_until_idle().unwrap();
         let PromiseState::Fulfilled(value) = vm.promise_state(&result).unwrap() else {
             panic!("expected fulfillment")
         };
@@ -154,7 +154,8 @@ fn retains_creation_stack_across_snapshot_restore() {
     };
     let original = finish(vm, &mut host);
     let mut restored_host = TestHost::default();
-    let mut restored = Vm::restore(decoded, build, &mut restored_host, Default::default()).unwrap();
+    let mut restored =
+        Vm::restore(decoded, build, restored_host.host(), Default::default()).unwrap();
     restored.start_recovered_operations().unwrap();
     assert_eq!(finish(restored, &mut restored_host), original);
     assert_eq!(

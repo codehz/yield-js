@@ -198,14 +198,14 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
         default = (!derives.contains("Default")).then(|| quote!(#[derive(Default)]));
         encode = (!derives.contains("Encode")).then(|| quote! {
             impl ::yield_vm::Encode for #ty {
-                fn encode(&self, _: &mut ::std::vec::Vec<u8>, _: &::yield_vm::Bindings) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
+                fn encode(&self, _: &mut ::std::vec::Vec<u8>, _: &::yield_vm::Services) -> ::core::result::Result<(), ::yield_vm::binding::CodecError> {
                     Ok(())
                 }
             }
         });
         decode = (!derives.contains("Decode")).then(|| quote! {
             impl ::yield_vm::Decode for #ty {
-                fn decode(_: &mut &[u8], _: &::yield_vm::Bindings) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
+                fn decode(_: &mut &[u8], _: &::yield_vm::Services) -> ::core::result::Result<Self, ::yield_vm::binding::CodecError> {
                     Ok(#empty)
                 }
             }
@@ -282,7 +282,7 @@ fn service_bindings(input: ParseStream<'_>) -> Result<Vec<ServiceBinding>> {
 }
 
 struct Registry {
-    dts: LitStr,
+    dts: Option<LitStr>,
     modules: Vec<TypePath>,
     services: Vec<ServiceBinding>,
 }
@@ -304,25 +304,37 @@ impl Parse for Registry {
                 input.parse::<Token![:]>()?;
                 service_bindings(input)
             }),
-            _ => Err(Error::new(key.span(), "unknown host_bindings section")),
+            _ => Err(Error::new(key.span(), "unknown host section")),
         })?;
+        let modules = modules.unwrap_or_default();
+        if !modules.is_empty() && dts.is_none() {
+            return Err(Error::new(span, "missing `dts`"));
+        }
         Ok(Self {
-            dts: required(dts, span, "dts")?,
-            modules: required(modules, span, "modules")?,
+            dts,
+            modules,
             services: required(services, span, "services")?,
         })
     }
 }
 
-pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenStream> {
+pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenStream> {
     let Registry {
         dts,
         modules,
         services,
     } = syn::parse2(input)?;
-    let (path, declarations) = read_declarations(&dts, origin.as_deref())?;
-    let include = LitStr::new(&path.to_string_lossy(), dts.span());
-    let checks = declaration_checks(&declarations, &modules);
+    let declaration_validation = if let Some(dts) = dts {
+        let (path, declarations) = read_declarations(&dts, origin.as_deref())?;
+        let include = LitStr::new(&path.to_string_lossy(), dts.span());
+        let checks = declaration_checks(&declarations, &modules);
+        quote! {
+            const _: &str = include_str!(#include);
+            #(#checks)*
+        }
+    } else {
+        TokenStream::new()
+    };
     let inserts = services.iter().map(|binding| {
         let key = &binding.key;
         let value = &binding.value;
@@ -341,8 +353,7 @@ pub(super) fn host_bindings(input: TokenStream, origin: Option<PathBuf>) -> Resu
     let mutable = (!modules.is_empty()).then(|| quote!(mut));
     Ok(quote! {
         {
-            const _: &str = include_str!(#include);
-            #(#checks)*
+            #declaration_validation
             match ::yield_vm::__macro_support::services(|__yield_services| {
                 #(#inserts)*
                 ::core::result::Result::Ok(())
@@ -465,8 +476,8 @@ fn declaration_checks(
 mod tests {
     use super::*;
 
-    fn host_bindings(input: TokenStream) -> Result<TokenStream> {
-        super::host_bindings(input, None)
+    fn host(input: TokenStream) -> Result<TokenStream> {
+        super::host(input, None)
     }
 
     fn diagnostic(result: Result<TokenStream>, expected: &str) {
@@ -576,22 +587,21 @@ mod tests {
     }
 
     #[test]
-    fn host_bindings_requires_all_sections_exactly_once() {
+    fn host_requires_services_and_dts_for_nonempty_modules() {
         for (input, error) in [
-            (quote!(modules: [], services: {}), "missing `dts`"),
-            (quote!(dts: "a.d.ts", services: {}), "missing `modules`"),
+            (quote!(modules: [X], services: {}), "missing `dts`"),
             (quote!(dts: "a.d.ts", modules: []), "missing `services`"),
             (quote!(dts: "a.d.ts", dts: "b.d.ts"), "duplicate `dts`"),
             (quote!(modules: [], modules: []), "duplicate `modules`"),
             (quote!(services: {}, services: {}), "duplicate `services`"),
         ] {
-            diagnostic(host_bindings(input), error);
+            diagnostic(host(input), error);
         }
     }
 
     #[test]
-    fn host_bindings_reads_and_validates_the_declaration_file() {
-        let error = host_bindings(quote!(
+    fn host_reads_and_validates_the_declaration_file() {
+        let error = host(quote!(
             dts: "tests/dts/missing.d.ts",
             modules: [],
             services: {}
@@ -604,7 +614,7 @@ mod tests {
             "{error}"
         );
 
-        let error = host_bindings(quote!(
+        let error = host(quote!(
             dts: "tests/dts/reexport.d.ts",
             modules: [X],
             services: {}
@@ -616,19 +626,21 @@ mod tests {
     }
 
     #[test]
-    fn host_bindings_rejects_old_sections() {
+    fn host_rejects_old_sections() {
         for key in [quote!(classes), quote!(operations), quote!(exports)] {
             diagnostic(
-                host_bindings(quote!(dts: "a.d.ts", modules: [], services: {}, #key: [])),
-                "unknown host_bindings section",
+                host(quote!(dts: "a.d.ts", modules: [], services: {}, #key: [])),
+                "unknown host section",
             );
         }
     }
 
     #[test]
-    fn host_bindings_accepts_empty_lists_and_service_bindings() {
+    fn host_accepts_empty_lists_and_service_bindings() {
+        host(quote!(services: {})).unwrap();
+        host(quote!(modules: [], services: {})).unwrap();
         assert!(
-            host_bindings(quote!(
+            host(quote!(
                 dts: "tests/dts/empty.d.ts",
                 modules: [],
                 services: {},
@@ -665,8 +677,8 @@ mod tests {
     }
 
     #[test]
-    fn host_bindings_reports_malformed_service_bindings() {
-        let error = host_bindings(quote!(
+    fn host_reports_malformed_service_bindings() {
+        let error = host(quote!(
             dts: "tests/dts/empty.d.ts",
             modules: [],
             services: { Clock tick() }

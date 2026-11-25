@@ -6,12 +6,12 @@ use crate::heap::{EventPayload, EventState, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
-impl Vm {
+impl VmCore {
     pub(crate) fn report_exception(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         error: Value,
     ) -> Result<(), VmError> {
@@ -63,7 +63,7 @@ impl Vm {
 
     pub(crate) fn new_global_notification(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         ty: &str,
         cancelable: bool,
         payload: EventPayload,
@@ -89,7 +89,7 @@ impl Vm {
 
     pub(crate) fn dispatch_global_notification(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         event: ObjectId,
     ) -> Result<bool, VmError> {
@@ -99,9 +99,15 @@ impl Vm {
         }
     }
 
-    fn deliver_exception(&self, host: &mut dyn Host, error: Value) {
+    fn deliver_exception(&self, host: &Host, error: Value) {
+        let Some(sink) = host.services().get::<crate::host::DiagnosticsKey>() else {
+            return;
+        };
         let diagnostic = self.exception_diagnostic(&error);
-        host.report_error_with_diagnostic(self.host_value(error), &diagnostic);
+        sink.report(crate::host::Diagnostic::Uncaught {
+            error: self.host_value(error),
+            diagnostic: &diagnostic,
+        });
     }
 
     pub(crate) fn exception_diagnostic(&self, error: &Value) -> JsString {

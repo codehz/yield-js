@@ -13,7 +13,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Copy)]
 enum StackMethod {
@@ -88,7 +88,7 @@ macro_rules! stack_family {
 
             pub(crate) const OWNER: Owner = Owner::new($root, ROOTS, &[INTRINSICS], Some(install));
 
-            fn install(vm: &mut Vm, _: &Value) {
+            fn install(vm: &mut VmCore, _: &Value) {
                 let prototype = vm.builtins.get($prototype);
                 link_constructor(vm, vm.builtins.get($root), prototype);
                 for (name, key) in [
@@ -144,7 +144,7 @@ stack_family!(
 pub(crate) use asynchronous::OWNER as ASYNC_OWNER;
 pub(crate) use sync::OWNER as SYNC_OWNER;
 
-impl Vm {
+impl VmCore {
     fn alloc_disposable_stack(
         &mut self,
         async_: bool,
@@ -162,7 +162,7 @@ impl Vm {
     #[allow(clippy::too_many_arguments)]
     fn disposable_stack_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         async_: bool,
         intrinsic_prototype: &'static str,

@@ -12,7 +12,7 @@ use crate::heap::{ASYNC_ITERATOR_SYMBOL, Attributes, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) const ROOT: &str = "asyncGenerator.prototype";
 
@@ -52,7 +52,7 @@ pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
     }),
 ];
 
-impl Vm {
+impl VmCore {
     pub(crate) fn install_async_generator_methods(&mut self) {
         let prototype = self.builtins.get(ROOT);
         let function_prototype = self.builtins.get("asyncGeneratorFunction.prototype");

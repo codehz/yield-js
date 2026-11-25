@@ -1,4 +1,4 @@
-//! A real consumer check: `host_bindings!` reads the declaration file while
+//! A real consumer check: `host!` reads the declaration file while
 //! rustc expands the macro, so a missing declared value is a compile error even
 //! when no script imports it.
 
@@ -43,7 +43,7 @@ impl Fixture {
             ""
         };
         format!(
-            r#"use yield_vm::{{JsResult, JsValue, ModuleCx, host_bindings, host_module, module_exports}};
+            r#"use yield_vm::{{Host, JsResult, JsValue, ModuleCx, host, host_module, module_exports}};
 
 #[host_module(name = "a")]
 struct A;
@@ -68,8 +68,8 @@ impl B {{
     {extra}
 }}
 
-pub fn bindings() -> Result<yield_vm::Bindings, String> {{
-    host_bindings! {{
+pub fn make_host() -> Result<Host, String> {{
+    host! {{
         dts: "host.d.ts",
         modules: [A, B],
         services: {{}},
@@ -163,10 +163,40 @@ declare module "b" {
 }
 
 #[test]
+fn service_only_hosts_need_no_dts_but_still_check_supplied_declarations() {
+    let fixture = Fixture::new("service-only-host");
+    let source = r#"
+pub fn make_host() -> Result<yield_vm::Host, String> {
+    yield_vm::host! { services: {} }
+}
+"#;
+    fixture.write("src/lib.rs", source);
+    let (ok, output) = fixture.check();
+    assert!(
+        ok,
+        "a service-only host must compile without a DTS file:\n{output}"
+    );
+
+    fixture.write(
+        "src/host.d.ts",
+        "declare module 'example' { export const missing: number; }",
+    );
+    fixture.write(
+        "src/lib.rs",
+        &source.replace("services: {}", "dts: \"host.d.ts\", services: {}"),
+    );
+    let (ok, output) = fixture.check();
+    assert!(
+        !ok && output.contains("missing host export: example:missing"),
+        "{output}"
+    );
+}
+
+#[test]
 fn typed_modules_reject_foreign_contexts_and_legacy_states() {
     let declarations = "declare module 'counter' { export function bump(): void; }";
     let source = r#"
-use yield_vm::{JsResult, ModuleCx, host_bindings, host_module, module_exports};
+use yield_vm::{Host, JsResult, ModuleCx, host, host_module, module_exports};
 
 #[host_module(name = "counter")]
 struct Counter;
@@ -180,8 +210,8 @@ impl Counter {
     fn bump(_: &mut ModuleCx<'_, Self>) -> JsResult<()> { Ok(()) }
 }
 
-pub fn bind() -> Result<yield_vm::Bindings, String> {
-    host_bindings! { dts: "host.d.ts", modules: [Counter], services: {} }
+pub fn make_host() -> Result<Host, String> {
+    host! { dts: "host.d.ts", modules: [Counter], services: {} }
 }
 "#;
     let fixture = Fixture::new("typed-modules");
@@ -189,6 +219,10 @@ pub fn bind() -> Result<yield_vm::Bindings, String> {
     fixture.write("src/lib.rs", source);
     let (ok, output) = fixture.check();
     assert!(ok, "baseline typed module must compile:\n{output}");
+
+    fixture.write("src/lib.rs", &source.replace("dts: \"host.d.ts\", ", ""));
+    let (ok, output) = fixture.check();
+    assert!(!ok && output.contains("missing `dts`"), "{output}");
 
     let fixture = Fixture::new("foreign-module-context");
     fixture.write("src/host.d.ts", declarations);
@@ -209,10 +243,7 @@ pub fn bind() -> Result<yield_vm::Bindings, String> {
         &source.replace("modules: [Counter],", "modules: [Counter], states: [],"),
     );
     let (ok, output) = fixture.check();
-    assert!(
-        !ok && output.contains("unknown host_bindings section"),
-        "{output}"
-    );
+    assert!(!ok && output.contains("unknown host section"), "{output}");
 }
 
 #[test]

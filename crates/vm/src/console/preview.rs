@@ -3,21 +3,21 @@
 use std::collections::BTreeSet;
 
 use super::{ConsoleKey, ConsoleObject, ConsoleProperty, ConsoleValue};
-use crate::Vm;
 use crate::heap::{Object, Property};
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
+use crate::vm::VmCore;
 
 pub(crate) const MAX_DEPTH: usize = 3;
 pub(crate) const MAX_PROPERTIES: usize = 100;
 
 pub(crate) struct Preview<'a> {
-    vm: &'a Vm,
+    vm: &'a VmCore,
     pub(crate) remaining: usize,
     ancestors: BTreeSet<ObjectId>,
 }
 
 impl<'a> Preview<'a> {
-    pub(crate) fn new(vm: &'a Vm) -> Self {
+    pub(crate) fn new(vm: &'a VmCore) -> Self {
         Self {
             vm,
             remaining: MAX_PROPERTIES,

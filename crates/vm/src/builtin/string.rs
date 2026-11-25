@@ -22,7 +22,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const MAX_LENGTH: usize = 16 * 1024 * 1024;
 
@@ -88,7 +88,9 @@ enum StringStatic {
 
 #[yield_binding_macros::builtin_global(name = "String", root = "string", kind = "constructor")]
 pub(crate) mod members {
-    use super::{ActiveRoots, Host, Invocation, StringMethod, StringStatic, Value, Vm, VmError};
+    use super::{
+        ActiveRoots, Host, Invocation, StringMethod, StringStatic, Value, VmCore, VmError,
+    };
 
     #[methods(
         charAt: 1 = StringMethod::CharAt,
@@ -138,8 +140,8 @@ pub(crate) mod members {
         sup: 0 = StringMethod::SUP,
     )]
     fn call_method(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         key: StringMethod,
         receiver: &Value,
@@ -156,8 +158,8 @@ pub(crate) mod members {
         raw: 1 = StringStatic::Raw,
     )]
     fn call_static(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         key: StringStatic,
         args: &[Value],
@@ -228,7 +230,7 @@ pub(crate) const STRING_ROOTS: &[RootSpec] = &[
     ),
 ];
 
-fn install(vm: &mut Vm, identity: ObjectId) {
+fn install(vm: &mut VmCore, identity: ObjectId) {
     let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get(ROOT_STRING_PROTOTYPE);
     let iterator = vm.builtins.get(ROOT_STRING_ITERATOR);
@@ -236,7 +238,7 @@ fn install(vm: &mut Vm, identity: ObjectId) {
     vm.init_string_iterator_prototype(vm.builtins.get(ROOT_STRING_ITERATOR_PROTOTYPE), identity);
 }
 
-impl Vm {
+impl VmCore {
     fn init_string_constructor(
         &mut self,
         constructor: ObjectId,
@@ -284,7 +286,7 @@ impl Vm {
 
     fn string_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -344,7 +346,7 @@ impl Vm {
 
     fn call_string(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -357,7 +359,7 @@ impl Vm {
 
     fn call_string_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
@@ -433,7 +435,7 @@ impl Vm {
 
     fn call_string_static(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: StringStatic,
         args: &[Value],
@@ -471,7 +473,7 @@ impl Vm {
     fn char_at(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -487,7 +489,7 @@ impl Vm {
     fn char_code_at(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -504,7 +506,7 @@ impl Vm {
     fn code_point_at(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -523,7 +525,7 @@ impl Vm {
     fn string_at(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         index: &Value,
     ) -> Result<Invocation, VmError> {
@@ -542,7 +544,7 @@ impl Vm {
     fn index_of(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         last: bool,
@@ -574,7 +576,7 @@ impl Vm {
     fn string_includes(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -595,7 +597,7 @@ impl Vm {
     fn string_affix(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
@@ -634,7 +636,7 @@ impl Vm {
     fn string_slice(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -670,7 +672,7 @@ impl Vm {
     fn string_substring(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -702,7 +704,7 @@ impl Vm {
     fn string_substr(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -730,7 +732,7 @@ impl Vm {
     fn string_normalize(
         &mut self,
         text: JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         form: &Value,
     ) -> Result<Invocation, VmError> {
@@ -765,7 +767,7 @@ impl Vm {
     fn string_html(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         tag: &str,
@@ -814,7 +816,7 @@ impl Vm {
     fn string_split(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -868,7 +870,7 @@ impl Vm {
     fn string_concat(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -913,7 +915,7 @@ impl Vm {
     fn string_repeat(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         count: &Value,
     ) -> Result<Invocation, VmError> {
@@ -951,7 +953,7 @@ impl Vm {
     fn string_pad(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         start: bool,
@@ -1020,7 +1022,7 @@ impl Vm {
     fn string_replace(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1070,7 +1072,7 @@ impl Vm {
     /// must fall back to the plain string algorithm.
     fn string_pattern_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: StringMethod,
         receiver: &Value,
@@ -1168,7 +1170,7 @@ impl Vm {
 
     fn get_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         symbol: SymbolId,
@@ -1187,7 +1189,7 @@ impl Vm {
 
     fn is_regexp(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<bool, Value>, VmError> {
@@ -1209,7 +1211,7 @@ impl Vm {
     fn string_replace_all(
         &mut self,
         text: &JsString,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1285,7 +1287,7 @@ impl Vm {
 
     fn string_from_char_code(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1305,7 +1307,7 @@ impl Vm {
 
     fn string_from_code_point(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1335,7 +1337,7 @@ impl Vm {
 
     fn string_raw(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -1386,7 +1388,7 @@ impl Vm {
 
     fn relative_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -1414,7 +1416,7 @@ impl Vm {
 
     fn integer_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         infinity: bool,
@@ -1433,7 +1435,7 @@ impl Vm {
 
     fn clamp_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,

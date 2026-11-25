@@ -14,7 +14,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops::strict_equal;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 mod unscopables;
 
@@ -149,7 +149,7 @@ fn relative(index: f64, len: u64) -> u64 {
     (if index < 0.0 { len + index } else { index }).clamp(0.0, len) as u64
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn install_array(
         &mut self,
         constructor: ObjectId,
@@ -248,7 +248,7 @@ impl Vm {
 
     pub(crate) fn length_of_array_like(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Completion<u64> {
@@ -268,7 +268,7 @@ impl Vm {
 
     pub(crate) fn read_array_like_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: u64,
@@ -294,7 +294,7 @@ impl Vm {
 
     fn construct_array_result(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -314,7 +314,7 @@ impl Vm {
 
     fn array_operation(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         name: &str,
         receiver: &Value,
@@ -339,7 +339,7 @@ impl Vm {
 
     fn array_prototype_operation(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         name: &str,
         receiver: &Value,
@@ -382,7 +382,7 @@ impl Vm {
 
     fn array_of(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -413,7 +413,7 @@ impl Vm {
 
     fn array_from(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: &[Value],
@@ -567,8 +567,8 @@ impl crate::gc::TraceRoots for FlattenRoots<'_> {
 }
 
 struct ArrayAccess<'a> {
-    vm: &'a mut Vm,
-    host: &'a mut dyn Host,
+    vm: &'a mut VmCore,
+    host: &'a Host,
     roots: &'a ActiveRoots<'a>,
     id: ObjectId,
     // Snapshot once: callbacks and property hooks can mutate the live array.

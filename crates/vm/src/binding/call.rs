@@ -3,7 +3,7 @@ use std::fmt;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, EventTargetState, Object, PlainObject, Property};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::schema::*;
 
@@ -386,7 +386,7 @@ impl<M: HostModule> ModuleCx<'_, M> {
 }
 
 pub struct CallCx<'a> {
-    pub(crate) vm: &'a mut Vm,
+    pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
     pub(crate) bindings: &'a Bindings,
     pub(crate) epoch: u32,
@@ -613,10 +613,6 @@ impl<'a> CallCx<'a> {
         Ok(value.value)
     }
 
-    pub fn bindings(&self) -> &Bindings {
-        self.bindings
-    }
-
     pub fn throw(&self, value: JsValue) -> JsError {
         JsError::Throw(value)
     }
@@ -752,7 +748,6 @@ impl<'a> CallCx<'a> {
         self.check_value(&value)?;
         Ok(Inspect {
             vm: self.vm,
-            bindings: self.bindings,
             value,
             epoch: self.epoch,
             call: self.call,
@@ -766,7 +761,7 @@ impl<'a> CallCx<'a> {
             .map_err(JsError::Fault)?;
         let mut bytes = Vec::new();
         state
-            .encode(&mut bytes, self.bindings)
+            .encode(&mut bytes, self.bindings.services())
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
         Ok((declaration, bytes))
     }
@@ -824,13 +819,14 @@ impl<'a> CallCx<'a> {
         let promise = self.vm.heap.alloc_promise();
         self.vm
             .register_operation(
+                self.bindings,
                 declaration,
                 bytes,
                 crate::snapshot::DeliveryTarget::Promise(promise),
                 signal,
                 |token, bindings, _| {
                     Ok(Box::new(TypedRegistration::<O>(
-                        state.start(token, bindings)?,
+                        state.start(token, bindings.services())?,
                     )))
                 },
             )
@@ -1041,8 +1037,7 @@ pub enum InspectValue {
 /// A borrowed, read-only view over one script value. It never invokes getters
 /// or proxy traps and cannot write script-visible state.
 pub struct Inspect<'a> {
-    vm: &'a Vm,
-    bindings: &'a Bindings,
+    vm: &'a VmCore,
     value: JsValue,
     epoch: u32,
     call: u64,
@@ -1161,10 +1156,6 @@ impl<'a> Inspect<'a> {
             None => None,
         }
     }
-
-    pub fn bindings(&self) -> &'a Bindings {
-        self.bindings
-    }
 }
 
 impl InspectValue {
@@ -1175,10 +1166,6 @@ impl InspectValue {
         }
     }
 }
-
-/// Marker used by [`Bindings::classes`]; kept public so diagnostics can print
-/// the declaration order deterministically.
-pub const _CLASS_ORDER_HINT: () = ();
 
 /// Attributes for prototype methods: writable and configurable, not enumerable.
 pub(crate) const PROTOTYPE_METHOD_ATTRIBUTES: Attributes = Attributes::METHOD;

@@ -8,11 +8,11 @@ use crate::heap::{Attributes, Object, PlainObject};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn construct_error(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         name: &str,
         prototype: &'static str,

@@ -19,7 +19,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const STREAM_PROTO: &str = "writableStream.prototype";
 const WRITER_PROTO: &str = "writableStreamDefaultWriter.prototype";
@@ -49,8 +49,8 @@ interface!(WRITABLE_CONTROLLER_OWNER, "writableStreamDefaultController", "Writab
 );
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -107,21 +107,21 @@ fn object(id: ObjectId) -> Invocation {
     Invocation::Value(Value::object(id))
 }
 
-fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn stream_id(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
     Ok(matches!(vm.heap.get(id)?, Object::WritableStream(_)).then_some(id))
 }
 
-fn writer_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn writer_id(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
     Ok(matches!(vm.heap.get(id)?, Object::WritableWriter(_)).then_some(id))
 }
 
-fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn controller_stream(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -132,8 +132,8 @@ fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError
 }
 
 fn locked(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -147,8 +147,8 @@ fn locked(
 }
 
 fn get_writer(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -160,8 +160,8 @@ fn get_writer(
 }
 
 fn construct_writer(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -176,8 +176,8 @@ fn construct_writer(
 }
 
 fn stream_abort(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -192,8 +192,8 @@ fn stream_abort(
 }
 
 fn stream_close(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -208,8 +208,8 @@ fn stream_close(
 }
 
 fn writer_abort(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -225,8 +225,8 @@ fn writer_abort(
 }
 
 fn writer_close(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -242,8 +242,8 @@ fn writer_close(
 }
 
 fn write(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -255,8 +255,8 @@ fn write(
 }
 
 fn release_lock(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -269,8 +269,8 @@ fn release_lock(
 }
 
 fn closed(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -282,8 +282,8 @@ fn closed(
 }
 
 fn ready(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -295,8 +295,8 @@ fn ready(
 }
 
 fn desired_size(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -317,8 +317,8 @@ fn desired_size(
 }
 
 fn signal(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -330,8 +330,8 @@ fn signal(
 }
 
 fn error(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -343,7 +343,7 @@ fn error(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn writable(&self, id: ObjectId) -> Result<&WritableStreamObject, VmError> {
         match self.heap.get(id)? {
             Object::WritableStream(s) => Ok(s),
@@ -377,7 +377,7 @@ impl Vm {
 
     pub(crate) fn create_writable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         prototype: ObjectId,
         sink: WritableSink,
@@ -572,7 +572,7 @@ impl Vm {
 
     pub(crate) fn writable_write(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         writer: ObjectId,
         chunk: &Value,
@@ -640,7 +640,7 @@ impl Vm {
 
     pub(crate) fn writable_close(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<Invocation, VmError> {
@@ -669,7 +669,7 @@ impl Vm {
 
     pub(crate) fn writable_abort(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -702,7 +702,7 @@ impl Vm {
 
     pub(crate) fn writable_error(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -716,7 +716,7 @@ impl Vm {
 
     fn start_writable_erroring(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -754,7 +754,7 @@ impl Vm {
 
     fn advance_writable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -789,7 +789,7 @@ impl Vm {
 
     fn invoke_writable_flight(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         callback: Option<Value>,
@@ -836,7 +836,7 @@ impl Vm {
 
     fn finish_writable_erroring(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -883,7 +883,7 @@ impl Vm {
 
     pub(super) fn resume_writable_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,

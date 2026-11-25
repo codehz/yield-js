@@ -13,8 +13,8 @@ use crate::intrinsic::{CallableTarget, Construction};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn is_callable(&self, value: &Value) -> bool {
         let ValueRef::Object(id) = value.view() else {
             return false;
@@ -87,7 +87,7 @@ impl Vm {
     /// Script errors are returned as `Invocation::Thrown`.
     pub(crate) fn invoke(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         callee: &Value,
         args: Arguments<'_>,
@@ -181,7 +181,7 @@ impl Vm {
 
     pub(crate) fn construct_with(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         callee: &Value,
         args: Arguments<'_>,
@@ -387,7 +387,7 @@ impl Vm {
 
     pub(crate) fn super_construct(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         context: ObjectId,
         callee: &Value,
@@ -417,7 +417,7 @@ impl Vm {
 
     fn construct_super_and_initialize(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         class: ObjectId,
         new_target: &Value,
@@ -455,7 +455,7 @@ impl Vm {
 
     pub(crate) fn reflect_call(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         construct: bool,
@@ -497,7 +497,7 @@ impl Vm {
 
     pub(crate) fn arguments_from_array_like(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         list: &Value,
     ) -> Result<Result<Vec<Value>, Value>, VmError> {

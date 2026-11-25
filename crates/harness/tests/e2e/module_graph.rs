@@ -30,12 +30,9 @@ fn run(files: &[(&str, &str)], expected: f64) {
 }
 
 fn run_build(build: Build, expected: f64) {
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(expected)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(expected));
 }
 
 #[test]
@@ -182,14 +179,11 @@ fn distinct_targets_are_omitted_unless_explicitly_shadowed() {
         None,
     )
     .unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
     assert!(vm.get_export("same").is_err());
     assert_eq!(vm.get_export("left").unwrap(), Value::number(3.0));
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(7.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(7.0));
     assert!(vm.get_export("privateToEntry").is_err());
 
     let error = link(
@@ -243,11 +237,11 @@ fn dynamic_import_fulfills_with_the_eagerly_initialized_namespace() {
             export function then() { throw 'namespace must not be assimilated'; }
         "#),
     ], None).unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
     assert_eq!(vm.get_export("beforeEntry").unwrap(), Value::number(1.0));
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     assert!(
         matches!(vm.promise_state(&result).unwrap(), PromiseState::Fulfilled(value) if value == Value::number(1.0))
     );
@@ -279,12 +273,9 @@ fn preload_and_entry_share_state_and_only_entry_exports_are_public() {
     let reversed = link(PRELOADED.into_iter().rev(), Some("preload.js")).unwrap();
     assert_eq!(build.build_id, reversed.build_id);
 
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(1.0)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(1.0));
     for hidden in ["preloadCount", "count", "inc", "seen", "default"] {
         assert!(vm.get_export(hidden).is_err(), "exposed {hidden}");
     }
@@ -341,9 +332,9 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
         .position(|module| module.id == "counter.js")
         .unwrap();
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
     assert!(host.token("wait:counter").is_some());
     let roots = std::slice::from_ref(&result);
@@ -358,7 +349,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
         Vm::restore(
             bad_env,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -395,7 +386,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
         Vm::restore(
             bad_getter,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -416,11 +407,11 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
     *module = u32::MAX;
     bad_build.finalize();
     assert!(matches!(
-        Vm::new(bad_build, &mut host, Default::default()),
+        Vm::new(bad_build, host.host(), Default::default()),
         Err(VmError::InvalidBuild(_))
     ));
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     host.complete(
         &mut vm,
@@ -428,7 +419,7 @@ fn suspended_graph_restores_live_bindings_and_namespace_identity() {
         Completion::Fulfilled(JsValue::undefined()),
     )
     .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(2.0))
@@ -442,12 +433,9 @@ fn shared_root_is_evaluated_once_before_installing_its_getters() {
         export const count = (globalThis.executions = (globalThis.executions || 0) + 1);
         export function run() { return !installedEarly && globalThis.count === 1 && globalThis.executions === 1; }
     "#)], Some("./main.js")).unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::boolean(true));
 }
 
 #[test]
@@ -463,17 +451,14 @@ fn restores_captured_block_bindings_created_during_evaluation() {
         None,
     )
     .unwrap();
-    let mut host = TestHost::default();
-    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     let mut vm = Vm::restore(
         json_round_trip(&vm.snapshot(&[]).unwrap()),
         build,
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(7.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(7.0));
 }

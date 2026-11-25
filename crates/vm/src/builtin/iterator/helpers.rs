@@ -9,7 +9,7 @@ use crate::heap::{Heap, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsBigInt, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,8 +231,8 @@ macro_rules! script {
 }
 
 pub(super) struct Protocol<'a, 'r> {
-    pub(super) vm: &'a mut Vm,
-    pub(super) host: &'a mut dyn Host,
+    pub(super) vm: &'a mut VmCore,
+    pub(super) host: &'a Host,
     pub(super) roots: &'a ActiveRoots<'r>,
 }
 
@@ -320,8 +320,8 @@ impl Protocol<'_, '_> {
 }
 
 pub(super) fn concat(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
 ) -> Result<Invocation, VmError> {
@@ -363,8 +363,8 @@ pub(super) fn concat(
 
 pub(super) fn invoke(
     method: Method,
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Arguments<'_>,
     receiver: &Value,
@@ -510,8 +510,8 @@ fn consume(
 }
 
 pub(super) fn resume(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     returning: bool,

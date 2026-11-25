@@ -1,4 +1,3 @@
-use crate::JsString;
 use crate::binding::{
     Action, Bindings, CallCx, CpsBoundary, CpsStage, ExportCall, ExportDecl, ExportId,
     GuestOutcome, HostFault, HostStep, JsError, JsValue, LiveRegistration, ModuleDispatch,
@@ -7,6 +6,7 @@ use crate::binding::{
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
 use crate::error::VmError;
+use crate::fetch::FetchEvent;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
@@ -17,8 +17,9 @@ use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
 };
-use crate::snapshot::{DeliveryTarget, OrdinaryTask, ScriptTimer, TimerTarget};
+use crate::snapshot::{DeliveryTarget, OrdinaryTask, ScriptTimer, Snapshot, TimerTarget};
 use crate::value::{ContinuationId, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
+use crate::{JsString, ServiceKey};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -361,8 +362,131 @@ impl std::ops::Deref for VerifiedBuild {
 
 #[derive(Debug)]
 pub struct Vm {
+    // The core drops its pending registrations before the host resources.
+    pub(super) core: VmCore,
+    pub(super) host: Host,
+}
+
+impl Vm {
+    /// Borrows a service installed in this VM's host.
+    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
+        self.host.services().get::<K>()
+    }
+
+    pub fn build_id(&self) -> &str {
+        self.core.build_id()
+    }
+
+    pub fn build(&self) -> &Build {
+        self.core.build()
+    }
+
+    /// Reads the current value of a public module binding.
+    pub fn get_export(&self, name: &str) -> Result<Value, VmError> {
+        self.core.get_export(name)
+    }
+
+    pub fn start(&mut self, entry: &str, args: Vec<JsValue>) -> Result<Value, VmError> {
+        self.core.start(&self.host, entry, args)
+    }
+
+    /// Runs queued VM microtasks and ordinary tasks. External timer/event
+    /// delivery belongs to the host; it should call this after completing an operation.
+    pub fn run_until_idle(&mut self) -> Result<(), VmError> {
+        self.core.run_until_idle(&self.host)
+    }
+
+    pub fn complete_operation(
+        &mut self,
+        token: crate::binding::OperationToken,
+        completion: Completion,
+    ) -> Result<(), VmError> {
+        self.core.complete_operation(token, completion)
+    }
+
+    pub fn pending_operations(&self) -> Vec<PendingOperationInfo> {
+        self.core.pending_operations()
+    }
+
+    /// Rearms recovered `Resume` / `Reissue` operations after publication.
+    /// Driver failures deliver their declared rejection; a timer service fault
+    /// is returned to the host without consuming other recovered operations.
+    pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
+        self.core.start_recovered_operations(&self.host)
+    }
+
+    pub fn promise_state(&self, value: &Value) -> Result<PromiseState, VmError> {
+        self.core.promise_state(value)
+    }
+
+    /// Captures an idle VM without releasing any live registrations.
+    /// The caller must hold external logical time and delivery at the same cut;
+    /// no event may have been taken out of its source but not yet delivered.
+    pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, VmError> {
+        self.core.snapshot(&self.host, roots)
+    }
+
+    /// Capture through the same path as `snapshot`, timing its phases.
+    #[doc(hidden)]
+    pub fn snapshot_profiled(
+        &self,
+        roots: &[Value],
+    ) -> Result<(Snapshot, crate::perf::Capture), VmError> {
+        self.core.snapshot_profiled(&self.host, roots)
+    }
+
+    /// Collects unreachable heap objects, returning the number removed.
+    ///
+    /// Call only between VM calls, after draining microtasks. No microtasks
+    /// are run by this method. Pass every same-VM [`Value`] you intend to use
+    /// later that is not otherwise reachable from the VM, including ordinary
+    /// symbols. The list may be empty or contain duplicates. Raw IDs do not
+    /// identify their VM of origin, so foreign IDs may alias local values.
+    /// This does not extend the lifetime of temporary host binding handles.
+    ///
+    /// Returns [`VmError::InvalidState`] if microtasks are queued or tracing
+    /// encounters a missing object, continuation, or symbol. A failed
+    /// collection leaves the VM unchanged.
+    pub fn collect_garbage(&mut self, roots: &[Value]) -> Result<usize, VmError> {
+        self.core.collect_garbage(roots)
+    }
+
+    /// Monotonic allocation totals for host GC scheduling, read between VM
+    /// calls. `objects` counts every allocation since VM creation; `bytes`
+    /// counts the backing storage of byte buffers allocated in the same span.
+    /// Compare against values taken at the previous collection; a restored VM
+    /// starts both at zero even though its heap is non-empty.
+    pub fn allocation_totals(&self) -> (u64, u64) {
+        self.core.allocation_totals()
+    }
+
+    /// Delivers a one-shot timer wake without executing guest code.
+    pub fn wake_timer(&mut self, token: OperationToken) -> Result<(), VmError> {
+        self.core.wake_timer(&self.host, token)
+    }
+
+    /// Whether accepted SubtleCrypto work still needs VM-side delivery.
+    /// Call [`Self::run_until_idle`] again to poll completions without waiting.
+    pub fn has_pending_subtle_operations(&self) -> bool {
+        self.core.has_pending_subtle_operations()
+    }
+
+    /// Accepts one adapter event for a live transaction. Runs on the VM thread
+    /// but never executes script: ordering and credit are checked here, then
+    /// the event is queued as an ordinary task. Events for unknown, cancelled
+    /// or older-generation tokens are ignored.
+    pub fn deliver_fetch_event(
+        &mut self,
+        token: crate::binding::OperationToken,
+        event: FetchEvent,
+    ) -> Result<(), VmError> {
+        self.core.deliver_fetch_event(token, event)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct VmCore {
     pub(crate) build: VerifiedBuild,
-    pub(crate) bindings: Bindings,
     pub(crate) heap: Heap,
     pub(crate) continuations: BTreeMap<ContinuationId, crate::runtime::Continuation>,
     pub(crate) operations: BTreeMap<u64, PendingOperation>,
@@ -421,14 +545,14 @@ pub struct Vm {
     pub(crate) property_caches: Vec<Vec<PropertyCache>>,
 }
 
-impl Vm {
-    pub(crate) fn monotonic_millis(&self, _: &dyn Host) -> f64 {
+impl VmCore {
+    pub(crate) fn monotonic_millis(&self, _: &Host) -> f64 {
         self.clock.now()
     }
 
     pub(crate) fn call_host(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: NativeTarget,
         args: Arguments<'_>,
@@ -501,7 +625,7 @@ impl Vm {
             host,
             roots,
             HostActivation {
-                bindings: &bindings,
+                bindings,
                 owner: target,
                 receiver,
                 construction,
@@ -521,7 +645,7 @@ impl Vm {
 
     fn run_host_steps(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         activation: HostActivation<'_>,
         mut entry: HostEntry,
@@ -691,6 +815,7 @@ impl Vm {
                     };
                     let token = self
                         .register_operation(
+                            bindings,
                             decl,
                             state,
                             DeliveryTarget::Task(id),
@@ -767,7 +892,7 @@ impl Vm {
 
     fn resume_host_task(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: u64,
         settlement: &Settlement,
@@ -785,29 +910,28 @@ impl Vm {
         let stage = frame.stage;
         let receiver = std::mem::replace(&mut frame.receiver, Value::UNDEFINED);
         let saved = std::mem::take(&mut frame.saved);
-        let bindings = self.bindings.clone();
+        let bindings = host.bindings();
         let mut task = Some(id);
-        let result =
-            Self::linked_stage(&bindings, owner, stage, CpsBoundary::External, saved.len())
-                .and_then(|entry| {
-                    let outcome = match settlement {
-                        Settlement::Fulfilled(value) => Invocation::Value(value.clone()),
-                        Settlement::Rejected(value) => Invocation::Thrown(value.clone()),
-                    };
-                    self.run_host_steps(
-                        host,
-                        roots,
-                        HostActivation {
-                            bindings: &bindings,
-                            owner,
-                            receiver: &receiver,
-                            construction: None,
-                            task: &mut task,
-                        },
-                        HostEntry::Resume(entry.resume, outcome),
-                        saved,
-                    )
-                });
+        let result = Self::linked_stage(bindings, owner, stage, CpsBoundary::External, saved.len())
+            .and_then(|entry| {
+                let outcome = match settlement {
+                    Settlement::Fulfilled(value) => Invocation::Value(value.clone()),
+                    Settlement::Rejected(value) => Invocation::Thrown(value.clone()),
+                };
+                self.run_host_steps(
+                    host,
+                    roots,
+                    HostActivation {
+                        bindings,
+                        owner,
+                        receiver: &receiver,
+                        construction: None,
+                        task: &mut task,
+                    },
+                    HostEntry::Resume(entry.resume, outcome),
+                    saved,
+                )
+            });
         if let Some(Invocation::Thrown(error)) = self.finish_host_task(id, result)? {
             self.report_exception(host, roots, error)?;
         }
@@ -841,7 +965,7 @@ impl Vm {
 
     pub fn start(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         entry: &str,
         args: Vec<JsValue>,
     ) -> Result<Value, VmError> {
@@ -908,7 +1032,7 @@ impl Vm {
 
     /// Runs queued VM microtasks and ordinary tasks. External timer/event
     /// delivery belongs to the host; it should call this after completing an operation.
-    pub fn run_until_idle(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    pub fn run_until_idle(&mut self, host: &Host) -> Result<(), VmError> {
         loop {
             self.run_microtask_checkpoint(host)?;
             let delivered_subtle = self.pump_subtle_completion();
@@ -943,7 +1067,7 @@ impl Vm {
         }
     }
 
-    fn run_microtask_checkpoint(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    fn run_microtask_checkpoint(&mut self, host: &Host) -> Result<(), VmError> {
         while let Some(task) = self.microtasks.pop_front() {
             let roots = &ActiveRoots::EMPTY.with(&task);
             match task {
@@ -1026,7 +1150,7 @@ impl Vm {
 
     fn run_unhandled_batch(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         mut batch: Vec<ObjectId>,
     ) -> Result<(), VmError> {
         for (index, &id) in batch.iter().enumerate() {
@@ -1046,7 +1170,7 @@ impl Vm {
 
     fn run_rejection_notification(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         handled: bool,
@@ -1093,8 +1217,14 @@ impl Vm {
                 *status = RejectionStatus::Reported;
             }
         }
-        if result? && !handled {
-            host.unhandled_rejection(self.host_value(Value::object(id)), self.host_value(reason));
+        if result?
+            && !handled
+            && let Some(sink) = host.services().get::<crate::host::DiagnosticsKey>()
+        {
+            sink.report(crate::host::Diagnostic::UnhandledRejection {
+                promise: self.host_value(Value::object(id)),
+                reason: self.host_value(reason),
+            });
         }
         Ok(())
     }
@@ -1217,7 +1347,7 @@ impl Vm {
     /// Rearms recovered `Resume` / `Reissue` operations after publication.
     /// Driver failures deliver their declared rejection; a timer service fault
     /// is returned to the host without consuming other recovered operations.
-    pub fn start_recovered_operations(&mut self) -> Result<(), VmError> {
+    pub(crate) fn start_recovered_operations(&mut self, host: &Host) -> Result<(), VmError> {
         if self.recovered_operations.is_empty() {
             return Ok(());
         }
@@ -1236,7 +1366,7 @@ impl Vm {
             } = operation.target
             {
                 let remaining = Self::timeout_remaining(deadline, elapsed);
-                match Self::arm_timeout(&self.bindings, token, remaining) {
+                match Self::arm_timeout(host, token, remaining) {
                     Ok(live) => operation.live = Some(live),
                     Err(fault) => {
                         self.remove_operation(id);
@@ -1249,8 +1379,8 @@ impl Vm {
             let decl = operation
                 .declaration
                 .expect("driver operation has a declaration");
-            if let Ok(live) = self
-                .bindings
+            if let Ok(live) = host
+                .bindings()
                 .resume_operation(decl, &operation.state, token)
             {
                 operation.live = Some(live);
@@ -1269,6 +1399,7 @@ impl Vm {
 
     pub(crate) fn schedule_timeout(
         &mut self,
+        host: &Host,
         signal: ObjectId,
         delay_ms: u64,
     ) -> Result<(), HostFault> {
@@ -1277,7 +1408,13 @@ impl Vm {
             .elapsed()
             .saturating_add(std::time::Duration::from_millis(delay_ms));
         let sequence = self.next_operation_id;
-        self.arm_new_timeout(TimerTarget::Abort(signal), deadline, delay_ms, sequence)?;
+        self.arm_new_timeout(
+            host,
+            TimerTarget::Abort(signal),
+            deadline,
+            delay_ms,
+            sequence,
+        )?;
         Ok(())
     }
 
@@ -1288,12 +1425,12 @@ impl Vm {
     }
 
     fn arm_timeout(
-        bindings: &Bindings,
+        host: &Host,
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        bindings
-            .service::<TimerKey>()
+        host.services()
+            .get::<TimerKey>()
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
             .clone()
             .arm(token, delay_ms)
@@ -1312,6 +1449,7 @@ impl Vm {
 
     pub(crate) fn register_operation(
         &mut self,
+        bindings: &Bindings,
         decl: usize,
         state: Vec<u8>,
         target: DeliveryTarget,
@@ -1324,7 +1462,7 @@ impl Vm {
     ) -> Result<OperationToken, HostFault> {
         let token = self.allocate_operation_token()?;
         let id = token.id;
-        let (name, recovery, rejection) = self.bindings.operation_metadata(decl);
+        let (name, recovery, rejection) = bindings.operation_metadata(decl);
         self.operations.insert(
             id,
             PendingOperation {
@@ -1346,7 +1484,7 @@ impl Vm {
                 .push(crate::heap::AbortStep::Operation(id));
         }
         let operation = self.operations.get_mut(&id).expect("operation inserted");
-        match arm(token, &self.bindings, &operation.state) {
+        match arm(token, bindings, &operation.state) {
             Ok(live) => {
                 operation.live = Some(live);
                 Ok(token)
@@ -1529,7 +1667,7 @@ impl Vm {
 
     pub(crate) fn settle_outcome(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         promise: ObjectId,
         outcome: ExecOutcome,
@@ -1550,7 +1688,7 @@ impl Vm {
     )]
     pub(crate) fn call_function(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         func_id: u32,
         parent_env: Option<ObjectId>,
@@ -1583,7 +1721,7 @@ impl Vm {
     )]
     pub(crate) fn activate(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         function_index: usize,
         parent_env: Option<ObjectId>,
@@ -1676,7 +1814,11 @@ impl Vm {
         &*self.time.0
     }
 
-    pub(crate) fn restored(build: VerifiedBuild, bindings: Bindings, state: RestoredState) -> Self {
+    pub(crate) fn restored(
+        build: VerifiedBuild,
+        bindings: &Bindings,
+        state: RestoredState,
+    ) -> Self {
         let RestoredState {
             mut heap,
             continuations,
@@ -1730,11 +1872,10 @@ impl Vm {
             .map(|(id, _)| *id)
             .collect();
         let caches = property_caches(&build);
-        let time = time_source(&bindings);
+        let time = time_source(bindings);
         Self {
             property_caches: caches,
             build,
-            bindings,
             heap,
             continuations,
             operations,

@@ -14,7 +14,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,8 +200,8 @@ impl PipeRecord {
 }
 
 pub(super) fn pipe_to(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -217,8 +217,8 @@ pub(super) fn pipe_to(
 }
 
 pub(super) fn pipe_through(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -227,8 +227,8 @@ pub(super) fn pipe_through(
 }
 
 fn pipe_call(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -315,7 +315,7 @@ fn pipe_object(result: Invocation) -> Result<ObjectId, VmError> {
     ))
 }
 
-impl Vm {
+impl VmCore {
     fn pipe_record_mut(&mut self, target: ObjectId) -> Result<&mut PipeRecord, VmError> {
         match self.heap.get_mut(target)? {
             Object::StreamPipe(record) => Ok(record),
@@ -332,7 +332,7 @@ impl Vm {
 
     fn start_stream_pipe(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         destination: ObjectId,
@@ -434,7 +434,7 @@ impl Vm {
 
     fn pump_pipe(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -458,7 +458,7 @@ impl Vm {
 
     pub(crate) fn abort_stream_pipe(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         reason: &Value,
@@ -473,7 +473,7 @@ impl Vm {
 
     fn stop_pipe(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stop: Stop,
@@ -511,7 +511,7 @@ impl Vm {
 
     fn resume_pipe_shutdown(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -548,7 +548,7 @@ impl Vm {
 
     fn perform_pipe_actions(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -657,7 +657,7 @@ impl Vm {
 
     pub(crate) fn run_pipe_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stage: PipeStage,

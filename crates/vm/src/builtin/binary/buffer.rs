@@ -13,7 +13,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const SPECIES: IntrinsicKey = IntrinsicKey::new("ArrayBuffer", Slot::StaticSymbolGetter, "species");
 const IS_VIEW: IntrinsicKey = IntrinsicKey::new("ArrayBuffer", Slot::Static, "isView");
@@ -84,7 +84,7 @@ pub(super) const INTRINSICS: &[IntrinsicDef] = &[
     }),
 ];
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(vm: &mut VmCore) {
     let constructor = vm.builtins.get(super::ARRAY_BUFFER_ROOT);
     let prototype = vm.builtins.get(ARRAY_BUFFER_PROTOTYPE);
     method(vm, constructor, SPECIES.member, SPECIES);
@@ -106,7 +106,7 @@ pub(super) fn install(vm: &mut Vm) {
 
 /// A getter body: branding first, then read the buffer's current state.
 fn property(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl Fn(&crate::heap::ArrayBufferObject) -> Value,
@@ -124,8 +124,8 @@ fn property(
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -161,8 +161,8 @@ fn construct(
 
 /// GetArrayBufferMaxByteLengthOption: a non-object options value is ignored.
 pub(super) fn max_byte_length_option(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<Option<usize>> {
@@ -186,10 +186,10 @@ pub(super) fn max_byte_length_option(
     Ok(vm.coerce_index(host, roots, &value)?.map(Some))
 }
 
-impl Vm {
+impl VmCore {
     fn array_buffer_slice(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -294,7 +294,7 @@ impl Vm {
 
     fn array_buffer_resize(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -362,7 +362,7 @@ impl Vm {
 
     fn array_buffer_transfer(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -466,7 +466,7 @@ impl Vm {
     /// SpeciesConstructor: the `constructor` property, then `@@species`.
     pub(crate) fn species_constructor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         default: &'static str,

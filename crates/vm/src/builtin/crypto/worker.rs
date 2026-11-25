@@ -8,13 +8,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 
-use crate::Vm;
 use crate::builtin::binary::{ARRAY_BUFFER_PROTOTYPE, MAX_BYTE_LENGTH};
 use crate::error::VmError;
 use crate::heap::{ArrayBufferObject, CryptoKeyAlgorithm, CryptoKeyUsage, Object, PlainObject};
 use crate::host::{SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService};
 use crate::runtime::Settlement;
 use crate::value::{ObjectId, Value};
+use crate::vm::VmCore;
 
 // Bound all accepted transactions, including work that completed but has not
 // yet been delivered. Both channels are therefore bounded without ever making
@@ -95,7 +95,7 @@ impl SubtleState {
     }
 }
 
-impl Vm {
+impl VmCore {
     /// Whether accepted SubtleCrypto work still needs VM-side delivery.
     /// Call [`Self::run_until_idle`] again to poll completions without waiting.
     pub fn has_pending_subtle_operations(&self) -> bool {
@@ -104,13 +104,14 @@ impl Vm {
 
     pub(crate) fn start_subtle_request(
         &mut self,
+        host: &crate::host::Host,
         promise: ObjectId,
         request: SubtleCryptoRequest,
         result: Output,
     ) -> Result<(), VmError> {
         let state = &mut self.subtle_state;
         if state.worker.is_none() {
-            let Some(service) = self.bindings.service::<SubtleCryptoKey>() else {
+            let Some(service) = host.services().get::<SubtleCryptoKey>() else {
                 let reason = self.alloc_dom_exception(
                     "NotSupportedError".into(),
                     "SubtleCrypto service unavailable".into(),

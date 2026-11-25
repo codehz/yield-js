@@ -1,3 +1,4 @@
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -5,18 +6,17 @@ use std::time::{Duration, Instant};
 
 use yield_compiler::{CompileError, Compiler, MemoryResolver, Project};
 use yield_vm::binding::{
-    Bindings, CallCx, CodecError, HostFault, InspectKey, InspectValue, Instance, JsResult, JsValue,
+    CallCx, CodecError, HostFault, InspectKey, InspectValue, Instance, JsResult, JsValue,
     Operation, OperationDriver, OperationToken, Registration, This,
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
 use yield_vm::{
-    ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, FetchKey, GuestOutcome, Host,
-    HostStep, JsString, SubtleCryptoKey, SubtleCryptoService, TimerKey, Vm, VmError,
+    ConsoleEvent, ConsoleKey, ConsoleSink, CryptoKey, CryptoService, Diagnostic, Diagnostics,
+    DiagnosticsKey, FetchKey, GcRoots, GcRootsKey, GuestOutcome, Host, HostStep, JsString,
+    Services, SubtleCryptoKey, SubtleCryptoService, TimerKey, UserAgentKey, Vm, VmError,
 };
-use yield_vm::{
-    Decode, Encode, host_bindings, host_class, host_module, methods, module_exports, operation,
-};
+use yield_vm::{Decode, Encode, host, host_class, host_module, methods, module_exports, operation};
 
 mod case;
 pub mod fetch;
@@ -103,11 +103,11 @@ impl Node {
 }
 
 impl Decode for Node {
-    fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError> {
-        if bindings.service::<NodeFactoryKey>().is_none() {
+    fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
+        if services.get::<NodeFactoryKey>().is_none() {
             return Err(CodecError::new("node factory service is unavailable"));
         }
-        let label = String::decode(input, bindings)
+        let label = String::decode(input, services)
             .map_err(|error| CodecError::new(format!("field label: {error}")))?;
         Ok(Self { label })
     }
@@ -401,12 +401,12 @@ macro_rules! label_driver {
         $(impl OperationDriver for $operation {
             type Live = LabelRegistration;
 
-            fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
-                register_label::<Self>(bindings, &self.label, token, false)
+            fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(services, &self.label, token, false)
             }
 
-            fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
-                register_label::<Self>(bindings, &self.label, token, true)
+            fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(services, &self.label, token, true)
             }
         })+
     };
@@ -415,13 +415,13 @@ macro_rules! label_driver {
 label_driver!(Wait, Pause, Reject, Reissue);
 
 fn register_label<O: Operation>(
-    bindings: &Bindings,
+    services: &Services,
     label: &str,
     token: OperationToken,
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
-    let service = bindings
-        .service::<LabelServiceKey>()
+    let service = services
+        .get::<LabelServiceKey>()
         .ok_or_else(|| HostFault::new("missing labels service"))?;
     service.register(format!("{}:{label}", O::NAME), token, restoring)
 }
@@ -429,6 +429,34 @@ fn register_label<O: Operation>(
 #[derive(Debug, PartialEq)]
 pub enum RejectionEvent {
     Unhandled { promise: JsValue, reason: JsValue },
+}
+
+#[derive(Default)]
+struct CapturedDiagnostics {
+    errors: RefCell<Vec<JsValue>>,
+    rejections: RefCell<Vec<RejectionEvent>>,
+}
+
+impl Diagnostics for CapturedDiagnostics {
+    fn report(&self, event: Diagnostic<'_>) {
+        match event {
+            Diagnostic::Uncaught { error, .. } => self.errors.borrow_mut().push(error),
+            Diagnostic::UnhandledRejection { promise, reason } => self
+                .rejections
+                .borrow_mut()
+                .push(RejectionEvent::Unhandled { promise, reason }),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct CaseRoot(RefCell<Option<yield_vm::Value>>);
+
+impl GcRoots for CaseRoot {
+    fn visit(&self, visit: &mut dyn FnMut(&yield_vm::Value)) {
+        self.0.borrow().iter().for_each(visit);
+    }
 }
 
 #[derive(Default)]
@@ -453,17 +481,19 @@ impl CryptoService for DeterministicEntropy {
 }
 
 pub struct TestHost {
-    bindings: Bindings,
     counters: Rc<Counters>,
     labels: Rc<LabelService>,
     clock: Arc<FakeClock>,
     console: Option<Arc<CapturedConsole>>,
     time: Arc<dyn yield_vm::TimeService>,
     test_time: Option<Arc<TestTimeService>>,
+    timers: bool,
+    fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
+    crypto: Option<Arc<dyn CryptoService>>,
+    subtle: Option<Arc<dyn SubtleCryptoService>>,
     user_agent: Option<String>,
-    errors: Vec<JsValue>,
-    rejection_events: Vec<RejectionEvent>,
-    case_result: Option<yield_vm::Value>,
+    diagnostics: Rc<CapturedDiagnostics>,
+    case_result: Rc<CaseRoot>,
     pub reject_native: bool,
     fetch_environment: yield_vm::FetchEnvironment,
 }
@@ -624,33 +654,51 @@ impl TestHost {
             .or(time)
             .expect("a time service");
         let console = capture_console.then(|| Arc::new(CapturedConsole::default()));
-        let sink = console.clone().map(|sink| -> Arc<dyn ConsoleSink> { sink });
-        let bindings = test_bindings(
-            (Rc::clone(&counters), Rc::clone(&labels)),
-            &clock,
-            timers,
-            fetch,
-            sink,
-            crypto,
-            subtle,
-            Arc::clone(&time),
-        )
-        .expect("test bindings");
         Self {
-            bindings,
             counters,
             labels,
             clock,
             console,
             time,
             test_time,
+            timers,
+            fetch,
+            crypto,
+            subtle,
             user_agent: None,
-            errors: Vec::new(),
-            rejection_events: Vec::new(),
-            case_result: None,
+            diagnostics: Rc::default(),
+            case_result: Rc::default(),
             reject_native: false,
             fetch_environment: yield_vm::FetchEnvironment::default(),
         }
+    }
+
+    /// Assembles a VM host that shares this controller's resource handles.
+    pub fn host(&self) -> Host {
+        let console = self
+            .console
+            .clone()
+            .map(|sink| -> Arc<dyn ConsoleSink> { sink });
+        host! {
+            dts: "../test.d.ts",
+            modules: [TestModule],
+            services: {
+                CountersKey => self.counters.clone(),
+                NodeFactoryKey => NodeFactory,
+                LabelServiceKey => self.labels.clone(),
+                timer::FakeClockKey => self.clock.clone(),
+                yield_vm::host::TimeKey => self.time.clone(),
+                TimerKey? => self.timers.then(|| self.clock.clone()),
+                FetchKey? => self.fetch.clone(),
+                ConsoleKey? => console,
+                CryptoKey? => self.crypto.clone(),
+                SubtleCryptoKey? => self.subtle.clone(),
+                DiagnosticsKey => self.diagnostics.clone(),
+                GcRootsKey => self.case_result.clone(),
+                UserAgentKey? => self.user_agent.clone(),
+            },
+        }
+        .expect("test host")
     }
 
     /// Origin, referrer, partition and authorization recorded in snapshots.
@@ -666,12 +714,14 @@ impl TestHost {
         self.counters.count(name)
     }
 
-    pub fn errors(&self) -> &[JsValue] {
-        &self.errors
+    /// Borrows uncaught errors. Drop the guard before running the VM again.
+    pub fn errors(&self) -> Ref<'_, [JsValue]> {
+        Ref::map(self.diagnostics.errors.borrow(), Vec::as_slice)
     }
 
-    pub fn rejection_events(&self) -> &[RejectionEvent] {
-        &self.rejection_events
+    /// Borrows rejection reports. Drop the guard before running the VM again.
+    pub fn rejection_events(&self) -> Ref<'_, [RejectionEvent]> {
+        Ref::map(self.diagnostics.rejections.borrow(), Vec::as_slice)
     }
 
     pub fn take_console_events(&self) -> Vec<ConsoleEvent> {
@@ -683,11 +733,11 @@ impl TestHost {
     /// Stores the case result, if any, and keeps it alive during guest GC.
     /// The value must belong to the VM this host is about to run.
     pub fn set_case_result(&mut self, result: Option<yield_vm::Value>) {
-        self.case_result = result;
+        *self.case_result.0.borrow_mut() = result;
     }
 
-    pub fn case_result(&self) -> Option<&yield_vm::Value> {
-        self.case_result.as_ref()
+    pub fn case_result(&self) -> Option<Ref<'_, yield_vm::Value>> {
+        Ref::filter_map(self.case_result.0.borrow(), Option::as_ref).ok()
     }
 
     pub fn labels(&self) -> &Rc<LabelService> {
@@ -698,7 +748,7 @@ impl TestHost {
         &self.clock
     }
 
-    /// The `wintertc.time` service linked into this host's bindings.
+    /// The `wintertc.time` service registered in each assembled host.
     pub fn time_service(&self) -> &Arc<dyn yield_vm::TimeService> {
         &self.time
     }
@@ -717,14 +767,14 @@ impl TestHost {
     }
 
     pub fn advance(&mut self, vm: &mut Vm, ms: u64) -> Result<(), String> {
-        Arc::clone(&self.clock).advance(vm, self, ms)
+        self.clock.advance(vm, ms)
     }
 
     /// Runs a VM turn and waits for accepted SubtleCrypto work to be delivered.
     /// Other host operations remain pending until their normal delivery turns.
     /// Returns a host error if SubtleCrypto work is still pending after five seconds.
     pub fn drain_subtle(&mut self, vm: &mut Vm) -> Result<(), VmError> {
-        vm.run_until_idle(self)?;
+        vm.run_until_idle()?;
         let deadline = Instant::now() + Duration::from_secs(5);
         while vm.has_pending_subtle_operations() {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -734,7 +784,7 @@ impl TestHost {
                 ));
             }
             std::thread::sleep(remaining.min(Duration::from_millis(1)));
-            vm.run_until_idle(self)?;
+            vm.run_until_idle()?;
         }
         Ok(())
     }
@@ -758,58 +808,6 @@ impl TestHost {
             .ok_or_else(|| format!("unknown operation {label:?}"))?;
         vm.complete_operation(token, completion)
             .map_err(|error| error.to_string())
-    }
-}
-
-impl Host for TestHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn user_agent(&self) -> Option<&str> {
-        self.user_agent.as_deref()
-    }
-
-    fn visit_gc_roots(&self, visit: &mut dyn FnMut(&yield_vm::Value)) {
-        self.case_result.iter().for_each(visit);
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        self.errors.push(error);
-    }
-
-    fn unhandled_rejection(&mut self, promise: JsValue, reason: JsValue) {
-        self.rejection_events
-            .push(RejectionEvent::Unhandled { promise, reason });
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn test_bindings(
-    (counters, labels): (Rc<Counters>, Rc<LabelService>),
-    clock: &Arc<FakeClock>,
-    timers: bool,
-    fetch: Option<Arc<dyn yield_vm::fetch::FetchService>>,
-    console: Option<Arc<dyn ConsoleSink>>,
-    crypto: Option<Arc<dyn CryptoService>>,
-    subtle: Option<Arc<dyn SubtleCryptoService>>,
-    time: Arc<dyn yield_vm::TimeService>,
-) -> Result<Bindings, String> {
-    host_bindings! {
-        dts: "../test.d.ts",
-        modules: [TestModule],
-        services: {
-            CountersKey => counters,
-            NodeFactoryKey => NodeFactory,
-            LabelServiceKey => labels,
-            timer::FakeClockKey => Arc::clone(clock),
-            yield_vm::host::TimeKey => time,
-            TimerKey? => timers.then(|| clock.clone()),
-            FetchKey? => fetch,
-            ConsoleKey? => console,
-            CryptoKey? => crypto,
-            SubtleCryptoKey? => subtle,
-        },
     }
 }
 

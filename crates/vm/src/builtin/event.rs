@@ -14,7 +14,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) const EVENT_ROOT: &str = "event";
 const EVENT_PROTOTYPE: &str = "event.prototype";
@@ -333,7 +333,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     Some(install),
 );
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     for (root, proto, tag, members) in [
         (EVENT_ROOT, EVENT_PROTOTYPE, EVENT.owner, EVENT_MEMBERS),
         (CUSTOM_ROOT, CUSTOM_PROTOTYPE, CUSTOM.owner, CUSTOM_MEMBERS),
@@ -379,7 +379,7 @@ fn install(vm: &mut Vm, _: &Value) {
     }
 }
 
-fn install_members(vm: &mut Vm, prototype: ObjectId, members: &[IntrinsicDef]) {
+fn install_members(vm: &mut VmCore, prototype: ObjectId, members: &[IntrinsicDef]) {
     let attributes = members
         .iter()
         .filter(|def| matches!(def.key.slot, Slot::PrototypeGetter));
@@ -416,7 +416,7 @@ fn install_members(vm: &mut Vm, prototype: ObjectId, members: &[IntrinsicDef]) {
 }
 
 pub(super) fn install_accessor(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     target: ObjectId,
     name: &str,
     get: ObjectId,
@@ -438,7 +438,7 @@ pub(super) fn install_accessor(
 }
 
 fn read_event(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     custom: bool,
@@ -453,7 +453,7 @@ fn read_event(
 }
 
 fn read_payload(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     incompatible_message: &str,
@@ -468,7 +468,11 @@ fn read_payload(
     vm.throw_type_error(roots, incompatible_message)
 }
 
-fn event_receiver(vm: &Vm, receiver: &Value, custom: bool) -> Result<Option<ObjectId>, VmError> {
+fn event_receiver(
+    vm: &VmCore,
+    receiver: &Value,
+    custom: bool,
+) -> Result<Option<ObjectId>, VmError> {
     if let ValueRef::Object(id) = receiver.view()
         && let Object::Event { event, .. } = vm.heap.get(id)?
         && (!custom || matches!(event.payload, EventPayload::CustomEvent { .. }))
@@ -479,7 +483,7 @@ fn event_receiver(vm: &Vm, receiver: &Value, custom: bool) -> Result<Option<Obje
 }
 
 fn incompatible_receiver(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     custom: bool,
 ) -> Result<Invocation, VmError> {
@@ -494,7 +498,7 @@ fn incompatible_receiver(
 }
 
 fn update_event(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     update: impl FnOnce(&mut EventState),
@@ -515,8 +519,8 @@ fn cancel(event: &mut EventState) {
 }
 
 fn composed_path(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -539,8 +543,8 @@ fn composed_path(
 }
 
 fn init_event(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -589,8 +593,8 @@ fn detail_or_null(value: &Value) -> Value {
 }
 
 pub(super) fn new_target_prototype(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     new_target: &Value,
     fallback: &'static str,
@@ -607,8 +611,8 @@ pub(super) fn new_target_prototype(
 }
 
 fn construct_event(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -722,7 +726,7 @@ fn construct_event(
     Ok(Invocation::Value(vm.alloc_event(Some(prototype), event)?))
 }
 
-impl Vm {
+impl VmCore {
     /// Allocate an initialized CustomEvent for a host binding.
     pub(crate) fn alloc_custom_event(
         &mut self,
@@ -777,8 +781,8 @@ impl Vm {
 }
 
 fn construct_target(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     new_target: &Value,

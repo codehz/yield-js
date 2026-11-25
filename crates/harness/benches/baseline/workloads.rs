@@ -44,7 +44,7 @@ pub(super) const REACT_REUSE: Workload =
             react_first_commit(vm, host);
             Vec::new()
         },
-        |vm, host, _| assert_number(vm, host, "checkFirst", vec![], 1.0),
+        |vm, _, _| assert_number(vm, "checkFirst", vec![], 1.0),
     );
 
 pub(super) const SNAPSHOT_BUFFER: Workload = Workload::new(
@@ -85,43 +85,43 @@ pub(super) const WORKLOADS: &[Workload] = &[
     Workload::new(
         "array-access",
         || build(include_str!("array-access.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 1_048_576.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 1_048_576.0);
         },
     ),
     Workload::new(
         "array-write",
         || build(include_str!("array-write.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 555_520.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 555_520.0);
         },
     ),
     Workload::new(
         "builtin-math",
         || build(include_str!("builtin.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 6_294_556.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 6_294_556.0);
         },
     ),
     Workload::new(
         "short-call",
         || build(include_str!("short-call.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 526_848.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 526_848.0);
         },
     ),
     Workload::new(
         "closure",
         || build(include_str!("closure.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 1_536.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 1_536.0);
         },
     ),
     Workload::new(
         "static-property",
         || build(include_str!("static-property.js")),
-        |vm, host| {
-            assert_number(vm, host, "run", vec![], 3_072.0);
+        |vm, _| {
+            assert_number(vm, "run", vec![], 3_072.0);
         },
     ),
     Workload::new("await-success", build_await, |vm, host| {
@@ -187,24 +187,20 @@ fn resume_literal(vm: &mut Vm, host: &mut TestHost, roots: &[Value]) {
 }
 
 #[track_caller]
-fn start(vm: &mut Vm, host: &mut TestHost, entry: &str, args: Vec<JsValue>) -> Value {
-    vm.start(host, entry, args)
+fn start(vm: &mut Vm, entry: &str, args: Vec<JsValue>) -> Value {
+    vm.start(entry, args)
         .unwrap_or_else(|error| panic!("{entry}: {error}"))
 }
 
 #[track_caller]
-fn assert_number(vm: &mut Vm, host: &mut TestHost, entry: &str, args: Vec<JsValue>, expected: f64) {
-    assert_eq!(
-        start(vm, host, entry, args),
-        Value::number(expected),
-        "{entry}"
-    );
+fn assert_number(vm: &mut Vm, entry: &str, args: Vec<JsValue>, expected: f64) {
+    assert_eq!(start(vm, entry, args), Value::number(expected), "{entry}");
 }
 
-fn numeric_branch(vm: &mut Vm, host: &mut TestHost) {
-    assert_number(vm, host, "run", vec![number(3.0)], 259_584.0);
+fn numeric_branch(vm: &mut Vm, _: &mut TestHost) {
+    assert_number(vm, "run", vec![number(3.0)], 259_584.0);
     // The same arithmetic sites must also coerce a non-Number operand.
-    assert_number(vm, host, "run", vec![string("5")], 258_560.0);
+    assert_number(vm, "run", vec![string("5")], 258_560.0);
 }
 
 fn build_react() -> Build {
@@ -238,7 +234,7 @@ pub(super) fn build_react_with_options(options: &Compiler) -> Build {
 }
 
 fn react_commit(vm: &mut Vm, host: &mut TestHost) {
-    vm.run_until_idle(host).expect("drain React microtasks");
+    vm.run_until_idle().expect("drain React microtasks");
     host.advance(vm, 10).expect("deliver React scheduler work");
     assert!(
         host.errors().is_empty(),
@@ -248,23 +244,23 @@ fn react_commit(vm: &mut Vm, host: &mut TestHost) {
 }
 
 fn react_first_commit(vm: &mut Vm, host: &mut TestHost) {
-    start(vm, host, "first", vec![]);
+    start(vm, "first", vec![]);
     react_commit(vm, host);
-    assert_number(vm, host, "checkFirst", vec![], 1.0);
+    assert_number(vm, "checkFirst", vec![], 1.0);
 }
 
 fn react_updates(vm: &mut Vm, host: &mut TestHost) {
     // The first run on a VM mounts the root; warm runs update that same root.
-    if start(vm, host, "hasUpdateRoot", vec![]) == Value::number(0.0) {
-        start(vm, host, "mountUpdates", vec![]);
+    if start(vm, "hasUpdateRoot", vec![]) == Value::number(0.0) {
+        start(vm, "mountUpdates", vec![]);
         react_commit(vm, host);
-        assert_number(vm, host, "checkUpdateMount", vec![], 1.0);
+        assert_number(vm, "checkUpdateMount", vec![], 1.0);
     }
     // Drain after each update so the scheduler cannot batch away intermediate commits.
     for index in 0..8 {
-        start(vm, host, "update", vec![number(f64::from(index))]);
+        start(vm, "update", vec![number(f64::from(index))]);
         react_commit(vm, host);
-        assert_number(vm, host, "checkUpdate", vec![number(f64::from(index))], 1.0);
+        assert_number(vm, "checkUpdate", vec![number(f64::from(index))], 1.0);
     }
 }
 
@@ -272,8 +268,8 @@ const AWAIT_LABEL: &str = "wait:baseline-await";
 const GENERATOR_LABEL: &str = "wait:baseline-generator";
 
 fn suspend_pending(vm: &mut Vm, host: &mut TestHost, entry: &str, label: &str) -> Vec<Value> {
-    let result = start(vm, host, entry, vec![]);
-    vm.run_until_idle(host).expect("drain to host wait");
+    let result = start(vm, entry, vec![]);
+    vm.run_until_idle().expect("drain to host wait");
     assert_eq!(host.pending_labels(), [label]);
     assert!(matches!(
         vm.promise_state(&result).expect("read result promise"),
@@ -295,7 +291,7 @@ fn finish_pending(
     };
     host.complete(vm, label, completion)
         .expect("deliver host completion");
-    vm.run_until_idle(host).expect("drain continuation");
+    vm.run_until_idle().expect("drain continuation");
     match vm.promise_state(result).expect("read result promise") {
         PromiseState::Fulfilled(value) => assert_eq!(value, Value::number(expected), "{label}"),
         state => panic!("{label}: expected fulfillment, got {state:?}"),

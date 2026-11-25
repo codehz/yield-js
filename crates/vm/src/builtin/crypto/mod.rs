@@ -6,11 +6,11 @@ use super::{define_builtin_data, install_getter};
 use crate::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ElementKind, TO_STRING_TAG_SYMBOL, ViewRange};
-use crate::host::CryptoKey as CryptoServiceKey;
+use crate::host::{CryptoKey as CryptoServiceKey, Host};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 mod subtle;
 pub(crate) mod worker;
@@ -40,17 +40,17 @@ const MEMBERS: &[IntrinsicDef] = &[
             vm.builtins.get(subtle::INSTANCE),
         )))
     }),
-    IntrinsicDef::call(GET_RANDOM_VALUES, 1, |vm, _, roots, args, receiver| {
-        get_random_values(vm, roots, args.into_iter().next(), receiver)
+    IntrinsicDef::call(GET_RANDOM_VALUES, 1, |vm, host, roots, args, receiver| {
+        get_random_values(vm, host, roots, args.into_iter().next(), receiver)
     }),
-    IntrinsicDef::call(RANDOM_UUID, 0, |vm, _, roots, _, receiver| {
-        random_uuid(vm, roots, receiver)
+    IntrinsicDef::call(RANDOM_UUID, 0, |vm, host, roots, _, receiver| {
+        random_uuid(vm, host, roots, receiver)
     }),
 ];
 
 pub(super) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[MEMBERS, subtle::MEMBERS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
     for key in [GET_RANDOM_VALUES, RANDOM_UUID] {
         let method = vm.alloc_intrinsic(key);
@@ -73,12 +73,13 @@ fn install(vm: &mut Vm, _: &Value) {
     subtle::install(vm);
 }
 
-fn is_crypto(vm: &Vm, receiver: &Value) -> bool {
+fn is_crypto(vm: &VmCore, receiver: &Value) -> bool {
     matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(ROOT))
 }
 
 fn get_random_values(
-    vm: &mut Vm,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     arg: Option<Value>,
     receiver: &Value,
@@ -111,7 +112,7 @@ fn get_random_values(
     }
     // Stage only the visible bytes so a failing host cannot partially modify the view.
     let mut bytes = vec![0; len];
-    if let Err(error) = fill_random(vm, &mut bytes) {
+    if let Err(error) = fill_random(vm, host, &mut bytes) {
         return Ok(error);
     }
     vm.write_buffer(buffer, start, &bytes)?;
@@ -119,7 +120,8 @@ fn get_random_values(
 }
 
 fn random_uuid(
-    vm: &mut Vm,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -127,7 +129,7 @@ fn random_uuid(
         return vm.throw_type_error(roots, "Incompatible Crypto receiver");
     }
     let mut bytes = [0; 16];
-    if let Err(error) = fill_random(vm, &mut bytes) {
+    if let Err(error) = fill_random(vm, host, &mut bytes) {
         return Ok(error);
     }
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -145,8 +147,8 @@ fn random_uuid(
     Ok(Invocation::Value(Value::string(uuid.into())))
 }
 
-fn fill_random(vm: &mut Vm, bytes: &mut [u8]) -> Result<(), Invocation> {
-    let Some(service) = vm.bindings.service::<CryptoServiceKey>() else {
+fn fill_random(vm: &mut VmCore, host: &Host, bytes: &mut [u8]) -> Result<(), Invocation> {
+    let Some(service) = host.services().get::<CryptoServiceKey>() else {
         return Err(dom_error(
             vm,
             "NotSupportedError",
@@ -158,10 +160,10 @@ fn fill_random(vm: &mut Vm, bytes: &mut [u8]) -> Result<(), Invocation> {
         .map_err(|_| dom_error(vm, "OperationError", "Host entropy service failed"))
 }
 
-fn type_mismatch(vm: &mut Vm) -> Invocation {
+fn type_mismatch(vm: &mut VmCore) -> Invocation {
     dom_error(vm, "TypeMismatchError", "Expected an integer TypedArray")
 }
 
-fn dom_error(vm: &mut Vm, name: &str, message: &str) -> Invocation {
+fn dom_error(vm: &mut VmCore, name: &str, message: &str) -> Invocation {
     Invocation::Thrown(vm.alloc_dom_exception(name.into(), message.into()))
 }

@@ -1,11 +1,20 @@
+use super::start_vm;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use yield_vm::{
-    Bindings, ConsoleEvent, ConsoleKey, ConsoleSink, Decode, Encode, FromBindings, HostFault,
-    HostModule, Operation, OperationDriver, OperationToken, Recovery, Registration, ServiceKey,
-    Services, host_bindings, host_class, host_module, module_exports, operation,
+    __macro_support::decode_operation, ConsoleEvent, ConsoleKey, ConsoleSink, Decode, Encode,
+    FromServices, Host, HostFault, HostModule, Operation, OperationDriver, OperationToken,
+    Recovery, Registration, ServiceKey, Services, host, host_class, host_module, module_exports,
+    operation,
 };
+
+fn fingerprint(host: Host) -> String {
+    start_vm(host, Default::default())
+        .snapshot(&[])
+        .unwrap()
+        .binding_fingerprint
+}
 
 #[host_module(name = "state", operations = [Work], services = [ClockV2, CounterKey?])]
 #[derive(Encode, Decode)]
@@ -37,7 +46,7 @@ impl Registration<Work> for Live {}
 impl OperationDriver for Work {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Bindings) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -94,7 +103,7 @@ impl Registration<ConflictingWork> for Live {}
 impl OperationDriver for ConflictingWork {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Bindings) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -107,27 +116,26 @@ impl OperationConflict {}
 
 #[test]
 fn module_dependencies_deduplicate_rust_types_and_stabilize_fingerprints() -> Result<(), String> {
-    let repeated = host_bindings! {
+    let repeated = host! {
         dts: "../dts/empty.d.ts",
         modules: [RepeatedDependencies, Second],
         services: {},
     }?;
-    let once_per_module = host_bindings! {
+    let once_per_module = host! {
         dts: "../dts/empty.d.ts",
         modules: [First, Second],
         services: {},
     }?;
-    let reversed = host_bindings! {
+    let reversed = host! {
         dts: "../dts/empty.d.ts",
         modules: [Second, First],
         services: {},
     }?;
 
-    assert_eq!(repeated.classes().collect::<Vec<_>>(), [(0, "Shared")]);
-    assert_eq!(repeated.operation_count(), 1);
-    repeated.decode_operation("work", &[]).unwrap();
-    assert_eq!(repeated.fingerprint(), once_per_module.fingerprint());
-    assert_eq!(repeated.fingerprint(), reversed.fingerprint());
+    decode_operation(&repeated, "work", &[]).unwrap();
+    let repeated = fingerprint(repeated);
+    assert_eq!(repeated, fingerprint(once_per_module));
+    assert_eq!(repeated, fingerprint(reversed));
     Ok(())
 }
 
@@ -135,51 +143,50 @@ fn module_dependencies_deduplicate_rust_types_and_stabilize_fingerprints() -> Re
 fn only_selected_modules_contribute_dependencies() -> Result<(), String> {
     // ClassConflict and OperationConflict are defined, but selecting Empty
     // alongside First must not pull in either of their conflicting types.
-    let bindings = host_bindings! {
+    let host = host! {
         dts: "../dts/empty.d.ts",
         modules: [Empty, First],
         services: {},
     }?;
-    assert_eq!(bindings.classes().collect::<Vec<_>>(), [(0, "Shared")]);
-    assert_eq!(bindings.operation_count(), 1);
-    bindings.decode_operation("work", &[]).unwrap();
+    decode_operation(&host, "work", &[]).unwrap();
+    start_vm(host, Default::default());
     Ok(())
 }
 
 #[test]
 fn distinct_class_types_with_the_same_tag_are_rejected() {
-    let class_collision = host_bindings! {
+    let class_collision = host! {
         dts: "../dts/empty.d.ts",
         modules: [First, ClassConflict],
         services: {},
     };
     assert_eq!(
-        class_collision.unwrap_err(),
+        class_collision.err().unwrap(),
         "duplicate host class \"Shared\""
     );
 }
 
 #[test]
 fn distinct_operation_types_with_the_same_name_are_rejected() {
-    let operation_collision = host_bindings! {
+    let operation_collision = host! {
         dts: "../dts/empty.d.ts",
         modules: [First, OperationConflict],
         services: {},
     };
     assert_eq!(
-        operation_collision.unwrap_err(),
+        operation_collision.err().unwrap(),
         "duplicate host operation \"work\""
     );
 }
 
 #[test]
 fn duplicate_modules_are_not_deduplicated() {
-    let duplicate = host_bindings! {
+    let duplicate = host! {
         dts: "../dts/empty.d.ts",
         modules: [First, First],
         services: {},
     };
-    assert_eq!(duplicate.unwrap_err(), "duplicate host module \"first\"");
+    assert_eq!(duplicate.err().unwrap(), "duplicate host module \"first\"");
 }
 
 struct ClockV2;
@@ -221,49 +228,46 @@ type ClockAlias = ClockV2;
 
 #[test]
 fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
-    let missing = host_bindings! {
+    let missing = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: { ClockAlias? => None::<u64> },
     };
     assert_eq!(
-        missing.unwrap_err(),
+        missing.err().unwrap(),
         "host module \"state\": missing host service \"clock\""
     );
 
-    let wrong_key = host_bindings! {
+    let wrong_key = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: { OtherClock => 17 },
     };
     assert_eq!(
-        wrong_key.unwrap_err(),
+        wrong_key.err().unwrap(),
         "host module \"state\": wrong key type for host service \"clock\""
     );
 
-    let bindings = host_bindings! {
+    let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: { ClockAlias? => Some(17), CounterKey? => None::<u64> },
     }?;
-    assert_eq!(bindings.service::<ClockV2>(), Some(&17));
-    assert_eq!(bindings.service::<CounterKey>(), None);
+    let vm = start_vm(host, Default::default());
+    assert_eq!(vm.service::<ClockV2>(), Some(&17));
+    assert_eq!(vm.service::<CounterKey>(), None);
     Ok(())
 }
 
 #[test]
 fn services_accept_thread_local_values() -> Result<(), String> {
-    let bindings = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let host = host! {
         services: {
             LocalKey => Rc::new(Cell::new(9)),
         },
     }?;
-    assert_eq!(
-        bindings.service::<LocalKey>().map(|value| value.get()),
-        Some(9)
-    );
+    let vm = start_vm(host, Default::default());
+    assert_eq!(vm.service::<LocalKey>().map(|value| value.get()), Some(9));
     Ok(())
 }
 
@@ -280,7 +284,7 @@ fn registers_state_operation_and_services() -> Result<(), String> {
     assert_eq!(services.get::<ClockV2>(), Some(&17));
 
     let evaluations = Cell::new(0);
-    let bindings = host_bindings! {
+    let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: {
@@ -288,32 +292,31 @@ fn registers_state_operation_and_services() -> Result<(), String> {
         },
     }?;
     assert_eq!(evaluations.get(), 1);
-    assert_eq!(<State as FromBindings>::from_bindings(&bindings).count, 3);
-    assert_eq!(bindings.service::<ClockV2>(), Some(&17));
-    assert_eq!(bindings.service::<OtherClock>(), None);
+    assert_eq!(<State as FromServices>::from_services(&services).count, 3);
+    let vm = start_vm(host, Default::default());
+    assert_eq!(vm.service::<ClockV2>(), Some(&17));
+    assert_eq!(vm.service::<OtherClock>(), None);
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
 
-    let absent = host_bindings! {
-        dts: "../dts/state.d.ts",
+    let absent = host! {
         modules: [],
         services: {
             ClockV2 => 17,
             CounterKey? => None::<u64>,
         },
     }?;
-    assert_eq!(absent.service::<CounterKey>(), None);
+    let vm = start_vm(absent, Default::default());
+    assert_eq!(vm.service::<CounterKey>(), None);
 
-    let duplicate = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let duplicate = host! {
         services: {
             ClockV2 => 17,
             ClockV3 => 23,
         },
     };
-    assert_eq!(duplicate.unwrap_err(), "duplicate host service \"clock\"");
+    assert_eq!(duplicate.err().unwrap(), "duplicate host service \"clock\"");
     Ok(())
 }
 
@@ -324,53 +327,43 @@ fn fingerprints_only_stable_service_contracts() -> Result<(), String> {
         fn write(&self, _: &ConsoleEvent) {}
     }
 
-    let baseline = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let baseline = fingerprint(host! {
         services: {
             ClockV2 => 17,
             CounterKey => 0,
         },
-    }?;
-    let reordered = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    }?);
+    let reordered = fingerprint(host! {
         services: {
             CounterKey => 0,
             ClockV2 => 17,
         },
-    }?;
-    assert_eq!(baseline.fingerprint(), reordered.fingerprint());
+    }?);
+    assert_eq!(baseline, reordered);
 
-    let other_clock = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let other_clock = fingerprint(host! {
         services: {
             ClockV2 => 42,
             CounterKey => 0,
         },
-    }?;
-    assert_eq!(baseline.fingerprint(), other_clock.fingerprint());
+    }?);
+    assert_eq!(baseline, other_clock);
 
-    let with_console = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let with_console = fingerprint(host! {
         services: {
             ClockV2 => 17,
             CounterKey => 0,
             ConsoleKey => Arc::new(Sink),
         },
-    }?;
-    assert_eq!(baseline.fingerprint(), with_console.fingerprint());
+    }?);
+    assert_eq!(baseline, with_console);
 
-    let upgraded = host_bindings! {
-        dts: "../dts/state.d.ts",
-        modules: [],
+    let upgraded = fingerprint(host! {
         services: {
             ClockV3 => 17,
             CounterKey => 0,
         },
-    }?;
-    assert_ne!(baseline.fingerprint(), upgraded.fingerprint());
+    }?);
+    assert_ne!(baseline, upgraded);
     Ok(())
 }

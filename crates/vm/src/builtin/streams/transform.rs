@@ -25,7 +25,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const STREAM_PROTO: &str = "transformStream.prototype";
 const CONTROLLER_PROTO: &str = "transformStreamDefaultController.prototype";
@@ -44,8 +44,8 @@ interface!(TRANSFORM_CONTROLLER_OWNER, "transformStreamDefaultController", "Tran
 );
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -131,8 +131,8 @@ fn construct(
 }
 
 fn strategy_mark(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     input: &Value,
     default: f64,
@@ -145,8 +145,8 @@ fn strategy_mark(
 }
 
 fn readable(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -160,8 +160,8 @@ fn readable(
 }
 
 fn writable(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -175,8 +175,8 @@ fn writable(
 }
 
 fn desired_size(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -193,8 +193,8 @@ fn desired_size(
 }
 
 fn enqueue(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -206,8 +206,8 @@ fn enqueue(
 }
 
 fn error(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -220,8 +220,8 @@ fn error(
 }
 
 fn terminate(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -236,14 +236,14 @@ fn terminate(
     Ok(Invocation::Value(Value::UNDEFINED))
 }
 
-pub(super) fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+pub(super) fn stream_id(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
     Ok(matches!(vm.heap.get(id)?, Object::TransformStream(_)).then_some(id))
 }
 
-fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn controller_stream(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -253,7 +253,7 @@ fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError
     })
 }
 
-impl Vm {
+impl VmCore {
     pub(in crate::builtin) fn transform(
         &self,
         stream: ObjectId,
@@ -398,7 +398,7 @@ impl Vm {
 
     pub(in crate::builtin) fn transform_enqueue(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -462,7 +462,7 @@ impl Vm {
 
     fn transform_error_writable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -478,7 +478,7 @@ impl Vm {
 
     fn transform_error(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         error: &Value,
@@ -495,7 +495,7 @@ impl Vm {
 
     pub(super) fn invoke_transform_write(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -517,7 +517,7 @@ impl Vm {
     /// path as guest callbacks, including flush and cancellation.
     fn invoke_transform_algorithm(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -568,7 +568,7 @@ impl Vm {
 
     fn perform_transform(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -581,7 +581,7 @@ impl Vm {
 
     pub(super) fn invoke_transform_flush(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<ObjectId, VmError> {
@@ -596,7 +596,7 @@ impl Vm {
 
     pub(super) fn invoke_transform_cancel(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -612,7 +612,7 @@ impl Vm {
 
     fn finish_transform(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,
@@ -636,7 +636,7 @@ impl Vm {
 
     fn transform_callback_promise(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         invocation: Invocation,
     ) -> Result<ObjectId, VmError> {
@@ -667,7 +667,7 @@ impl Vm {
 
     pub(super) fn resume_transform_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,

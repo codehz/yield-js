@@ -18,7 +18,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) type Completion<T> = Result<Result<T, Value>, VmError>;
 
@@ -52,20 +52,20 @@ pub(crate) enum BodyMode {
 }
 
 impl BodyRecord {
-    pub(crate) fn unusable(&self, vm: &Vm) -> Result<bool, VmError> {
+    pub(crate) fn unusable(&self, vm: &VmCore) -> Result<bool, VmError> {
         Ok(
             matches!(vm.heap.get(self.stream)?, Object::ReadableStream(stream) if stream.disturbed || stream.reader.is_some()),
         )
     }
 
-    pub(super) fn used(&self, vm: &Vm) -> bool {
+    pub(super) fn used(&self, vm: &VmCore) -> bool {
         matches!(vm.heap.get(self.stream), Ok(Object::ReadableStream(stream)) if stream.disturbed)
     }
 }
 
 pub(super) fn get(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     obj: &Value,
     name: &str,
@@ -79,8 +79,8 @@ pub(super) fn get(
 }
 
 pub(super) fn usv(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<String> {
@@ -90,8 +90,8 @@ pub(super) fn usv(
 }
 
 pub(super) fn json_call(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     name: &'static str,
     value: Value,
@@ -106,7 +106,7 @@ pub(super) fn json_call(
     )
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn body_from_bytes(&mut self, bytes: Vec<u8>) -> Result<BodyRecord, VmError> {
         let stream = self.readable_from_bytes(bytes.clone())?;
         Ok(BodyRecord {
@@ -118,7 +118,7 @@ impl Vm {
 
     pub(crate) fn extract_body(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<(BodyRecord, Option<String>)> {
@@ -189,7 +189,7 @@ impl Vm {
 
     pub(super) fn tee_fetch_body(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
     ) -> Completion<(BodyRecord, BodyRecord)> {
@@ -223,7 +223,7 @@ impl Vm {
 
     pub(super) fn transfer_fetch_body(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
     ) -> Completion<BodyRecord> {
@@ -256,7 +256,7 @@ impl Vm {
 
     pub(crate) fn begin_fetch_body(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         body: &BodyRecord,
         mode: BodyMode,
@@ -293,7 +293,7 @@ impl Vm {
 
     fn fetch_body_read_next(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         mut job: BodyRead,
     ) -> Result<(), VmError> {
@@ -315,7 +315,7 @@ impl Vm {
 
     pub(crate) fn resume_fetch_body(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         mut job: BodyRead,
         settlement: Settlement,
@@ -377,8 +377,8 @@ impl Vm {
 }
 
 pub(super) fn consume(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     body: Option<BodyRecord>,
     mode: BodyMode,
@@ -396,7 +396,7 @@ pub(super) fn consume(
 }
 
 pub(super) fn rejected(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     message: &str,
 ) -> Result<Invocation, VmError> {
@@ -407,8 +407,8 @@ pub(super) fn rejected(
 }
 
 fn package(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     mode: BodyMode,
     bytes: Vec<u8>,
@@ -492,7 +492,7 @@ fn quote(text: &str) -> String {
         .replace('"', "%22")
 }
 
-fn encode_form(vm: &Vm, data: &FormDataRecord) -> Result<(Vec<u8>, String), VmError> {
+fn encode_form(vm: &VmCore, data: &FormDataRecord) -> Result<(Vec<u8>, String), VmError> {
     let mut sequence = vm.random_state;
     let boundary = loop {
         let boundary = format!("----yield-formdata-{sequence:016x}");
@@ -591,7 +591,11 @@ fn parameters(mut text: &str) -> impl Iterator<Item = (&str, String)> {
     })
 }
 
-fn parse_form(vm: &mut Vm, mime: &str, mut bytes: &[u8]) -> Option<Vec<(String, FormDataValue)>> {
+fn parse_form(
+    vm: &mut VmCore,
+    mime: &str,
+    mut bytes: &[u8],
+) -> Option<Vec<(String, FormDataValue)>> {
     let end = mime.find(';').unwrap_or(mime.len());
     let essence = mime[..end].trim();
     if essence.eq_ignore_ascii_case("application/x-www-form-urlencoded") {

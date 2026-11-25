@@ -10,14 +10,14 @@ use crate::heap::{Object, object_id};
 use crate::host::Host;
 use crate::runtime::Settlement;
 use crate::value::Value;
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::Step;
 
-impl Vm {
+impl VmCore {
     pub(super) fn step_env(
         &mut self,
-        _host: &mut dyn Host,
+        _host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

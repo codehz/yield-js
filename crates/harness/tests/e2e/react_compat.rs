@@ -49,18 +49,18 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
     let build = declared(TEST_DECLARATIONS)
         .compile(Project::new("main.js", resolver).with_preload("preload.js"))
         .unwrap();
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let clock = host.clock().clone();
     let mut source = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock),
             ..Default::default()
         },
     )
     .unwrap();
-    source.start(&mut host, "run", vec![]).unwrap();
+    source.start("run", vec![]).unwrap();
     let image = source.snapshot(&[]).unwrap();
     assert_eq!(host.clock().registrations().len(), 1);
     assert_eq!(image.script_timers.len(), 1);
@@ -71,7 +71,7 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
         let mut vm = Vm::restore(
             image.clone(),
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 test_clock: Some(clock),
                 ..Default::default()
@@ -80,17 +80,14 @@ fn react_scheduler_delayed_callback_survives_restore_once_unless_canceled() {
         .unwrap();
         vm.start_recovered_operations().unwrap();
         if cancel {
-            vm.start(&mut host, "cancel", vec![]).unwrap();
+            vm.start("cancel", vec![]).unwrap();
         }
         host.advance(&mut vm, 4).unwrap();
-        assert_eq!(
-            vm.start(&mut host, "observe", vec![]).unwrap(),
-            Value::number(0.0)
-        );
+        assert_eq!(vm.start("observe", vec![]).unwrap(), Value::number(0.0));
         host.advance(&mut vm, 1).unwrap();
         host.advance(&mut vm, 20).unwrap();
         assert_eq!(
-            vm.start(&mut host, "observe", vec![]).unwrap(),
+            vm.start("observe", vec![]).unwrap(),
             Value::number(if cancel { 0.0 } else { 1.0 })
         );
         assert!(host.errors().is_empty());

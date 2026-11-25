@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::sync::{Arc, Mutex};
 
 use yield_vm::binding::{
-    Bindings, CallCx, HostFault, JsResult, JsValue, LiveRegistration, OperationDriver,
-    OperationToken, Registration,
+    CallCx, HostFault, JsResult, JsValue, LiveRegistration, OperationDriver, OperationToken,
+    Registration,
 };
 use yield_vm::host::{Completion, TimerService};
-use yield_vm::{Decode, Encode, Host, Vm, operation};
+use yield_vm::{Decode, Encode, Services, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
 
@@ -98,7 +98,7 @@ impl FakeClock {
     }
 
     /// Advances the VM attached to this clock, draining work after each timer.
-    pub fn advance(&self, vm: &mut Vm, host: &mut dyn Host, ms: u64) -> Result<(), String> {
+    pub fn advance(&self, vm: &mut Vm, ms: u64) -> Result<(), String> {
         let target = self.advance_target(ms).map_err(|error| error.to_string())?;
         while let Some((token, delivery)) =
             self.take_due(target).map_err(|error| error.to_string())?
@@ -110,7 +110,7 @@ impl FakeClock {
                 Delivery::Wake => vm.wake_timer(token),
             }
             .map_err(|error| error.to_string())?;
-            vm.run_until_idle(host).map_err(|error| error.to_string())?;
+            vm.run_until_idle().map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -221,9 +221,9 @@ impl Timer {
         })
     }
 
-    fn clock(bindings: &Bindings) -> Result<&Arc<FakeClock>, HostFault> {
-        bindings
-            .service::<FakeClockKey>()
+    fn clock(services: &Services) -> Result<&Arc<FakeClock>, HostFault> {
+        services
+            .get::<FakeClockKey>()
             .ok_or_else(|| HostFault::new("missing clock service"))
     }
 }
@@ -231,9 +231,9 @@ impl Timer {
 impl OperationDriver for Timer {
     type Live = ArmedTimer;
 
-    fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<ArmedTimer, HostFault> {
+    fn start(&self, token: OperationToken, services: &Services) -> Result<ArmedTimer, HostFault> {
         FakeClock::arm(
-            Self::clock(bindings)?,
+            Self::clock(services)?,
             token,
             u64::from(self.remaining_ms),
             false,
@@ -241,9 +241,9 @@ impl OperationDriver for Timer {
         )
     }
 
-    fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<ArmedTimer, HostFault> {
+    fn resume(&self, token: OperationToken, services: &Services) -> Result<ArmedTimer, HostFault> {
         FakeClock::arm(
-            Self::clock(bindings)?,
+            Self::clock(services)?,
             token,
             u64::from(self.remaining_ms),
             true,

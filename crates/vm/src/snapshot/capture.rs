@@ -9,7 +9,7 @@ use crate::init::{RestoreOptions, SnapshotValidation};
 use crate::regexp::compile_pattern;
 use crate::runtime::{ContinuationTarget, HostSlot, HostTaskState, Settlement};
 use crate::value::Value;
-use crate::vm::{VerifiedBuild, Vm};
+use crate::vm::{VerifiedBuild, Vm, VmCore};
 
 use super::record::*;
 
@@ -26,18 +26,19 @@ use self::{
     validate_builtins::*, validate_tables::*,
 };
 
-impl Vm {
+impl VmCore {
     /// Captures an idle VM without releasing any live registrations.
     /// The caller must hold external logical time and delivery at the same cut;
     /// no event may have been taken out of its source but not yet delivered.
-    pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, VmError> {
-        self.capture_image(roots, |_| {})
+    pub(crate) fn snapshot(&self, host: &Host, roots: &[Value]) -> Result<Snapshot, VmError> {
+        self.capture_image(host, roots, |_| {})
     }
 
     /// Capture through the same path as `snapshot`, timing its phases.
     #[doc(hidden)]
     pub fn snapshot_profiled(
         &self,
+        host: &Host,
         roots: &[Value],
     ) -> Result<(Snapshot, crate::perf::Capture), VmError> {
         use std::time::Instant;
@@ -45,7 +46,7 @@ impl Vm {
         let start = Instant::now();
         let mut last = start;
         let mut profile = crate::perf::Capture::default();
-        let snapshot = self.capture_image(roots, |field| {
+        let snapshot = self.capture_image(host, roots, |field| {
             let now = Instant::now();
             *field(&mut profile) += now.duration_since(last);
             last = now;
@@ -58,9 +59,11 @@ impl Vm {
 
     fn capture_image(
         &self,
+        host: &Host,
         roots: &[Value],
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Capture) -> &mut std::time::Duration),
     ) -> Result<Snapshot, VmError> {
+        let bindings = host.bindings();
         if self.has_pending_subtle_operations() {
             return Err(VmError::InvalidState(
                 "snapshot during pending SubtleCrypto operations".to_owned(),
@@ -95,7 +98,7 @@ impl Vm {
         snapshot.script_timers = self.script_timers.clone();
         snapshot.next_timer_id = self.next_timer_id;
         snapshot.next_operation_id = self.next_operation_id;
-        snapshot.binding_fingerprint = self.bindings.fingerprint().to_owned();
+        snapshot.binding_fingerprint = bindings.fingerprint().to_owned();
         snapshot.globals = self.globals.clone();
         snapshot.roots = self.builtins.to_map();
         if self.templates.len() != self.build.templates.len() {
@@ -108,7 +111,7 @@ impl Vm {
         snapshot.pending_rejection_notifications = self.pending_rejection_notifications.clone();
         snapshot.ordinary_tasks = self.ordinary_tasks.iter().cloned().collect();
         snapshot.next_stream_message = self.next_stream_message;
-        for (class, tag) in self.bindings.classes() {
+        for (class, tag) in bindings.classes() {
             snapshot
                 .class_prototypes
                 .insert(tag.to_owned(), self.host_classes[class].prototype);
@@ -190,12 +193,12 @@ impl Vm {
                     HostSlot::JsList(values) => HostSlotRecord::JsList(values.clone()),
                 })
                 .collect();
-            let payload = if self.bindings.class_has_payload_codec(class) {
+            let payload = if bindings.class_has_payload_codec(class) {
                 let payload = instance.payload.as_ref().ok_or_else(|| {
                     VmError::InvalidState(format!("host instance {object} is missing its payload"))
                 })?;
                 let mut bytes = Vec::new();
-                self.bindings
+                bindings
                     .class_encode(class, payload.as_ref(), &mut bytes)
                     .map_err(|error| VmError::InvalidState(error.0))?;
                 Some(PayloadRecord { bytes })
@@ -204,11 +207,7 @@ impl Vm {
             };
             snapshot.host_instances.push(HostInstanceRecord {
                 object: *object,
-                class: self
-                    .bindings
-                    .class_tag(class)
-                    .unwrap_or_default()
-                    .to_owned(),
+                class: bindings.class_tag(class).unwrap_or_default().to_owned(),
                 slots,
                 payload,
             });
@@ -223,17 +222,16 @@ impl Vm {
                 })
                 .collect();
             let mut bytes = Vec::new();
-            self.bindings
+            bindings
                 .state_encode(module, state.payload.as_ref(), &mut bytes)
                 .map_err(|error| {
                     VmError::InvalidState(format!(
                         "module {:?} state payload: {error}",
-                        self.bindings.module_name(module)
+                        bindings.module_name(module)
                     ))
                 })?;
             snapshot.module_states.push(ModuleStateRecord {
-                module: self
-                    .bindings
+                module: bindings
                     .module_name(module)
                     .expect("linked module index")
                     .to_owned(),
@@ -303,7 +301,7 @@ impl Vm {
                 name: operation.name.clone(),
                 recovery: operation.recovery,
                 state: operation
-                    .checkpoint(&self.bindings)
+                    .checkpoint(host.services())
                     .map_err(|error| VmError::HostFault(error.0))?,
                 target: operation.target,
                 signal: operation.signal,
@@ -325,7 +323,9 @@ impl Vm {
         }
         Ok(snapshot)
     }
+}
 
+impl Vm {
     /// Restore a trusted, unmodified snapshot produced by [`Vm::snapshot`].
     ///
     /// The caller must ensure provenance and integrity. Both validation modes
@@ -334,7 +334,7 @@ impl Vm {
     pub fn restore(
         snapshot: Snapshot,
         build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
-        host: &mut dyn Host,
+        host: Host,
         options: RestoreOptions,
     ) -> Result<Self, VmError> {
         check_snapshot_header(&snapshot)?;
@@ -343,14 +343,15 @@ impl Vm {
             options.fetch_environment.as_ref(),
         )?;
         let build = build.try_into().map_err(Into::into)?;
-        match options.validation {
+        let core = match options.validation {
             SnapshotValidation::Trusted => {
-                Self::restore_image::<false>(snapshot, build, host, options.test_clock, |_| {})
+                VmCore::restore_image::<false>(snapshot, build, &host, options.test_clock, |_| {})
             }
             SnapshotValidation::Full => {
-                Self::restore_image::<true>(snapshot, build, host, options.test_clock, |_| {})
+                VmCore::restore_image::<true>(snapshot, build, &host, options.test_clock, |_| {})
             }
-        }
+        }?;
+        Ok(Self { core, host })
     }
 
     /// Restore with full snapshot validation and time its phases.
@@ -358,7 +359,7 @@ impl Vm {
     pub fn restore_profiled(
         snapshot: Snapshot,
         build: VerifiedBuild,
-        host: &mut dyn Host,
+        host: Host,
     ) -> Result<(Self, crate::perf::Restore), VmError> {
         use std::time::Instant;
 
@@ -367,7 +368,7 @@ impl Vm {
         let mut profile = crate::perf::Restore::default();
         check_snapshot_header(&snapshot)?;
         authorize_fetch_environment(&snapshot.fetch_environment, None)?;
-        let vm = Self::restore_image::<true>(snapshot, build, host, None, |field| {
+        let core = VmCore::restore_image::<true>(snapshot, build, &host, None, |field| {
             let now = Instant::now();
             *field(&mut profile) = now.duration_since(last);
             last = now;
@@ -375,13 +376,15 @@ impl Vm {
         let end = Instant::now();
         profile.finalize = end.duration_since(last);
         profile.total = end.duration_since(start);
-        Ok((vm, profile))
+        Ok((Self { core, host }, profile))
     }
+}
 
+impl VmCore {
     fn restore_image<const AUDIT: bool>(
         mut snapshot: Snapshot,
         build: VerifiedBuild,
-        host: &mut dyn Host,
+        host: &Host,
         clock: Option<std::sync::Arc<dyn crate::TestClock>>,
         mut checkpoint: impl FnMut(fn(&mut crate::perf::Restore) -> &mut std::time::Duration),
     ) -> Result<Self, VmError> {
@@ -399,7 +402,7 @@ impl Vm {
                 bindings.fingerprint()
             )));
         }
-        let resolved_imports = Self::resolve_imports(&build, &bindings)?;
+        let resolved_imports = Self::resolve_imports(&build, bindings)?;
         checkpoint(|profile| &mut profile.compatibility);
 
         let mut heap = Heap::new();
@@ -455,11 +458,11 @@ impl Vm {
             )));
         }
         checkpoint(|profile| &mut profile.heap_side_tables);
-        validate_native_targets(&bindings, &heap)?;
+        validate_native_targets(bindings, &heap)?;
         checkpoint(|profile| &mut profile.native_validation);
-        let host_classes = load_host_classes(&bindings, &heap, &snapshot.class_prototypes)?;
-        let host_instances = load_host_instances(&bindings, &heap, &snapshot.host_instances)?;
-        let module_states = load_module_states(&bindings, &heap, &snapshot.module_states)?;
+        let host_classes = load_host_classes(bindings, &heap, &snapshot.class_prototypes)?;
+        let host_instances = load_host_instances(bindings, &heap, &snapshot.host_instances)?;
+        let module_states = load_module_states(bindings, &heap, &snapshot.module_states)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
         if AUDIT {
             for continuation in continuations.values() {
@@ -486,14 +489,14 @@ impl Vm {
             )?;
         }
         let operations = load_operations(
-            &bindings,
+            bindings,
             &heap,
             snapshot.elapsed,
             std::mem::take(&mut snapshot.operations),
             &snapshot.fetch_state,
         )?;
         let host_tasks = load_host_tasks(
-            &bindings,
+            bindings,
             &heap,
             &host_instances,
             &operations,
@@ -509,7 +512,7 @@ impl Vm {
             )?;
         }
         validate_timers(
-            &bindings,
+            bindings,
             &heap,
             &snapshot.script_timers,
             &snapshot.ordinary_tasks,
@@ -521,7 +524,7 @@ impl Vm {
         checkpoint(|profile| &mut profile.state_load);
         let mut vm = Self::restored(
             build,
-            bindings.clone(),
+            bindings,
             crate::vm::RestoredState {
                 heap,
                 continuations,
@@ -554,7 +557,7 @@ impl Vm {
         // Accepted events run first; work that still depends on the old host
         // transport is interrupted locally without starting a new request.
         vm.start_fetch_interruptions(host)?;
-        vm.restore_imports(&bindings, snapshot.imports, resolved_imports)?;
+        vm.restore_imports(bindings, snapshot.imports, resolved_imports)?;
         checkpoint(|profile| &mut profile.vm_assembly);
         if AUDIT {
             validate_native_import_objects(&vm.heap, &vm.imports)?;

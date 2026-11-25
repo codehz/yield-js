@@ -266,7 +266,7 @@ fn restore_rejects_an_out_of_range_generator_resume() {
         Vm::restore(
             captured,
             suspended.vm.build().clone(),
-            &mut TestHost::default(),
+            TestHost::default().host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -290,7 +290,7 @@ fn restore_rejects_a_generator_missing_a_saved_value() {
         Vm::restore(
             captured,
             suspended.vm.build().clone(),
-            &mut TestHost::default(),
+            TestHost::default().host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -314,7 +314,7 @@ fn restore_rejects_a_generator_that_was_captured_while_executing() {
         Vm::restore(
             captured,
             suspended.vm.build().clone(),
-            &mut TestHost::default(),
+            TestHost::default().host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -359,7 +359,7 @@ fn restore_rejects_a_duplicate_async_request_promise() {
         Vm::restore(
             captured,
             suspended.vm.build().clone(),
-            &mut TestHost::default(),
+            TestHost::default().host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -404,7 +404,7 @@ fn restore_rejects_a_continuation_targeting_another_generator() {
         Vm::restore(
             captured,
             suspended.vm.build().clone(),
-            &mut TestHost::default(),
+            TestHost::default().host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()

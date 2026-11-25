@@ -8,7 +8,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 /// `Error.prototype.toString` is shared by every error class through the
 /// prototype chain, so it is registered under the `error.prototype` owner.
@@ -30,10 +30,10 @@ const ERROR_PROTOTYPE_INTRINSICS: &[IntrinsicDef] = &[IntrinsicDef::call(
 )];
 const NO_PROTOTYPE_INTRINSICS: &[IntrinsicDef] = &[];
 
-impl Vm {
+impl VmCore {
     fn error_to_string(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {

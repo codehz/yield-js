@@ -26,7 +26,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) const ENCODER_ROOT: &str = "textEncoder";
 pub(crate) const ENCODER_PROTOTYPE: &str = "textEncoder.prototype";
@@ -140,7 +140,7 @@ pub(crate) const DECODER_OWNER: Owner = Owner::new(
     Some(install_decoder),
 );
 
-fn install_encoder(vm: &mut Vm, _: &Value) {
+fn install_encoder(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ENCODER_ROOT);
     let prototype = vm.builtins.get(ENCODER_PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -156,7 +156,7 @@ fn install_encoder(vm: &mut Vm, _: &Value) {
     );
 }
 
-fn install_decoder(vm: &mut Vm, _: &Value) {
+fn install_decoder(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(DECODER_ROOT);
     let prototype = vm.builtins.get(DECODER_PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -178,7 +178,7 @@ fn install_decoder(vm: &mut Vm, _: &Value) {
 }
 
 /// Install a Web IDL operation: writable, enumerable, configurable.
-fn operation(vm: &mut Vm, target: ObjectId, key: &str, intrinsic: IntrinsicKey) {
+fn operation(vm: &mut VmCore, target: ObjectId, key: &str, intrinsic: IntrinsicKey) {
     let function = vm.alloc_intrinsic(intrinsic);
     define_builtin_data(
         vm,
@@ -190,7 +190,7 @@ fn operation(vm: &mut Vm, target: ObjectId, key: &str, intrinsic: IntrinsicKey) 
 }
 
 /// Install a Web IDL readonly attribute: an enumerable, configurable getter.
-fn accessor(vm: &mut Vm, target: ObjectId, key: &str, intrinsic: IntrinsicKey) {
+fn accessor(vm: &mut VmCore, target: ObjectId, key: &str, intrinsic: IntrinsicKey) {
     let getter = vm.alloc_intrinsic(intrinsic);
     assert!(
         vm.heap
@@ -209,8 +209,8 @@ fn accessor(vm: &mut Vm, target: ObjectId, key: &str, intrinsic: IntrinsicKey) {
 }
 
 fn construct_encoder(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     _: &ActiveRoots<'_>,
     _: Vec<Value>,
     prototype: Option<ObjectId>,
@@ -223,8 +223,8 @@ fn construct_encoder(
 }
 
 fn construct_decoder(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     prototype: Option<ObjectId>,
@@ -250,8 +250,8 @@ fn construct_decoder(
 }
 
 pub(in crate::builtin) fn decoder_config(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<TextDecoderConfig> {
@@ -302,8 +302,8 @@ fn canonical_label(label: &str) -> Option<TextEncoding> {
 /// The `TextDecoderOptions` dictionary: undefined and null are empty, any
 /// other non-object is a TypeError. Members are read in lexicographic order.
 fn decoder_options(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<(bool, bool)> {
@@ -325,8 +325,8 @@ fn decoder_options(
 
 /// `TextDecodeOptions`: undefined and null are empty, other non-objects throw.
 fn stream_option(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<bool> {
@@ -338,7 +338,7 @@ fn stream_option(
 }
 
 fn options_dictionary(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<Option<ObjectId>> {
@@ -361,7 +361,7 @@ pub(in crate::builtin) enum Source {
 }
 
 pub(in crate::builtin) fn buffer_source(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<Source> {
@@ -388,7 +388,7 @@ pub(in crate::builtin) fn buffer_source(
 
 /// The raw byte window of a validated buffer source. A detached or
 /// out-of-bounds view contributes no bytes.
-pub(in crate::builtin) fn source_bytes(vm: &Vm, source: Source) -> Result<&[u8], VmError> {
+pub(in crate::builtin) fn source_bytes(vm: &VmCore, source: Source) -> Result<&[u8], VmError> {
     match source {
         Source::Empty => Ok(&[]),
         Source::Buffer(id) => Ok(vm
@@ -412,7 +412,7 @@ pub(in crate::builtin) fn source_bytes(vm: &Vm, source: Source) -> Result<&[u8],
     }
 }
 
-impl Vm {
+impl VmCore {
     /// The decoder record behind a branded receiver, or `None`.
     fn text_decoder_state(&self, receiver: &Value) -> Result<Option<&TextDecoderObject>, VmError> {
         let ValueRef::Object(id) = receiver.view() else {
@@ -466,7 +466,7 @@ impl Vm {
 
     pub(super) fn text_encode(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -493,7 +493,7 @@ impl Vm {
 
     pub(super) fn text_encode_into(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -552,7 +552,7 @@ impl Vm {
 
     pub(super) fn text_decode(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

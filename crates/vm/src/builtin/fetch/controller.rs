@@ -27,7 +27,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::snapshot::OrdinaryTask;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const KEY: IntrinsicKey = IntrinsicKey::new("fetch", Slot::Global, "");
 const CREDIT: u64 = 64 * 1024;
@@ -49,7 +49,7 @@ pub(crate) const OWNER: Owner = Owner::new(
         let input = args.first().unwrap_or(&undefined);
         let init = args.get(1).unwrap_or(&undefined);
         match vm.request_from_fetch(host, roots, input, init)? {
-            Ok(request) => vm.begin_fetch(roots, promise, request)?,
+            Ok(request) => vm.begin_fetch(host, roots, promise, request)?,
             Err(reason) => vm.settle(promise, Settlement::Rejected(reason))?,
         }
         Ok(Invocation::Value(Value::object(promise)))
@@ -289,7 +289,7 @@ fn no_body(hop: &HopRequest, head: &ResponseHead) -> bool {
     hop.method == "HEAD" || matches!(head.status, 101 | 103 | 204 | 205 | 304)
 }
 
-impl Vm {
+impl VmCore {
     fn fetch_request_record(&self, request: ObjectId) -> Result<&RequestRecord, VmError> {
         let Object::Request { data, .. } = self.heap.get(request)? else {
             unreachable!()
@@ -376,6 +376,7 @@ impl Vm {
 
     fn begin_fetch(
         &mut self,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         promise: ObjectId,
         request: ObjectId,
@@ -466,7 +467,7 @@ impl Vm {
         if let Err(message) = self.configure_hop(&data, &mut hop) {
             return reject(self, message);
         }
-        if self.bindings.service::<FetchKey>().is_none() {
+        if host.services().get::<FetchKey>().is_none() {
             return reject(self, "Fetch service unavailable");
         }
         let upload = match &data.body {
@@ -498,6 +499,7 @@ impl Vm {
         };
         let urls = vec![hop.url.clone()];
         self.start_fetch_hop(
+            host,
             FetchTransaction {
                 promise,
                 request,
@@ -528,6 +530,7 @@ impl Vm {
 
     fn start_fetch_hop(
         &mut self,
+        host: &Host,
         mut tx: FetchTransaction,
         check_preflight: bool,
     ) -> Result<(), VmError> {
@@ -571,7 +574,7 @@ impl Vm {
                 .push(AbortStep::Operation(id));
         }
         self.fetch_state.transactions.insert(id, tx);
-        let registration = self.bindings.service::<FetchKey>().and_then(|service| {
+        let registration = host.services().get::<FetchKey>().and_then(|service| {
             Arc::clone(service)
                 .start(
                     OperationToken {
@@ -661,10 +664,7 @@ impl Vm {
         Ok(())
     }
 
-    pub(crate) fn start_fetch_interruptions(
-        &mut self,
-        _host: &mut dyn Host,
-    ) -> Result<(), VmError> {
+    pub(crate) fn start_fetch_interruptions(&mut self, _host: &Host) -> Result<(), VmError> {
         for (&id, tx) in &mut self.fetch_state.transactions {
             if tx.is_external() && !tx.interruption_queued && !self.fetch_live.contains_key(&id) {
                 tx.interruption_queued = true;
@@ -750,7 +750,7 @@ impl Vm {
         self.fetch_registration(id, |r| r.finish_upload())
     }
 
-    fn pump_fetch_upload(&mut self, host: &mut dyn Host, id: u64) -> Result<(), VmError> {
+    fn pump_fetch_upload(&mut self, host: &Host, id: u64) -> Result<(), VmError> {
         let Some(tx) = self.fetch_state.transactions.get_mut(&id) else {
             return Ok(());
         };
@@ -819,7 +819,7 @@ impl Vm {
 
     pub(crate) fn resume_fetch_upload(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         id: u64,
         settlement: &Settlement,
     ) -> Result<(), VmError> {
@@ -860,7 +860,7 @@ impl Vm {
 
     pub(crate) fn process_fetch_event(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         id: u64,
         event: FetchEvent,
     ) -> Result<(), VmError> {
@@ -886,7 +886,7 @@ impl Vm {
                     })?;
                 self.pump_fetch_upload(host, id)
             }
-            FetchEvent::Head(head) => self.fetch_head(id, head),
+            FetchEvent::Head(head) => self.fetch_head(host, id, head),
             FetchEvent::Data(bytes) => {
                 let length = bytes.len() as u64;
                 if let Some(buffer) = &mut tx.buffer {
@@ -924,13 +924,13 @@ impl Vm {
         }
     }
 
-    fn fetch_head(&mut self, id: u64, head: ResponseHead) -> Result<(), VmError> {
+    fn fetch_head(&mut self, host: &Host, id: u64, head: ResponseHead) -> Result<(), VmError> {
         let tx = &self.fetch_state.transactions[&id];
         if tx.preflight {
             if !preflight_allows(&tx.hop, &head) {
                 return self.fail_fetch(id, "Fetch CORS preflight failed");
             }
-            return self.restart_fetch(id, None);
+            return self.restart_fetch(host, id, None);
         }
         if tx.hop.origin.is_some() && !cors_allows(&tx.hop, &head) {
             return self.fail_fetch(id, "Fetch CORS check failed");
@@ -967,7 +967,7 @@ impl Vm {
             if !rewrite && matches!(tx.upload, Upload::Streaming { .. }) {
                 return self.fail_fetch(id, "Fetch redirect cannot replay a streaming body");
             }
-            return self.restart_fetch(id, Some((url, rewrite)));
+            return self.restart_fetch(host, id, Some((url, rewrite)));
         }
         let mut upload = {
             let tx = self.fetch_state.transactions.get_mut(&id).unwrap();
@@ -1003,7 +1003,12 @@ impl Vm {
         self.grant_fetch_download(id, CREDIT)
     }
 
-    fn restart_fetch(&mut self, id: u64, redirect: Option<(Url, bool)>) -> Result<(), VmError> {
+    fn restart_fetch(
+        &mut self,
+        host: &Host,
+        id: u64,
+        redirect: Option<(Url, bool)>,
+    ) -> Result<(), VmError> {
         // Restored fetches may consume an already-accepted head, but must never start another hop.
         if !self.fetch_live.contains_key(&id) {
             let reason = self.alloc_dom_exception("AbortError".into(), INTERRUPTION.into());
@@ -1059,7 +1064,7 @@ impl Vm {
         tx.upload_credit = 0;
         tx.pending_upload_credit = 0;
         tx.download_credit = 0;
-        self.start_fetch_hop(tx, check_preflight)
+        self.start_fetch_hop(host, tx, check_preflight)
     }
 
     fn fetch_response_type(&self, tx: &FetchTransaction) -> Result<ResponseType, VmError> {
@@ -1155,7 +1160,7 @@ impl Vm {
         self.settle(promise, Settlement::Fulfilled(Value::object(response)))
     }
 
-    fn fetch_eof(&mut self, host: &mut dyn Host, id: u64) -> Result<(), VmError> {
+    fn fetch_eof(&mut self, host: &Host, id: u64) -> Result<(), VmError> {
         let tx = self.fetch_state.transactions.get_mut(&id).unwrap();
         if let Some(bytes) = tx.buffer.take() {
             let head = tx.head.clone().expect("final head processed before EOF");

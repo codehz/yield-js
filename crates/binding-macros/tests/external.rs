@@ -1,11 +1,63 @@
+use std::collections::{BTreeMap, BTreeSet};
 use yield_vm::binding::CallCx;
+use yield_vm::bytecode::{Build, Function, Instr, Slot, SourceModule};
 use yield_vm::{
-    HostClass, Instance, JsResult, JsValue, ModuleCx, This, host_bindings, host_class, host_module,
-    methods, module_exports,
+    Host, HostClass, Instance, JsResult, JsValue, ModuleCx, Services, This, Vm, host, host_class,
+    host_module, methods, module_exports,
 };
 
 #[path = "external/registry.rs"]
 mod registry;
+
+// An empty guest with optional host imports is enough to exercise startup,
+// without introducing a compiler dependency into the macro tests.
+fn start_vm(host: Host, imports: BTreeMap<String, BTreeSet<String>>) -> Vm {
+    let initializer = |func_id, name: &str| {
+        let slot = Slot::transient(0);
+        Function {
+            func_id,
+            name: name.into(),
+            initial_name: name.into(),
+            is_async: false,
+            is_arrow: false,
+            is_method: false,
+            is_generator: false,
+            length: 0,
+            params: vec![],
+            rest_param: None,
+            this_param: None,
+            new_target_param: None,
+            home_param: None,
+            arguments_param: None,
+            transient_slots: 1,
+            persistent_slots: 0,
+            code: vec![Instr::Undefined { dst: slot }, Instr::Return { src: slot }],
+            resumes: vec![],
+            generator_start: None,
+            generator_resumes: vec![],
+            handlers: vec![],
+            module: Some(0),
+            stack_sites: vec![],
+        }
+    };
+    let mut build = Build::new(
+        vec![],
+        vec![],
+        imports,
+        vec![initializer(0, "declare"), initializer(1, "evaluate")],
+        vec![SourceModule {
+            id: "entry".into(),
+            declaration: 0,
+            evaluation: 1,
+            dependencies: vec![],
+            exports: BTreeMap::new(),
+        }],
+        0,
+        None,
+    );
+    build.build_id = build.compute_id();
+    Vm::new(build, host, Default::default()).expect("start guest")
+}
 
 #[host_class(tag = "Example", methods)]
 struct Example {
@@ -49,14 +101,18 @@ impl ExampleModule {
 
 #[test]
 fn links_an_external_module_and_class() -> Result<(), String> {
-    let bindings = host_bindings! {
+    let host = host! {
         dts: "dts/example.d.ts",
         modules: [ExampleModule],
         services: {},
     }?;
-    assert_eq!(
-        bindings.export_names("example").collect::<Vec<_>>(),
-        ["Example", "version"]
+    start_vm(
+        host,
+        [(
+            "example".into(),
+            ["Example".into(), "version".into()].into(),
+        )]
+        .into(),
     );
     assert_eq!(Example::SLOTS.len(), 2);
     Ok(())
@@ -105,11 +161,7 @@ impl yield_vm::Registration<MixedWork> for () {}
 impl yield_vm::OperationDriver for MixedWork {
     type Live = ();
 
-    fn start(
-        &self,
-        _: yield_vm::OperationToken,
-        _: &yield_vm::Bindings,
-    ) -> Result<(), yield_vm::HostFault> {
+    fn start(&self, _: yield_vm::OperationToken, _: &Services) -> Result<(), yield_vm::HostFault> {
         Ok(())
     }
 }
@@ -119,28 +171,29 @@ fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -
 {
     use yield_vm::{Decode, Encode};
 
-    let bindings = host_bindings! {
+    let host = host! {
         dts: "dts/state.d.ts",
         modules: [Implicit, Explicit],
         services: {},
     }?;
+    let services = Services::default();
     let value = MixedWork(Mixed {
         strings: Pair(String::new(), "é".into()),
     });
     let mut bytes = Vec::new();
-    value.encode(&mut bytes, &bindings).unwrap();
+    value.encode(&mut bytes, &services).unwrap();
     assert_eq!(&bytes[..4], &0u32.to_le_bytes());
     assert_eq!(&bytes[4..8], &2u32.to_le_bytes());
     assert_eq!(&bytes[8..], "é".as_bytes());
     let mut cursor = bytes.as_slice();
     assert_eq!(
-        MixedWork::decode(&mut cursor, &bindings).unwrap().0,
+        MixedWork::decode(&mut cursor, &services).unwrap().0,
         value.0
     );
     assert!(cursor.is_empty());
-    let truncated = bindings
-        .decode_operation("mixed", &bytes[..bytes.len() - 1])
-        .unwrap_err();
+    let truncated =
+        yield_vm::__macro_support::decode_operation(&host, "mixed", &bytes[..bytes.len() - 1])
+            .unwrap_err();
     assert!(
         truncated
             .0
@@ -148,7 +201,7 @@ fn derived_payload_excludes_slots_and_checks_nested_and_top_level_boundaries() -
         "{truncated}"
     );
     bytes.push(0);
-    let trailing = bindings.decode_operation("mixed", &bytes).unwrap_err();
+    let trailing = yield_vm::__macro_support::decode_operation(&host, "mixed", &bytes).unwrap_err();
     assert_eq!(trailing.0, "trailing payload bytes");
     Ok(())
 }

@@ -4,8 +4,8 @@
 
 use super::vm::{
     IMPORT_EXPORT_ATTRIBUTES, ImportModule, MODULE_EXPORT_ATTRIBUTES, PRELOAD_EXPORT_ATTRIBUTES,
-    ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, host_function_metadata,
-    module_getter_capture, next_epoch, property_caches, time_source,
+    ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, VmCore,
+    host_function_metadata, module_getter_capture, next_epoch, property_caches, time_source,
 };
 use crate::binding::{Bindings, ExportDecl, NativeTarget};
 use crate::bytecode::Build;
@@ -67,7 +67,7 @@ impl Vm {
     /// A raw [`Build`] is validated; a [`VerifiedBuild`] reuses its validation.
     pub fn new(
         build: impl TryInto<VerifiedBuild, Error: Into<VmError>>,
-        host: &mut dyn Host,
+        host: Host,
         options: VmOptions<'_>,
     ) -> Result<Self, VmError> {
         let base_url = options
@@ -76,19 +76,16 @@ impl Vm {
             .transpose()
             .map_err(|error| VmError::InvalidState(format!("invalid base URL: {error}")))?;
         let build = build.try_into().map_err(Into::into)?;
-        let mut vm = Self::prepare(build, host, options.test_clock)?;
-        vm.base_url = base_url;
-        vm.fetch_environment = options.fetch_environment.unwrap_or_default();
-        vm.initialize_modules(host)?;
-        Ok(vm)
+        let mut core = VmCore::prepare(build, &host, options.test_clock)?;
+        core.base_url = base_url;
+        core.fetch_environment = options.fetch_environment.unwrap_or_default();
+        core.initialize_modules(&host)?;
+        Ok(Self { core, host })
     }
 
     /// Construct a VM using the regular startup pipeline and time its phases.
     #[doc(hidden)]
-    pub fn new_profiled(
-        build: Build,
-        host: &mut dyn Host,
-    ) -> Result<(Self, crate::perf::Startup), VmError> {
+    pub fn new_profiled(build: Build, host: Host) -> Result<(Self, crate::perf::Startup), VmError> {
         let started = std::time::Instant::now();
         let mut digest_checked = None;
         build
@@ -97,12 +94,12 @@ impl Vm {
             })
             .map_err(VmError::InvalidBuild)?;
         let validated = std::time::Instant::now();
-        let mut vm = Self::prepare(VerifiedBuild::from_validated(build), host, None)?;
+        let mut core = VmCore::prepare(VerifiedBuild::from_validated(build), &host, None)?;
         let initializing = std::time::Instant::now();
-        vm.initialize_modules(host)?;
+        core.initialize_modules(&host)?;
         let (digest_checked, digest_timing) = digest_checked.expect("recorded digest timing");
         Ok((
-            vm,
+            Self { core, host },
             crate::perf::Startup {
                 prepare: initializing.duration_since(started),
                 build_identity: digest_checked.duration_since(started),
@@ -113,25 +110,31 @@ impl Vm {
             },
         ))
     }
+}
 
+impl VmCore {
     fn prepare(
         build: VerifiedBuild,
-        host: &mut dyn Host,
+        host: &Host,
         clock: Option<Arc<dyn crate::TestClock>>,
     ) -> Result<Self, VmError> {
         let bindings = host.bindings();
-        let resolved = Self::resolve_imports(&build, &bindings)?;
+        let resolved = Self::resolve_imports(&build, bindings)?;
         let clock = VmClock::new(clock, std::time::Duration::ZERO);
-        let mut vm = Self::empty(build, bindings.clone(), clock);
-        vm.init_builtins(host.user_agent());
+        let mut vm = Self::empty(build, bindings, clock);
+        vm.init_builtins(
+            host.services()
+                .get::<crate::host::UserAgentKey>()
+                .map(String::as_str),
+        );
         vm.install_templates();
-        vm.install_classes(&bindings)?;
-        vm.install_module_states(&bindings);
-        vm.install_imports(&bindings, resolved)?;
+        vm.install_classes(bindings)?;
+        vm.install_module_states(bindings);
+        vm.install_imports(bindings, resolved)?;
         Ok(vm)
     }
 
-    fn initialize_modules(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    fn initialize_modules(&mut self, host: &Host) -> Result<(), VmError> {
         self.instantiate_modules(host)?;
         let mut states = vec![ModuleEvaluation::Pending; self.build.modules.len()];
         if let Some(preload) = self.build.preload {
@@ -149,14 +152,13 @@ impl Vm {
         self.run_until_idle(host)
     }
 
-    fn empty(build: VerifiedBuild, bindings: Bindings, clock: VmClock) -> Self {
-        let time = time_source(&bindings);
+    fn empty(build: VerifiedBuild, bindings: &Bindings, clock: VmClock) -> Self {
+        let time = time_source(bindings);
         let module_states = Vec::new();
         let caches = property_caches(&build);
         Self {
             property_caches: caches,
             build,
-            bindings,
             heap: Heap::new(),
             host_tasks: BTreeMap::new(),
             next_host_task_id: 1,
@@ -552,7 +554,7 @@ impl Vm {
         Ok(())
     }
 
-    fn instantiate_modules(&mut self, host: &mut dyn Host) -> Result<(), VmError> {
+    fn instantiate_modules(&mut self, host: &Host) -> Result<(), VmError> {
         let count = self.build.modules.len();
         self.module_envs.reserve(count);
         self.module_namespaces.reserve(count);
@@ -665,7 +667,7 @@ impl Vm {
 
     fn evaluate_module(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         root: u32,
         states: &mut [ModuleEvaluation],
     ) -> Result<(), VmError> {
@@ -696,7 +698,7 @@ impl Vm {
 
     fn run_module_phase(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         module: usize,
         func_id: u32,
     ) -> Result<(), VmError> {
@@ -714,8 +716,12 @@ impl Vm {
                 None,
             )?
             .into_result();
-        if let Err(VmError::Thrown(error)) = &result {
-            host.report_startup_exception(&self.exception_diagnostic(error));
+        if let Err(VmError::Thrown(error)) = &result
+            && let Some(sink) = host.services().get::<crate::host::DiagnosticsKey>()
+        {
+            sink.report(crate::host::Diagnostic::StartupException {
+                diagnostic: &self.exception_diagnostic(error),
+            });
         }
         result.map(|_| ())
     }

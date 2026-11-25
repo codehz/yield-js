@@ -28,12 +28,9 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
     "#,
     );
     let image = {
-        let mut host = TestHost::new();
-        let mut vm = Vm::new(program.clone(), &mut host, Default::default()).unwrap();
-        assert_eq!(
-            vm.start(&mut host, "run", vec![]).unwrap(),
-            Value::UNDEFINED
-        );
+        let host = TestHost::new();
+        let mut vm = Vm::new(program.clone(), host.host(), Default::default()).unwrap();
+        assert_eq!(vm.start("run", vec![]).unwrap(), Value::UNDEFINED);
         vm.collect_garbage(&[]).unwrap();
         vm.snapshot(&[]).unwrap().to_json().unwrap()
     };
@@ -68,21 +65,22 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
         }));
 
         let mut host = TestHost::new();
-        let mut vm = Vm::restore(snapshot, program.clone(), &mut host, Default::default()).unwrap();
+        let mut vm =
+            Vm::restore(snapshot, program.clone(), host.host(), Default::default()).unwrap();
         assert!(host.clock().registrations().is_empty());
         vm.collect_garbage(&[]).unwrap();
         let recaptured = vm.snapshot(&[]).unwrap().to_json().unwrap();
         let mut vm = Vm::restore(
             Snapshot::from_json(&recaptured).unwrap(),
             program.clone(),
-            &mut host,
+            host.host(),
             Default::default(),
         )
         .unwrap();
         assert_eq!(host.clock().arm_count(), 0);
         vm.start_recovered_operations().unwrap();
         if cancel {
-            vm.start(&mut host, "cancel", vec![]).unwrap();
+            vm.start("cancel", vec![]).unwrap();
             assert_eq!(host.clock().registrations().len(), 1);
         }
         host.advance(&mut vm, 100).unwrap();
@@ -110,7 +108,7 @@ fn waiting_timer_and_unobserved_sleep_chain_root_their_own_objects() {
 
 #[test]
 fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let mut vm = Vm::new(
         build(
             r#"
@@ -142,11 +140,11 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
             }
         "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    vm.start(&mut host, "run", vec![]).unwrap();
+    vm.start("run", vec![]).unwrap();
 
     // Complete both operations without draining the queue. A clock advance
     // would run the first callback before the second task became ready.
@@ -160,7 +158,7 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
     }
     assert!(host.clock().registrations().is_empty());
     assert_eq!(vm.get_export("result").unwrap(), Value::number(0.0));
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("result").unwrap(), Value::number(427.0));
     assert!(host.errors().is_empty());
     let idle = vm.snapshot(&[]).unwrap();
@@ -212,29 +210,18 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
     use super::support::{compile_main, declared};
     use std::sync::Arc;
     use yield_harness::FakeClock;
-    use yield_vm::{Bindings, Host};
-
-    struct RepeatHost(Bindings);
-    impl Host for RepeatHost {
-        fn bindings(&self) -> Bindings {
-            self.0.clone()
-        }
-
-        fn report_error(&mut self, error: JsValue) {
-            panic!("unexpected callback error: {error}");
-        }
-    }
-
     let clock = Arc::new(FakeClock::default());
-    let bindings = yield_vm::host_bindings! {
+    let make_host = || {
+        yield_vm::host! {
         dts: "../dts/repeat_timer.d.ts",
         modules: [RepeatTimer],
         services: {
+            yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },
     }
-    .unwrap();
-    let mut host = RepeatHost(bindings);
+    .unwrap()
+    };
     let program = compile_main(
         r#"
         import { start, cancelDelayedTask } from 'repeat_timer';
@@ -250,15 +237,15 @@ fn running_callback_can_clear_itself_and_prevent_the_next_timer_arm() {
         &declared(include_str!("../dts/repeat_timer.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(program, &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(program, make_host(), Default::default()).unwrap();
+    vm.start("run", vec![]).unwrap();
     let registrations = clock.registrations();
     let [(token, 10)] = registrations.as_slice() else {
         panic!("expected one initial timer registration");
     };
     vm.complete_operation(*token, Completion::Fulfilled(JsValue::undefined()))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("result").unwrap(), Value::number(2.0));
     assert_eq!(clock.arm_count(), 1);
     assert!(clock.registrations().is_empty());

@@ -10,7 +10,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 use std::sync::{Arc, OnceLock};
 use urlpattern::quirks::{self, StringOrInit};
 use urlpattern::regexp::RegExp;
@@ -77,7 +77,7 @@ const INTRINSICS: &[IntrinsicDef] = &[
 pub(crate) const PATTERN_OWNER: Owner =
     Owner::new(ROOT, ROOTS, &[INTRINSICS, GETTERS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -183,7 +183,7 @@ pub(crate) fn validate(input: &UrlPatternInit, ignore_case: bool) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
-fn receiver_pattern(vm: &Vm, receiver: &Value) -> Result<Option<Arc<Pattern>>, VmError> {
+fn receiver_pattern(vm: &VmCore, receiver: &Value) -> Result<Option<Arc<Pattern>>, VmError> {
     if let ValueRef::Object(id) = receiver.view()
         && let Object::UrlPattern {
             input,
@@ -207,8 +207,8 @@ fn receiver_pattern(vm: &Vm, receiver: &Value) -> Result<Option<Arc<Pattern>>, V
 }
 
 fn coerce_usv(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Result<Result<String, Value>, VmError> {
@@ -219,8 +219,8 @@ fn coerce_usv(
 }
 
 fn convert_input(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Result<Result<StringOrInit<'static>, Value>, VmError> {
@@ -274,8 +274,8 @@ fn normalize_constructor_input(
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -337,8 +337,8 @@ fn construct(
 }
 
 fn matches(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,

@@ -18,7 +18,7 @@ use crate::host::{Host, SubtleCryptoKey, SubtleCryptoRequest};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(super) const INSTANCE: &str = "subtleCrypto.instance";
 pub(super) const PROTOTYPE: &str = "subtleCrypto.prototype";
@@ -131,7 +131,7 @@ pub(super) const MEMBERS: &[IntrinsicDef] = &[
     )),
 ];
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(vm: &mut VmCore) {
     let proto = vm.builtins.get(PROTOTYPE);
     tag(vm, proto, "SubtleCrypto");
     for key in [
@@ -148,7 +148,7 @@ pub(super) fn install(vm: &mut Vm) {
     }
 }
 
-fn install_key(vm: &mut Vm, _: &Value) {
+fn install_key(vm: &mut VmCore, _: &Value) {
     let proto = vm.builtins.get(KEY_PROTO);
     link_constructor(vm, vm.builtins.get(KEY), proto);
     tag(vm, proto, "CryptoKey");
@@ -157,7 +157,7 @@ fn install_key(vm: &mut Vm, _: &Value) {
     }
 }
 
-fn tag(vm: &mut Vm, proto: ObjectId, name: &str) {
+fn tag(vm: &mut VmCore, proto: ObjectId, name: &str) {
     define_builtin_data(
         vm,
         proto,
@@ -168,7 +168,7 @@ fn tag(vm: &mut Vm, proto: ObjectId, name: &str) {
 }
 
 fn key_property(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     member: IntrinsicKey,
@@ -252,7 +252,7 @@ fn usage_name(usage: CryptoKeyUsage) -> &'static str {
 }
 
 pub(super) fn alloc_key(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     algorithm: CryptoKeyAlgorithm,
     usages: Vec<CryptoKeyUsage>,
     bytes: Vec<u8>,
@@ -281,7 +281,7 @@ impl From<VmError> for Failure {
 }
 
 type Js<T> = Result<T, Failure>;
-type Prepare = fn(&mut Vm, &mut dyn Host, &ActiveRoots<'_>, &[Value]) -> Js<Work>;
+type Prepare = fn(&mut VmCore, &Host, &ActiveRoots<'_>, &[Value]) -> Js<Work>;
 
 enum Work {
     Primitive(SubtleCryptoRequest, Output),
@@ -289,8 +289,8 @@ enum Work {
 }
 
 fn call(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -300,7 +300,7 @@ fn call(
     let result = if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(INSTANCE))
     {
         Err(Failure::Type("Incompatible SubtleCrypto receiver"))
-    } else if vm.bindings.service::<SubtleCryptoKey>().is_none() {
+    } else if host.services().get::<SubtleCryptoKey>().is_none() {
         Err(Failure::Dom(
             "NotSupportedError",
             "Host SubtleCrypto service is not available",
@@ -313,7 +313,7 @@ fn call(
     let promise = vm.heap.alloc_promise();
     match result {
         Ok(Work::Primitive(request, output)) => {
-            vm.start_subtle_request(promise, request, output)?
+            vm.start_subtle_request(host, promise, request, output)?
         }
         Ok(Work::Local(value)) => vm.queue_adopt(promise, Settlement::Fulfilled(value)),
         Err(Failure::Fault(fault)) => return Err(fault),
@@ -330,7 +330,7 @@ fn call(
     Ok(Invocation::Value(Value::object(promise)))
 }
 
-fn digest(vm: &mut Vm, host: &mut dyn Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn digest(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
     let data = bytes(vm, &args[1])?;
     require_algorithm(vm, host, roots, &args[0], "SHA-256")?;
     Ok(Work::Primitive(
@@ -360,7 +360,7 @@ fn require_extractable(value: &Value) -> Js<()> {
     Ok(())
 }
 
-fn read_key<'a>(vm: &'a Vm, value: &Value) -> Js<&'a CryptoKey> {
+fn read_key<'a>(vm: &'a VmCore, value: &Value) -> Js<&'a CryptoKey> {
     if let ValueRef::Object(id) = value.view()
         && let Object::CryptoKey(key) = vm.heap.get(id)?
     {
@@ -370,7 +370,7 @@ fn read_key<'a>(vm: &'a Vm, value: &Value) -> Js<&'a CryptoKey> {
 }
 
 fn key_bytes(
-    vm: &Vm,
+    vm: &VmCore,
     value: &Value,
     algorithm: CryptoKeyAlgorithm,
     usage: CryptoKeyUsage,
@@ -386,8 +386,8 @@ fn key_bytes(
 }
 
 fn key_usages(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
     allowed: &[CryptoKeyUsage],
@@ -442,12 +442,7 @@ const AES_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::Encrypt, CryptoKeyUsage:
 const HMAC_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::Sign, CryptoKeyUsage::Verify];
 const PBKDF2_USAGES: &[CryptoKeyUsage] = &[CryptoKeyUsage::DeriveKey];
 
-fn import_key(
-    vm: &mut Vm,
-    host: &mut dyn Host,
-    roots: &ActiveRoots<'_>,
-    args: &[Value],
-) -> Js<Work> {
+fn import_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
     require_raw(&args[0])?;
     let data = bytes(vm, &args[1])?;
     let params = &args[2];
@@ -488,7 +483,7 @@ fn import_key(
     Ok(Work::Local(alloc_key(vm, algorithm, usages, data)))
 }
 
-fn export_key(vm: &mut Vm, _: &mut dyn Host, _: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
+fn export_key(vm: &mut VmCore, _: &Host, _: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
     require_raw(&args[0])?;
     let data = read_key(vm, &args[1])?.bytes.clone();
     let object = PlainObject::new(Some(vm.builtins.get(ARRAY_BUFFER_PROTOTYPE)));
@@ -501,12 +496,7 @@ fn export_key(vm: &mut Vm, _: &mut dyn Host, _: &ActiveRoots<'_>, args: &[Value]
     ))))
 }
 
-fn derive_key(
-    vm: &mut Vm,
-    host: &mut dyn Host,
-    roots: &ActiveRoots<'_>,
-    args: &[Value],
-) -> Js<Work> {
+fn derive_key(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, args: &[Value]) -> Js<Work> {
     let params = &args[0];
     require_algorithm(vm, host, roots, params, "PBKDF2")?;
     let salt = dictionary_prop(vm, host, roots, params, "salt")?;
@@ -553,8 +543,8 @@ fn derive_key(
 }
 
 fn gcm(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     encrypt: bool,
@@ -627,8 +617,8 @@ fn gcm(
 }
 
 fn hmac(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     verify: bool,
@@ -653,8 +643,8 @@ fn hmac(
 }
 
 fn dictionary_prop(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     params: &Value,
     name: &str,
@@ -665,19 +655,14 @@ fn dictionary_prop(
     prop(vm, host, roots, params, name)
 }
 
-fn require_hash(
-    vm: &mut Vm,
-    host: &mut dyn Host,
-    roots: &ActiveRoots<'_>,
-    params: &Value,
-) -> Js<()> {
+fn require_hash(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, params: &Value) -> Js<()> {
     let hash = dictionary_prop(vm, host, roots, params, "hash")?;
     require_algorithm(vm, host, roots, &hash, "SHA-256")
 }
 
 fn unsigned(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     input: &Value,
     max: u32,
@@ -693,8 +678,8 @@ fn unsigned(
 }
 
 fn prop(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     object: &Value,
     name: &str,
@@ -706,8 +691,8 @@ fn prop(
 }
 
 fn algorithm_name(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     algorithm: &Value,
 ) -> Js<Value> {
@@ -730,8 +715,8 @@ fn named(name: &Value, expected: &str) -> bool {
 }
 
 fn require_algorithm(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     algorithm: &Value,
     expected: &str,
@@ -743,7 +728,7 @@ fn require_algorithm(
     }
 }
 
-fn bytes(vm: &Vm, value: &Value) -> Js<Vec<u8>> {
+fn bytes(vm: &VmCore, value: &Value) -> Js<Vec<u8>> {
     let ValueRef::Object(id) = value.view() else {
         return Err(Failure::Type("Expected BufferSource"));
     };

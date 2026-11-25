@@ -46,7 +46,7 @@ fn timeout_rearms_early_tokens_and_restores_remaining_time() {
     let clock = source_host.clock().clone();
     let mut vm = Vm::new(
         build.clone(),
-        &mut source_host,
+        source_host.host(),
         VmOptions {
             test_clock: Some(clock),
             ..Default::default()
@@ -73,7 +73,7 @@ fn timeout_rearms_early_tokens_and_restores_remaining_time() {
     let mut vm = Vm::restore(
         Snapshot::from_bytes(&image.to_bytes().unwrap()).unwrap(),
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             test_clock: Some(clock),
             validation: SnapshotValidation::Full,
@@ -87,15 +87,9 @@ fn timeout_rearms_early_tokens_and_restores_remaining_time() {
     assert_eq!(deadline, 1_006);
     vm.wake_timer(old).unwrap();
     host.advance(&mut vm, 5).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(0.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(0.0));
     host.advance(&mut vm, 1).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(231.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(231.0));
     vm.wake_timer(current).unwrap();
 }
 
@@ -109,14 +103,14 @@ fn due_timeout_recovery_delivers_once_without_rearming() {
         export function run() { return observed; }
     "#,
     );
-    let mut host = TestHost::new();
-    let source = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::new();
+    let source = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     let image = source.snapshot(&[]).unwrap();
-    let mut restored_host = TestHost::new();
+    let restored_host = TestHost::new();
     let mut restored = Vm::restore(
         image,
         build,
-        &mut restored_host,
+        restored_host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -126,15 +120,9 @@ fn due_timeout_recovery_delivers_once_without_rearming() {
     restored.start_recovered_operations().unwrap();
     restored.start_recovered_operations().unwrap();
     assert_eq!(restored_host.clock().arm_count(), 0);
-    assert_eq!(
-        restored.start(&mut restored_host, "run", vec![]).unwrap(),
-        Value::number(0.0)
-    );
-    restored.run_until_idle(&mut restored_host).unwrap();
-    assert_eq!(
-        restored.start(&mut restored_host, "run", vec![]).unwrap(),
-        Value::number(1.0)
-    );
+    assert_eq!(restored.start("run", vec![]).unwrap(), Value::number(0.0));
+    restored.run_until_idle().unwrap();
+    assert_eq!(restored.start("run", vec![]).unwrap(), Value::number(1.0));
 }
 
 #[test]
@@ -146,11 +134,11 @@ fn timer_arm_failure_is_not_an_abort() {
         export function aborted() { return signal.aborted; }
     "#,
     );
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let clock = host.clock().clone();
     let mut vm = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock),
             ..Default::default()
@@ -159,19 +147,19 @@ fn timer_arm_failure_is_not_an_abort() {
     .unwrap();
     host.clock().set_fail_start(true);
     assert!(matches!(
-        vm.start(&mut host, "run", vec![]),
+        vm.start("run", vec![]),
         Err(VmError::HostFault(_))
     ));
     assert!(vm.pending_operations().is_empty());
     host.clock().set_fail_start(false);
-    vm.start(&mut host, "run", vec![]).unwrap();
+    vm.start("run", vec![]).unwrap();
     let image = vm.snapshot(&[]).unwrap();
-    let mut other_host = TestHost::new();
+    let other_host = TestHost::new();
     let clock = other_host.clock().clone();
     let mut restored = Vm::restore(
         image,
         build,
-        &mut other_host,
+        other_host.host(),
         RestoreOptions {
             test_clock: Some(clock),
             validation: SnapshotValidation::Full,
@@ -189,11 +177,8 @@ fn timer_arm_failure_is_not_an_abort() {
     host.clock().set_fail_start(true);
     assert!(matches!(vm.wake_timer(token), Err(VmError::HostFault(_))));
     assert!(host.clock().registrations().is_empty());
-    vm.run_until_idle(&mut host).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "aborted", vec![]).unwrap(),
-        Value::boolean(false)
-    );
+    vm.run_until_idle().unwrap();
+    assert_eq!(vm.start("aborted", vec![]).unwrap(), Value::boolean(false));
 }
 
 #[test]
@@ -209,8 +194,8 @@ fn date_clock_rejects_out_of_range_changes_without_delivering_timers() {
     assert_eq!(host.time_service().now_ms(), 0);
     host.clock().set_time(MAX_DATE_MS - 100).unwrap();
 
-    let mut vm = Vm::new(build(SCHEDULE), &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build(SCHEDULE), host.host(), Default::default()).unwrap();
+    vm.start("run", vec![]).unwrap();
     let registrations = host.clock().registrations();
     assert_eq!(registrations.len(), 3);
     for delta in [101, u64::MAX] {
@@ -232,14 +217,14 @@ fn restore_arms_only_remaining_time_on_an_independent_clock() {
         let clock = host.clock().clone();
         let mut vm = Vm::new(
             build.clone(),
-            &mut host,
+            host.host(),
             VmOptions {
                 test_clock: Some(clock),
                 ..Default::default()
             },
         )
         .unwrap();
-        vm.start(&mut host, "run", vec![]).unwrap();
+        vm.start("run", vec![]).unwrap();
         let old = host.clock().registrations();
         assert_eq!(old.len(), 3);
         assert!(old.iter().all(|&(_, deadline)| deadline == 100));
@@ -286,7 +271,7 @@ fn restore_arms_only_remaining_time_on_an_independent_clock() {
             vm = Vm::restore(
                 Snapshot::from_json(&json).unwrap(),
                 build.clone(),
-                &mut host,
+                host.host(),
                 RestoreOptions {
                     test_clock: Some(clock),
                     ..Default::default()
@@ -317,9 +302,9 @@ fn restore_arms_only_remaining_time_on_an_independent_clock() {
         }
         let current = host.clock().registrations();
         assert_eq!(vm.get_export("sleeping").unwrap(), promise);
-        vm.start(&mut host, "cancel", vec![]).unwrap();
+        vm.start("cancel", vec![]).unwrap();
         expect_unknown(&mut vm, current[1].0);
-        let observed = vm.start(&mut host, "observe", vec![]).unwrap();
+        let observed = vm.start("observe", vec![]).unwrap();
         host.advance(&mut vm, 69).unwrap();
         assert_eq!(
             vm.get_export("observations").unwrap(),
@@ -364,8 +349,8 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     "#,
     );
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let completed = vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let completed = vm.start("run", vec![]).unwrap();
     assert_eq!(vm.get_export("total").unwrap(), Value::number(0.0));
     host.advance(&mut vm, 0).unwrap();
     assert_eq!(vm.get_export("total").unwrap(), Value::number(1.0));
@@ -373,8 +358,8 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     assert!(image.host_tasks.is_empty());
     assert!(image.operations.is_empty());
     let mut host = TestHost::new();
-    let mut vm = Vm::restore(image, build, &mut host, Default::default()).unwrap();
-    let fresh = vm.start(&mut host, "again", vec![]).unwrap();
+    let mut vm = Vm::restore(image, build, host.host(), Default::default()).unwrap();
+    let fresh = vm.start("again", vec![]).unwrap();
     assert_ne!(fresh, completed);
     host.advance(&mut vm, 0).unwrap();
     assert_eq!(vm.get_export("total").unwrap(), Value::number(3.0));
@@ -424,18 +409,6 @@ impl Chain {
     }
 }
 
-struct ChainHost(yield_vm::Bindings);
-
-impl yield_vm::Host for ChainHost {
-    fn bindings(&self) -> yield_vm::Bindings {
-        self.0.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected task error: {error}");
-    }
-}
-
 #[test]
 fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     use super::support::compile_main;
@@ -443,15 +416,17 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
     use std::sync::Arc;
 
     let clock = Arc::new(yield_harness::FakeClock::default());
-    let bindings = yield_vm::host_bindings! {
+    let make_host = || {
+        yield_vm::host! {
         dts: "../dts/chain.d.ts",
         modules: [Chain],
         services: {
+            yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
             yield_harness::timer::FakeClockKey => Arc::clone(&clock),
         },
     }
-    .unwrap();
-    let mut host = ChainHost(bindings);
+    .unwrap()
+    };
     let build = compile_main(
         r#"
         import { start, cancel } from 'chain';
@@ -463,25 +438,25 @@ fn consecutive_timer_awaits_restore_without_replacing_the_handle() {
         &declared(include_str!("../dts/chain.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let handle = vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), make_host(), Default::default()).unwrap();
+    let handle = vm.start("run", vec![]).unwrap();
     let first = vm.pending_operations()[0].token;
     assert_eq!(clock.registrations(), [(first, 10)]);
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
-    vm = Vm::restore(image, build.clone(), &mut host, Default::default()).unwrap();
+    vm = Vm::restore(image, build.clone(), make_host(), Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     let first_recovered = vm.pending_operations()[0].token;
-    clock.advance(&mut vm, &mut host, 10).unwrap();
+    clock.advance(&mut vm, 10).unwrap();
     let second = vm.pending_operations()[0].token;
     assert_eq!(clock.registrations(), [(second, 30)]);
     assert_eq!(vm.get_export("count").unwrap(), Value::number(1.0));
     expect_unknown(&mut vm, first_recovered);
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(Value::number(image.host_tasks[0].id as f64), handle);
-    vm = Vm::restore(image, build, &mut host, Default::default()).unwrap();
+    vm = Vm::restore(image, build, make_host(), Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
     let second_recovered = vm.pending_operations()[0].token;
-    vm.start(&mut host, "clear", vec![]).unwrap();
+    vm.start("clear", vec![]).unwrap();
     expect_unknown(&mut vm, second_recovered);
     assert!(clock.registrations().is_empty());
     assert_eq!(vm.get_export("count").unwrap(), Value::number(1.0));
@@ -508,30 +483,21 @@ fn fractional_performance_clock_survives_restore_without_timer_service() {
         }
     "#,
     );
-    let mut host = TestHost::without_timer_service();
+    let host = TestHost::without_timer_service();
     let clock = std::sync::Arc::new(yield_harness::FakeClock::default());
     let mut vm = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock.clone()),
             ..Default::default()
         },
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut host, "now", vec![]).unwrap(),
-        Value::number(0.0)
-    );
-    assert_eq!(
-        vm.start(&mut host, "origin", vec![]).unwrap(),
-        Value::number(0.0)
-    );
+    assert_eq!(vm.start("now", vec![]).unwrap(), Value::number(0.0));
+    assert_eq!(vm.start("origin", vec![]).unwrap(), Value::number(0.0));
     clock.advance_monotonic(Duration::from_micros(250));
-    assert_eq!(
-        vm.start(&mut host, "now", vec![]).unwrap(),
-        Value::number(0.25)
-    );
+    assert_eq!(vm.start("now", vec![]).unwrap(), Value::number(0.25));
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
 
     let restored_clock = std::sync::Arc::new(yield_harness::FakeClock::default());
@@ -539,7 +505,7 @@ fn fractional_performance_clock_survives_restore_without_timer_service() {
     let mut vm = Vm::restore(
         image,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             test_clock: Some(restored_clock.clone()),
             validation: SnapshotValidation::Full,
@@ -547,21 +513,12 @@ fn fractional_performance_clock_survives_restore_without_timer_service() {
         },
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut host, "now", vec![]).unwrap(),
-        Value::number(0.25)
-    );
+    assert_eq!(vm.start("now", vec![]).unwrap(), Value::number(0.25));
     restored_clock.advance_monotonic(Duration::from_micros(500));
+    assert_eq!(vm.start("now", vec![]).unwrap(), Value::number(0.75));
+    assert_eq!(vm.start("origin", vec![]).unwrap(), Value::number(0.0));
     assert_eq!(
-        vm.start(&mut host, "now", vec![]).unwrap(),
-        Value::number(0.75)
-    );
-    assert_eq!(
-        vm.start(&mut host, "origin", vec![]).unwrap(),
-        Value::number(0.0)
-    );
-    assert_eq!(
-        vm.start(&mut host, "unsupported", vec![]).unwrap(),
+        vm.start("unsupported", vec![]).unwrap(),
         Value::boolean(true)
     );
     assert!(vm.pending_operations().is_empty());
@@ -588,18 +545,18 @@ fn script_timeout_snapshot_cuts_preserve_roots_and_cancellation() {
     );
     for cut in ["armed", "rearmed", "queued"] {
         for cancel in [false, true] {
-            let mut host = TestHost::new();
+            let host = TestHost::new();
             let clock = host.clock().clone();
             let mut vm = Vm::new(
                 build.clone(),
-                &mut host,
+                host.host(),
                 VmOptions {
                     test_clock: Some(clock.clone()),
                     ..Default::default()
                 },
             )
             .unwrap();
-            vm.start(&mut host, "schedule", vec![]).unwrap();
+            vm.start("schedule", vec![]).unwrap();
             let original = clock.registrations()[0].0;
             clock.advance_monotonic(Duration::from_micros(3_250));
             let mut stale = vec![original];
@@ -638,7 +595,7 @@ fn script_timeout_snapshot_cuts_preserve_roots_and_cancellation() {
             let mut vm = Vm::restore(
                 image,
                 build.clone(),
-                &mut host,
+                host.host(),
                 RestoreOptions {
                     test_clock: Some(clock.clone()),
                     validation: SnapshotValidation::Full,
@@ -660,7 +617,7 @@ fn script_timeout_snapshot_cuts_preserve_roots_and_cancellation() {
                 assert_eq!(deadline, 20_007);
             }
             if cancel {
-                vm.start(&mut host, "cancel", vec![]).unwrap();
+                vm.start("cancel", vec![]).unwrap();
                 vm.collect_garbage(&[]).unwrap();
             }
             let armed_count = clock.arm_count();
@@ -673,7 +630,7 @@ fn script_timeout_snapshot_cuts_preserve_roots_and_cancellation() {
                 vm.wake_timer(token).unwrap();
                 vm.wake_timer(token).unwrap();
             }
-            vm.run_until_idle(&mut host).unwrap();
+            vm.run_until_idle().unwrap();
             assert_eq!(clock.arm_count(), armed_count);
             let expected = if cancel { "" } else { "fired" };
             assert_eq!(
@@ -708,18 +665,18 @@ fn reversed_script_timer_wakes_keep_fifo_and_microtask_order() {
     "#,
     );
     for cancel in [false, true] {
-        let mut host = TestHost::new();
+        let host = TestHost::new();
         let clock = host.clock().clone();
         let mut vm = Vm::new(
             build.clone(),
-            &mut host,
+            host.host(),
             VmOptions {
                 test_clock: Some(clock.clone()),
                 ..Default::default()
             },
         )
         .unwrap();
-        vm.start(&mut host, "schedule", vec![JsValue::boolean(cancel)])
+        vm.start("schedule", vec![JsValue::boolean(cancel)])
             .unwrap();
         let registrations = clock.registrations();
         assert_eq!(registrations.len(), 2);
@@ -731,7 +688,7 @@ fn reversed_script_timer_wakes_keep_fifo_and_microtask_order() {
         assert!(clock.registrations().is_empty());
         assert_eq!(vm.get_export("log").unwrap(), Value::string("".into()));
         assert_eq!(vm.snapshot(&[]).unwrap().ordinary_tasks.len(), 2);
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         let expected = if cancel { "AM" } else { "AMB" };
         assert_eq!(
             vm.get_export("log").unwrap(),
@@ -752,18 +709,18 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
         export function repeat() { setInterval(() => { ++calls; }, 10); }
     "#,
     );
-    let mut source = TestHost::new();
+    let source = TestHost::new();
     let clock = source.clock().clone();
     let mut vm = Vm::new(
         build.clone(),
-        &mut source,
+        source.host(),
         VmOptions {
             test_clock: Some(clock),
             ..Default::default()
         },
     )
     .unwrap();
-    vm.start(&mut source, "schedule", vec![]).unwrap();
+    vm.start("schedule", vec![]).unwrap();
     let image = vm.snapshot(&[]).unwrap();
     for corrupt_sequence in [false, true] {
         let mut bad = image.clone();
@@ -780,12 +737,12 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
         } else {
             key.id += 1;
         }
-        let mut host = TestHost::new();
+        let host = TestHost::new();
         let clock = host.clock().clone();
         let restored = Vm::restore(
             bad,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 test_clock: Some(clock.clone()),
                 validation: SnapshotValidation::Full,
@@ -797,9 +754,9 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
         assert!(clock.registrations().is_empty());
     }
 
-    let mut host = TestHost::without_timer_service();
+    let host = TestHost::without_timer_service();
     assert!(matches!(
-        Vm::restore(image, build.clone(), &mut host, Default::default()),
+        Vm::restore(image, build.clone(), host.host(), Default::default()),
         Err(VmError::InvalidSnapshot(message)) if message.contains("wintertc.timer")
     ));
 
@@ -812,7 +769,7 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
     let mut restored = Vm::restore(
         queued,
         build.clone(),
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -820,12 +777,12 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
     )
     .unwrap();
     restored.start_recovered_operations().unwrap();
-    restored.run_until_idle(&mut host).unwrap();
+    restored.run_until_idle().unwrap();
     assert_eq!(restored.get_export("calls").unwrap(), Value::number(1.0));
     assert_eq!(host.clock().arm_count(), 0);
 
-    vm.run_until_idle(&mut source).unwrap();
-    vm.start(&mut source, "repeat", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
+    vm.start("repeat", vec![]).unwrap();
     let token = source.clock().registrations()[0].0;
     source
         .clock()
@@ -833,7 +790,7 @@ fn corrupt_script_timer_sequence_and_target_fail_before_arming() {
     vm.wake_timer(token).unwrap();
     let queued = vm.snapshot(&[]).unwrap();
     assert!(matches!(
-        Vm::restore(queued, build, &mut host, Default::default()),
+        Vm::restore(queued, build, host.host(), Default::default()),
         Err(VmError::InvalidSnapshot(message)) if message.contains("wintertc.timer")
     ));
 }
@@ -863,18 +820,18 @@ fn restored_interval_does_not_catch_up_and_can_cancel_itself_after_throwing() {
         }
     "#,
     );
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let clock = host.clock().clone();
     let mut vm = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock.clone()),
             ..Default::default()
         },
     )
     .unwrap();
-    vm.start(&mut host, "schedule", vec![]).unwrap();
+    vm.start("schedule", vec![]).unwrap();
     let stale = clock.registrations()[0].0;
     clock.advance_monotonic(Duration::from_secs(1));
     let image = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
@@ -885,7 +842,7 @@ fn restored_interval_does_not_catch_up_and_can_cancel_itself_after_throwing() {
     let mut vm = Vm::restore(
         image,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             test_clock: Some(clock.clone()),
             validation: SnapshotValidation::Full,
@@ -897,7 +854,7 @@ fn restored_interval_does_not_catch_up_and_can_cancel_itself_after_throwing() {
     vm.start_recovered_operations().unwrap();
     vm.wake_timer(stale).unwrap();
     assert_eq!(clock.arm_count(), 0);
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("log").unwrap(), Value::string("IETM".into()));
     assert_eq!(clock.arm_count(), 1);
     assert_eq!(clock.registrations()[0].1, 90_010);
@@ -921,33 +878,30 @@ fn interval_rearm_fault_discards_registration_without_a_second_callback() {
         export function schedule() { setInterval(() => { ++count; }, 10); }
     "#,
     );
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let clock = host.clock().clone();
     let mut vm = Vm::new(
         build,
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock.clone()),
             ..Default::default()
         },
     )
     .unwrap();
-    vm.start(&mut host, "schedule", vec![]).unwrap();
+    vm.start("schedule", vec![]).unwrap();
     let token = clock.registrations()[0].0;
     clock.advance_monotonic(Duration::from_millis(10));
     vm.wake_timer(token).unwrap();
     clock.set_fail_start(true);
-    assert!(matches!(
-        vm.run_until_idle(&mut host),
-        Err(VmError::HostFault(_))
-    ));
+    assert!(matches!(vm.run_until_idle(), Err(VmError::HostFault(_))));
     assert!(clock.registrations().is_empty());
     let image = vm.snapshot(&[]).unwrap();
     assert!(image.script_timers.is_empty());
     assert!(image.operations.is_empty());
     clock.set_fail_start(false);
     vm.wake_timer(token).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("count").unwrap(), Value::number(1.0));
     assert_eq!(clock.arm_count(), 1);
 }

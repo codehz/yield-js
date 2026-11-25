@@ -12,6 +12,8 @@
 
 ## Host：单跳 HTTP、背压与环境服务
 
+Rust 嵌入方通过 `host!` 将 `FetchKey` 注册到交由 VM 接管的宿主。平台工作在 VM 外执行，事件由嵌入方回到 VM 线程调用 `vm.deliver_fetch_event` 投递，不再另传宿主，也不在平台回调中同步执行脚本。
+
 - 最小 HTTP 适配器接收 `start(token, HopRequest) → registration`，其中含绝对 URL、方法、保序的 header 字节对、无体／已知长度／未知长度上传描述及本跳的凭据约束；登记提供 `send_upload(bytes)`、`finish_upload()`、`grant_download(bytes_limit)`、`cancel()`。名称仅示意接口方向，不锁定 ABI。单跳指 HTTP 交换，不指整次 Fetch；重定向、预检与后续请求由 VM 另发，平台不得自动重定向、应用浏览器响应过滤、合并 `Set-Cookie` 或擅自重试已可能发送的请求。适配器负责 DNS、连接、代理、TLS、HTTP framing 等平台工作；单跳传输输出去 framing、未自动解压的字节，由 VM 按适用规则解码，避免重复解压或丢失 header 信息。
 - 投递类型限定为上传额度、最终 `ResponseHead { status, status_text, headers }`、响应字节、EOF 或类型化失败；需要观测的中间响应保留为单独事件。上传按宿主额度从原 VM 流读取并送入适配器，下载按 VM 授予的字节额度投递，不能以无界缓冲替代流。额度和字节所有权、单跳事件顺序、唯一终结及取消明确写入协议；最终 headers 可先于上传 EOF，最终响应体按规范在可暴露时交付，不要求提前读完。`AbortSignal` 或 body 取消由 VM 按 Fetch/Streams 算法转成取消，事务终结后忽略迟到结果。普通网络失败在响应交付前拒绝原 Promise，交付后只使相应未结束的体流出错；中止遵循规范的 reason 与阶段，不以宿主错误字符串替代脚本原因。
 - 每个实际出站的 URL（含重定向、预检和连接重试）都受宿主授权及连接层策略约束；不能把 CORS 当作宿主网络权限。平台客户端应禁止隐式共享 cookie、认证和缓存。可按需注入隔离的 cookie／HTTP 认证／缓存服务，并遵循 VM 为每一跳传入的 origin、分区及 credential/cache mode；无可选存储时是空凭据库、缓存 miss 或按模式返回网络错误，不降级 `only-if-cached` 为联网。宿主可配置请求体、响应体和并发资源限制，超限走可诊断的错误，不能截断成成功。平台服务是外部环境，不是保存 VM Fetch 进度的第二份存档。

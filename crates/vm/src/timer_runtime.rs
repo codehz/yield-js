@@ -15,11 +15,11 @@ use crate::snapshot::{
 };
 use crate::value::Value;
 
-use super::Vm;
+use super::VmCore;
 
-impl Vm {
+impl VmCore {
     /// Delivers a one-shot timer wake without executing guest code.
-    pub fn wake_timer(&mut self, token: OperationToken) -> Result<(), VmError> {
+    pub fn wake_timer(&mut self, host: &Host, token: OperationToken) -> Result<(), VmError> {
         if token.epoch != self.epoch {
             return Ok(());
         }
@@ -45,6 +45,7 @@ impl Vm {
         } else {
             drop(self.remove_operation(token.id));
             match self.arm_new_timeout(
+                host,
                 target,
                 deadline,
                 Self::timeout_remaining(deadline, elapsed),
@@ -95,13 +96,14 @@ impl Vm {
 
     pub(super) fn arm_new_timeout(
         &mut self,
+        host: &Host,
         target: TimerTarget,
         deadline: Duration,
         delay_ms: u64,
         sequence: u64,
     ) -> Result<u64, HostFault> {
         let token = self.allocate_operation_token()?;
-        let live = Self::arm_timeout(&self.bindings, token, delay_ms)?;
+        let live = Self::arm_timeout(host, token, delay_ms)?;
         self.operations.insert(
             token.id,
             PendingOperation {
@@ -144,13 +146,14 @@ impl Vm {
 
     pub(crate) fn schedule_script_timer(
         &mut self,
+        host: &Host,
         id: i32,
         callback: Value,
         arguments: Vec<Value>,
         repeat: bool,
         period: u32,
     ) -> Result<(), HostFault> {
-        let (sequence, nesting, state) = self.arm_script_timer(id, period)?;
+        let (sequence, nesting, state) = self.arm_script_timer(host, id, period)?;
         self.script_timers.insert(
             id,
             ScriptTimer {
@@ -168,6 +171,7 @@ impl Vm {
 
     fn arm_script_timer(
         &mut self,
+        host: &Host,
         id: i32,
         period: u32,
     ) -> Result<(u64, u32, TimerState), HostFault> {
@@ -183,6 +187,7 @@ impl Vm {
         let sequence = self.next_operation_id;
         let key = TimerKey { id, sequence };
         let operation = self.arm_new_timeout(
+            host,
             TimerTarget::Script(key),
             deadline,
             u64::from(delay),
@@ -215,11 +220,7 @@ impl Vm {
         }
     }
 
-    pub(super) fn run_script_timer(
-        &mut self,
-        host: &mut dyn Host,
-        key: TimerKey,
-    ) -> Result<(), VmError> {
+    pub(super) fn run_script_timer(&mut self, host: &Host, key: TimerKey) -> Result<(), VmError> {
         let Some(timer) = self
             .script_timers
             .get(&key.id)
@@ -247,7 +248,7 @@ impl Vm {
                 }
                 Ok(())
             });
-        let result = result.and_then(|()| self.finish_script_timer(key));
+        let result = result.and_then(|()| self.finish_script_timer(host, key));
         self.timer_nesting = 0;
         if result.is_err()
             && self
@@ -260,7 +261,7 @@ impl Vm {
         result
     }
 
-    fn finish_script_timer(&mut self, key: TimerKey) -> Result<(), VmError> {
+    fn finish_script_timer(&mut self, host: &Host, key: TimerKey) -> Result<(), VmError> {
         let Some(timer) = self
             .script_timers
             .get(&key.id)
@@ -273,7 +274,7 @@ impl Vm {
             return Ok(());
         }
         let (sequence, nesting, state) = self
-            .arm_script_timer(key.id, timer.period)
+            .arm_script_timer(host, key.id, timer.period)
             .map_err(|fault| VmError::HostFault(fault.0))?;
         let timer = self
             .script_timers

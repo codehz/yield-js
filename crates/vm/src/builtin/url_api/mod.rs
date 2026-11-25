@@ -19,7 +19,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const ROOT: &str = "url";
 const PROTOTYPE: &str = "url.prototype";
@@ -146,7 +146,7 @@ pub(crate) const URL_OWNER: Owner = Owner::new(
     Some(install),
 );
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -190,7 +190,7 @@ fn install(vm: &mut Vm, _: &Value) {
     );
 }
 
-fn url_receiver<'a>(vm: &'a Vm, value: &Value) -> Result<Option<(ObjectId, &'a Url)>, VmError> {
+fn url_receiver<'a>(vm: &'a VmCore, value: &Value) -> Result<Option<(ObjectId, &'a Url)>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -200,7 +200,7 @@ fn url_receiver<'a>(vm: &'a Vm, value: &Value) -> Result<Option<(ObjectId, &'a U
     })
 }
 
-fn bad_receiver(vm: &mut Vm, roots: &ActiveRoots<'_>) -> Result<Invocation, VmError> {
+fn bad_receiver(vm: &mut VmCore, roots: &ActiveRoots<'_>) -> Result<Invocation, VmError> {
     vm.throw_type_error(roots, "URL member called on an incompatible receiver")
 }
 
@@ -214,8 +214,8 @@ fn string(text: impl AsRef<str>) -> Invocation {
 }
 
 fn stringify(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -233,8 +233,8 @@ enum ParseMode {
 }
 
 fn parse(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     mode: ParseMode,
@@ -308,7 +308,7 @@ fn serialize_query(pairs: &[(String, String)]) -> String {
         .finish()
 }
 
-impl Vm {
+impl VmCore {
     fn refresh_search_params(&mut self, id: ObjectId) -> Result<(), VmError> {
         let Object::Url {
             url,

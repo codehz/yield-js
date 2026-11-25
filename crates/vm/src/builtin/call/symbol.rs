@@ -6,8 +6,8 @@ use crate::heap::{BoxedPrimitive, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{JsString, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn symbol_static(
         &mut self,
         _receiver: &Value,
@@ -55,7 +55,7 @@ impl Vm {
     /// `Symbol(desc)`: every call produces a fresh identity.
     pub(crate) fn symbol_constructor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
@@ -72,7 +72,7 @@ impl Vm {
 
     pub(crate) fn symbol_for(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {

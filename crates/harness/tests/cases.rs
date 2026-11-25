@@ -6,9 +6,13 @@ fn private_run_is_not_a_case_entrypoint() {
     let error = yield_harness::run_case("private_run.js", source).unwrap_err();
     assert!(error.contains("unknown export \"run\""), "{error}");
 
-    let mut host = yield_harness::TestHost::default();
-    let vm =
-        yield_vm::Vm::new(yield_harness::build(source), &mut host, Default::default()).unwrap();
+    let host = yield_harness::TestHost::default();
+    let vm = yield_vm::Vm::new(
+        yield_harness::build(source),
+        host.host(),
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         matches!(vm.get_export("run"), Err(yield_vm::VmError::InvalidState(message)) if message == "unknown export \"run\"")
     );

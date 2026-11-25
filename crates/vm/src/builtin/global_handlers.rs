@@ -6,7 +6,7 @@ use crate::heap::EventListener;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) const TYPES: [&str; 3] = ["error", "unhandledrejection", "rejectionhandled"];
 
@@ -28,7 +28,7 @@ pub(crate) const INTRINSICS: &[IntrinsicDef] = attributes![
     (2, "onrejectionhandled"),
 ];
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(vm: &mut VmCore) {
     let global = vm.builtins.get("globalThis");
     for [getter, setter] in INTRINSICS.as_chunks::<2>().0 {
         let get = vm.alloc_intrinsic(getter.key);
@@ -39,7 +39,7 @@ pub(super) fn install(vm: &mut Vm) {
 }
 
 fn access(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     index: usize,

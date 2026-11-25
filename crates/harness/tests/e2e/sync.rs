@@ -17,9 +17,9 @@ export function run() {
 }
 "#;
     let build_return = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build_return, &mut host, Default::default()).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build_return, host.host(), Default::default()).expect("bindings");
+    let result = vm.start("run", Vec::new()).expect("start");
     assert_eq!(result, Value::number(5.0));
 
     let source = r#"
@@ -32,8 +32,8 @@ export function run() {
 }
 "#;
     let build_override = build(source);
-    let mut vm = Vm::new(build_override, &mut host, Default::default()).expect("bindings");
-    let result = vm.start(&mut host, "run", Vec::new()).expect("start");
+    let mut vm = Vm::new(build_override, host.host(), Default::default()).expect("bindings");
+    let result = vm.start("run", Vec::new()).expect("start");
     assert_eq!(result, Value::number(2.0));
 
     let source = r#"
@@ -46,10 +46,8 @@ export function run() {
 }
 "#;
     let build_throw = build(source);
-    let mut vm = Vm::new(build_throw, &mut host, Default::default()).expect("bindings");
-    let error = vm
-        .start(&mut host, "run", Vec::new())
-        .expect_err("finally throw wins");
+    let mut vm = Vm::new(build_throw, host.host(), Default::default()).expect("bindings");
+    let error = vm.start("run", Vec::new()).expect_err("finally throw wins");
     assert!(matches!(error, VmError::Thrown(value) if value == Value::number(3.0)));
 }
 
@@ -67,11 +65,9 @@ export function run(n) {
 }
 "#;
     let build = build(source);
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("bindings");
-    let result = vm
-        .start(&mut host, "run", vec![JsValue::number(5.0)])
-        .expect("start");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).expect("bindings");
+    let result = vm.start("run", vec![JsValue::number(5.0)]).expect("start");
     assert!(matches!(
         vm.promise_state(&result),
         Err(VmError::InvalidState(message)) if message == "value is not an object"
@@ -82,18 +78,19 @@ export function run(n) {
 #[test]
 fn math_random_continues_after_snapshot_restore() {
     let build = build("export function run() { return Math.random(); }");
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let first = vm.start(&mut host, "run", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let first = vm.start("run", vec![]).unwrap();
     let snapshot = vm.snapshot(&[]).unwrap();
-    let expected = vm.start(&mut host, "run", vec![]).unwrap();
+    let expected = vm.start("run", vec![]).unwrap();
     assert_ne!(first, expected);
     let decoded = yield_vm::Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
-    let mut restored = Vm::restore(decoded, build.clone(), &mut host, Default::default()).unwrap();
-    assert_eq!(restored.start(&mut host, "run", vec![]).unwrap(), expected);
+    let mut restored =
+        Vm::restore(decoded, build.clone(), host.host(), Default::default()).unwrap();
+    assert_eq!(restored.start("run", vec![]).unwrap(), expected);
     assert_eq!(
-        restored.start(&mut host, "run", vec![]).unwrap(),
-        vm.start(&mut host, "run", vec![]).unwrap()
+        restored.start("run", vec![]).unwrap(),
+        vm.start("run", vec![]).unwrap()
     );
 
     let mut missing_root = snapshot.clone();
@@ -102,7 +99,7 @@ fn math_random_continues_after_snapshot_restore() {
         Vm::restore(
             missing_root,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -116,7 +113,7 @@ fn math_random_continues_after_snapshot_restore() {
         Vm::restore(
             zero_state,
             build,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()

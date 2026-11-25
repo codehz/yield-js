@@ -3,9 +3,9 @@
 use crate::builtin::define_builtin_data;
 use crate::heap::{Attributes, UNSCOPABLES_SYMBOL};
 use crate::value::{ObjectId, PropertyKey, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
-pub(super) fn install(vm: &mut Vm, prototype: ObjectId) {
+pub(super) fn install(vm: &mut VmCore, prototype: ObjectId) {
     let list = vm.heap.alloc_plain_with(None);
     for name in [
         "at",

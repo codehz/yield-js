@@ -29,7 +29,7 @@ fn message(event: &ConsoleEvent) -> String {
 
 #[test]
 fn console_formatter_keeps_fragments_and_never_invokes_inspection_hooks() {
-    let mut host = TestHost::new();
+    let host = TestHost::new();
     let mut vm = Vm::new(
         build(
             r#"
@@ -60,14 +60,11 @@ fn console_formatter_keeps_fragments_and_never_invokes_inspection_hooks() {
         }
     "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(0.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(0.0));
     let events = host.take_console_events();
     assert_eq!(events.len(), 4);
     let [ConsoleArg::Formatted(fragments)] = args(&events[0]) else {
@@ -135,14 +132,14 @@ fn console_table_dir_groups_clear_and_trace_have_structured_payloads() {
         }
     "#;
     for stack_traces in [true, false] {
-        let mut host = TestHost::new();
+        let host = TestHost::new();
         let options = Compiler {
             stack_traces,
             ..Default::default()
         };
         let build = super::support::compile_main(source, &options).unwrap();
-        let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-        vm.start(&mut host, "run", vec![]).unwrap();
+        let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+        vm.start("run", vec![]).unwrap();
         let events = host.take_console_events();
         assert_eq!(events.len(), 8);
         assert_eq!(events[0].level, ConsoleLevel::GroupCollapsed);
@@ -231,31 +228,28 @@ fn console_missing_sink_is_lazy_and_preserves_earlier_effects() {
         export function finish() { console.count('x'); console.timeLog('t'); }
     "#,
     );
-    let mut host = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "begin", vec![]).unwrap();
-    let mut missing = TestHost::without_console_service();
+    let host = TestHost::new();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    vm.start("begin", vec![]).unwrap();
+    let missing = TestHost::without_console_service();
     let mut vm = Vm::restore(
         vm.snapshot(&[]).unwrap(),
         build.clone(),
-        &mut missing,
+        missing.host(),
         Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut missing, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::boolean(true));
     host.take_console_events();
     let mut vm = Vm::restore(
         vm.snapshot(&[]).unwrap(),
         build,
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
     assert!(host.take_console_events().is_empty());
-    vm.start(&mut host, "finish", vec![]).unwrap();
+    vm.start("finish", vec![]).unwrap();
     let events = host.take_console_events();
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.groups.is_empty()));
@@ -280,13 +274,13 @@ fn console_snapshot_restores_state_without_replaying_events() {
         }
     "#,
     );
-    let mut old_host = TestHost::new();
+    let old_host = TestHost::new();
     let options = VmOptions {
         test_clock: Some(old_host.clock().clone()),
         ..Default::default()
     };
-    let mut vm = Vm::new(build.clone(), &mut old_host, options).unwrap();
-    vm.start(&mut old_host, "begin", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), old_host.host(), options).unwrap();
+    vm.start("begin", vec![]).unwrap();
     old_host
         .clock()
         .advance_monotonic(Duration::from_micros(1250));
@@ -295,15 +289,15 @@ fn console_snapshot_restores_state_without_replaying_events() {
     assert_eq!(old_host.take_console_events().len(), 2);
     let binary = snapshot.to_bytes().unwrap();
     let json = snapshot.to_json().unwrap();
-    let mut missing = TestHost::without_console_service();
+    let missing = TestHost::without_console_service();
     Vm::restore(
         Snapshot::from_json(&json).unwrap(),
         build.clone(),
-        &mut missing,
+        missing.host(),
         Default::default(),
     )
     .unwrap();
-    let mut new_host = TestHost::new();
+    let new_host = TestHost::new();
     new_host.clock().advance_monotonic(Duration::from_secs(50));
     let clock = new_host.clock().clone();
     let full = || RestoreOptions {
@@ -316,23 +310,20 @@ fn console_snapshot_restores_state_without_replaying_events() {
     let invalid = Snapshot::from_json(&edited.to_string()).unwrap();
     let invalid_options = full();
     assert!(
-        matches!(Vm::restore(invalid, build.clone(), &mut new_host, invalid_options),
+        matches!(Vm::restore(invalid, build.clone(), new_host.host(), invalid_options),
         Err(VmError::InvalidSnapshot(message)) if message.contains("console timer start"))
     );
     let options = full();
     let mut vm = Vm::restore(
         Snapshot::from_bytes(&binary).unwrap(),
         build,
-        &mut new_host,
+        new_host.host(),
         options,
     )
     .unwrap();
     assert!(new_host.take_console_events().is_empty());
     new_host.clock().advance_monotonic(Duration::from_millis(2));
-    assert_eq!(
-        vm.start(&mut new_host, "run", vec![]).unwrap(),
-        Value::number(42.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(42.0));
     let events = new_host.take_console_events();
     assert_eq!(
         events

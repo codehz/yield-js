@@ -15,7 +15,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const BUFFER: IntrinsicKey = IntrinsicKey::new("DataView", Slot::PrototypeGetter, "buffer");
 const BYTE_LENGTH: IntrinsicKey =
@@ -60,7 +60,7 @@ macro_rules! data_view_members {
         ];
 
         /// Property installation repeats the same member list.
-        fn install_elements(vm: &mut Vm) {
+        fn install_elements(vm: &mut VmCore) {
             let prototype = vm.builtins.get(DATA_VIEW_PROTOTYPE);
             $(
                 let get = IntrinsicKey::new("DataView", Slot::Prototype, $get);
@@ -86,7 +86,7 @@ data_view_members! {
     "getBigUint64" => "setBigUint64": BigUint64,
 }
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(vm: &mut VmCore) {
     let prototype = vm.builtins.get(DATA_VIEW_PROTOTYPE);
     for key in [BUFFER, BYTE_LENGTH, BYTE_OFFSET] {
         getter(vm, prototype, key.member, key);
@@ -103,7 +103,7 @@ pub(super) fn install(vm: &mut Vm) {
 
 /// A getter body: brand check, then read the view's own record.
 fn brand(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl Fn(&DataViewObject) -> Value,
@@ -117,8 +117,8 @@ fn brand(
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -176,7 +176,7 @@ fn construct(
     Ok(Invocation::Value(Value::object(view)))
 }
 
-impl Vm {
+impl VmCore {
     /// `get DataView.prototype.byteLength`: out of bounds is a TypeError.
     fn data_view_length(
         &mut self,
@@ -239,7 +239,7 @@ impl Vm {
 
     fn data_view_get(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -276,7 +276,7 @@ impl Vm {
 
     fn data_view_set(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

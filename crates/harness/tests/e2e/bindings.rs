@@ -5,51 +5,27 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Mutex;
 
-use super::support::{compile_main, declared};
+use super::support::{UnexpectedUncaught, compile_main, declared};
 use yield_harness::{LabelRegistration, LabelService, LabelServiceKey};
 use yield_vm::binding::{CallCx, CodecError, HostFault, OperationToken};
 use yield_vm::{
-    Bindings, Completion, Decode, Encode, FromBindings, GuestOutcome, Host, HostStep, Instance,
-    JsError, JsResult, JsValue, OperationDriver, PromiseState, RestoreOptions, SnapshotValidation,
-    This, Value, Vm, VmError, VmOptions, host_bindings, host_class, host_module, methods,
-    module_exports, operation,
+    Completion, Decode, Encode, FromServices, GuestOutcome, Host, HostStep, Instance, JsError,
+    JsResult, JsValue, OperationDriver, PromiseState, RestoreOptions, Services, SnapshotValidation,
+    This, Value, Vm, VmError, VmOptions, host, host_class, host_module, methods, module_exports,
+    operation,
 };
 
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
 
-struct StrategyHost {
-    bindings: Bindings,
-    errors: usize,
-}
-
-impl StrategyHost {
-    fn new(bindings: Bindings) -> Self {
-        Self {
-            bindings,
-            errors: 0,
-        }
-    }
-}
-
-impl Host for StrategyHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn report_error(&mut self, _error: JsValue) {
-        self.errors += 1;
-    }
-}
-
 fn register_label(
-    bindings: &Bindings,
+    services: &Services,
     label: &str,
     token: OperationToken,
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
-    bindings
-        .service::<LabelServiceKey>()
+    services
+        .get::<LabelServiceKey>()
         .ok_or_else(|| HostFault::new("missing labels service"))?
         .register(label.to_owned(), token, restoring)
 }
@@ -62,17 +38,17 @@ macro_rules! label_driver {
             fn start(
                 &self,
                 token: OperationToken,
-                bindings: &Bindings,
+                services: &Services,
             ) -> Result<Self::Live, HostFault> {
-                register_label(bindings, $wire, token, false)
+                register_label(services, $wire, token, false)
             }
 
             fn resume(
                 &self,
                 token: OperationToken,
-                bindings: &Bindings,
+                services: &Services,
             ) -> Result<Self::Live, HostFault> {
-                register_label(bindings, $wire, token, true)
+                register_label(services, $wire, token, true)
             }
         }
     };
@@ -142,11 +118,12 @@ mod strategy_fixture {
         }
     }
 
-    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host(labels: &Rc<LabelService>) -> Host {
+        host! {
             dts: "../dts/ops.d.ts",
             modules: [Ops],
             services: {
+                yield_vm::DiagnosticsKey => Rc::new(UnexpectedUncaught) as Rc<dyn yield_vm::Diagnostics>,
                 LabelServiceKey => Rc::clone(labels),
             },
         }
@@ -190,20 +167,20 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).unwrap();
     let labels = Rc::new(LabelService::default());
-    let mut host = StrategyHost::new(strategy_fixture::bindings(&labels));
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let host = || strategy_fixture::make_host(&labels);
+    let mut vm = Vm::new(build.clone(), host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     let old = labels.token("resume").unwrap();
     let image = vm.snapshot(std::slice::from_ref(&result)).unwrap();
     let restored_labels = Rc::new(LabelService::default());
-    let mut restored_host = StrategyHost::new(strategy_fixture::bindings(&restored_labels));
+    let restored_host = || strategy_fixture::make_host(&restored_labels);
     let mut no_backlink = image.clone();
     no_backlink.operations[0].signal = None;
     assert!(matches!(
         Vm::restore(
             no_backlink,
             build.clone(),
-            &mut restored_host,
+            restored_host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -226,7 +203,7 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
         Vm::restore(
             wrong_signal,
             build.clone(),
-            &mut restored_host,
+            restored_host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -237,7 +214,7 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
     let mut restored = Vm::restore(
         image,
         build,
-        &mut restored_host,
+        restored_host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -248,9 +225,7 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
     restored.start_recovered_operations().unwrap();
     assert_eq!(restored_labels.resume_log(), ["resume"]);
     let current = restored_labels.token("resume").unwrap();
-    restored
-        .start(&mut restored_host, "cancel", vec![])
-        .unwrap();
+    restored.start("cancel", vec![]).unwrap();
     assert!(restored_labels.pending_labels().is_empty());
     for token in [old, current] {
         assert!(matches!(
@@ -258,17 +233,13 @@ fn restored_signal_cancels_original_operation_and_rejects_stale_delivery() {
             Err(VmError::UnknownOperation(_))
         ));
     }
-    let already = restored
-        .start(&mut restored_host, "already", vec![])
-        .unwrap();
+    let already = restored.start("already", vec![]).unwrap();
     assert!(restored_labels.pending_labels().is_empty());
     assert_eq!(
-        restored
-            .start(&mut restored_host, "badSignal", vec![])
-            .unwrap(),
+        restored.start("badSignal", vec![]).unwrap(),
         Value::boolean(true)
     );
-    restored.run_until_idle(&mut restored_host).unwrap();
+    restored.run_until_idle().unwrap();
     for promise in [result, already] {
         assert_eq!(
             restored.promise_state(&promise).unwrap(),
@@ -300,19 +271,18 @@ export async function run() {
 }
 "#;
     let labels = Rc::new(LabelService::default());
-    let bindings = strategy_fixture::bindings(&labels);
+    let host = || strategy_fixture::make_host(&labels);
     let build = compile_main(source, &declared(include_str!("../dts/ops.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let mut vm = Vm::new(build.clone(), host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     assert_eq!(labels.pending_labels().len(), 4);
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
     drop(vm);
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    let mut vm = Vm::restore(snapshot, build, host(), Default::default()).expect("restore");
     assert!(labels.pending_labels().is_empty());
     assert!(
         labels.resume_log().is_empty(),
@@ -323,8 +293,7 @@ export async function run() {
         .expect("start recovered operations");
     vm.start_recovered_operations()
         .expect("starting recovered operations is idempotent");
-    vm.run_until_idle(&mut host)
-        .expect("settle restored operations");
+    vm.run_until_idle().expect("settle restored operations");
     assert_eq!(
         labels.resume_log(),
         vec!["resume".to_owned(), "reissue".to_owned()]
@@ -335,13 +304,12 @@ export async function run() {
         let token = labels.token(name).expect("restored token");
         vm.complete_operation(token, Completion::Fulfilled(JsValue::number(value)))
             .expect("complete restored operation");
-        vm.run_until_idle(&mut host).expect("drain completion");
+        vm.run_until_idle().expect("drain completion");
     }
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::string("strategy rejected".into()))
     );
-    assert_eq!(host.errors, 0);
 }
 
 #[test]
@@ -354,16 +322,16 @@ export async function run() {
 }
 "#;
     let build = yield_harness::build(source);
-    let mut host = yield_harness::TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let host = yield_harness::TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let stale = host.token("wait:a").expect("old token");
     assert_eq!(host.pending_labels(), vec!["wait:a".to_owned()]);
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
-    vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    vm = Vm::restore(snapshot, build, host.host(), Default::default()).expect("restore");
     vm.start_recovered_operations()
         .expect("start recovered operations");
     assert!(matches!(
@@ -373,7 +341,7 @@ export async function run() {
     let fresh = host.token("wait:a").expect("new token");
     vm.complete_operation(fresh, Completion::Fulfilled(JsValue::undefined()))
         .expect("fresh token settles");
-    vm.run_until_idle(&mut host).expect("resume");
+    vm.run_until_idle().expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(1.0))
@@ -393,19 +361,19 @@ export async function run() {
 }
 "#;
     let build = yield_harness::build(source);
-    let mut host = yield_harness::TestHost::default();
+    let host = yield_harness::TestHost::default();
     let clock = host.clock().clone();
     let mut vm = Vm::new(
         build,
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock),
             ..Default::default()
         },
     )
     .expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let first = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("first snapshot")
@@ -462,8 +430,8 @@ mod stale_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host() -> Host {
+        host! {
             dts: "../dts/stale.d.ts",
             modules: [Stale],
             services: {
@@ -476,7 +444,7 @@ mod stale_fixture {
 
 #[test]
 fn handles_cannot_cross_calls() {
-    let bindings = stale_fixture::bindings();
+    let host = || stale_fixture::make_host();
     let source = r#"
 import { stash, unstash } from "stale";
 export function run() {
@@ -486,10 +454,9 @@ export function run() {
 "#;
     let build =
         compile_main(source, &declared(include_str!("../dts/stale.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
+    let mut vm = Vm::new(build, host(), Default::default()).expect("create VM");
     let error = vm
-        .start(&mut host, "run", vec![])
+        .start("run", vec![])
         .expect_err("stale handle is a host fault");
     assert!(
         matches!(&error, VmError::HostFault(message) if message.contains("outside the call")),
@@ -629,7 +596,7 @@ mod guest_call_fixture {
 
     pub(super) fn run(source: &str) -> (Result<Value, VmError>, usize) {
         let runs = Rc::new(Cell::new(0));
-        let bindings = host_bindings! {
+        let host = host! {
             dts: "../dts/guest.d.ts",
             modules: [Guest],
             services: {
@@ -640,9 +607,8 @@ mod guest_call_fixture {
         .expect("guest bindings");
         let build =
             compile_main(source, &declared(include_str!("../dts/guest.d.ts"))).expect("compile");
-        let mut host = StrategyHost::new(bindings);
-        let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
-        let result = vm.start(&mut host, "run", vec![]);
+        let mut vm = Vm::new(build, host, Default::default()).expect("create VM");
+        let result = vm.start("run", vec![]);
         (result, runs.get())
     }
 }
@@ -797,8 +763,8 @@ mod counter_fixture {
         cx.promise(Wait { label })
     }
 
-    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host(labels: &Rc<LabelService>) -> Host {
+        host! {
             dts: "../dts/counter-test.d.ts",
             modules: [Counter, TestModule],
             services: {
@@ -825,16 +791,16 @@ mod counter_fixture {
     struct ServiceField(u32);
 
     impl Encode for ServiceField {
-        fn encode(&self, out: &mut Vec<u8>, bindings: &Bindings) -> Result<(), CodecError> {
-            let service = bindings.service::<PayloadKey>().unwrap();
-            (self.0 + service.offset).encode(out, bindings)
+        fn encode(&self, out: &mut Vec<u8>, services: &Services) -> Result<(), CodecError> {
+            let service = services.get::<PayloadKey>().unwrap();
+            (self.0 + service.offset).encode(out, services)
         }
     }
 
     impl Decode for ServiceField {
-        fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError> {
-            let service = bindings.service::<PayloadKey>().unwrap();
-            Ok(Self(u32::decode(input, bindings)? + service.offset))
+        fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
+            let service = services.get::<PayloadKey>().unwrap();
+            Ok(Self(u32::decode(input, services)? + service.offset))
         }
     }
 
@@ -846,9 +812,9 @@ mod counter_fixture {
         saved: JsValue,
     }
 
-    impl FromBindings for ServiceCounter {
-        fn from_bindings(bindings: &Bindings) -> Self {
-            let service = bindings.service::<PayloadKey>().unwrap();
+    impl FromServices for ServiceCounter {
+        fn from_services(services: &Services) -> Self {
+            let service = services.get::<PayloadKey>().unwrap();
             service.initialized.set(service.initialized.get() + 1);
             Self {
                 count: ServiceField(service.initial),
@@ -871,8 +837,8 @@ mod counter_fixture {
         }
     }
 
-    pub(super) fn service_bindings(service: Rc<PayloadService>) -> Bindings {
-        host_bindings! {
+    pub(super) fn service_host(service: Rc<PayloadService>) -> Host {
+        host! {
             dts: "../dts/counter-test.d.ts",
             modules: [ServiceCounter, TestModuleWithoutWait],
             services: { PayloadKey => service },
@@ -883,7 +849,7 @@ mod counter_fixture {
 
 #[test]
 fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
-    use counter_fixture::{PayloadService, service_bindings};
+    use counter_fixture::{PayloadService, service_host};
 
     let a = Rc::new(PayloadService {
         initial: 3,
@@ -895,8 +861,6 @@ fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
         offset: 20,
         initialized: Cell::new(0),
     });
-    let mut source = StrategyHost::new(service_bindings(a.clone()));
-    let mut target = StrategyHost::new(service_bindings(b.clone()));
     let build = compile_main(
         r#"import { bump, value } from 'counter';
            export function save() { bump(); return value(); }
@@ -904,20 +868,43 @@ fn module_payload_uses_current_bindings_without_reinitializing_on_restore() {
         &declared(include_str!("../dts/counter-test.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut source, "save", vec![]).unwrap(),
-        Value::number(10.0)
-    );
+    let mut vm = Vm::new(build.clone(), service_host(a.clone()), Default::default()).unwrap();
+    assert_eq!(vm.start("save", vec![]).unwrap(), Value::number(10.0));
     let snapshot = vm.snapshot(&[]).unwrap();
     assert_eq!(snapshot.module_states[0].bytes, 13u32.to_le_bytes());
-    let mut vm = Vm::restore(snapshot, build, &mut target, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut target, "read", vec![]).unwrap(),
-        Value::number(40.0)
-    );
+    let mut vm = Vm::restore(snapshot, build, service_host(b.clone()), Default::default()).unwrap();
+    assert_eq!(vm.start("read", vec![]).unwrap(), Value::number(40.0));
     assert_eq!(a.initialized.get(), 1);
     assert_eq!(b.initialized.get(), 0);
+}
+
+#[test]
+fn host_services_are_isolated_and_restore_uses_the_supplied_registry() {
+    let first = Rc::new(LabelService::default());
+    let second = Rc::new(LabelService::default());
+    let recovered = Rc::new(LabelService::default());
+    let build = compile_main(
+        "import { wait } from 'test'; export function run(label) { return wait(label); }",
+        &declared(include_str!("../dts/counter-test.d.ts")),
+    )
+    .unwrap();
+    let build = yield_vm::VerifiedBuild::new(build).unwrap();
+    let make_host = counter_fixture::make_host;
+    let mut vm_a = Vm::new(build.clone(), make_host(&first), Default::default()).unwrap();
+    let mut vm_b = Vm::new(build.clone(), make_host(&second), Default::default()).unwrap();
+    vm_a.start("run", vec![JsValue::string("first")]).unwrap();
+    vm_b.start("run", vec![JsValue::string("second")]).unwrap();
+    assert_eq!(first.pending_labels(), ["wait:first"]);
+    assert_eq!(second.pending_labels(), ["wait:second"]);
+
+    let image = vm_a.snapshot(&[]).unwrap();
+    let mut restored =
+        Vm::restore(image, build, make_host(&recovered), Default::default()).unwrap();
+    assert!(recovered.pending_labels().is_empty());
+    restored.start_recovered_operations().unwrap();
+    assert_eq!(recovered.pending_labels(), ["wait:first"]);
+    assert_eq!(first.pending_labels(), ["wait:first"]);
+    assert_eq!(second.pending_labels(), ["wait:second"]);
 }
 
 #[test]
@@ -935,13 +922,12 @@ export async function run() {
 }
 "#;
     let labels = Rc::new(LabelService::default());
-    let bindings = counter_fixture::bindings(&labels);
+    let host = || counter_fixture::make_host(&labels);
     let build =
         compile_main(source, &declared(include_str!("../dts/counter-test.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let mut vm = Vm::new(build.clone(), host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
@@ -953,11 +939,8 @@ export async function run() {
     assert_eq!(test.module, "test");
     assert!(test.bytes.is_empty());
 
-    let mut second = Vm::new(build.clone(), &mut host, Default::default()).expect("second VM");
-    assert_eq!(
-        second.start(&mut host, "read", vec![]).unwrap(),
-        Value::number(0.0)
-    );
+    let mut second = Vm::new(build.clone(), host(), Default::default()).expect("second VM");
+    assert_eq!(second.start("read", vec![]).unwrap(), Value::number(0.0));
 
     let mut missing = snapshot.clone();
     missing.module_states.pop();
@@ -982,7 +965,7 @@ export async function run() {
         };
         assert!(
             matches!(
-                Vm::restore(invalid, build.clone(), &mut host, options),
+                Vm::restore(invalid, build.clone(), host(), options),
                 Err(VmError::InvalidSnapshot(message)) if message.contains(expected)
             ),
             "restore must reject {expected}"
@@ -990,13 +973,13 @@ export async function run() {
     }
     drop(vm);
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    let mut vm = Vm::restore(snapshot, build, host(), Default::default()).expect("restore");
     vm.start_recovered_operations()
         .expect("start recovered operations");
     let token = labels.token("wait:a").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
-    vm.run_until_idle(&mut host).expect("resume");
+    vm.run_until_idle().expect("resume");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(3.0))
@@ -1035,8 +1018,8 @@ mod geom_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host() -> Host {
+        host! {
             dts: "../dts/geom.d.ts",
             modules: [Geom],
             services: {},
@@ -1047,7 +1030,7 @@ mod geom_fixture {
 
 #[test]
 fn declared_constructor_exports_create_class_instances() {
-    let bindings = geom_fixture::bindings();
+    let host = || geom_fixture::make_host();
     let source = r#"
 import { Point } from "geom";
 export function run() {
@@ -1058,12 +1041,8 @@ export function run() {
 }
 "#;
     let build = compile_main(source, &declared(include_str!("../dts/geom.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).expect("start"),
-        Value::number(3.0)
-    );
+    let mut vm = Vm::new(build, host(), Default::default()).expect("create VM");
+    assert_eq!(vm.start("run", vec![]).expect("start"), Value::number(3.0));
 }
 
 #[test]
@@ -1077,10 +1056,10 @@ export async function run() {
 }
 "#;
     let build = yield_harness::build(source);
-    let mut host = yield_harness::TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let host = yield_harness::TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let mut snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot");
@@ -1095,7 +1074,7 @@ export async function run() {
         ..Default::default()
     };
     payload.bytes = vec![2, 0, 0, 0, 0xff, 0xfe];
-    let error = Vm::restore(snapshot, build, &mut host, options).expect_err("invalid payload");
+    let error = Vm::restore(snapshot, build, host.host(), options).expect_err("invalid payload");
     assert!(
         matches!(&error, VmError::InvalidSnapshot(message) if message.contains("class Node payload") && message.contains("field label: invalid UTF-8")),
         "{error:?}"
@@ -1104,9 +1083,9 @@ export async function run() {
 
 #[test]
 fn node_payload_decode_requires_factory_service() {
-    let bindings = geom_fixture::bindings();
+    let services = Services::default();
     let mut payload = [0u8; 4].as_slice();
-    let error = yield_harness::Node::decode(&mut payload, &bindings)
+    let error = yield_harness::Node::decode(&mut payload, &services)
         .err()
         .expect("missing factory");
     assert!(
@@ -1223,8 +1202,8 @@ mod inherit_fixture {
         }
     }
 
-    pub(super) fn bindings(labels: &Rc<LabelService>) -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host(labels: &Rc<LabelService>) -> Host {
+        host! {
             dts: "../dts/inherit.d.ts",
             modules: [Inherit],
             services: {
@@ -1238,7 +1217,7 @@ mod inherit_fixture {
 #[test]
 fn derived_host_classes_inherit_prototypes_and_slot_layout() {
     let labels = Rc::new(LabelService::default());
-    let bindings = inherit_fixture::bindings(&labels);
+    let host = || inherit_fixture::make_host(&labels);
     let source = r#"
 import { assert, Base, Derived, readBase, wait } from "inherit";
 export async function run() {
@@ -1275,22 +1254,21 @@ export async function run() {
 "#;
     let build =
         compile_main(source, &declared(include_str!("../dts/inherit.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let mut vm = Vm::new(build.clone(), host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot derived instance");
     drop(vm);
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    let mut vm = Vm::restore(snapshot, build, host(), Default::default()).expect("restore");
     vm.start_recovered_operations()
         .expect("start recovered operation");
     let token = labels.token("inherit-wait").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
-    vm.run_until_idle(&mut host).expect("drain");
+    vm.run_until_idle().expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::boolean(true))
@@ -1300,7 +1278,7 @@ export async function run() {
 #[test]
 fn script_subclass_of_host_class_survives_restore() {
     let labels = Rc::new(LabelService::default());
-    let bindings = inherit_fixture::bindings(&labels);
+    let host = || inherit_fixture::make_host(&labels);
     let source = r#"
 import { assert, Base, Derived, wait } from "inherit";
 
@@ -1357,23 +1335,22 @@ export async function run() {
 "#;
     let build =
         compile_main(source, &declared(include_str!("../dts/inherit.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start");
-    vm.run_until_idle(&mut host).expect("suspend");
+    let mut vm = Vm::new(build.clone(), host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start");
+    vm.run_until_idle().expect("suspend");
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
     let snapshot = vm
         .snapshot(std::slice::from_ref(&result))
         .expect("snapshot script subclass");
     drop(vm);
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).expect("restore");
+    let mut vm = Vm::restore(snapshot, build, host(), Default::default()).expect("restore");
     vm.start_recovered_operations()
         .expect("start recovered operation");
     let token = labels.token("inherit-wait").expect("restored wait token");
     vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
         .expect("complete wait");
-    vm.run_until_idle(&mut host).expect("drain");
+    vm.run_until_idle().expect("drain");
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::boolean(true))
@@ -1394,10 +1371,10 @@ export function run() {
 }
 "#;
     let build = yield_harness::build(source);
-    let mut host = yield_harness::TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
+    let host = yield_harness::TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).expect("create VM");
     assert_eq!(
-        vm.start(&mut host, "run", vec![]).expect("start"),
+        vm.start("run", vec![]).expect("start"),
         Value::boolean(true)
     );
     assert_eq!(host.count("wait"), 1);
@@ -1423,8 +1400,8 @@ mod subset_fixture {
         }
     }
 
-    pub(super) fn bindings() -> Bindings {
-        host_bindings! {
+    pub(super) fn make_host() -> Host {
+        host! {
             dts: "../dts/subset.d.ts",
             modules: [Subset],
             services: {},
@@ -1435,7 +1412,7 @@ mod subset_fixture {
 
 #[test]
 fn declared_names_select_implementations_and_hide_extra_exports() {
-    let bindings = subset_fixture::bindings();
+    let host = || subset_fixture::make_host();
     let source = r#"
 import * as shared from "subset";
 export function run() {
@@ -1446,10 +1423,6 @@ export function run() {
 "#;
     let build =
         compile_main(source, &declared(include_str!("../dts/subset.d.ts"))).expect("compile");
-    let mut host = StrategyHost::new(bindings);
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("create VM");
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).expect("start"),
-        Value::number(4.0)
-    );
+    let mut vm = Vm::new(build, host(), Default::default()).expect("create VM");
+    assert_eq!(vm.start("run", vec![]).expect("start"), Value::number(4.0));
 }

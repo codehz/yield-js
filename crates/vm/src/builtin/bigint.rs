@@ -11,7 +11,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("BigInt", Slot::Global, "");
 const PROTOTYPE: &str = "bigint.prototype";
@@ -24,7 +24,7 @@ pub(crate) mod members {
     use crate::builtin::{FUNCTION_PARENT, OBJECT_PARENT, link_constructor};
     use crate::intrinsic::IntrinsicDef;
     use crate::value::{PropertyKey, Value};
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     pub(crate) const OWNER: Owner = Owner::new(
         ROOT,
@@ -42,7 +42,7 @@ pub(crate) mod members {
         |vm, host, roots, args, _| vm.call_bigint(host, roots, &args),
     )];
 
-    fn install(vm: &mut Vm, _: &Value) {
+    fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get(PROTOTYPE);
         link_constructor(vm, constructor, prototype);
@@ -71,10 +71,10 @@ pub(crate) mod members {
 
 pub(crate) const OWNER: Owner = members::OWNER;
 
-impl Vm {
+impl VmCore {
     fn call_bigint(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -90,7 +90,7 @@ impl Vm {
 
     fn coerce_bigint(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<JsBigInt, Value>, VmError> {
@@ -138,7 +138,7 @@ impl Vm {
 
     fn bigint_as_n(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         signed: bool,
@@ -201,7 +201,7 @@ impl Vm {
 
     fn bigint_to_string(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

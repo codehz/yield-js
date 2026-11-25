@@ -8,7 +8,7 @@ use crate::heap::{
 };
 use crate::intrinsic::IntrinsicKey;
 use crate::value::{ObjectId, PropertyKeyRef, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) enum RootKind {
     Plain,
@@ -177,7 +177,7 @@ impl BuiltinRoots {
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn allocate_builtin_roots(&mut self) {
         let specs = || crate::builtin::globals::root_groups().flatten();
         for spec in specs() {

@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const KEY: IntrinsicKey = IntrinsicKey::new("structuredClone", Slot::Global, "");
 pub(super) const OWNER: Owner = Owner::new(
@@ -46,8 +46,8 @@ macro_rules! normal {
 }
 
 fn get(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     key: PropertyKeyRef<'_>,
@@ -59,8 +59,8 @@ fn get(
 }
 
 fn transfer_list(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     options: &Value,
 ) -> Completion<Vec<ObjectId>> {
@@ -109,8 +109,8 @@ fn transfer_list(
 }
 
 pub(super) fn clone_message(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<Value> {
@@ -122,7 +122,7 @@ pub(super) fn clone_message(
     }
 }
 
-fn rejected<T>(vm: &mut Vm) -> Completion<T> {
+fn rejected<T>(vm: &mut VmCore) -> Completion<T> {
     Ok(Err(vm.alloc_dom_exception(
         "DataCloneError".into(),
         "Value could not be cloned".into(),
@@ -130,8 +130,8 @@ fn rejected<T>(vm: &mut Vm) -> Completion<T> {
 }
 
 fn clone(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<Value> {
@@ -227,8 +227,8 @@ impl TraceRoots for Graph {
 impl Graph {
     fn walk(
         &mut self,
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Completion<Value> {
@@ -299,8 +299,8 @@ impl Graph {
 
     fn object(
         &mut self,
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
     ) -> Completion<ObjectId> {
@@ -457,7 +457,12 @@ impl Graph {
         Ok(Ok(target))
     }
 
-    fn properties(&mut self, vm: &Vm, source: ObjectId, target: ObjectId) -> Result<(), VmError> {
+    fn properties(
+        &mut self,
+        vm: &VmCore,
+        source: ObjectId,
+        target: ObjectId,
+    ) -> Result<(), VmError> {
         let start = self.work.len();
         self.work.extend(
             vm.heap
@@ -473,7 +478,7 @@ impl Graph {
         Ok(())
     }
 
-    fn buffer(&mut self, vm: &mut Vm, source: ObjectId) -> Completion<ObjectId> {
+    fn buffer(&mut self, vm: &mut VmCore, source: ObjectId) -> Completion<ObjectId> {
         if let Some(&target) = self.memory.get(&source) {
             return Ok(Ok(target));
         }
@@ -490,7 +495,7 @@ impl Graph {
 
     fn view_buffer(
         &mut self,
-        vm: &mut Vm,
+        vm: &mut VmCore,
         source: ObjectId,
         offset: usize,
         length: Option<usize>,
@@ -510,8 +515,8 @@ impl Graph {
 
     fn error(
         &mut self,
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
     ) -> Completion<ObjectId> {
@@ -582,7 +587,11 @@ fn own_data<'a>(object: &'a Object, key: &str) -> Option<&'a Value> {
     }
 }
 
-fn alloc_buffer(vm: &mut Vm, bytes: Option<Vec<u8>>, max_byte_length: Option<usize>) -> ObjectId {
+fn alloc_buffer(
+    vm: &mut VmCore,
+    bytes: Option<Vec<u8>>,
+    max_byte_length: Option<usize>,
+) -> ObjectId {
     vm.heap.alloc(Object::ArrayBuffer(ArrayBufferObject {
         object: PlainObject::new(Some(vm.builtins.get(ARRAY_BUFFER_PROTOTYPE))),
         bytes,

@@ -29,7 +29,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, PropertyKeyRef, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use crate::heap::ReactionJob;
 use crate::runtime::Settlement;
@@ -74,10 +74,10 @@ impl StreamJob {
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn resume_stream_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,
@@ -109,7 +109,7 @@ impl Vm {
 
     fn stream_callback_promise(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ObjectId, VmError> {
@@ -131,7 +131,7 @@ impl Vm {
 }
 
 fn install(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     name: &str,
     root: &'static str,
     prototype: &'static str,
@@ -176,8 +176,8 @@ fn install(
 }
 
 fn dictionary_member(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     dictionary: &Value,
     member: &str,

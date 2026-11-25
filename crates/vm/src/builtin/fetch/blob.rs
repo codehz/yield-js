@@ -21,7 +21,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const BLOB: &str = "blob";
 pub(crate) const BLOB_PROTOTYPE: &str = "blob.prototype";
@@ -64,7 +64,7 @@ impl FileData {
     }
 }
 
-pub(crate) fn alloc_file(vm: &mut Vm, data: FileData) -> ObjectId {
+pub(crate) fn alloc_file(vm: &mut VmCore, data: FileData) -> ObjectId {
     vm.heap.alloc(Object::File {
         object: PlainObject::new(Some(vm.builtins.get(FILE_PROTOTYPE))),
         data,
@@ -195,7 +195,13 @@ pub(crate) const FILE_OWNER: Owner = Owner::new(
     Some(|vm, _| install(vm, FILE, FILE_PROTOTYPE, "File", FILE_DEFS)),
 );
 
-fn install(vm: &mut Vm, root: &'static str, proto: &'static str, tag: &str, defs: &[IntrinsicDef]) {
+fn install(
+    vm: &mut VmCore,
+    root: &'static str,
+    proto: &'static str,
+    tag: &str,
+    defs: &[IntrinsicDef],
+) {
     let prototype = vm.builtins.get(proto);
     link_constructor(vm, vm.builtins.get(root), prototype);
     for def in defs {
@@ -228,7 +234,7 @@ fn install(vm: &mut Vm, root: &'static str, proto: &'static str, tag: &str, defs
     );
 }
 
-fn blob_receiver<'a>(vm: &'a Vm, this: &Value) -> Result<Option<&'a BlobData>, VmError> {
+fn blob_receiver<'a>(vm: &'a VmCore, this: &Value) -> Result<Option<&'a BlobData>, VmError> {
     let ValueRef::Object(id) = this.view() else {
         return Ok(None);
     };
@@ -240,7 +246,7 @@ fn blob_receiver<'a>(vm: &'a Vm, this: &Value) -> Result<Option<&'a BlobData>, V
 }
 
 fn blob_get(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     this: &Value,
     get: impl FnOnce(&BlobData) -> Value,
@@ -252,7 +258,7 @@ fn blob_get(
 }
 
 fn file_get(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     this: &Value,
     get: impl FnOnce(&FileData) -> Value,
@@ -265,12 +271,7 @@ fn file_get(
     vm.throw_type_error(roots, "incompatible File receiver")
 }
 
-fn usv(
-    vm: &mut Vm,
-    host: &mut dyn Host,
-    roots: &ActiveRoots<'_>,
-    value: &Value,
-) -> Completion<String> {
+fn usv(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, value: &Value) -> Completion<String> {
     Ok(vm.coerce_string(host, roots, value)?.map(|value| {
         value
             .to_utf8()
@@ -293,12 +294,7 @@ enum Part {
     Bytes(Vec<u8>),
 }
 
-fn part(
-    vm: &mut Vm,
-    host: &mut dyn Host,
-    roots: &ActiveRoots<'_>,
-    value: &Value,
-) -> Completion<Part> {
+fn part(vm: &mut VmCore, host: &Host, roots: &ActiveRoots<'_>, value: &Value) -> Completion<Part> {
     if let Some(data) = blob_receiver(vm, value)? {
         return Ok(Ok(Part::Blob(data.clone())));
     }
@@ -316,8 +312,8 @@ fn part(
 }
 
 fn dictionary_member(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     options: &Value,
     member: &str,
@@ -352,8 +348,8 @@ fn signed_long_long(number: f64) -> i64 {
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -479,8 +475,8 @@ fn construct(
 }
 
 fn slice(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     this: &Value,
@@ -541,8 +537,8 @@ fn slice(
 }
 
 fn stream(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     this: &Value,
@@ -563,7 +559,7 @@ enum ReadAs {
 }
 
 fn read(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     this: &Value,
     mode: ReadAs,

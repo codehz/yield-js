@@ -1,77 +1,68 @@
 //! Host task ABI and macro-lowered continuations exercised across VM restore.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::support::{compile_main, declared};
 use yield_harness::{CountersKey, LabelService, LabelServiceKey, Wait};
-use yield_vm::binding::__macro_support as abi;
+use yield_vm::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::{
-    Bindings, Completion, GuestOutcome, Host, HostStep, JsResult, JsValue, RestoreOptions,
-    SnapshotValidation, Value, Vm, VmError,
+    Completion, Diagnostic, Diagnostics, DiagnosticsKey, GuestOutcome, Host, HostStep, JsResult,
+    JsValue, RestoreOptions, SnapshotValidation, Value, Vm, VmError,
 };
 
-struct TaskHost {
-    bindings: Bindings,
-    labels: Rc<LabelService>,
-    errors: Option<Vec<JsValue>>,
-}
+#[derive(Default)]
+struct TaskDiagnostics(RefCell<Option<Vec<JsValue>>>);
 
-impl TaskHost {
-    fn new() -> Self {
-        let labels = Rc::new(LabelService::default());
-        let module = abi::raw_module(
-            "task",
-            vec![
-                abi::function_cps(
-                    "spawn",
-                    false,
-                    None,
-                    spawn,
-                    CallSignature {
-                        args: &[ArgKind::Value],
-                        result: ReturnKind::Value,
-                    },
-                    &STAGES,
-                ),
-                abi::function(
-                    "cancel",
-                    false,
-                    None,
-                    cancel,
-                    CallSignature {
-                        args: &[ArgKind::Value],
-                        result: ReturnKind::Void,
-                    },
-                ),
-            ],
-        );
-        let mut services = yield_vm::Services::default();
-        services
-            .insert::<LabelServiceKey>(Rc::clone(&labels))
-            .unwrap();
-        let mut deps = abi::ModuleDependencies::default();
-        deps.operation::<Wait>();
-        let bindings = abi::link([module], deps, services).unwrap();
-        Self {
-            bindings,
-            labels,
-            errors: None,
+impl Diagnostics for TaskDiagnostics {
+    fn report(&self, event: Diagnostic<'_>) {
+        if let Diagnostic::Uncaught { error, .. } = event {
+            match &mut *self.0.borrow_mut() {
+                Some(errors) => errors.push(error),
+                None => panic!("unexpected error: {error}"),
+            }
         }
     }
 }
 
-impl Host for TaskHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        match &mut self.errors {
-            Some(errors) => errors.push(error),
-            None => panic!("unexpected error: {error}"),
-        }
-    }
+fn task_host(labels: &Rc<LabelService>) -> Host {
+    let module = abi::raw_module(
+        "task",
+        vec![
+            abi::function_cps(
+                "spawn",
+                false,
+                None,
+                spawn,
+                CallSignature {
+                    args: &[ArgKind::Value],
+                    result: ReturnKind::Value,
+                },
+                &STAGES,
+            ),
+            abi::function(
+                "cancel",
+                false,
+                None,
+                cancel,
+                CallSignature {
+                    args: &[ArgKind::Value],
+                    result: ReturnKind::Void,
+                },
+            ),
+        ],
+    );
+    let mut services = yield_vm::Services::default();
+    services
+        .insert::<LabelServiceKey>(Rc::clone(labels))
+        .unwrap();
+    let mut deps = abi::ModuleDependencies::default();
+    deps.operation::<Wait>();
+    services
+        .insert::<DiagnosticsKey>(Rc::new(TaskDiagnostics::default()))
+        .unwrap();
+    abi::link([module], deps, services).unwrap()
 }
 
 static STAGES: [CpsStage; 2] = [
@@ -120,7 +111,8 @@ fn finish(cx: &mut CallCx<'_>, outcome: GuestOutcome) -> JsResult<HostStep> {
 
 #[test]
 fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
-    let mut host = TaskHost::new();
+    let labels = Rc::new(LabelService::default());
+    let make_host = || task_host(&labels);
     let build = compile_main(
         r#"
         import { spawn, cancel } from 'task';
@@ -136,12 +128,12 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         &declared(include_str!("../dts/task.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), make_host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     let yield_vm::ValueRef::Number(handle) = result.view() else {
         panic!("expected numeric handle");
     };
-    let old = host.labels.token("wait:task").unwrap();
+    let old = labels.token("wait:task").unwrap();
     vm.collect_garbage(&[]).unwrap();
     let snapshot = vm.snapshot(&[]).unwrap();
     let [task] = snapshot.host_tasks.as_slice() else {
@@ -154,7 +146,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
         yield_vm::snapshot::DeliveryTarget::Task(task.id)
     );
     drop(vm);
-    assert_eq!(host.labels.token("wait:task"), None);
+    assert_eq!(labels.token("wait:task"), None);
 
     for corrupt in [
         (
@@ -178,7 +170,7 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
                 Vm::restore(
                     image,
                     build.clone(),
-                    &mut host,
+                    make_host(),
                     RestoreOptions {
                         validation: SnapshotValidation::Full,
                         ..Default::default()
@@ -188,20 +180,20 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
             ),
             "accepted {label}"
         );
-        assert!(host.labels.pending_labels().is_empty());
+        assert!(labels.pending_labels().is_empty());
     }
 
     for cancel in [true, false] {
         let mut vm = Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut host,
+            make_host(),
             Default::default(),
         )
         .unwrap();
-        assert_eq!(host.labels.token("wait:task"), None);
+        assert_eq!(labels.token("wait:task"), None);
         vm.start_recovered_operations().unwrap();
-        let token = host.labels.token("wait:task").unwrap();
+        let token = labels.token("wait:task").unwrap();
         assert!(matches!(
             vm.complete_operation(old, Completion::Fulfilled(JsValue::undefined())),
             Err(VmError::UnknownOperation(_))
@@ -210,9 +202,9 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
             .unwrap();
         assert_eq!(vm.get_export("result").unwrap(), Value::number(0.0));
         if cancel {
-            vm.start(&mut host, "clear", vec![]).unwrap();
+            vm.start("clear", vec![]).unwrap();
         }
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         assert_eq!(
             vm.get_export("result").unwrap(),
             Value::number(if cancel { 0.0 } else { 42.0 })
@@ -467,22 +459,7 @@ fn hit(cx: &CallCx<'_>, name: &str) {
 
 #[test]
 fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
-    let labels = Rc::new(LabelService::default());
-    let counters = Rc::new(yield_harness::Counters::default());
-    let bindings = yield_vm::host_bindings! {
-        dts: "../dts/branch.d.ts",
-        modules: [Branch, Mirror],
-        services: {
-            LabelServiceKey => Rc::clone(&labels),
-            CountersKey => Rc::clone(&counters),
-        },
-    }
-    .unwrap();
-    let mut host = TaskHost {
-        bindings,
-        labels,
-        errors: None,
-    };
+    let (make_host, labels, counters, _) = branch_fixture();
     let build = compile_main(
         r#"
         import { choose, spawn, cancel, early } from 'branch';
@@ -499,52 +476,41 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         &declared(include_str!("../dts/branch.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let mut vm = Vm::new(build.clone(), make_host(), Default::default()).unwrap();
     assert_eq!(
-        vm.start(&mut host, "immediate", vec![JsValue::number(2.0)])
-            .unwrap(),
+        vm.start("immediate", vec![JsValue::number(2.0)]).unwrap(),
         Value::number(-1.0)
     );
-    let failed = vm.start(&mut host, "immediate", vec![JsValue::number(1.0)]);
+    let failed = vm.start("immediate", vec![JsValue::number(1.0)]);
     assert!(matches!(
         failed,
         Err(VmError::Thrown(value)) if value == Value::string("prefix failed".into())
     ));
-    let handle = vm
-        .start(&mut host, "immediate", vec![JsValue::number(0.0)])
-        .unwrap();
+    let handle = vm.start("immediate", vec![JsValue::number(0.0)]).unwrap();
     assert!(matches!(handle.view(), yield_vm::ValueRef::Number(id) if id > 0.0));
     assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     assert_eq!(
-        vm.start(&mut host, "sync", vec![JsValue::number(0.0)])
-            .unwrap(),
+        vm.start("sync", vec![JsValue::number(0.0)]).unwrap(),
         Value::number(99.0)
     );
+    assert_eq!(vm.start("other", vec![]).unwrap(), Value::number(100.0));
     assert_eq!(
-        vm.start(&mut host, "other", vec![]).unwrap(),
-        Value::number(100.0)
-    );
-    assert_eq!(
-        vm.start(&mut host, "sync", vec![JsValue::number(1.0)])
-            .unwrap(),
+        vm.start("sync", vec![JsValue::number(1.0)]).unwrap(),
         Value::number(11.0)
     );
-    let handle = vm.start(&mut host, "run", vec![]).unwrap();
-    assert_eq!(host.labels.pending_labels(), ["wait:one"]);
+    let handle = vm.start("run", vec![]).unwrap();
+    assert_eq!(labels.pending_labels(), ["wait:one"]);
     let snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
-    vm = Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "other", vec![]).unwrap(),
-        Value::number(200.0)
-    );
+    vm = Vm::restore(snapshot, build.clone(), make_host(), Default::default()).unwrap();
+    assert_eq!(vm.start("other", vec![]).unwrap(), Value::number(200.0));
     vm.start_recovered_operations().unwrap();
-    let first = host.labels.token("wait:one").unwrap();
+    let first = labels.token("wait:one").unwrap();
     vm.complete_operation(first, Completion::Fulfilled(JsValue::number(5.0)))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("result").unwrap(), Value::number(12.0));
-    assert_eq!(host.labels.pending_labels(), ["wait:again"]);
+    assert_eq!(labels.pending_labels(), ["wait:again"]);
     assert!(matches!(
         vm.complete_operation(first, Completion::Fulfilled(JsValue::undefined())),
         Err(VmError::UnknownOperation(_))
@@ -555,15 +521,15 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         let mut vm = Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut host,
+            make_host(),
             Default::default(),
         )
         .unwrap();
         vm.start_recovered_operations().unwrap();
-        let token = host.labels.token("wait:again").unwrap();
+        let token = labels.token("wait:again").unwrap();
         if cancel {
-            vm.start(&mut host, "clear", vec![]).unwrap();
-            assert_eq!(host.labels.token("wait:again"), None);
+            vm.start("clear", vec![]).unwrap();
+            assert_eq!(labels.token("wait:again"), None);
             assert!(matches!(
                 vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined())),
                 Err(VmError::UnknownOperation(_))
@@ -572,7 +538,7 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
             vm.complete_operation(token, Completion::Fulfilled(JsValue::undefined()))
                 .unwrap();
         }
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         assert_eq!(
             vm.get_export("result").unwrap(),
             Value::number(if cancel { 12.0 } else { 14.0 })
@@ -584,26 +550,32 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
     assert_eq!(counters.count("tail"), 1);
 }
 
-fn branch_host() -> (TaskHost, Rc<yield_harness::Counters>) {
+fn branch_fixture() -> (
+    impl Fn() -> Host,
+    Rc<LabelService>,
+    Rc<yield_harness::Counters>,
+    Rc<TaskDiagnostics>,
+) {
     let labels = Rc::new(LabelService::default());
     let counters = Rc::new(yield_harness::Counters::default());
-    let bindings = yield_vm::host_bindings! {
-        dts: "../dts/branch.d.ts",
-        modules: [Branch, Mirror],
-        services: {
-            LabelServiceKey => Rc::clone(&labels),
-            CountersKey => Rc::clone(&counters),
-        },
-    }
-    .unwrap();
-    (
-        TaskHost {
-            bindings,
-            labels,
-            errors: None,
-        },
-        counters,
-    )
+    let diagnostics = Rc::new(TaskDiagnostics::default());
+    let make_host = {
+        let (labels, counters, diagnostics) =
+            (labels.clone(), counters.clone(), diagnostics.clone());
+        move || {
+            yield_vm::host! {
+                dts: "../dts/branch.d.ts",
+                modules: [Branch, Mirror],
+                services: {
+                    LabelServiceKey => labels.clone(),
+                    CountersKey => counters.clone(),
+                    DiagnosticsKey => diagnostics.clone() as Rc<dyn Diagnostics>,
+                },
+            }
+            .unwrap()
+        }
+    };
+    (make_host, labels, counters, diagnostics)
 }
 
 fn branch_build(source: &str, imports: &[&str]) -> yield_vm::Build {
@@ -618,7 +590,7 @@ fn branch_build(source: &str, imports: &[&str]) -> yield_vm::Build {
 
 #[test]
 fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
-    let (mut host, counters) = branch_host();
+    let (make_host, labels, counters, diagnostics) = branch_fixture();
     let build = branch_build(
         r#"
         import { repeat } from 'branch';
@@ -628,9 +600,9 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     "#,
         &["repeat"],
     );
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let handle = vm.start(&mut host, "run", vec![]).unwrap();
-    let first = host.labels.token("wait:repeat").unwrap();
+    let mut vm = Vm::new(build.clone(), make_host(), Default::default()).unwrap();
+    let handle = vm.start("run", vec![]).unwrap();
+    let first = labels.token("wait:repeat").unwrap();
     let first_snapshot = vm.snapshot(&[]).unwrap();
     let [first_task] = first_snapshot.host_tasks.as_slice() else {
         panic!("expected one task")
@@ -638,9 +610,9 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
     assert_eq!(Value::number(first_task.id as f64), handle);
     vm.complete_operation(first, Completion::Fulfilled(JsValue::string("first")))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.get_export("observed").unwrap(), Value::string("".into()));
-    let second = host.labels.token("wait:repeat").unwrap();
+    let second = labels.token("wait:repeat").unwrap();
     let second_snapshot = super::support::json_round_trip(&vm.snapshot(&[]).unwrap());
     let [second_task] = second_snapshot.host_tasks.as_slice() else {
         panic!("expected one task")
@@ -655,52 +627,52 @@ fn loop_reuses_wait_stage_and_restores_previous_iteration_value() {
         Err(VmError::UnknownOperation(_))
     ));
 
-    vm = Vm::restore(second_snapshot, build, &mut host, Default::default()).unwrap();
+    vm = Vm::restore(second_snapshot, build, make_host(), Default::default()).unwrap();
     vm.start_recovered_operations().unwrap();
-    let recovered = host.labels.token("wait:repeat").unwrap();
+    let recovered = labels.token("wait:repeat").unwrap();
     assert!(matches!(
         vm.complete_operation(second, Completion::Fulfilled(JsValue::undefined())),
         Err(VmError::UnknownOperation(_))
     ));
     vm.complete_operation(recovered, Completion::Fulfilled(JsValue::string("second")))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.get_export("observed").unwrap(),
         Value::string("first;".into())
     );
-    let third = host.labels.token("wait:repeat").unwrap();
+    let third = labels.token("wait:repeat").unwrap();
     vm.complete_operation(third, Completion::Fulfilled(JsValue::string("stop")))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.get_export("observed").unwrap(),
         Value::string("first;second;".into())
     );
     assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
-    assert!(host.labels.pending_labels().is_empty());
+    assert!(labels.pending_labels().is_empty());
     assert_eq!(counters.count("repeat-prefix"), 1);
     assert_eq!(counters.count("repeat-exit"), 1);
 
-    host.errors = Some(Vec::new());
-    vm.start(&mut host, "run", vec![]).unwrap();
-    let token = host.labels.token("wait:repeat").unwrap();
+    *diagnostics.0.borrow_mut() = Some(Vec::new());
+    vm.start("run", vec![]).unwrap();
+    let token = labels.token("wait:repeat").unwrap();
     vm.complete_operation(token, Completion::Rejected(JsValue::string("rejected")))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
-    let errors = host.errors.unwrap();
+    vm.run_until_idle().unwrap();
+    let errors = diagnostics.0.borrow_mut().take().unwrap();
     let [error] = errors.as_slice() else {
         panic!("expected one rejection")
     };
     assert!(error.as_string().is_some_and(|text| text == "rejected"));
-    assert!(host.labels.pending_labels().is_empty());
+    assert!(labels.pending_labels().is_empty());
     assert!(vm.snapshot(&[]).unwrap().host_tasks.is_empty());
     assert_eq!(counters.count("repeat-exit"), 1);
 }
 
 #[test]
 fn while_evaluates_once_per_test_and_while_let_preserves_both_bindings() {
-    let (mut host, counters) = branch_host();
+    let (make_host, _, counters, _) = branch_fixture();
     let build = branch_build(
         r#"
         import { countWhile, countWhileLet } from 'branch';
@@ -709,29 +681,24 @@ fn while_evaluates_once_per_test_and_while_let_preserves_both_bindings() {
     "#,
         &["countWhile", "countWhileLet"],
     );
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let mut vm = Vm::new(build, make_host(), Default::default()).unwrap();
     assert_eq!(
-        vm.start(&mut host, "run", vec![JsValue::number(0.0)])
-            .unwrap(),
+        vm.start("run", vec![JsValue::number(0.0)]).unwrap(),
         Value::number(0.0)
     );
     assert_eq!(counters.count("while-check"), 1);
     assert_eq!(
-        vm.start(&mut host, "run", vec![JsValue::number(5.0)])
-            .unwrap(),
+        vm.start("run", vec![JsValue::number(5.0)]).unwrap(),
         Value::number(5.0)
     );
     assert_eq!(counters.count("while-check") - 1, 6);
-    assert_eq!(
-        vm.start(&mut host, "runLet", vec![]).unwrap(),
-        Value::number(33.0)
-    );
+    assert_eq!(vm.start("runLet", vec![]).unwrap(), Value::number(33.0));
     assert_eq!(counters.count("while-let-check"), 3);
 }
 
 #[test]
 fn labeled_jumps_skip_the_tail_and_native_for_can_exit_the_graph_loop() {
-    let (mut host, counters) = branch_host();
+    let (make_host, _, counters, _) = branch_fixture();
     let build = branch_build(
         r#"
         import { labeled, nativeFor, selectorJump, countWhile } from 'branch';
@@ -742,26 +709,14 @@ fn labeled_jumps_skip_the_tail_and_native_for_can_exit_the_graph_loop() {
     "#,
         &["labeled", "nativeFor", "selectorJump", "countWhile"],
     );
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(2.0)
-    );
-    assert_eq!(
-        vm.start(&mut host, "fromFor", vec![]).unwrap(),
-        Value::number(1.0)
-    );
+    let mut vm = Vm::new(build, make_host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(2.0));
+    assert_eq!(vm.start("fromFor", vec![]).unwrap(), Value::number(1.0));
     assert_eq!(counters.count("for-break-value"), 1);
     assert_eq!(counters.count("after-for"), 0);
     assert_eq!(counters.count("after-inner"), 0);
-    assert_eq!(
-        vm.start(&mut host, "selector", vec![]).unwrap(),
-        Value::number(3.0)
-    );
+    assert_eq!(vm.start("selector", vec![]).unwrap(), Value::number(3.0));
     assert_eq!(counters.count("after-guard"), 1);
-    assert_eq!(
-        vm.start(&mut host, "many", vec![]).unwrap(),
-        Value::number(2048.0)
-    );
+    assert_eq!(vm.start("many", vec![]).unwrap(), Value::number(2048.0));
     assert_eq!(counters.count("while-check"), 2049);
 }

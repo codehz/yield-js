@@ -20,7 +20,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const ENCODER_PROTO: &str = "textEncoderStream.prototype";
 const DECODER_PROTO: &str = "textDecoderStream.prototype";
@@ -61,8 +61,8 @@ interface!(DECODER_OWNER, "textDecoderStream", "TextDecoderStream", DECODER_PROT
 );
 
 fn construct_encoder(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     target: &Value,
@@ -78,8 +78,8 @@ fn construct_encoder(
 }
 
 fn construct_decoder(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -92,7 +92,7 @@ fn construct_decoder(
 }
 
 fn construct(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     prototype: ObjectId,
     decoder: Option<TextDecoderConfig>,
 ) -> Result<Invocation, VmError> {
@@ -110,7 +110,7 @@ fn construct(
 }
 
 fn text_stream(
-    vm: &Vm,
+    vm: &VmCore,
     receiver: &Value,
     decoder_brand: bool,
 ) -> Result<Option<(ObjectId, Option<TextDecoderConfig>)>, VmError> {
@@ -125,7 +125,7 @@ fn text_stream(
     }
 }
 
-fn incompatible(vm: &mut Vm, roots: &ActiveRoots<'_>) -> Result<Invocation, VmError> {
+fn incompatible(vm: &mut VmCore, roots: &ActiveRoots<'_>) -> Result<Invocation, VmError> {
     vm.throw_type_error(
         roots,
         "Text stream getter called on an incompatible receiver",
@@ -133,7 +133,7 @@ fn incompatible(vm: &mut Vm, roots: &ActiveRoots<'_>) -> Result<Invocation, VmEr
 }
 
 fn endpoint(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     decoder_brand: bool,
@@ -152,7 +152,7 @@ fn endpoint(
 }
 
 fn decoder_property(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     property: impl FnOnce(TextDecoderConfig) -> Value,
@@ -163,10 +163,10 @@ fn decoder_property(
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(super) fn invoke_text_transform(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,

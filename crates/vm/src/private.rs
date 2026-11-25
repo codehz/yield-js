@@ -11,9 +11,9 @@ use crate::heap::{
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
-impl Vm {
+impl VmCore {
     pub(crate) fn private_class(
         &self,
         brand: ObjectId,
@@ -133,7 +133,7 @@ impl Vm {
 
     pub(crate) fn get_private(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,
@@ -165,7 +165,7 @@ impl Vm {
 
     pub(crate) fn set_private(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         brand: ObjectId,

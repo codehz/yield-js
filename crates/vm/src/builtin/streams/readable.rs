@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const STREAM_PROTO: &str = "readableStream.prototype";
 pub(super) const READER_PROTO: &str = "readableStreamDefaultReader.prototype";
@@ -125,8 +125,8 @@ interface!(CONTROLLER_OWNER, "readableStreamDefaultController", "ReadableStreamD
 );
 
 pub(super) fn illegal_constructor(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     _: &Value,
@@ -159,8 +159,8 @@ pub(in crate::builtin) use bytes::{BYOB_READER_OWNER, BYOB_REQUEST_OWNER, BYTE_C
 use bytes::{BYOB_READER_PROTO, BYTE_CONTROLLER_PROTO, enforce_unsigned};
 
 pub(super) fn member(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     input: &Value,
     name: &str,
@@ -172,8 +172,8 @@ pub(super) fn member(
 }
 
 pub(super) fn callback_member(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     input: &Value,
     name: &str,
@@ -194,8 +194,8 @@ pub(super) fn callback_member(
 }
 
 fn construct_stream(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -294,29 +294,29 @@ fn promise_or_object(id: ObjectId) -> Invocation {
     Invocation::Value(Value::object(id))
 }
 
-pub(super) fn stream_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+pub(super) fn stream_id(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
     Ok(matches!(vm.heap.get(id)?, Object::ReadableStream(_)).then_some(id))
 }
 
-fn reader_id(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn reader_id(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     reader_of_kind(vm, value, false)
 }
 
-fn reader_of_kind(vm: &Vm, value: &Value, byob: bool) -> Result<Option<ObjectId>, VmError> {
+fn reader_of_kind(vm: &VmCore, value: &Value, byob: bool) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
     Ok(matches!(vm.heap.get(id)?, Object::ReadableReader(r) if r.byob == byob).then_some(id))
 }
 
-fn controller_stream(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn controller_stream(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     controller_of_kind(vm, value, false)
 }
 
-fn controller_of_kind(vm: &Vm, value: &Value, byte: bool) -> Result<Option<ObjectId>, VmError> {
+fn controller_of_kind(vm: &VmCore, value: &Value, byte: bool) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -328,8 +328,8 @@ fn controller_of_kind(vm: &Vm, value: &Value, byte: bool) -> Result<Option<Objec
 }
 
 fn locked(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -343,8 +343,8 @@ fn locked(
 }
 
 fn get_reader(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -366,8 +366,8 @@ fn get_reader(
 }
 
 fn construct_reader(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -382,8 +382,8 @@ fn construct_reader(
 }
 
 fn reader_closed(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -395,8 +395,8 @@ fn reader_closed(
 }
 
 fn stream_cancel(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -411,8 +411,8 @@ fn stream_cancel(
 }
 
 fn reader_cancel(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -427,8 +427,8 @@ fn reader_cancel(
 }
 
 fn reader_read(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -440,8 +440,8 @@ fn reader_read(
 }
 
 fn release_lock(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -454,8 +454,8 @@ fn release_lock(
 }
 
 fn desired_size(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -472,8 +472,8 @@ fn desired_size(
 }
 
 fn controller_close(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -489,8 +489,8 @@ fn controller_close(
 }
 
 fn controller_enqueue(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -505,8 +505,8 @@ fn controller_enqueue(
 }
 
 fn controller_error(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -534,7 +534,7 @@ fn reset_queue(stream: &mut ReadableStreamObject) {
     stream.total_size = 0.0;
 }
 
-impl Vm {
+impl VmCore {
     fn allocate_readable(
         &mut self,
         prototype: ObjectId,
@@ -806,7 +806,7 @@ impl Vm {
 
     pub(crate) fn read_readable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         reader: ObjectId,
     ) -> Result<Invocation, VmError> {
@@ -859,7 +859,7 @@ impl Vm {
 
     pub(super) fn request_readable_close(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -876,7 +876,7 @@ impl Vm {
 
     fn close_readable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -907,7 +907,7 @@ impl Vm {
 
     fn finish_read(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         request: ObjectId,
         chunk: Value,
@@ -961,7 +961,7 @@ impl Vm {
 
     pub(super) fn enqueue_readable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         chunk: &Value,
@@ -1021,7 +1021,7 @@ impl Vm {
 
     pub(super) fn cancel_readable(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reason: &Value,
@@ -1091,7 +1091,7 @@ impl Vm {
 
     fn invoke_readable_callback(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         callback: Option<Value>,
         source: &Value,
@@ -1114,7 +1114,7 @@ impl Vm {
 
     pub(super) fn pull_readable_if_needed(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -1162,7 +1162,7 @@ impl Vm {
 
     pub(crate) fn resume_readable_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         job: StreamJob,
         settlement: &Settlement,

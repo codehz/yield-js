@@ -8,7 +8,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const ROOT: &str = "domException";
 const PROTOTYPE: &str = "domException.prototype";
@@ -86,7 +86,7 @@ const INTRINSICS: &[IntrinsicDef] = &[
 
 pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -131,7 +131,7 @@ fn install(vm: &mut Vm, _: &Value) {
 }
 
 fn get(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl FnOnce(&JsString, &JsString) -> Value,
@@ -145,8 +145,8 @@ fn get(
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -178,7 +178,7 @@ fn construct(
     Ok(Invocation::Value(value))
 }
 
-impl Vm {
+impl VmCore {
     /// Allocate from internal strings without consulting the global constructor or its properties.
     pub(crate) fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
         self.alloc_dom_exception_with(self.builtins.get(PROTOTYPE), name, message)

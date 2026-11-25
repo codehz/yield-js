@@ -9,16 +9,16 @@ use crate::heap::{Attributes, BoxedPrimitive, DescriptorUpdate, Object};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[yield_binding_macros::builtin_global(name = "JSON", root = "json")]
 pub(crate) mod namespace {
-    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, VmCore, VmError};
 
     #[function(name = "parse", length = 2)]
     fn parse(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -27,8 +27,8 @@ pub(crate) mod namespace {
 
     #[function(name = "stringify", length = 3)]
     fn stringify(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -37,8 +37,8 @@ pub(crate) mod namespace {
 
     #[function(name = "rawJSON", length = 1)]
     fn raw_json(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -47,8 +47,8 @@ pub(crate) mod namespace {
 
     #[function(name = "isRawJSON", length = 1)]
     fn is_raw_json(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
+        vm: &mut VmCore,
+        _host: &Host,
         _roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -463,10 +463,10 @@ struct Serialize<'a> {
     path: String,
 }
 
-impl Vm {
+impl VmCore {
     fn json_parse(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -525,7 +525,7 @@ impl Vm {
 
     fn json_raw_json(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -558,7 +558,7 @@ impl Vm {
 
     fn json_stringify(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -613,7 +613,7 @@ impl Vm {
 
     fn json_gap(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         space: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -661,7 +661,7 @@ impl Vm {
 
     fn json_property_list(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
@@ -695,7 +695,7 @@ impl Vm {
 
     fn serialize_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         holder: ObjectId,
@@ -753,7 +753,7 @@ impl Vm {
 
     fn serialize_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         value: Value,
@@ -798,7 +798,7 @@ impl Vm {
 
     fn serialize_array(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
@@ -830,7 +830,7 @@ impl Vm {
 
     fn serialize_object(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: &mut Serialize<'_>,
         id: ObjectId,
@@ -885,7 +885,7 @@ impl Vm {
 
     fn revive(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         reviver: &Reviver<'_>,
         holder: ObjectId,
@@ -977,7 +977,7 @@ impl Vm {
 
     fn apply_reviver_result(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         holder: ObjectId,
         key: JsString,

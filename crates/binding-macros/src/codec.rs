@@ -32,16 +32,16 @@ pub(crate) fn derive(input: DeriveInput, encode: bool) -> syn::Result<TokenStrea
             ::std::format!("field {}: {}", #label, error)
         ))?);
         steps.push(if encode {
-            quote!(<#ty as #codec>::encode(&self.#member, out, bindings)#context)
+            quote!(<#ty as #codec>::encode(&self.#member, out, services)#context)
         } else {
-            quote!(<#ty as #codec>::decode(input, bindings)#context)
+            quote!(<#ty as #codec>::decode(input, services)#context)
         });
         members.push(member);
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let method = if encode {
         quote! {
-            fn encode(&self, out: &mut ::std::vec::Vec<u8>, bindings: &::yield_vm::Bindings)
+            fn encode(&self, out: &mut ::std::vec::Vec<u8>, services: &::yield_vm::Services)
                 -> ::core::result::Result<(), ::yield_vm::binding::CodecError>
             {
                 #(#steps;)*
@@ -55,7 +55,7 @@ pub(crate) fn derive(input: DeriveInput, encode: bool) -> syn::Result<TokenStrea
             Fields::Unit => quote!(Self),
         };
         quote! {
-            fn decode(input: &mut &[u8], bindings: &::yield_vm::Bindings)
+            fn decode(input: &mut &[u8], services: &::yield_vm::Services)
                 -> ::core::result::Result<Self, ::yield_vm::binding::CodecError>
             {
                 Ok(#value)

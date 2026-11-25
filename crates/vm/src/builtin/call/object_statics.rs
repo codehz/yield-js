@@ -9,8 +9,8 @@ use crate::heap::{
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn construct_object(&mut self, args: &[Value]) -> Result<Invocation, VmError> {
         let value = args.first().unwrap_or(&UNDEFINED_VALUE);
         match value.view() {
@@ -53,7 +53,7 @@ impl Vm {
 
     pub(crate) fn object_create(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -209,7 +209,7 @@ impl Vm {
 
     pub(crate) fn set_integrity(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         level: IntegrityLevel,
@@ -262,7 +262,7 @@ impl Vm {
 
     pub(crate) fn test_integrity(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         level: IntegrityLevel,

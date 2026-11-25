@@ -4,7 +4,8 @@ use super::globals::Owner;
 use super::{OBJECT_PARENT, RootKind, RootSpec, define_builtin_data};
 use crate::heap::{Attributes, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
-use crate::{Value, Vm, value::PropertyKey};
+use crate::vm::VmCore;
+use crate::{Value, value::PropertyKey};
 
 mod logging;
 mod state;
@@ -38,7 +39,7 @@ console_methods! {
     Warn => "warn",
 }
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let object = vm.builtins.get("console");
     for method in METHODS {
         let key = method.key;

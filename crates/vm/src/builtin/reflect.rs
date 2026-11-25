@@ -5,12 +5,12 @@ pub(crate) mod namespace {
     use crate::host::Host;
     use crate::runtime::Invocation;
     use crate::value::{PropertyKey, Value, ValueRef};
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     #[function(name = "ownKeys", length = 1)]
     fn own_keys(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -34,8 +34,8 @@ pub(crate) mod namespace {
 
     #[function(name = "deleteProperty", length = 2)]
     fn delete_property(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -56,8 +56,8 @@ pub(crate) mod namespace {
 
     #[function(name = "defineProperty", length = 3)]
     fn define_property(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -67,8 +67,8 @@ pub(crate) mod namespace {
 
     #[function(name = "preventExtensions", length = 1)]
     fn prevent_extensions(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
+        vm: &mut VmCore,
+        _host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -77,8 +77,8 @@ pub(crate) mod namespace {
 
     #[function(name = "isExtensible", length = 1)]
     fn is_extensible(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
+        vm: &mut VmCore,
+        _host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -87,8 +87,8 @@ pub(crate) mod namespace {
 
     #[function(name = "getPrototypeOf", length = 1)]
     fn get_prototype_of(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
+        vm: &mut VmCore,
+        _host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -97,8 +97,8 @@ pub(crate) mod namespace {
 
     #[function(name = "setPrototypeOf", length = 2)]
     fn set_prototype_of(
-        vm: &mut Vm,
-        _host: &mut dyn Host,
+        vm: &mut VmCore,
+        _host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -107,8 +107,8 @@ pub(crate) mod namespace {
 
     #[function(name = "get", length = 2)]
     fn get(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -132,8 +132,8 @@ pub(crate) mod namespace {
 
     #[function(name = "set", length = 3)]
     fn set(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -153,8 +153,8 @@ pub(crate) mod namespace {
 
     #[function(name = "has", length = 2)]
     fn has(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -172,8 +172,8 @@ pub(crate) mod namespace {
 
     #[function(name = "getOwnPropertyDescriptor", length = 2)]
     fn get_own_property_descriptor(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -183,8 +183,8 @@ pub(crate) mod namespace {
 
     #[function(name = "apply", length = 3)]
     fn apply(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -194,8 +194,8 @@ pub(crate) mod namespace {
 
     #[function(name = "construct", length = 2)]
     fn construct(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {

@@ -15,18 +15,18 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::Invocation;
 use crate::value::{Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[yield_binding_macros::builtin_global(name = "Number", root = "number", kind = "constructor")]
 pub(crate) mod members {
-    use super::{ActiveRoots, Host, Invocation, Value, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, VmCore, VmError};
 
     #[functions(isFinite: 1, isInteger: 1, isNaN: 1, isSafeInteger: 1)]
     fn call_static(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         key: &str,
         args: &[Value],
@@ -37,8 +37,8 @@ pub(crate) mod members {
 
     #[methods(toString: 1, valueOf: 0, toFixed: 1, toExponential: 1, toPrecision: 1, toLocaleString: 0)]
     fn call_method(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         key: &str,
         receiver: &Value,
@@ -104,7 +104,7 @@ pub(crate) const NUMBER_ROOTS: &[RootSpec] = &[
     ),
 ];
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get(ROOT_NUMBER_PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -121,10 +121,10 @@ fn install(vm: &mut Vm, _: &Value) {
     }
 }
 
-impl Vm {
+impl VmCore {
     fn call_number(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -143,7 +143,7 @@ impl Vm {
 
     pub(super) fn call_number_static(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
@@ -191,7 +191,7 @@ impl Vm {
 
     fn call_number_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: &str,
         receiver: &Value,

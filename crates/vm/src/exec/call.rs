@@ -9,12 +9,12 @@ use crate::heap::{Attributes, Object, object_id};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
-impl Vm {
+impl VmCore {
     pub(super) fn step_call(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

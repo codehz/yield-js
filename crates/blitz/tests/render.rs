@@ -123,7 +123,7 @@ fn returns_uncaught_script_errors() {
     for (source, message) in [
         (
             "throw new Error('startup failed');",
-            "Error: startup failed",
+            "script threw: Error: startup failed",
         ),
         (
             "queueMicrotask(() => { throw new TypeError('microtask failed'); });",
@@ -133,7 +133,7 @@ fn returns_uncaught_script_errors() {
         let Err(error) = render_module(source) else {
             panic!("expected error: {source}")
         };
-        assert!(error.contains(message), "{error}");
+        assert_eq!(error.matches(message).count(), 1, "{error}");
         assert!(error.contains("main.mjs:1:"), "{error}");
     }
 }

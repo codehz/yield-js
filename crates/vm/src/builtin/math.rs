@@ -8,7 +8,7 @@ use crate::host::Host;
 use crate::ops::number_to_uint32;
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -16,7 +16,7 @@ pub(crate) const RANDOM_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub(crate) mod namespace {
     use std::f64::consts;
 
-    use super::{ActiveRoots, Host, Invocation, Value, ValueRef, Vm, VmError};
+    use super::{ActiveRoots, Host, Invocation, Value, ValueRef, VmCore, VmError};
 
     #[constant(name = "E")]
     const E: f64 = consts::E;
@@ -37,8 +37,8 @@ pub(crate) mod namespace {
 
     #[function(name = "abs", length = 1)]
     fn abs(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -61,8 +61,8 @@ pub(crate) mod namespace {
         sumPrecise: 1, tan: 1, tanh: 1, trunc: 1
     )]
     fn dispatch(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         member: &'static str,
         args: &[Value],
@@ -71,10 +71,10 @@ pub(crate) mod namespace {
     }
 }
 
-impl Vm {
+impl VmCore {
     fn call_math_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: &str,
         args: &[Value],
@@ -202,7 +202,7 @@ impl Vm {
 
     fn math_sum_precise(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         items: &Value,
     ) -> Result<Invocation, VmError> {

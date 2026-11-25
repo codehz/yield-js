@@ -31,18 +31,18 @@
 
 ## 可选宿主能力
 
-启动 VM 时以独立的类型化服务注册定时器、Fetch、Console 输出和 Crypto 等能力，复用现有 service / operation 生命周期，不要求脚本导入宿主模块、不要求宿主实现全局对象或字符串分派。语言无关的边界传递有类型的记录、字节和代际令牌；宿主不持有脚本函数、`JsValue`、Promise 或流对象，也不从平台回调同步重入 VM。宿主可以在后台线程执行工作，仅在 VM 线程按任务投递；每个脚本任务后进行微任务检查。服务声明可版本化，活动快照记录声明所需的兼容版本；不保存服务实例。恢复时需重新登记的 operation 缺少匹配能力则在发布前报错；有纯 VM 终结策略的记录不必重连服务。
+用 `host!` 为 VM 接管的 `Host` 注册定时器、Fetch、Console 输出和 Crypto 等类型化服务；可只写 `services`，无需脚本导入或 `.d.ts`。后台适配器传递有类型的记录、字节和代际令牌，不持有 guest 句柄，也不从平台回调同步重入 VM。嵌入方在 VM 线程投递；脚本任务后进行微任务检查。快照不保存服务实例；恢复从新宿主取用所需服务，活动 timer 缺少唤醒能力时拒绝恢复，有纯 VM 终结策略的记录则无需重连。
 
 能力默认关闭，不回退到进程的全局网络客户端、凭据库、文件系统或熵源。全局名字仍存在；需调用外部服务的同步 API 缺能力时抛出可捕获的异常（定时器、Crypto 或 Console 输出默认 `NotSupportedError`），Promise API 按正常时序拒绝（网络 Fetch 为网络错误 `TypeError`，异步 Crypto 为 `NotSupportedError`）。无外部工作时按原 API 行为，例如清除不存在的 timer 是空操作，`new Response()` 和本地 `data:` Fetch 不依赖网络能力。宿主拒绝权限或操作失败由 VM 映射到对应 API 错误；过期令牌、越权投递及协议违约是宿主集成错误，不当作正常结果。
 
 ### Web Crypto 随机 API
 
-`crypto` 全局始终存在。宿主可通过 `Bindings` 在稳定 ID `wintertc.crypto` 注册 `Arc<dyn CryptoService>`；同步 `fill_random(&mut [u8]) -> Result<(), HostFault>` 成功时须填满切片，既不接收脚本值，也不重入 VM。两种随机方法仅在调用时查找服务，不回退到 `Math.random` 或进程全局熵源。无匹配服务（包括类型不符）时抛出 `NotSupportedError`；宿主失败时抛出 `OperationError`，不提交部分写入。快照不保存服务实例、熵源状态或内部临时字节；脚本保留的返回值和缓冲区仍按普通值保存。
+`crypto` 全局始终存在。`host!` 可用 `CryptoKey`（稳定 ID `wintertc.crypto`）注册 `Arc<dyn CryptoService>`；同步 `fill_random(&mut [u8]) -> Result<(), HostFault>` 成功时须填满切片，既不接收脚本值，也不重入 VM。两种随机方法仅在调用时查找服务，不回退到 `Math.random` 或进程全局熵源。无匹配服务（包括类型不符）时抛出 `NotSupportedError`；宿主失败时抛出 `OperationError`，不提交部分写入。快照不保存服务实例、熵源状态或内部临时字节；脚本保留的返回值和缓冲区仍按普通值保存。
 
 ### 定时器
 
 - 宿主只需实现一次性 `arm(token, relative_delay) → registration` 与可取消登记；到期投递 token，不分配 JS 定时器 ID、不执行回调，也不负责周期运算。VM 实现延时转换、HTML 的嵌套最小时延、`setTimeout` / `setInterval` 共用 ID 表及 `clear*` 交叉取消；`AbortSignal.timeout()` 也通过同一唤醒能力驱动。提前唤醒按 VM 时钟重新登记，已取消或重复唤醒忽略。
-- VM 保存逻辑 ID、回调和参数引用、种类、周期以及同一相对时钟域的下次截止时间和任务顺序；interval 每次执行后仅在未取消时登记下一次，并按本轮调度，不补跑存档期间的 tick。恢复按保存的截止时间及恢复时钟重新计算相对延时，已到期则入普通任务队列。旧平台登记的迟到投递不会触发新代际回调；切点只接受已纳入 VM 状态的任务或仍可由逻辑记录重建的登记。
+- VM 保存逻辑 ID、回调和参数引用、种类、周期以及同一相对时钟域的下次截止时间和任务顺序；interval 每次执行后仅在未取消时登记下一次，并按本轮调度，不补跑存档期间的 tick。`Vm::restore` 返回后显式调用 `vm.start_recovered_operations()`：按保存的截止时间及恢复时钟重新计算相对延时，已到期则入普通任务队列。旧平台登记的迟到投递不会触发新代际回调；切点只接受已纳入 VM 状态的任务或仍可由逻辑记录重建的登记。
 
 ## Fetch
 

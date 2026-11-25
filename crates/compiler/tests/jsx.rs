@@ -2,7 +2,7 @@ use yield_compiler::{
     CompileError, Compiler, GraphTransform, MemoryResolver, ModuleGraph, ParsedModule, Project,
     SourceTransform, TransformError,
 };
-use yield_vm::{Bindings, Build, Host, JsValue, ValueRef, Vm};
+use yield_vm::{Build, Host, ValueRef, Vm};
 
 fn compile(
     source: &str,
@@ -11,25 +11,6 @@ fn compile(
 ) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.jsx", source)].into_iter().chain(runtime)).unwrap();
     compiler.compile(Project::new("main.jsx", resolver))
-}
-
-struct EmptyHost(Bindings);
-
-impl EmptyHost {
-    fn new() -> Self {
-        let bindings = yield_vm::__macro_support::link([], Default::default(), Default::default());
-        Self(bindings.unwrap())
-    }
-}
-
-impl Host for EmptyHost {
-    fn bindings(&self) -> Bindings {
-        self.0.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected guest error: {error:?}");
-    }
 }
 
 #[test]
@@ -77,10 +58,9 @@ export function jsxs(tag, props, key) { return { helper: 'jsxs', tag, props, key
         &compiler,
     )
     .unwrap();
-    let mut host = EmptyHost::new();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let mut vm = Vm::new(build, Host::default(), Default::default()).unwrap();
     assert!(matches!(
-        vm.start(&mut host, "run", vec![]).unwrap().view(),
+        vm.start("run", vec![]).unwrap().view(),
         ValueRef::Bool(true)
     ));
 }
@@ -171,8 +151,7 @@ fn jsx_replacement_runs_before_discovery_and_again_on_relink() {
                 .with_graph_transform(Graph),
         )
         .unwrap();
-    let mut host = EmptyHost::new();
-    let vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let vm = Vm::new(build, Host::default(), Default::default()).unwrap();
     assert!(matches!(
         vm.get_export("default").unwrap().view(),
         ValueRef::Bool(true)

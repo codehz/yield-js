@@ -11,7 +11,7 @@ use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Slot {
@@ -79,16 +79,16 @@ impl IntrinsicKey {
 }
 
 type Call =
-    fn(&mut Vm, &mut dyn Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+    fn(&mut VmCore, &Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
 type Construct = fn(
-    &mut Vm,
-    &mut dyn Host,
+    &mut VmCore,
+    &Host,
     &ActiveRoots<'_>,
     Vec<Value>,
     Option<ObjectId>,
 ) -> Result<Invocation, VmError>;
 type ConstructWithTarget =
-    fn(&mut Vm, &mut dyn Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
+    fn(&mut VmCore, &Host, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Construction {
@@ -226,7 +226,7 @@ fn table() -> &'static Table {
     })
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn alloc_intrinsic(&mut self, key: IntrinsicKey) -> ObjectId {
         self.heap.alloc_intrinsic(key.link())
     }

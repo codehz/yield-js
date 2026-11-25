@@ -888,7 +888,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     if constructor {
         items.push(syn::parse_quote! {
             pub(crate) fn install_members(
-                vm: &mut crate::vm::Vm,
+                vm: &mut crate::vm::VmCore,
                 constructor: crate::value::ObjectId,
                 prototype: crate::value::ObjectId,
             ) {
@@ -902,7 +902,7 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
             ];
         });
         items.push(syn::parse_quote! {
-            fn install(vm: &mut crate::vm::Vm, _: &crate::value::Value) {
+            fn install(vm: &mut crate::vm::VmCore, _: &crate::value::Value) {
                 let object = vm.builtins.get(ROOT);
                 #(#install)*
             }

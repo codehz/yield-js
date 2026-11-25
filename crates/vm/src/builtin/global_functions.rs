@@ -10,7 +10,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 macro_rules! function {
     ($owner:ident, $name:literal, $length:literal, $call:expr) => {
@@ -68,8 +68,8 @@ function!(BTOA, "btoa", 1, |vm, host, roots, args, _| {
 });
 
 fn call_base64(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     transform: fn(&JsString) -> Option<JsString>,
@@ -92,8 +92,8 @@ fn call_base64(
 }
 
 fn number_predicate(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     predicate: fn(f64) -> bool,
@@ -130,8 +130,8 @@ function!(
 );
 
 fn call_uri(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     transform: impl FnOnce(JsString) -> Option<JsString>,

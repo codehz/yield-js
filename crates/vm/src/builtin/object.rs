@@ -11,7 +11,7 @@ pub(crate) mod members {
     use crate::ops;
     use crate::runtime::{Arguments, Invocation};
     use crate::value::{Value, ValueRef};
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     pub(crate) const ROOTS: &[RootSpec] = &[
@@ -33,7 +33,7 @@ pub(crate) mod members {
 
     pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
 
-    fn install(vm: &mut Vm, _: &Value) {
+    fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get("object.prototype");
         link_constructor(vm, constructor, prototype);
@@ -119,8 +119,8 @@ pub(crate) mod members {
     }
 
     fn test_own_property(
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         receiver: &Value,

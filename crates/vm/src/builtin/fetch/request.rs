@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequestRecord {
@@ -88,12 +88,12 @@ definitions! {
 
 pub(crate) const REQUEST_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     install_interface(vm, NAME, ROOT, PROTOTYPE, GETTERS, METHODS);
 }
 
 pub(super) fn install_interface(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     name: &'static str,
     root: &'static str,
     proto: &'static str,
@@ -132,14 +132,14 @@ pub(super) fn nullish(value: &Value) -> bool {
     matches!(value.view(), ValueRef::Undefined | ValueRef::Null)
 }
 
-pub(super) fn headers(vm: &Vm, id: ObjectId) -> Result<&HeadersRecord, VmError> {
+pub(super) fn headers(vm: &VmCore, id: ObjectId) -> Result<&HeadersRecord, VmError> {
     let Object::Headers { data, .. } = vm.heap.get(id)? else {
         unreachable!()
     };
     Ok(data)
 }
 
-pub(super) fn mime(vm: &Vm, headers_id: ObjectId) -> Result<String, VmError> {
+pub(super) fn mime(vm: &VmCore, headers_id: ObjectId) -> Result<String, VmError> {
     let value = headers(vm, headers_id)?
         .get(b"content-type")
         .unwrap_or_default();
@@ -165,7 +165,10 @@ pub(super) fn apply_content_type(headers: &mut HeadersRecord, ty: Option<String>
     }
 }
 
-fn record<'a>(vm: &'a Vm, value: &Value) -> Result<Option<(ObjectId, &'a RequestRecord)>, VmError> {
+fn record<'a>(
+    vm: &'a VmCore,
+    value: &Value,
+) -> Result<Option<(ObjectId, &'a RequestRecord)>, VmError> {
     let ValueRef::Object(id) = value.view() else {
         return Ok(None);
     };
@@ -176,10 +179,10 @@ fn record<'a>(vm: &'a Vm, value: &Value) -> Result<Option<(ObjectId, &'a Request
 }
 
 fn read(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     this: &Value,
-    getter: impl FnOnce(&RequestRecord, &Vm) -> Value,
+    getter: impl FnOnce(&RequestRecord, &VmCore) -> Value,
 ) -> Result<Invocation, VmError> {
     let Some((_, data)) = record(vm, this)? else {
         return vm.throw_type_error(roots, "Expected a Request receiver");
@@ -188,8 +191,8 @@ fn read(
 }
 
 fn consume(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     this: &Value,
     mode: BodyMode,
@@ -201,7 +204,7 @@ fn consume(
     body::consume(vm, host, roots, data.body.clone(), mode, mime)
 }
 
-fn dependent_signal(vm: &mut Vm, source: Option<ObjectId>) -> Result<ObjectId, VmError> {
+fn dependent_signal(vm: &mut VmCore, source: Option<ObjectId>) -> Result<ObjectId, VmError> {
     let mut state = AbortSignalState {
         dependent: true,
         ..Default::default()
@@ -228,7 +231,7 @@ fn dependent_signal(vm: &mut Vm, source: Option<ObjectId>) -> Result<ObjectId, V
     Ok(dependent)
 }
 
-fn parse_url(vm: &Vm, text: &str) -> Option<Url> {
+fn parse_url(vm: &VmCore, text: &str) -> Option<Url> {
     Url::options()
         .base_url(vm.base_url.as_ref())
         .parse(text)
@@ -258,8 +261,8 @@ const INIT: &[&str] = &[
 ];
 
 fn enum_string(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
     names: &[&str],
@@ -276,10 +279,10 @@ fn enum_string(
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn request_from_fetch(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         input: &Value,
         init: &Value,
@@ -297,8 +300,8 @@ impl Vm {
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     prototype: Option<ObjectId>,
@@ -557,8 +560,8 @@ fn construct(
 }
 
 fn clone_request(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     this: &Value,
 ) -> Result<Invocation, VmError> {

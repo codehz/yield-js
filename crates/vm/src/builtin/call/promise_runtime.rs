@@ -8,11 +8,11 @@ use crate::host::Host;
 use crate::intrinsic::CallableTarget;
 use crate::runtime::{Arguments, Invocation, Microtask};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn construct_promise(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         prototype: Option<ObjectId>,
@@ -69,7 +69,7 @@ impl Vm {
 
     pub(crate) fn call_promise_static(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         name: &str,
@@ -137,7 +137,7 @@ impl Vm {
 
     pub(crate) fn call_promise_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         name: &str,
@@ -205,7 +205,7 @@ impl Vm {
 
     pub(crate) fn invoke_promise_then(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: Vec<Value>,
@@ -226,7 +226,7 @@ impl Vm {
 
     pub(crate) fn promise_species(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -266,7 +266,7 @@ impl Vm {
 
     pub(crate) fn new_promise_capability(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         species: &Value,
     ) -> Result<Result<(Value, Value, Value), Value>, VmError> {
@@ -323,7 +323,7 @@ impl Vm {
 
     pub(crate) fn call_promise_callback(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: Arguments<'_>,
@@ -393,7 +393,7 @@ impl Vm {
 
     pub(crate) fn promise_resolve_with(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         species: &Value,
         value: Value,
@@ -418,7 +418,7 @@ impl Vm {
 
     pub(super) fn call_promise_capability(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: Value,
         callback: &Value,

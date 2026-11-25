@@ -3,9 +3,19 @@
 use yield_compiler::{CompileError, Compiler, MemoryResolver, Project};
 use yield_harness::{TestHost, build};
 use yield_vm::{
-    Completion, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
-    VmError,
+    Completion, Diagnostic, Diagnostics, JsValue, PromiseState, RestoreOptions, Snapshot,
+    SnapshotValidation, Value, Vm, VmError,
 };
+
+pub(super) struct UnexpectedUncaught;
+
+impl Diagnostics for UnexpectedUncaught {
+    fn report(&self, event: Diagnostic<'_>) {
+        if let Diagnostic::Uncaught { error, .. } = event {
+            panic!("unexpected task error: {error}");
+        }
+    }
+}
 
 pub(super) fn compile_main(
     source: &str,
@@ -54,10 +64,10 @@ pub(super) struct Suspended {
 impl Suspended {
     #[track_caller]
     pub(super) fn start(source: &str, args: Vec<JsValue>) -> Self {
-        let mut host = TestHost::default();
-        let mut vm = Vm::new(build(source), &mut host, Default::default()).expect("create VM");
-        let result = vm.start(&mut host, "run", args).expect("start run");
-        vm.run_until_idle(&mut host).expect("drain after start");
+        let host = TestHost::default();
+        let mut vm = Vm::new(build(source), host.host(), Default::default()).expect("create VM");
+        let result = vm.start("run", args).expect("start run");
+        vm.run_until_idle().expect("drain after start");
         Self { vm, host, result }
     }
 
@@ -79,7 +89,7 @@ impl Suspended {
         self.vm = Vm::restore(
             snapshot,
             self.vm.build().clone(),
-            &mut self.host,
+            self.host.host(),
             Default::default(),
         )?;
         self.vm.start_recovered_operations()?;
@@ -91,7 +101,7 @@ impl Suspended {
         self.vm = Vm::restore(
             snapshot,
             self.vm.build().clone(),
-            &mut self.host,
+            self.host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -108,7 +118,7 @@ impl Suspended {
             .map_err(|error| (id, error))
             .expect("complete operation");
         self.vm
-            .run_until_idle(&mut self.host)
+            .run_until_idle()
             .map_err(|error| (id, error))
             .expect("drain after completing operation");
     }

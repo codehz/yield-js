@@ -7,13 +7,14 @@ use crate::gc::ActiveRoots;
 use crate::host::{ConsoleKey, Host};
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
-use crate::{JsString, Value, Vm, VmError, ops};
+use crate::vm::VmCore;
+use crate::{JsString, Value, VmError, ops};
 
 use super::{Method, logging};
 
 pub(super) fn call(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     method: Method,
@@ -22,7 +23,7 @@ pub(super) fn call(
     let result = match method {
         Method::Clear => {
             vm.console.groups.clear();
-            print(vm, ConsoleLevel::Clear, ConsolePayload::Clear)
+            print(vm, host, ConsoleLevel::Clear, ConsolePayload::Clear)
         }
         Method::GroupEnd => {
             vm.console.groups.pop();
@@ -45,7 +46,7 @@ pub(super) fn call(
             } else {
                 ConsoleLevel::Group
             };
-            print(vm, level, ConsolePayload::Args(title.clone())).map(|()| {
+            print(vm, host, level, ConsolePayload::Args(title.clone())).map(|()| {
                 vm.console.groups.push(ConsoleGroup { title, collapsed });
             })
         }
@@ -60,7 +61,7 @@ pub(super) fn call(
                 },
                 None => "default".into(),
             };
-            label_method(vm, args.get(1..).unwrap_or_default(), method, label)
+            label_method(vm, host, args.get(1..).unwrap_or_default(), method, label)
         }
         Method::Assert
         | Method::Debug
@@ -72,7 +73,7 @@ pub(super) fn call(
         | Method::Table
         | Method::Trace
         | Method::Warn => match logging::payload(vm, host, roots, method, args)? {
-            Ok(Some((level, payload))) => print(vm, level, payload),
+            Ok(Some((level, payload))) => print(vm, host, level, payload),
             Ok(None) => Ok(()),
             Err(error) => Err(error),
         },
@@ -84,7 +85,8 @@ pub(super) fn call(
 }
 
 fn label_method(
-    vm: &mut Vm,
+    vm: &mut VmCore,
+    host: &Host,
     rest: &[Value],
     method: Method,
     mut label: JsString,
@@ -125,6 +127,7 @@ fn label_method(
             let Some(start) = start else {
                 return print_message(
                     vm,
+                    host,
                     ConsoleLevel::Warn,
                     prefixed("No timer for label: ", &label),
                     &[],
@@ -141,11 +144,12 @@ fn label_method(
         }
         _ => unreachable!("not a console label method"),
     };
-    print_message(vm, level, message, rest)
+    print_message(vm, host, level, message, rest)
 }
 
 fn print_message(
-    vm: &mut Vm,
+    vm: &mut VmCore,
+    host: &Host,
     level: ConsoleLevel,
     message: JsString,
     rest: &[Value],
@@ -164,11 +168,16 @@ fn print_message(
             crate::console::ConsolePreviewMode::Optimal,
         ))
     }));
-    print(vm, level, ConsolePayload::Args(args))
+    print(vm, host, level, ConsolePayload::Args(args))
 }
 
-fn print(vm: &mut Vm, level: ConsoleLevel, payload: ConsolePayload) -> Result<(), Value> {
-    let Some(sink) = vm.bindings.service::<ConsoleKey>() else {
+fn print(
+    vm: &mut VmCore,
+    host: &Host,
+    level: ConsoleLevel,
+    payload: ConsolePayload,
+) -> Result<(), Value> {
+    let Some(sink) = host.services().get::<ConsoleKey>() else {
         return Err(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Console service is not available".into(),

@@ -2,7 +2,7 @@
 
 > **状态：首版契约已落地，仍非最终设计。** 本文展开 [`host-interface.md`](host-interface.md) 的静态模块与 JS 值槽模型，以及 [`snapshot.md`](snapshot.md) 的 operation 中断与恢复规则；命名与记录编码仍可能调整。
 >
-> 当前实现与本文的对应关系：`crates/vm/src/binding/schema.rs` 提供静态 `Bindings`、`ModuleDecl`、`HostClass`、`HostModule` / `FromBindings` / `ModuleExports`、`Operation`；`binding/codec.rs` 提供共享的 `Encode` / `Decode`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`。VM 持有原型、实例槽、payload、模块状态和 operation 记录。第 15 节记录已选定的后续策略及尚未实现的能力，不代表这些策略均已落地。
+> `crates/vm/src/binding/schema.rs` 提供 `ModuleDecl`、`HostClass`、`HostModule` / `FromServices` / `ModuleExports`、`Operation` 及内部静态绑定表；`binding/codec.rs` 提供 `Encode` / `Decode`；`binding/call.rs` 提供 `JsValue`、`CallCx` 与 `ModuleCx`。VM 接管 `Host`，持有原型、实例槽、payload、模块状态和 operation 记录。第 15 节还记录尚未实现的能力。
 
 ## 1. 目标与范围
 
@@ -30,7 +30,7 @@
 | 实例（instance） | VM 堆中的对象，带类标签、槽和 payload。对象身份、原型和属性由 VM 持有。 |
 | 槽（slot） | 实例上声明的、不可从 JS 伪装的强引用，保存任意 `JsValue`。 |
 | payload | 实例上声明的非 JS 数据，由绑定提供的 codec 编解码，随快照保存。 |
-| 服务（service） | 按进程提供的平台能力，例如节点工厂、单调时钟、网络客户端、错误日志。不随快照保存。 |
+| 服务（service） | VM 接管的 `Host` 按键提供的运行时能力，例如节点工厂、时钟、网络客户端、错误报告。不随快照保存。 |
 | operation | 一次可由中断恢复的异步工作。VM 为其创建 Promise 并保存持久记录。 |
 | 声明指纹（fingerprint） | 由静态声明语义字段计算出的稳定标识，用于恢复时精确匹配绑定契约。 |
 
@@ -53,7 +53,7 @@
 
 `#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [LabelServiceKey])]` 中的三个依赖列表可省略，省略等同于空列表。每个模块要列出自身的完整依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
 
-`host_bindings!` 只接受 `dts`、`modules`、`services` 三个必填段。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
+`host!` 接受 `dts`、`modules`、`services` 三段，或只有 `services`，返回 `Result<Host, String>`。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
 `dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
@@ -73,9 +73,9 @@ impl Demo {
 }
 ```
 
-- 编译器用 `Compiler::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host_bindings! { dts: "…" }` 在展开时把同一份清单与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的名字（它们不进入命名空间导出）。
+- 编译器用 `Compiler::from_dts` 从 `.d.ts` 取得 `module -> export names` 清单，用于校验 `import` 并在 `Build.imports` 中记录；它不需要知道类的槽布局或 codec。`host!` 在展开时把同一份清单与同一模块类型的 `HostModule::NAME` 与 `ModuleExports::EXPORT_NAMES` 逐名比较，缺少声明的值即编译错误；只比较名字，不比较签名、种类或 arity，实现可以额外注册未声明的名字（它们不进入命名空间导出）。
 - VM 在创建时校验：Build 引用的每个模块和导出都已注册；导出种类匹配（函数必须是函数，常量必须是常量）。
-- 声明可以在同一线程的多个 VM 之间共享（`Bindings` 用 `Rc` 克隆），但**实例、原型和模块状态每 VM 一份**。`Bindings` 与 VM 一样按线程持有，不作为跨线程协调机制：需要并行工作时，每个线程各自构建 `Bindings`。服务值本身若要在工作线程执行，由对应服务的 trait（例如 `FetchService`、`SubtleCryptoService`）自行要求 `Send + Sync`；服务表不强制。
+- 每个 VM 独立接管不可克隆的 `Host`，静态绑定表是内部实现；实例、原型和模块状态每 VM 一份。服务注册表不要求 `Send + Sync`；需要在工作线程执行的服务由其 trait（例如 `FetchService`、`SubtleCryptoService`）自行规定。
 
 ### 4.2 类、槽与成员
 
@@ -115,7 +115,7 @@ impl Matcher {
 
 `cx.abort_reason(&signal)` 检查信号品牌并返回已有原因。`cx.promise_with_signal(op, &signal)` 对已取消信号直接拒绝原生 Promise，不启动 driver；否则将登记绑定到信号。取消先删除 pending 记录并释放登记，再以同一原因拒绝 Promise。完成和恢复失败也解除关联。
 
-可选服务 `wintertc.timer` 注册为 `Arc<dyn TimerService>`，接收 operation token 和 `u64` 相对延迟，返回可 drop 的一次性登记。平台只投递 token；在 VM 线程调用 `complete_operation` 后，用 `run_until_idle` 完成独立轮次。恢复发布后调用 `start_recovered_operations`；有活动 timeout 的镜像在缺少该服务时拒绝恢复。测试时钟与唤醒服务应使用同一计时域。
+可选服务 `wintertc.timer` 注册为 `Arc<dyn TimerService>`，接收 operation token 和 `u64` 相对延迟，返回可 drop 的一次性登记。平台只投递 token；在 VM 线程调用 `vm.wake_timer(token)` 后，用 `vm.run_until_idle()` 完成独立轮次。恢复发布后调用 `vm.start_recovered_operations()`；有活动 timeout 的镜像在缺少该服务时拒绝恢复。测试时钟与唤醒服务应使用同一计时域。
 
 ### 4.3 稳定标识与契约指纹
 
@@ -190,29 +190,29 @@ this.pending(cx).push(callback);              // JsList 槽
 
 ```rust
 pub trait Encode {
-    fn encode(&self, out: &mut Vec<u8>, bindings: &Bindings) -> Result<(), CodecError>;
+    fn encode(&self, out: &mut Vec<u8>, services: &Services) -> Result<(), CodecError>;
 }
 pub trait Decode: Sized {
-    fn decode(input: &mut &[u8], bindings: &Bindings) -> Result<Self, CodecError>;
+    fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError>;
 }
 ```
 
 规则：
 
-- **上下文提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Bindings` 按键读取服务，例如 `bindings.service::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
+- **服务提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Services` 按键读取服务，例如 `services.get::<NodeFactoryKey>()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
 - **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
-服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings` 和 `CallCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host!` 的 `services:` 段是一张 `Key => value` 表；`Key? => option` 只在 `option` 为 `Some` 时注册。重复 ID 使整个调用返回错误且不覆盖。`Services::get::<Key>()`、`CallCx::service::<Key>()` 和 `Vm::service::<Key>()` 查询同一个注册表；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
-模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host_bindings!` 在组装服务表后、返回 `Bindings` 前检查选中模块：必需服务缺失，或任一已注册服务以同一 ID 使用了不同的 Rust 键类型，都会返回包含模块名和服务 ID 的错误。可选依赖允许服务缺失；注册端的 `Key? => None` 不会满足必需依赖。不要求每个已注册服务都被模块声明，例如 VM 内建可直接使用自己的服务。已注册服务的指纹规则不变。
+模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host!` 在组装服务表后、返回 `Host` 前检查选中模块：必需服务缺失，或任一已注册服务以同一 ID 使用了不同的 Rust 键类型，都会返回包含模块名和服务 ID 的错误。可选依赖允许服务缺失；注册端的 `Key? => None` 不会满足必需依赖。声明用于链接检查，不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
 
-`CallCx::service` 返回的引用借自本次原生调用的 `Bindings`，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
+`CallCx::service` 返回的引用借自本次原生调用的服务表，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
 
 ```rust
-host_bindings! {
+let host = host! {
     dts: "test.d.ts",
     modules: [TestModule],
     services: {
@@ -221,11 +221,17 @@ host_bindings! {
         TimerKey? => timer,          // Option<Arc<dyn TimerService>>
         ConsoleKey? => console,
     },
-}
+}?;
+let mut vm = Vm::new(build, host, VmOptions::default())?;
+vm.start("run", vec![])?;
+vm.run_until_idle()?;
+
+// 没有宿主模块时不需要 .d.ts。
+let console_host = host! { services: { ConsoleKey => console_sink } }?;
 ```
 
 
-资源值不进入快照。默认只有契约的 ID 和版本进入绑定指纹，缺失或版本不匹配会拒绝恢复。六种可选内建适配器均不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；`TimeKey`（`wintertc.time`，版本 `1`）注册 `Arc<dyn TimeService>`，为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区；未注册时 VM 回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）；其余三种如下。
+服务实例不进入快照。默认只有契约的 ID 和版本进入绑定指纹；参与指纹的服务缺失或版本不匹配会拒绝恢复。运行时适配器 `DiagnosticsKey`、`GcRootsKey` 和 `UserAgentKey` 不参与指纹，分别用于诊断、绑定触发的同步 GC 和新建时的 `navigator.userAgent`，见[宿主接口](host-interface.md)。六种可选内建适配器同样不参与指纹：`TimerKey`（`wintertc.timer`，版本 `1`）由恢复逻辑根据定时器记录检查；`CryptoKey`（`wintertc.crypto`，版本 `1`）提供同步熵；`TimeKey`（`wintertc.time`，版本 `1`）注册 `Arc<dyn TimeService>`，为 `Date` 和文件时间戳提供 Unix 毫秒与本地 IANA 时区；未注册时 VM 回退到确定的 `DummyTimeService`（epoch 0，`Etc/UTC`）；其余三种如下。
 
 `FetchKey`（`wintertc.fetch`，协议版本 `1`）注册 `Arc<dyn FetchService>`。快照只保存 VM 侧事务，恢复不要求网络能力。`start(token, HopRequest) -> Box<dyn FetchRegistration>` 只启动一跳；适配器不得自动重定向、重试、合并 `Set-Cookie` 或解压。上行只能通过 `send_upload` 发送 `UploadCredit` 授予的字节，`finish_upload` 结束上传；下行必须先 `grant_download` 再投递 `Data`；`cancel` 幂等并关闭连接。VM 线程用 `Vm::deliver_fetch_event` 接收 `UploadCredit`/`Informational`/`Head`/`Data`/`Eof`/`Failed`：head 至多一次，`Data`/`Eof` 只在 head 之后，终结唯一，额度或顺序违约是宿主协议错误。恢复时旧登记被丢弃，在途事务以 `AbortError` 中断且不重发。
 
@@ -238,7 +244,7 @@ host_bindings! {
 - 影响后续调用的模块级可变状态必须声明在模块状态类型中；它的 JS 引用走槽，非 JS 数据走 codec。
 - 模块状态是快照的持久根。静态声明表不持有任何 VM 状态；注册闭包捕获 `Rc<RefCell<_>>` 这类做法在评审中直接视为违约。
 - 模块状态只在 VM 创建或恢复时构造，不在每次调用时重建。每个注册模块（含无导出的模块）都有一条按模块名排序的快照状态记录。
-- 新 VM 通过 `FromBindings` 初始化模块；恢复只调用 `Decode`。实现 `Default` 的类型自动获得 `FromBindings`。需要服务的模块直接实现 `FromBindings`，不同时实现 `Default`。
+- 新 VM 通过 `FromServices::from_services(&Services)` 初始化模块；恢复只调用 `Decode`。实现 `Default` 的类型自动获得 `FromServices`。需要服务的模块直接实现 `FromServices`，不同时实现 `Default`。
 - `#[host_module]` 和 `#[host_class]` 应放在 codec derive 之前，使 `#[js_slot]` / `#[js_list]` 不参与编码。没有剩余 Rust 字段的模块自动补齐缺省的 `Default` derive 和空 codec；非空模块必须明确选择初始化和 codec 实现。
 - 函数和构造器使用 `&mut ModuleCx<'_, Self>`，通过 `cx.state()` 短借用本模块的状态，通过本模块的 `SLOT_*` 常量访问 JS 槽。每次进入 CPS 阶段时由分派器重新建立 `ModuleCx`；跨挂起点不保留上下文或 Rust 引用。类方法仍使用 `CallCx` 和 `This`，不能访问模块状态。
 
@@ -288,7 +294,7 @@ impl CallCx {
 ### 6.4 重入与执行线程
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
-- `Bindings` 与 VM 同属一个线程（内部用 `Rc`）；不要跨线程传递，需要多线程时各线程独立构建。跨线程的能力与状态由具体服务值自行声明和同步。
+- `Host` 随 VM 在同一线程持有；并行时各线程独立构造宿主。跨线程的能力与状态由具体服务值自行声明和同步。
 - 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `wintertc.timer`（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。
 - `loop`、`while` 和 `while let` 的循环体可使用受支持的 `await`；条件必须同步，`for` 不可挂起。回边不会主动让出执行权；后台循环再次到达同一个外部 `await` 时复用任务 ID 和恢复阶段，但登记新的 operation，必须用新的令牌投递。
@@ -305,7 +311,7 @@ struct Wait {
 }
 ```
 
-每个 operation 声明类型 ID、codec 和恢复策略。`OperationDriver` 从链接的 `Bindings` 获取服务，并用 `start` / `resume` 返回拥有平台登记的 `Live`。状态和 `Live` 均不得持有 guest 值；回调与其他活值由 VM 的后台任务保存。`Live` 的 `Drop` 释放登记，`checkpoint` 可为本次镜像编码替换状态。
+每个 operation 声明类型 ID、codec 和恢复策略。`OperationDriver` 通过 `&Services` 获取服务，并用 `start` / `resume` 返回拥有平台登记的 `Live`。状态和 `Live` 均不得持有 guest 值；回调与其他活值由 VM 的后台任务保存。`Live` 的 `Drop` 释放登记，`checkpoint` 可为本次镜像编码替换状态。
 
 ### 7.2 启动与结算
 
@@ -391,8 +397,8 @@ flowchart TB
     F --> G[解码 payload 与模块状态]
     G --> H[校验续体、等待关系与 operation 记录]
     H --> I[在新代际下原子发布 VM]
-    I --> J[按策略结算或重新登记 operation]
-    J --> K[排空恢复产生的微任务]
+    I --> J[嵌入方显式启动待重新登记的 operation]
+    J --> K[嵌入方驱动 VM 执行排队的工作]
 ```
 
 `Vm::restore` 默认使用 `SnapshotValidation::Trusted`，只接收受信、未经篡改的 VM 镜像，仍匹配当前绑定声明、解码 payload、重建宿主记录；不重复遍历堆图审计镜像内部关系。开发和诊断可将 `RestoreOptions::validation` 设为 `SnapshotValidation::Full`；两种模式都不负责认证存档来源或完整性，也不适用于不可信输入。
@@ -414,7 +420,7 @@ flowchart TB
 
 ## 11. 多 VM、代际与生命周期
 
-- 静态声明共享；每个 VM 有独立原型表、模块状态和实例。实例、句柄和 operation 令牌不能跨 VM 使用。
+- 每个 VM 接管自己的 `Host`，并有独立原型表、模块状态和实例。实例、临时句柄和 operation 令牌不能跨 VM 使用；允许共享的服务资源须显式共享。
 - VM 创建时分配随机代际，恢复时分配新代际。代际不写入快照：分叉恢复出的两个 VM 各自拥有不同代际，旧宿主持有的交付只会在匹配原代际时被接受，从而避免「旧任务结算新 VM」。
 - 实例不可达时，payload 随对象释放；平台资源由 payload 的 `Drop` 或绑定提供的释放钩子处理。快照不保存平台句柄，因此恢复不会「复活」旧平台对象。
 - VM 销毁时释放全部实例与平台资源；静态声明不持有资源。
@@ -475,7 +481,7 @@ flowchart TB
 7. **TypeScript 定义生成：暂缓。** 待声明和签名模型稳定后再确定生成范围，不引入手工补丁机制。
 8. **payload 编码：继续使用自定义 codec。** 不绑定 postcard、bincode 或 CBOR；规范编码、字段顺序、长度与版本规则由 codec 契约明确。
 9. **流式 payload：暂缓。** 维持整段写入/读取接口；只有实测证明峰值内存构成问题时再改为流式 API。
-10. **宿主并发与 operation 恢复：** VM 不承诺跨线程安全。`Bindings` 同样按线程持有，不作为跨线程共享对象；需要并行时每线程各自构建，跨线程的服务能力由服务自身的类型或 trait 声明。宿主可在其他线程完成平台工作，但只向宿主自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `Vm::start_recovered_operations` 启动。启动失败按对应 operation 的声明拒绝结算原 Promise，不回滚已恢复的 VM。
+10. **宿主并发与 operation 恢复：** VM 及其宿主按线程持有；跨线程的服务能力由服务自身的类型或 trait 声明。宿主可在其他线程完成平台工作，但只向自己的队列投递令牌与结果；VM 交付仍在 VM 所在线程进行。恢复成功返回前不启动 `Resume` / `Reissue` 外部工作；`Vm::restore` 返回后由 VM 所在线程调用 `vm.start_recovered_operations()` 启动。启动失败只拒绝对应目标，不回滚已恢复的 VM。
 11. **恢复资源限制：暂不由 VM 设通用上限。** 前提是快照仅来自可信本地存档；接入方须在读取/解析前限制文件大小。若快照转为导入、同步或其他不可信输入，必须重新评估解析前的大小、对象数、payload 大小和嵌套深度限制。
 12. **BigInt：纳入首版值域。** VM 使用自有任意精度整数表示；`JsValue` 仍为定长句柄，构建常量与快照按规范十进制字符串编码。宿主通过 `JsValue::bigint(&str)` 构造（解析失败按宿主错误处理）、通过 `Inspect` 读取文本，不在宿主侧引入第二套大整数模型。
 
@@ -489,5 +495,5 @@ Rust 回调从 `&mut CallCx<'_>` 开始，类成员接着接收 `This<Class>`；
 
 宏展开引用 `::yield_vm`；如果依赖在 Cargo 中改名，在消费 crate 根用 `extern crate <依赖名> as yield_vm;` 提供该名字。`#[js_slot]` / `#[js_list]` 字段不进入 Rust payload；类用生成的 `<Class>Slots` trait 访问槽，模块状态用 `SLOT_<字段大写>` 索引。如果槽方法名被 `Instance` 的固有方法遮蔽，可用 `<Class>Slots::槽方法(&instance, cx)`。
 
-`host_bindings!` 是受支持的注册入口，不再提供公开 builder。`__macro_support` 只用于跨 crate 的宏展开，不是手写注册 API。
+`host!` 是受支持的注册入口，不提供公开 builder。`__macro_support` 只用于跨 crate 的宏展开，不是手写注册 API。
 

@@ -9,7 +9,7 @@ pub(crate) mod members {
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
     use crate::value::{Value, ValueRef};
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     const KEY: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     const PROTOTYPE: &str = "boolean.prototype";
@@ -40,7 +40,7 @@ pub(crate) mod members {
         Some(install),
     );
 
-    fn install(vm: &mut Vm, _: &Value) {
+    fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get(PROTOTYPE);
         link_constructor(vm, constructor, prototype);
@@ -48,7 +48,7 @@ pub(crate) mod members {
     }
 
     fn boolean_value(
-        vm: &mut Vm,
+        vm: &mut VmCore,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         stringify: bool,

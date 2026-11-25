@@ -11,7 +11,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Copy)]
 pub(crate) enum RegExpMethod {
@@ -121,7 +121,7 @@ mod members {
     }
 }
 
-fn install(vm: &mut Vm, identity: &Value) {
+fn install(vm: &mut VmCore, identity: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get("regexp.prototype");
     let iterator = vm.builtins.get("regexpIterator.prototype");
@@ -144,7 +144,7 @@ fn install(vm: &mut Vm, identity: &Value) {
     );
 }
 
-impl Vm {
+impl VmCore {
     /// A literal was validated by the compiler, but bytecode may come from elsewhere.
     pub(crate) fn alloc_regexp(
         &mut self,
@@ -184,7 +184,7 @@ impl Vm {
 
     pub(crate) fn construct_regexp(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -260,7 +260,7 @@ impl Vm {
 
     pub(crate) fn call_regexp_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: RegExpMethod,
         receiver: &Value,
@@ -377,7 +377,7 @@ impl Vm {
     }
     fn regexp_symbol_match(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -447,7 +447,7 @@ impl Vm {
 
     fn regexp_symbol_match_all(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -506,7 +506,7 @@ impl Vm {
 
     fn regexp_string_iterator_next(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {
@@ -579,7 +579,7 @@ impl Vm {
 
     fn regexp_symbol_replace(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -691,7 +691,7 @@ impl Vm {
 
     fn regexp_symbol_search(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -746,7 +746,7 @@ impl Vm {
 
     fn regexp_symbol_split(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: &[Value],
@@ -889,7 +889,7 @@ impl Vm {
     )]
     fn regexp_replace_results(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         string: &JsString,
         results: Vec<Value>,
@@ -999,7 +999,7 @@ impl Vm {
 
     fn regexp_substitution(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         replaced: &JsString,
         parts: &Substitution<'_>,
@@ -1111,7 +1111,7 @@ impl Vm {
 
     fn regexp_flags(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -1126,7 +1126,7 @@ impl Vm {
 
     fn regexp_last_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -1147,7 +1147,7 @@ impl Vm {
 
     fn regexp_set_last_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         value: f64,
@@ -1169,7 +1169,7 @@ impl Vm {
     /// Reads `array[index]` for a match result or a named key such as `index`.
     fn regexp_element(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         array: ObjectId,
         key: &str,
@@ -1187,7 +1187,7 @@ impl Vm {
 
     fn regexp_capture(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         array: ObjectId,
         index: usize,
@@ -1197,7 +1197,7 @@ impl Vm {
 
     fn regexp_string_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         key: &str,
@@ -1211,7 +1211,7 @@ impl Vm {
 
     fn regexp_test(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1234,7 +1234,7 @@ impl Vm {
 
     fn regexp_exec(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1246,7 +1246,7 @@ impl Vm {
 
     fn regexp_exec_with_encoded(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,
@@ -1289,7 +1289,7 @@ impl Vm {
 
     fn regexp_match(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,
@@ -1299,7 +1299,7 @@ impl Vm {
 
     fn regexp_match_with_encoded(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         input: JsString,

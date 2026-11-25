@@ -20,11 +20,11 @@ export function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     assert!(matches!(
         Vm::new(
             build.clone(),
-            &mut host,
+            host.host(),
             VmOptions {
                 base_url: Some("relative"),
                 ..Default::default()
@@ -35,7 +35,7 @@ export function run() {
     let verified = VerifiedBuild::new(build.clone()).unwrap();
     let vm = Vm::new(
         verified.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             base_url: Some("https://example.org/a/b/"),
             ..Default::default()
@@ -60,7 +60,7 @@ export function run() {
         Vm::restore(
             malformed,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -71,14 +71,14 @@ export function run() {
     let mut vm = Vm::restore(
         snapshot,
         verified,
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
         },
     )
     .unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     assert_eq!(
         result.into_string().unwrap().to_utf8().unwrap(),
         "https://example.org/a/b/other https://example.org/a/item?old=a+b true item"
@@ -91,14 +91,14 @@ fn restore_rejects_the_previous_snapshot_format() {
     use yield_vm::{SNAPSHOT_FORMAT_VERSION, Vm, VmError};
 
     let build = build("export function run() { return [1].entries(); }");
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let cursor = vm.start(&mut host, "run", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let cursor = vm.start("run", vec![]).unwrap();
     let mut snapshot = vm.snapshot(&[cursor]).unwrap();
     assert_eq!(snapshot.format_version, SNAPSHOT_FORMAT_VERSION);
     snapshot.format_version -= 1;
     assert!(matches!(
-        Vm::restore(snapshot, build, &mut host, Default::default()),
+        Vm::restore(snapshot, build, host.host(), Default::default()),
         Err(VmError::InvalidSnapshot(message)) if message.contains(&format!("unsupported snapshot format {}", SNAPSHOT_FORMAT_VERSION - 1))
     ));
 }
@@ -119,10 +119,10 @@ export async function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start run");
-    vm.run_until_idle(&mut host).expect("suspend run");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start run");
+    vm.run_until_idle().expect("suspend run");
     let mut snapshot = vm.snapshot(&[result]).expect("capture boxed symbol");
     let symbol = snapshot
         .objects
@@ -143,7 +143,7 @@ export async function run() {
         Vm::restore(
             snapshot,
             build,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -166,10 +166,10 @@ export async function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start run");
-    vm.run_until_idle(&mut host).expect("suspend run");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start run");
+    vm.run_until_idle().expect("suspend run");
     let mut snapshot = vm.snapshot(&[result]).expect("capture string cursor");
     let visited = snapshot
         .objects
@@ -184,7 +184,7 @@ export async function run() {
         Vm::restore(
             snapshot,
             build,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -323,24 +323,22 @@ source.next = () => { throw 'next was not cached'; };
 export function run() { return iterator.toArray().join(); }
 "#,
     );
-    let mut host = TestHost::default();
-    let vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
+    let host = TestHost::default();
+    let vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
     let snapshot = vm.snapshot(&[]).expect("capture suspended iterator");
     let bytes = snapshot.to_bytes().expect("encode snapshot");
     let decoded = Snapshot::from_bytes(&bytes).expect("decode snapshot");
     let mut restored = Vm::restore(
         decoded,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
         },
     )
     .expect("restore snapshot");
-    let actual = restored
-        .start(&mut host, "run", vec![])
-        .expect("consume iterator");
+    let actual = restored.start("run", vec![]).expect("consume iterator");
     assert_eq!(actual, Value::string("2,3".into()));
 }
 
@@ -380,10 +378,10 @@ export async function run() {
 "#,
     );
     for restore in [false, true] {
-        let mut host = TestHost::default();
-        let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-        let result = vm.start(&mut host, "run", vec![]).unwrap();
-        vm.run_until_idle(&mut host).unwrap();
+        let host = TestHost::default();
+        let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+        let result = vm.start("run", vec![]).unwrap();
+        vm.run_until_idle().unwrap();
         for (label, completion) in [
             (
                 "wait:fulfill",
@@ -397,12 +395,12 @@ export async function run() {
             if restore {
                 let snapshot = vm.snapshot(std::slice::from_ref(&result)).unwrap();
                 let snapshot = Snapshot::from_json(&snapshot.to_json().unwrap()).unwrap();
-                vm = Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
+                vm = Vm::restore(snapshot, build.clone(), host.host(), Default::default()).unwrap();
                 vm.start_recovered_operations().unwrap();
             }
             vm.complete_operation(host.token(label).unwrap(), completion)
                 .unwrap();
-            vm.run_until_idle(&mut host).unwrap();
+            vm.run_until_idle().unwrap();
         }
         assert_eq!(
             vm.promise_state(&result).unwrap(),
@@ -417,8 +415,8 @@ fn restore_rejects_changed_has_instance_description() {
     use yield_vm::{Vm, VmError};
 
     let build = build("export function run() { return 0; }");
-    let mut host = TestHost::default();
-    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     let mut snapshot = vm.snapshot(&[]).unwrap();
     let description = snapshot.symbols.get_mut(&8).expect("reserved symbol root");
     assert_eq!(*description, Some("Symbol.hasInstance".into()));
@@ -427,7 +425,7 @@ fn restore_rejects_changed_has_instance_description() {
         Vm::restore(
             snapshot,
             build,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -445,11 +443,11 @@ fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
     let build = build(
         "export function cycle() { const object = {}; object.self = object; return object; }",
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
     vm.collect_garbage(&[]).unwrap();
 
-    let cycle = vm.start(&mut host, "cycle", vec![]).unwrap();
+    let cycle = vm.start("cycle", vec![]).unwrap();
     let ValueRef::Object(id) = cycle.view() else {
         panic!("expected cycle object");
     };
@@ -465,7 +463,7 @@ fn gc_reclaims_unrooted_cycles_without_reusing_ids() {
         Err(VmError::InvalidState(_))
     ));
 
-    let next = vm.start(&mut host, "cycle", vec![]).unwrap();
+    let next = vm.start("cycle", vec![]).unwrap();
     let ValueRef::Object(next_id) = next.view() else {
         panic!("expected new cycle object");
     };
@@ -501,24 +499,21 @@ export function takeKey1() { const key = key1; key1 = undefined; return key; }
 export function read() { return second.get(first.get(key1)).answer; }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let key2 = vm.start(&mut host, "takeKey2", vec![]).unwrap();
-    let backref = vm.start(&mut host, "takeBackref", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let key2 = vm.start("takeKey2", vec![]).unwrap();
+    let backref = vm.start("takeBackref", vec![]).unwrap();
 
     // Only key1 remains in the script's roots. Neither key2 nor the
     // backreference key is a root just because the Rust test holds its ID.
     vm.collect_garbage(&[]).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "read", vec![]).unwrap(),
-        Value::number(42.0)
-    );
+    assert_eq!(vm.start("read", vec![]).unwrap(), Value::number(42.0));
     assert!(matches!(
         vm.collect_garbage(&[backref]),
         Err(VmError::InvalidState(_))
     ));
 
-    let key1 = vm.start(&mut host, "takeKey1", vec![]).unwrap();
+    let key1 = vm.start("takeKey1", vec![]).unwrap();
     vm.collect_garbage(&[key1]).unwrap();
     vm.snapshot(std::slice::from_ref(&key2))
         .expect("an explicit key1 root must still preserve key2");
@@ -550,10 +545,9 @@ const stash = setup();
 export function take(i) { const value = stash[i]; delete stash[i]; return value; }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let values =
-        [0.0, 1.0, 2.0, 3.0].map(|i| vm.start(&mut host, "take", vec![number(i)]).unwrap());
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let values = [0.0, 1.0, 2.0, 3.0].map(|i| vm.start("take", vec![number(i)]).unwrap());
     let [
         ValueRef::Object(map),
         ValueRef::Object(set),
@@ -628,8 +622,8 @@ export const set = new WeakSet();
 export const registered = Symbol.for('registered');
 "#,
     );
-    let mut host = TestHost::default();
-    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     let ValueRef::Symbol(registered) = vm.get_export("registered").unwrap().view() else {
         panic!("expected registered symbol");
     };
@@ -654,7 +648,7 @@ export const registered = Symbol.for('registered');
                 Vm::restore(
                     corrupt,
                     build.clone(),
-                    &mut host,
+                    host.host(),
                     RestoreOptions {
                         validation: SnapshotValidation::Full,
                         ..Default::default()
@@ -706,11 +700,11 @@ export function fresh() { return Symbol("ordinary"); }
 export function registered() { return Symbol.for("registry"); }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
     vm.collect_garbage(&[]).unwrap();
-    let registered = vm.start(&mut host, "registered", vec![]).unwrap();
-    let ValueRef::Symbol(id) = vm.start(&mut host, "fresh", vec![]).unwrap().view() else {
+    let registered = vm.start("registered", vec![]).unwrap();
+    let ValueRef::Symbol(id) = vm.start("fresh", vec![]).unwrap().view() else {
         panic!("expected ordinary symbol");
     };
     let roots = [Value::symbol(id)];
@@ -728,10 +722,7 @@ export function registered() { return Symbol.for("registry"); }
         Err(VmError::InvalidState(message))
             if message == format!("garbage collection references missing symbol {id}")
     ));
-    assert_eq!(
-        vm.start(&mut host, "registered", vec![]).unwrap(),
-        registered
-    );
+    assert_eq!(vm.start("registered", vec![]).unwrap(), registered);
 }
 
 #[test]
@@ -751,10 +742,10 @@ export async function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     let token = host.token("wait:a").unwrap();
     let roots = std::slice::from_ref(&result);
     let before = vm.snapshot(roots).unwrap();
@@ -764,13 +755,13 @@ export async function run() {
     let expected = PromiseState::Fulfilled(Value::string("closure:payload!".into()));
     vm.complete_operation(token, Completion::Fulfilled(JsValue::string("!")))
         .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), expected);
 
     for snapshot in [before, after] {
         let mut host = TestHost::default();
         let mut restored =
-            Vm::restore(snapshot, build.clone(), &mut host, Default::default()).unwrap();
+            Vm::restore(snapshot, build.clone(), host.host(), Default::default()).unwrap();
         restored.start_recovered_operations().unwrap();
         host.complete(
             &mut restored,
@@ -778,7 +769,7 @@ export async function run() {
             Completion::Fulfilled(JsValue::string("!")),
         )
         .unwrap();
-        restored.run_until_idle(&mut host).unwrap();
+        restored.run_until_idle().unwrap();
         assert_eq!(restored.promise_state(&result).unwrap(), expected);
     }
 }
@@ -796,19 +787,19 @@ fn gc_active_preserves_only_registered_external_roots() {
     "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let value = vm.start(&mut host, "make", vec![]).unwrap();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let value = vm.start("make", vec![]).unwrap();
     let ValueRef::Object(id) = value.view() else {
         panic!("expected object")
     };
     let roots = [Value::object(id)];
     host.set_case_result(Some(Value::object(id)));
-    vm.start(&mut host, "collect", vec![]).unwrap();
+    vm.start("collect", vec![]).unwrap();
     let snapshot = vm.snapshot(&roots).unwrap();
     assert!(snapshot.objects.iter().any(|object| object.id == id));
 
     host.set_case_result(None);
-    vm.start(&mut host, "collect", vec![]).unwrap();
+    vm.start("collect", vec![]).unwrap();
     assert!(matches!(vm.snapshot(&roots), Err(VmError::InvalidState(_))));
 }
 
@@ -827,11 +818,11 @@ fn gc_active_rejects_a_missing_root_without_sweeping() {
     "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let value = vm.start(&mut host, "make", vec![]).unwrap();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let value = vm.start("make", vec![]).unwrap();
     host.set_case_result(Some(Value::symbol(u32::MAX)));
     assert!(matches!(
-        vm.start(&mut host, "collect", vec![]),
+        vm.start("collect", vec![]),
         Err(VmError::InvalidState(message))
             if message == format!("garbage collection references missing symbol {}", u32::MAX)
     ));
@@ -846,9 +837,9 @@ fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
     use yield_vm::{PromiseState, Value, Vm, VmError};
 
     let build = build("export async function run() { return await 42; }");
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     let roots = std::slice::from_ref(&result);
     assert!(matches!(
         vm.collect_garbage(roots),
@@ -856,7 +847,7 @@ fn gc_rejects_a_nonempty_microtask_queue_without_draining_it() {
             if message == "garbage collection requires a drained microtask queue"
     ));
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     vm.collect_garbage(roots).unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
@@ -879,16 +870,16 @@ export function pending() {
 export function settle() { saved(42); }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "pending", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    let result = vm.start("pending", vec![]).unwrap();
     let roots = std::slice::from_ref(&result);
     assert!(matches!(
         vm.snapshot(roots),
         Err(VmError::InvalidState(message)) if message == "snapshot during pending thenable assimilation"
     ));
     assert!(vm.collect_garbage(roots).unwrap() >= 3);
-    vm.start(&mut host, "settle", vec![]).unwrap();
+    vm.start("settle", vec![]).unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(42.0))
@@ -1003,10 +994,10 @@ export function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).expect("create VM");
-    let result = vm.start(&mut host, "run", vec![]).expect("start run");
-    vm.run_until_idle(&mut host).expect("drain run");
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).expect("create VM");
+    let result = vm.start("run", vec![]).expect("start run");
+    vm.run_until_idle().expect("drain run");
     let snapshot = vm.snapshot(&[result]).expect("capture binary objects");
 
     let view_id = snapshot
@@ -1038,7 +1029,7 @@ export function run() {
         Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut host,
+            host.host(),
             Default::default()
         )
         .is_ok()
@@ -1058,7 +1049,7 @@ export function run() {
         Vm::restore(
             misaligned,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1082,7 +1073,7 @@ export function run() {
         Vm::restore(
             partial,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1106,7 +1097,7 @@ export function run() {
         Vm::restore(
             overflow,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1129,7 +1120,7 @@ export function run() {
         Vm::restore(
             shrink,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1153,7 +1144,7 @@ export function run() {
         Vm::restore(
             tracking,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -1178,19 +1169,16 @@ export function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, VmOptions::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), VmOptions::default()).unwrap();
     vm.collect_garbage(&[]).unwrap();
     let snapshot = Snapshot::from_bytes(&vm.snapshot(&[]).unwrap().to_bytes().unwrap()).unwrap();
     let full = || RestoreOptions {
         validation: SnapshotValidation::Full,
         ..Default::default()
     };
-    let mut vm = Vm::restore(snapshot.clone(), build.clone(), &mut host, full()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
+    let mut vm = Vm::restore(snapshot.clone(), build.clone(), host.host(), full()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::boolean(true));
 
     let mut malformed = snapshot;
     let mark = malformed
@@ -1205,7 +1193,7 @@ export function run() {
         .unwrap();
     *mark = Value::NULL;
     assert!(matches!(
-        Vm::restore(malformed, build, &mut host, full()),
+        Vm::restore(malformed, build, host.host(), full()),
         Err(VmError::InvalidSnapshot(message)) if message.contains("nonnumeric high water mark")
     ));
 }
@@ -1228,9 +1216,9 @@ export function run() {
 "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     let roots = std::slice::from_ref(&result);
     vm.collect_garbage(roots).unwrap();
     let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
@@ -1248,12 +1236,12 @@ export function run() {
         })
         .unwrap();
     assert!(stream.reader.take().is_some());
-    let invalid = Vm::restore(malformed, build.clone(), &mut host, full());
+    let invalid = Vm::restore(malformed, build.clone(), host.host(), full());
     assert!(
         matches!(invalid, Err(VmError::InvalidSnapshot(message)) if message.contains("invalid stream record"))
     );
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), full()).unwrap();
     vm.start_recovered_operations().unwrap();
     host.complete(
         &mut vm,
@@ -1261,7 +1249,7 @@ export function run() {
         Completion::Fulfilled(JsValue::number(42.0)),
     )
     .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(42.0))
@@ -1291,8 +1279,8 @@ export async function run() {
 }
 "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     vm.collect_garbage(&[]).unwrap();
     let captured = vm.snapshot(&[]).unwrap();
     let snapshot = Snapshot::from_json(&captured.to_json().unwrap()).unwrap();
@@ -1311,13 +1299,13 @@ export async function run() {
         .unwrap();
     bytes.queue.front_mut().unwrap().offset = usize::MAX;
     assert!(matches!(
-        Vm::restore(malformed, build.clone(), &mut host, full()),
+        Vm::restore(malformed, build.clone(), host.host(), full()),
         Err(VmError::InvalidSnapshot(_))
     ));
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), full()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         yield_vm::PromiseState::Fulfilled(Value::boolean(true))
@@ -1356,16 +1344,16 @@ export async function run() {
 "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let first = vm.start(&mut host, "enqueue", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let first = vm.start("enqueue", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     let roots = std::slice::from_ref(&first);
     vm.collect_garbage(roots).unwrap();
     let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
     let mut vm = Vm::restore(
         snapshot,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -1380,13 +1368,13 @@ export async function run() {
         Completion::Fulfilled(JsValue::undefined()),
     )
     .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&first).unwrap(),
         PromiseState::Fulfilled(Value::UNDEFINED)
     );
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(Value::number(123.0))
@@ -1416,9 +1404,9 @@ export function run() {
 "#,
     );
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
     let roots = std::slice::from_ref(&result);
     vm.collect_garbage(roots).unwrap();
     let snapshot = Snapshot::from_bytes(&vm.snapshot(roots).unwrap().to_bytes().unwrap()).unwrap();
@@ -1438,11 +1426,11 @@ export function run() {
     let (_, stage) = transform.write_wait.expect("pending transform write");
     transform.write_wait = Some((transform.backpressure_change, stage));
     assert!(matches!(
-        Vm::restore(malformed, build.clone(), &mut host, full()),
+        Vm::restore(malformed, build.clone(), host.host(), full()),
         Err(VmError::InvalidSnapshot(_))
     ));
 
-    let mut vm = Vm::restore(snapshot, build, &mut host, full()).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), full()).unwrap();
     vm.start_recovered_operations().unwrap();
     host.complete(
         &mut vm,
@@ -1450,7 +1438,7 @@ export function run() {
         Completion::Fulfilled(JsValue::number(8.0)),
     )
     .unwrap();
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert!(matches!(
         vm.promise_state(&result).unwrap(),
         PromiseState::Fulfilled(_)
@@ -1484,13 +1472,11 @@ export async function run(size) {
     };
     let mut captured = Vec::new();
     for &size in sizes {
-        let mut host = TestHost::default();
-        let mut vm = Vm::new(build.clone(), &mut host, VmOptions::default()).unwrap();
+        let host = TestHost::default();
+        let mut vm = Vm::new(build.clone(), host.host(), VmOptions::default()).unwrap();
         let started = std::time::Instant::now();
-        let result = vm
-            .start(&mut host, "run", vec![JsValue::number(size as f64)])
-            .unwrap();
-        vm.run_until_idle(&mut host).unwrap();
+        let result = vm.start("run", vec![JsValue::number(size as f64)]).unwrap();
+        vm.run_until_idle().unwrap();
         let elapsed = started.elapsed();
         vm.collect_garbage(std::slice::from_ref(&result)).unwrap();
         let bytes = vm

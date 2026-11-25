@@ -15,7 +15,7 @@ use crate::host::Host;
 use crate::runtime::{Invocation, Settlement};
 use crate::snapshot::OrdinaryTask;
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::StreamJob;
 
@@ -315,7 +315,7 @@ impl TransferRecord {
     }
 }
 
-pub(in crate::builtin) fn transferable(vm: &Vm, source: ObjectId) -> Result<bool, VmError> {
+pub(in crate::builtin) fn transferable(vm: &VmCore, source: ObjectId) -> Result<bool, VmError> {
     Ok(match vm.heap.get(source)? {
         Object::ReadableStream(s) => s.reader.is_none(),
         Object::WritableStream(s) => s.writer.is_none(),
@@ -341,7 +341,7 @@ fn invalid() -> VmError {
     VmError::InvalidState("invalid stream transfer state".into())
 }
 
-impl Vm {
+impl VmCore {
     pub(in crate::builtin) fn allocate_transfer_proxy(
         &mut self,
         source: ObjectId,
@@ -476,7 +476,7 @@ impl Vm {
 
     pub(super) fn transfer_send(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         flight: WritableFlight,
@@ -503,7 +503,7 @@ impl Vm {
 
     pub(super) fn transfer_cancel(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: &Value,
@@ -514,7 +514,7 @@ impl Vm {
 
     fn transfer_reason(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         reason: &Value,
     ) -> Result<Value, VmError> {
@@ -525,7 +525,7 @@ impl Vm {
 
     pub(crate) fn deliver_stream_message(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         id: ObjectId,
         sequence: u64,
     ) -> Result<(), VmError> {
@@ -669,7 +669,7 @@ impl Vm {
 
     pub(super) fn resume_transfer(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         stage: TransferStage,

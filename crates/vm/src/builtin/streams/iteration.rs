@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const PROTO: &str = "ReadableStreamAsyncIterator.prototype";
 const NEXT: IntrinsicKey =
@@ -54,7 +54,7 @@ pub(crate) const INTRINSICS: &[IntrinsicDef] = &[
     }),
 ];
 
-pub(crate) fn install(vm: &mut Vm) {
+pub(crate) fn install(vm: &mut VmCore) {
     let stream = vm.builtins.get("readableStream");
     let prototype = vm.builtins.get("readableStream.prototype");
     let from = vm.alloc_intrinsic(FROM.key);
@@ -208,8 +208,8 @@ macro_rules! script {
 }
 
 fn from(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -259,8 +259,8 @@ fn from(
 }
 
 fn values(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -301,7 +301,7 @@ fn nullish(value: &Value) -> bool {
     matches!(value.view(), ValueRef::Null | ValueRef::Undefined)
 }
 
-impl Vm {
+impl VmCore {
     fn iterator_record(&self, source: ObjectId) -> Result<&FromIterator, VmError> {
         match self.heap.get(source)? {
             Object::StreamFromIterator(record) => Ok(record),
@@ -330,7 +330,7 @@ impl Vm {
 
     pub(super) fn pull_from_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stream: ObjectId,
@@ -345,7 +345,7 @@ impl Vm {
 
     pub(super) fn cancel_from_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         reason: &Value,
@@ -373,7 +373,7 @@ impl Vm {
 
     fn begin_from_flight(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stream: Option<ObjectId>,
@@ -424,7 +424,7 @@ impl Vm {
 
     fn result_parts(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: &Value,
     ) -> Result<Result<(bool, Value), Value>, VmError> {
@@ -451,7 +451,7 @@ impl Vm {
 
     fn resume_source_iteration(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
         stage: IterationStage,
@@ -516,7 +516,7 @@ impl Vm {
 
     fn queue_iterator_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         reason: Option<Value>,
@@ -548,7 +548,7 @@ impl Vm {
 
     fn run_iterator_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<(), VmError> {
@@ -665,7 +665,7 @@ impl Vm {
 
     pub(super) fn resume_iteration_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         stage: IterationStage,

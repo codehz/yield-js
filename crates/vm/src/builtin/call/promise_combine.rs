@@ -9,11 +9,11 @@ use crate::heap::{
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn combine(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         kind: CombineKind,
@@ -28,7 +28,7 @@ impl Vm {
         };
         let capability_roots = (&result, &resolve, &reject);
         let roots = &roots.with(&capability_roots);
-        let reject_result = |vm: &mut Self, host: &mut dyn Host, roots: &ActiveRoots<'_>, error| {
+        let reject_result = |vm: &mut Self, host: &Host, roots: &ActiveRoots<'_>, error| {
             vm.call_promise_capability(host, roots, result.clone(), &reject, error)
         };
         let input_resolve =
@@ -181,7 +181,7 @@ impl Vm {
 
     pub(crate) fn capability_call(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         value: Value,
@@ -246,7 +246,7 @@ impl Vm {
 
     pub(crate) fn run_call_handler(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         handler: &Option<Value>,
         argument: &Value,
@@ -282,7 +282,7 @@ impl Vm {
 
     pub(crate) fn run_queue_call(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         function: &Value,
         args: &[Value],
@@ -308,7 +308,7 @@ impl Vm {
 
     pub(super) fn call_combine_element(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         index: usize,
@@ -344,7 +344,7 @@ impl Vm {
 
     fn finish_combine_element(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
     ) -> Result<Invocation, VmError> {

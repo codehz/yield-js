@@ -11,7 +11,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::{RootKind, RootSpec, define_builtin_data, globals::Owner};
 
@@ -189,8 +189,8 @@ iterator_methods!(
 );
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _args: Vec<Value>,
     new_target: &Value,
@@ -212,8 +212,8 @@ fn construct(
 }
 
 fn from(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     item: &Value,
 ) -> Result<Invocation, VmError> {
@@ -237,8 +237,8 @@ fn from(
 }
 
 fn forward(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     returning: bool,
@@ -267,8 +267,8 @@ fn forward(
 
 // SetterThatIgnoresPrototypeProperties (ECMA-262 §7.3.37).
 fn set_own(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: Value,
     receiver: &Value,
@@ -305,8 +305,8 @@ fn set_own(
 }
 
 fn return_method(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -320,7 +320,7 @@ fn return_method(
     }
 }
 
-pub(crate) fn install(vm: &mut Vm, identity: &Value) {
+pub(crate) fn install(vm: &mut VmCore, identity: &Value) {
     let sync = vm.builtins.get(SYNC_ROOT);
     let helper = vm.builtins.get(HELPER_ROOT);
     let constructor = vm.builtins.get(ROOT);

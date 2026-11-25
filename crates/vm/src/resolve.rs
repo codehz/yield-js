@@ -11,7 +11,7 @@ use crate::heap::{Object, PromiseState};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation, Microtask, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) enum AwaitPrepared {
     Promise(ObjectId),
@@ -25,10 +25,10 @@ enum ResolutionInput {
     Thrown(Value),
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn resolve_promise(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         value: Value,
@@ -48,7 +48,7 @@ impl Vm {
     /// after observing its constructor. Resolving functions never do this check.
     pub(crate) fn promise_identity(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<Option<ObjectId>, Value>, VmError> {
@@ -69,7 +69,7 @@ impl Vm {
 
     fn classify_resolution(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<ResolutionInput, VmError> {
@@ -126,7 +126,7 @@ impl Vm {
 
     pub(crate) fn run_assimilate(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         receiver: &Value,
@@ -148,7 +148,7 @@ impl Vm {
 
     pub(crate) fn prepare_await(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         input: Value,
     ) -> Result<Result<AwaitPrepared, Value>, VmError> {
@@ -169,7 +169,7 @@ impl Vm {
 
     pub(crate) fn run_adopt(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         settlement: &Settlement,

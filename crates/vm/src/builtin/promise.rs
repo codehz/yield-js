@@ -7,7 +7,7 @@ pub(crate) mod members {
     use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
     use crate::runtime::Invocation;
     use crate::value::Value;
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Global, "");
     pub(crate) const THEN: IntrinsicKey = IntrinsicKey::new(NAME, Slot::Prototype, "then");
@@ -24,7 +24,7 @@ pub(crate) mod members {
     )];
     pub(crate) const OWNER: Owner = Owner::new(ROOT, ROOTS, &[GLOBAL, INTRINSICS], Some(install));
 
-    fn install(vm: &mut Vm, _: &Value) {
+    fn install(vm: &mut VmCore, _: &Value) {
         let constructor = vm.builtins.get(ROOT);
         let prototype = vm.builtins.get("promise.prototype");
         install_members(vm, constructor, prototype);

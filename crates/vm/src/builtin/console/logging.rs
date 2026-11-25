@@ -10,7 +10,8 @@ use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
-use crate::{JsString, Value, Vm, VmError};
+use crate::vm::VmCore;
+use crate::{JsString, Value, VmError};
 
 use super::Method;
 
@@ -26,8 +27,8 @@ macro_rules! convert {
 }
 
 pub(super) fn payload(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     method: Method,
     args: &[Value],
@@ -115,22 +116,22 @@ pub(super) fn payload(
     Ok(Ok(Some((level, ConsolePayload::Args(args)))))
 }
 
-pub(super) fn preview(vm: &Vm, value: &Value, mode: ConsolePreviewMode) -> ConsolePreview {
+pub(super) fn preview(vm: &VmCore, value: &Value, mode: ConsolePreviewMode) -> ConsolePreview {
     ConsolePreview {
         mode,
         value: Preview::new(vm).value(value, 0),
     }
 }
 
-pub(super) fn raw(vm: &Vm, args: &[Value]) -> Vec<ConsoleArg> {
+pub(super) fn raw(vm: &VmCore, args: &[Value]) -> Vec<ConsoleArg> {
     args.iter()
         .map(|value| ConsoleArg::Value(preview(vm, value, Optimal)))
         .collect()
 }
 
 pub(super) fn format(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Completion<Vec<ConsoleArg>> {

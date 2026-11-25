@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct FormDataRecord {
@@ -112,7 +112,7 @@ methods! {
 
 pub(crate) const FORM_DATA_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, vm.builtins.get(ROOT), prototype);
     for &(name, key) in METHODS {
@@ -142,7 +142,7 @@ fn install(vm: &mut Vm, _: &Value) {
     }
 }
 
-impl Vm {
+impl VmCore {
     fn construct_form_data(
         &mut self,
         roots: &ActiveRoots<'_>,
@@ -177,7 +177,7 @@ impl Vm {
 
     fn form_data_usv(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<String, Value>, VmError> {
@@ -190,7 +190,7 @@ impl Vm {
 
     fn form_data_entry_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         filename: Option<&Value>,
@@ -235,7 +235,7 @@ impl Vm {
 
     fn form_data_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -330,7 +330,7 @@ impl Vm {
 
     fn form_data_for_each(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,

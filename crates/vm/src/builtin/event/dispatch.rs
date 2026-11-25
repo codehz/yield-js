@@ -5,12 +5,12 @@ use crate::heap::{AbortStep, EventListener, EventPayload, EventState, EventTarge
 use crate::host::Host;
 use crate::runtime::{Arguments, HostSlot, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 use std::collections::BTreeSet;
 
 pub(super) fn add_listener(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -19,8 +19,8 @@ pub(super) fn add_listener(
 }
 
 pub(super) fn remove_listener(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -29,8 +29,8 @@ pub(super) fn remove_listener(
 }
 
 fn change_listener(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -148,8 +148,8 @@ fn change_listener(
 }
 
 pub(super) fn dispatch_untrusted(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -158,8 +158,8 @@ pub(super) fn dispatch_untrusted(
 }
 
 pub(super) fn dispatch_trusted(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -168,8 +168,8 @@ pub(super) fn dispatch_trusted(
 }
 
 fn dispatch_call(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     receiver: &Value,
@@ -184,7 +184,7 @@ fn dispatch_call(
     vm.dispatch_event(host, roots, target, event, trusted)
 }
 
-fn target_receiver(vm: &Vm, value: &Value) -> Result<Option<ObjectId>, VmError> {
+fn target_receiver(vm: &VmCore, value: &Value) -> Result<Option<ObjectId>, VmError> {
     if let ValueRef::Object(id) = value.view()
         && vm.event_target(id)?.is_some()
     {
@@ -199,10 +199,11 @@ struct ListenerPass<'a> {
     capture: bool,
 }
 
-impl Vm {
+impl VmCore {
     // Read only the VM-managed parent slot; never consult JS properties.
     fn dispatch_path(
         &mut self,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
     ) -> Result<Result<Vec<ObjectId>, Value>, VmError> {
@@ -210,7 +211,7 @@ impl Vm {
         let mut seen = BTreeSet::new();
         let mut current = target;
         while let Some(instance) = self.host_instances.get(&current) {
-            let Some(slot) = self.bindings.class_event_parent(instance.class) else {
+            let Some(slot) = host.bindings().class_event_parent(instance.class) else {
                 break;
             };
             let Some(HostSlot::Js(parent)) = instance.slots.get(slot) else {
@@ -285,7 +286,7 @@ impl Vm {
     /// Dispatch by internal brand, without consulting public methods on the target.
     pub(crate) fn dispatch_event(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         event: ObjectId,
@@ -306,7 +307,7 @@ impl Vm {
             )));
         }
 
-        let path = match self.dispatch_path(roots, target)? {
+        let path = match self.dispatch_path(host, roots, target)? {
             Ok(path) => std::rc::Rc::new(path),
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
@@ -364,7 +365,7 @@ impl Vm {
 
     fn invoke_event_listeners(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         event: ObjectId,
         current: ObjectId,
@@ -458,7 +459,7 @@ impl Vm {
 
     fn invoke_event_listener(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         callback: &Value,
         current_target: &Value,

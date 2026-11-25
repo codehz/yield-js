@@ -10,12 +10,12 @@ use std::rc::Rc;
 
 use blitz_dom::{DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
-use yield_binding_macros::host_bindings;
+use yield_binding_macros::host;
 use yield_compiler::{
     CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
     ResolvedModule,
 };
-use yield_vm::{Bindings, Host, JsString, JsValue, ServiceKey, Vm, VmError};
+use yield_vm::{Diagnostic, Diagnostics, DiagnosticsKey, ServiceKey, Vm, VmError};
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
 
@@ -51,30 +51,19 @@ impl ServiceKey for DomKey {
     const IN_FINGERPRINT: bool = false;
 }
 
-struct DomHost {
-    bindings: Bindings,
-    errors: Vec<String>,
-}
+#[derive(Default)]
+struct RenderDiagnostics(RefCell<Vec<String>>);
 
-impl Host for DomHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        self.errors.push(error.to_string());
-    }
-
-    fn report_error_with_diagnostic(&mut self, _error: JsValue, diagnostic: &JsString) {
-        self.errors.push(diagnostic.to_string());
-    }
-
-    fn report_startup_exception(&mut self, diagnostic: &JsString) {
-        self.errors.push(format!("script threw: {diagnostic}"));
-    }
-
-    fn unhandled_rejection(&mut self, _promise: JsValue, reason: JsValue) {
-        self.errors.push(format!("unhandled rejection: {reason}"));
+impl Diagnostics for RenderDiagnostics {
+    fn report(&self, event: Diagnostic<'_>) {
+        let message = match event {
+            Diagnostic::Uncaught { diagnostic, .. } => diagnostic.to_string(),
+            Diagnostic::StartupException { diagnostic } => format!("script threw: {diagnostic}"),
+            Diagnostic::UnhandledRejection { reason, .. } => {
+                format!("unhandled rejection: {reason}")
+            }
+        };
+        self.0.borrow_mut().push(message);
     }
 }
 
@@ -149,26 +138,23 @@ fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
     let compiler = Compiler::from_dts(include_str!("dom.d.ts")).map_err(|e| e.to_string())?;
     let build = compiler.compile(project).map_err(|e| e.to_string())?;
     let dom = Rc::new(RefCell::new(Dom::new()));
-    let bindings = host_bindings! {
+    let diagnostics = Rc::new(RenderDiagnostics::default());
+    let host = host! {
         dts: "dom.d.ts",
         modules: [dom::DomModule],
         services: {
             DomKey => dom.clone(),
+            DiagnosticsKey => diagnostics.clone(),
         },
     }?;
-    let mut host = DomHost {
-        bindings,
-        errors: Vec::new(),
-    };
-    let result = Vm::new(build, &mut host, Default::default())
-        .and_then(|mut vm| vm.run_until_idle(&mut host));
+    // Keep diagnostics outside the VM so they survive failed startup and teardown.
+    let result = Vm::new(build, host, Default::default()).and_then(|mut vm| vm.run_until_idle());
+    let mut errors = diagnostics.0.take();
     if let Err(error) = result
-        && (!matches!(error, VmError::Thrown(_)) || host.errors.is_empty())
+        && (!matches!(error, VmError::Thrown(_)) || errors.is_empty())
     {
-        host.errors.push(error.to_string());
+        errors.push(error.to_string());
     }
-    let errors = std::mem::take(&mut host.errors);
-    drop(host);
     if !errors.is_empty() {
         return Err(errors.join("\n"));
     }

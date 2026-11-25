@@ -14,7 +14,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::resolve::AwaitPrepared;
 use crate::runtime::{Arguments, Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 /// An await operand, not a return from cleanup. In particular an undefined
 /// operand still requires the caller to schedule an await reaction.
@@ -124,7 +124,7 @@ pub(crate) const SCOPE_ROOTS: &[RootSpec] = &[
     scope_root(DisposeBuiltin::GetThrow),
 ];
 
-impl Vm {
+impl VmCore {
     fn disposal_scope_arg(&self, args: &[Value]) -> Result<ObjectId, VmError> {
         if let Some(ValueRef::Object(id)) = args.first().map(Value::view)
             && let Object::DisposeState(state) = self.heap.get(id)?
@@ -139,7 +139,7 @@ impl Vm {
 
     fn disposal_await_operand(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: Value,
     ) -> Result<Value, VmError> {
@@ -163,10 +163,10 @@ impl Vm {
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn create_disposable_resource(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         async_: bool,
@@ -231,7 +231,7 @@ impl Vm {
 
     fn step_disposal(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
     ) -> Result<DisposeStep, VmError> {
@@ -314,7 +314,7 @@ impl Vm {
 
     pub(crate) fn dispose_records(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         records: Vec<DisposableResource>,
         result: Option<ObjectId>,
@@ -349,7 +349,7 @@ impl Vm {
 
     fn drive_async_disposal(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         result: ObjectId,
@@ -384,7 +384,7 @@ impl Vm {
 
     pub(crate) fn resume_disposal(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         state: ObjectId,
         result: ObjectId,

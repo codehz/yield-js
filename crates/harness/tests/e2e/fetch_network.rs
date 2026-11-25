@@ -25,7 +25,7 @@ fn environment(server: &Server, authorization: &str) -> FetchEnvironment {
     }
 }
 
-fn pump(vm: &mut Vm, host: &mut TestHost, service: &LoopbackFetchService) -> Result<(), String> {
+fn pump(vm: &mut Vm, service: &LoopbackFetchService) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut delivered = false;
@@ -36,7 +36,7 @@ fn pump(vm: &mut Vm, host: &mut TestHost, service: &LoopbackFetchService) -> Res
                 delivered = true;
             }
         }
-        vm.run_until_idle(host).map_err(|error| error.to_string())?;
+        vm.run_until_idle().map_err(|error| error.to_string())?;
         if delivered {
             continue;
         }
@@ -58,16 +58,15 @@ fn run(server: &Server, script: String) -> Result<(TestHost, Vm), String> {
     let build = build(&script);
     let mut vm = Vm::new(
         build,
-        &mut host,
+        host.host(),
         VmOptions {
             fetch_environment: Some(environment),
             ..Default::default()
         },
     )
     .map_err(|error| error.to_string())?;
-    vm.start(&mut host, "run", vec![])
-        .map_err(|error| error.to_string())?;
-    pump(&mut vm, &mut host, &service)?;
+    vm.start("run", vec![]).map_err(|error| error.to_string())?;
+    pump(&mut vm, &service)?;
     Ok((host, vm))
 }
 
@@ -157,16 +156,15 @@ fn run_multi(servers: &[&Server], script: String) -> Result<(TestHost, Vm), Stri
     let build = build(&script);
     let mut vm = Vm::new(
         build,
-        &mut host,
+        host.host(),
         VmOptions {
             fetch_environment: Some(environment),
             ..Default::default()
         },
     )
     .map_err(|error| error.to_string())?;
-    vm.start(&mut host, "run", vec![])
-        .map_err(|error| error.to_string())?;
-    pump(&mut vm, &mut host, &service)?;
+    vm.start("run", vec![]).map_err(|error| error.to_string())?;
+    pump(&mut vm, &service)?;
     Ok((host, vm))
 }
 
@@ -482,15 +480,15 @@ mod snapshot {
         let build = build(source);
         let mut vm = Vm::new(
             build,
-            &mut host,
+            host.host(),
             VmOptions {
                 fetch_environment: Some(environment),
                 ..Default::default()
             },
         )
         .unwrap();
-        vm.start(&mut host, "run", vec![]).unwrap();
-        vm.run_until_idle(&mut host).unwrap();
+        vm.start("run", vec![]).unwrap();
+        vm.run_until_idle().unwrap();
         (host, vm)
     }
 
@@ -504,7 +502,6 @@ mod snapshot {
 
     fn deliver(
         vm: &mut Vm,
-        host: &mut TestHost,
         service: &Arc<ControllableFetchService>,
         token: OperationToken,
         event: FetchEvent,
@@ -513,7 +510,7 @@ mod snapshot {
         for event in service.take(token) {
             vm.deliver_fetch_event(token, event).unwrap();
         }
-        vm.run_until_idle(host).unwrap();
+        vm.run_until_idle().unwrap();
     }
 
     fn outcome(vm: &Vm) -> String {
@@ -525,13 +522,13 @@ mod snapshot {
             .unwrap()
     }
 
-    fn restore(vm: &Vm, build_source: &str, host: &mut TestHost) -> Vm {
+    fn restore(vm: &Vm, build_source: &str, host: &TestHost) -> Vm {
         let snapshot = vm.snapshot(&[]).unwrap();
         let snapshot = yield_vm::Snapshot::from_bytes(&snapshot.to_bytes().unwrap()).unwrap();
         Vm::restore(
             snapshot,
             build(build_source),
-            host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 fetch_environment: Some(environment()),
@@ -558,80 +555,50 @@ mod snapshot {
     #[test]
     fn restored_awaiting_head_rejects_with_abort_error_without_replaying() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start(&service);
+        let (_host, mut vm) = start(&service);
         let token = token(&service);
-        let mut restored_host = TestHost::default();
-        let mut restored = restore(&vm, SCRIPT, &mut restored_host);
+        let restored_host = TestHost::default();
+        let mut restored = restore(&vm, SCRIPT, &restored_host);
         assert_eq!(outcome(&restored), "pending");
         // The old generation token is inert after restore.
         restored
             .deliver_fetch_event(token, FetchEvent::Head(head("")))
             .unwrap();
-        restored.run_until_idle(&mut restored_host).unwrap();
+        restored.run_until_idle().unwrap();
         assert_eq!(outcome(&restored), "rejected:AbortError");
 
         // The source VM keeps its registration and settles normally.
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Head(head("abc")),
-        );
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Data(b"abc".to_vec()),
-        );
-        deliver(&mut vm, &mut host, &service, token, FetchEvent::Eof);
+        deliver(&mut vm, &service, token, FetchEvent::Head(head("abc")));
+        deliver(&mut vm, &service, token, FetchEvent::Data(b"abc".to_vec()));
+        deliver(&mut vm, &service, token, FetchEvent::Eof);
         assert_eq!(outcome(&vm), "body:abc");
     }
 
     #[test]
     fn restored_streaming_response_errors_only_the_body() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start(&service);
+        let (_host, mut vm) = start(&service);
         let token = token(&service);
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Head(head("")),
-        );
+        deliver(&mut vm, &service, token, FetchEvent::Head(head("")));
         assert_eq!(outcome(&vm), "head:200");
-        let mut restored_host = TestHost::default();
-        let mut restored = restore(&vm, SCRIPT, &mut restored_host);
-        restored.run_until_idle(&mut restored_host).unwrap();
+        let restored_host = TestHost::default();
+        let mut restored = restore(&vm, SCRIPT, &restored_host);
+        restored.run_until_idle().unwrap();
         assert_eq!(outcome(&restored), "stream:AbortError");
     }
 
     #[test]
     fn completed_bodies_stay_readable_after_restore() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start(&service);
+        let (_host, mut vm) = start(&service);
         let token = token(&service);
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Head(head("abc")),
-        );
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Data(b"abc".to_vec()),
-        );
-        deliver(&mut vm, &mut host, &service, token, FetchEvent::Eof);
+        deliver(&mut vm, &service, token, FetchEvent::Head(head("abc")));
+        deliver(&mut vm, &service, token, FetchEvent::Data(b"abc".to_vec()));
+        deliver(&mut vm, &service, token, FetchEvent::Eof);
         assert_eq!(outcome(&vm), "body:abc");
-        let mut restored_host = TestHost::default();
-        let mut restored = restore(&vm, SCRIPT, &mut restored_host);
-        restored.run_until_idle(&mut restored_host).unwrap();
+        let restored_host = TestHost::default();
+        let mut restored = restore(&vm, SCRIPT, &restored_host);
+        restored.run_until_idle().unwrap();
         assert_eq!(outcome(&restored), "body:abc");
     }
 
@@ -654,12 +621,12 @@ mod snapshot {
         let duplicate = tasks[index].clone();
         tasks.insert(index, duplicate);
         let corrupted: yield_vm::Snapshot = serde_json::from_value(json).unwrap();
-        let mut host = TestHost::default();
+        let host = TestHost::default();
         assert!(matches!(
             Vm::restore(
                 corrupted,
                 build(SCRIPT),
-                &mut host,
+                host.host(),
                 RestoreOptions {
                     validation: SnapshotValidation::Full,
                     fetch_environment: Some(environment()),
@@ -702,10 +669,10 @@ mod snapshot {
     #[test]
     fn restored_mid_upload_interrupts_without_replaying() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start_with(&service, UPLOAD_SCRIPT);
+        let (_host, mut vm) = start_with(&service, UPLOAD_SCRIPT);
         let token = token(&service);
         accept(&mut vm, &service, token, FetchEvent::UploadCredit(2));
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         let mut uploaded = 0;
         for call in service.take_calls() {
             if let FetchCall::SendUpload(_, bytes) = call {
@@ -716,9 +683,9 @@ mod snapshot {
         assert_eq!(uploaded, 2, "only granted bytes are sent");
 
         let restored_service = Arc::new(ControllableFetchService::default());
-        let mut restored_host = TestHost::with_fetch_service(restored_service.clone());
-        let mut restored = restore(&vm, UPLOAD_SCRIPT, &mut restored_host);
-        restored.run_until_idle(&mut restored_host).unwrap();
+        let restored_host = TestHost::with_fetch_service(restored_service.clone());
+        let mut restored = restore(&vm, UPLOAD_SCRIPT, &restored_host);
+        restored.run_until_idle().unwrap();
         assert_eq!(outcome(&restored), "rejected:AbortError");
         assert!(
             restored_service.take_calls().is_empty(),
@@ -726,33 +693,27 @@ mod snapshot {
         );
 
         accept(&mut vm, &service, token, FetchEvent::UploadCredit(16));
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         accept(&mut vm, &service, token, FetchEvent::Head(head("")));
         accept(&mut vm, &service, token, FetchEvent::Eof);
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
         assert_eq!(outcome(&vm), "head:200:body:");
     }
 
     #[test]
     fn accepted_eof_drains_before_the_interruption() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start_with(&service, SCRIPT);
+        let (_host, mut vm) = start_with(&service, SCRIPT);
         let token = token(&service);
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Head(head("abc")),
-        );
+        deliver(&mut vm, &service, token, FetchEvent::Head(head("abc")));
         assert_eq!(outcome(&vm), "head:200");
         accept(&mut vm, &service, token, FetchEvent::Data(b"abc".to_vec()));
         accept(&mut vm, &service, token, FetchEvent::Eof);
 
         let restored_service = Arc::new(ControllableFetchService::default());
-        let mut restored_host = TestHost::with_fetch_service(restored_service.clone());
-        let mut restored = restore(&vm, SCRIPT, &mut restored_host);
-        restored.run_until_idle(&mut restored_host).unwrap();
+        let restored_host = TestHost::with_fetch_service(restored_service.clone());
+        let mut restored = restore(&vm, SCRIPT, &restored_host);
+        restored.run_until_idle().unwrap();
         assert_eq!(outcome(&restored), "body:abc");
         assert!(restored_service.take_calls().is_empty());
     }
@@ -785,19 +746,12 @@ mod snapshot {
     #[test]
     fn failure_after_head_only_errors_the_body() {
         let service = Arc::new(ControllableFetchService::default());
-        let (mut host, mut vm) = start(&service);
+        let (_host, mut vm) = start(&service);
         let token = token(&service);
-        deliver(
-            &mut vm,
-            &mut host,
-            &service,
-            token,
-            FetchEvent::Head(head("")),
-        );
+        deliver(&mut vm, &service, token, FetchEvent::Head(head("")));
         assert_eq!(outcome(&vm), "head:200");
         deliver(
             &mut vm,
-            &mut host,
             &service,
             token,
             FetchEvent::Failed(yield_vm::fetch::FetchFailure::Network("boom".into())),

@@ -17,7 +17,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,8 +113,8 @@ interface!(DECODER_OWNER, "decompressionStream", "DecompressionStream", DECODER_
 );
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -151,7 +151,7 @@ fn construct(
 }
 
 fn endpoint(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     decoder_brand: bool,
@@ -179,10 +179,10 @@ fn endpoint(
     )
 }
 
-impl Vm {
+impl VmCore {
     pub(super) fn invoke_compression_transform(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         stage: TransformStage,

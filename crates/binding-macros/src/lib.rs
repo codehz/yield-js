@@ -52,12 +52,14 @@ pub fn module_exports(args: TokenStream, item: TokenStream) -> TokenStream {
     expand(typed::module_exports(args.into(), item.into()))
 }
 
-/// Links host modules, classes, operations and services. The `dts`
-/// path is resolved relative to the file containing the invocation, like
-/// `include_str!`; it falls back to `CARGO_MANIFEST_DIR` when the invocation
-/// file is unknown (for example inside a macro expansion).
+/// Links host modules, classes, operations and services into a host.
+///
+/// A nonempty `modules` section requires `dts`. Omit both sections for a
+/// service-only host. A `dts` path is resolved relative to the file containing
+/// the invocation, like `include_str!`, or to `CARGO_MANIFEST_DIR` when that file
+/// is unknown.
 #[proc_macro]
-pub fn host_bindings(input: TokenStream) -> TokenStream {
+pub fn host(input: TokenStream) -> TokenStream {
     let origin = proc_macro::Span::call_site().local_file();
-    expand(registry::host_bindings(input.into(), origin))
+    expand(registry::host(input.into(), origin))
 }

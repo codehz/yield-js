@@ -23,24 +23,20 @@ export function run(expected) {
 #[test]
 fn crypto_without_entropy_fails_lazily_after_init_and_restore() {
     let build = build(CHECK_ERRORS);
-    let mut missing = TestHost::without_crypto_service();
-    let mut vm = Vm::new(build.clone(), &mut missing, Default::default()).unwrap();
+    let missing = TestHost::without_crypto_service();
+    let mut vm = Vm::new(build.clone(), missing.host(), Default::default()).unwrap();
     assert_eq!(
-        vm.start(
-            &mut missing,
-            "run",
-            vec![JsValue::string("NotSupportedError")],
-        )
-        .unwrap(),
+        vm.start("run", vec![JsValue::string("NotSupportedError")],)
+            .unwrap(),
         Value::boolean(true)
     );
 
-    let mut enabled = TestHost::new();
-    let vm = Vm::new(build.clone(), &mut enabled, Default::default()).unwrap();
+    let enabled = TestHost::new();
+    let vm = Vm::new(build.clone(), enabled.host(), Default::default()).unwrap();
     let mut vm = Vm::restore(
         vm.snapshot(&[]).unwrap(),
         build,
-        &mut missing,
+        missing.host(),
         yield_vm::RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -48,12 +44,8 @@ fn crypto_without_entropy_fails_lazily_after_init_and_restore() {
     )
     .unwrap();
     assert_eq!(
-        vm.start(
-            &mut missing,
-            "run",
-            vec![JsValue::string("NotSupportedError")],
-        )
-        .unwrap(),
+        vm.start("run", vec![JsValue::string("NotSupportedError")],)
+            .unwrap(),
         Value::boolean(true)
     );
 }
@@ -72,10 +64,10 @@ fn crypto_faults_are_catchable_without_partial_mutation() {
     }
 
     let service = Arc::new(FaultyEntropy::default());
-    let mut host = TestHost::with_crypto_service(service.clone());
-    let mut vm = Vm::new(build(CHECK_ERRORS), &mut host, Default::default()).unwrap();
+    let host = TestHost::with_crypto_service(service.clone());
+    let mut vm = Vm::new(build(CHECK_ERRORS), host.host(), Default::default()).unwrap();
     assert_eq!(
-        vm.start(&mut host, "run", vec![JsValue::string("OperationError")])
+        vm.start("run", vec![JsValue::string("OperationError")])
             .unwrap(),
         Value::boolean(true)
     );
@@ -106,8 +98,8 @@ export async function run() {
 }
 "#;
     let mut host = TestHost::without_subtle_service();
-    let mut vm = Vm::new(build(source), &mut host, Default::default()).unwrap();
-    let result = vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build(source), host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
     host.drain_subtle(&mut vm).unwrap();
     assert_eq!(
@@ -136,8 +128,8 @@ export async function open() {
 "#;
     let build = build(source);
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let prepared = vm.start(&mut host, "prepare", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let prepared = vm.start("prepare", vec![]).unwrap();
     host.drain_subtle(&mut vm).unwrap();
     assert_eq!(
         vm.promise_state(&prepared).unwrap(),
@@ -149,14 +141,14 @@ export async function open() {
     let mut restored = Vm::restore(
         Snapshot::from_bytes(&image).unwrap(),
         build,
-        &mut restored_host,
+        restored_host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
         },
     )
     .unwrap();
-    let opened = restored.start(&mut restored_host, "open", vec![]).unwrap();
+    let opened = restored.start("open", vec![]).unwrap();
     restored_host.drain_subtle(&mut restored).unwrap();
     assert_eq!(
         restored.promise_state(&opened).unwrap(),
@@ -175,11 +167,11 @@ export function run() {
 }
 "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    let promise = vm.start(&mut host, "run", vec![]).unwrap();
+    let promise = vm.start("run", vec![]).unwrap();
     // Completion is applied only when the VM drains the worker result, so the snapshot
     // check does not race the worker even if the digest has already been computed.
     assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
@@ -206,11 +198,11 @@ export function run() {
 }
 "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    let promise = vm.start(&mut host, "run", vec![]).unwrap();
+    let promise = vm.start("run", vec![]).unwrap();
     assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
     assert!(!vm.has_pending_subtle_operations());
     host.drain_subtle(&mut vm).unwrap();

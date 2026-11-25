@@ -28,7 +28,7 @@ use crate::runtime::{
     Arguments, Continuation, ContinuationTarget, ExecOutcome, Invocation, Settlement,
 };
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 mod branch;
 mod call;
 mod class;
@@ -68,17 +68,17 @@ enum CacheStatus {
 const FUNCTION_CALL: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "call"),
     1,
-    Vm::function_call,
+    VmCore::function_call,
 );
 const FUNCTION_APPLY: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "apply"),
     2,
-    Vm::function_apply,
+    VmCore::function_apply,
 );
 const FUNCTION_BIND: IntrinsicDef = IntrinsicDef::call(
     IntrinsicKey::new("Function", IntrinsicSlot::Prototype, "bind"),
     1,
-    Vm::function_bind,
+    VmCore::function_bind,
 );
 pub(crate) const FUNCTION_HAS_INSTANCE: IntrinsicKey =
     IntrinsicKey::new("Function", IntrinsicSlot::PrototypeSymbol, "hasInstance");
@@ -127,7 +127,7 @@ pub(crate) const FUNCTION_INTRINSICS: &[IntrinsicDef] = &[
             )
         },
     ),
-    IntrinsicDef::call(FUNCTION_METHODS[3], 0, Vm::function_to_string),
+    IntrinsicDef::call(FUNCTION_METHODS[3], 0, VmCore::function_to_string),
 ];
 
 pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
@@ -144,10 +144,10 @@ pub(crate) const FUNCTION_ROOTS: &[RootSpec] = &[
     .fixed("function.prototype"),
 ];
 
-impl Vm {
+impl VmCore {
     fn function_call(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -162,7 +162,7 @@ impl Vm {
 
     fn function_apply(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -187,7 +187,7 @@ impl Vm {
 
     fn function_bind(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: Vec<Value>,
         receiver: &Value,
@@ -238,7 +238,7 @@ impl Vm {
 
     fn function_to_string(
         &mut self,
-        _: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         _: Vec<Value>,
         receiver: &Value,
@@ -251,14 +251,14 @@ impl Vm {
             return self
                 .throw_type_error(roots, "incompatible Function.prototype.toString receiver");
         }
-        let name = self.initial_function_name(id)?;
+        let name = self.initial_function_name(host, id)?;
         let mut text = JsString::from("function ");
         text.push_str(&name);
         text.push_str(&"() { [native code] }".into());
         Ok(Invocation::Value(Value::string(text)))
     }
 
-    fn initial_function_name(&self, id: ObjectId) -> Result<JsString, VmError> {
+    fn initial_function_name(&self, host: &Host, id: ObjectId) -> Result<JsString, VmError> {
         Ok(match self.heap.get(id)? {
             Object::Function(function) => match &function.dynamic_name {
                 Some(name) => name.clone(),
@@ -272,7 +272,7 @@ impl Vm {
                 intrinsic.definition().key.initial_name()
             }
             Object::Native(NativeObject::Host { target, .. }) => {
-                crate::vm::host_function_metadata(&self.bindings, *target)
+                crate::vm::host_function_metadata(host.bindings(), *target)
                     .ok_or_else(|| {
                         VmError::InvalidState("missing host function declaration".into())
                     })?
@@ -287,8 +287,15 @@ impl Vm {
         id: ObjectId,
         func_id: u32,
     ) -> Result<(), VmError> {
-        let length = self.build.functions[self.function_index(func_id)?].length;
-        let name = self.initial_function_name(id)?;
+        let definition = &self.build.functions[self.function_index(func_id)?];
+        let length = definition.length;
+        let Object::Function(function) = self.heap.get(id)? else {
+            return Err(VmError::InvalidState("expected script function".into()));
+        };
+        let name = function
+            .dynamic_name
+            .clone()
+            .unwrap_or_else(|| definition.initial_name.as_str().into());
         self.heap.define_data(
             id,
             "length",
@@ -330,10 +337,10 @@ impl Hint {
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn execute_frame(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         mut frame: Frame,
     ) -> Result<ExecOutcome, VmError> {
@@ -368,7 +375,7 @@ impl Vm {
 
     pub(crate) fn resume_continuation(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         continuation_id: crate::value::ContinuationId,
         settlement: &Settlement,
@@ -456,7 +463,7 @@ impl Vm {
     /// `Value` when both operands are numbers.
     fn branch_compare(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         op: BinaryOp,
         lhs: Value,
@@ -484,7 +491,7 @@ impl Vm {
     /// Evaluates a unary operation without committing a destination slot.
     fn unary_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         op: UnaryOp,
         mut value: Value,
@@ -525,7 +532,7 @@ impl Vm {
 
     fn binary_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         op: BinaryOp,
         mut lhs: Value,
@@ -636,7 +643,7 @@ impl Vm {
 
     fn step(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,
@@ -751,7 +758,7 @@ impl Vm {
     )]
     fn call_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         dst: Slot,
@@ -797,7 +804,7 @@ impl Vm {
 
     pub(crate) fn get_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
@@ -820,7 +827,7 @@ impl Vm {
 
     pub(crate) fn get_iterator_from_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
         method: &Value,
@@ -842,7 +849,7 @@ impl Vm {
     /// A failed step is not a consumer-side abrupt exit and does not close the iterator.
     pub(crate) fn iterator_step(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
@@ -860,7 +867,7 @@ impl Vm {
 
     pub(crate) fn iterator_step_result(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
         next: &Value,
@@ -894,7 +901,7 @@ impl Vm {
 
     pub(crate) fn close_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterator: &Value,
     ) -> Result<Invocation, VmError> {
@@ -919,7 +926,7 @@ impl Vm {
 
     pub(crate) fn string_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Invocation, VmError> {
@@ -931,7 +938,7 @@ impl Vm {
 
     pub(crate) fn coerce_string(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<JsString, Value>, VmError> {
@@ -949,7 +956,7 @@ impl Vm {
     /// unlike arithmetic and `Number.prototype` methods.
     pub(crate) fn coerce_number_allow_bigint(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -968,7 +975,7 @@ impl Vm {
 
     pub(crate) fn coerce_number(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<f64, Value>, VmError> {
@@ -987,7 +994,7 @@ impl Vm {
 
     pub(crate) fn coerce_property_key(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Result<Result<PropertyKey, Value>, VmError> {
@@ -1003,7 +1010,7 @@ impl Vm {
 
     pub(crate) fn coerce_primitive<'a>(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &'a Value,
         hint: Hint,
@@ -1021,7 +1028,7 @@ impl Vm {
 
     fn primitive_from_object(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         hint: Hint,
@@ -1057,7 +1064,7 @@ impl Vm {
 
     pub(crate) fn ordinary_to_primitive(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         hint: Hint,
@@ -1102,7 +1109,7 @@ impl Vm {
 
     pub(crate) fn read_member(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1140,7 +1147,7 @@ impl Vm {
 
     fn read_destructured_member(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
@@ -1153,7 +1160,7 @@ impl Vm {
 
     pub(crate) fn read_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: PropertyKeyRef<'_>,
@@ -1175,7 +1182,7 @@ impl Vm {
 
     pub(crate) fn read_property_with_receiver(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
@@ -1236,7 +1243,7 @@ impl Vm {
     /// defer creating it until an accessor or proxy can observe the receiver.
     pub(crate) fn read_to_object_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         boxed: &mut Option<ObjectId>,
@@ -1265,7 +1272,7 @@ impl Vm {
 
     fn read_property_from_chain<'a>(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -1282,7 +1289,7 @@ impl Vm {
                 ..
             }) = *object
                 && key.is_str("prototype")
-                && let Some(class) = self.bindings.export_class(export)
+                && let Some(class) = host.bindings().export_class(export)
             {
                 return Ok(Invocation::Value(Value::object(
                     self.host_classes[class].prototype,
@@ -1325,7 +1332,7 @@ impl Vm {
 
     pub(crate) fn read_array_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: usize,
@@ -1348,7 +1355,7 @@ impl Vm {
 
     fn read_property_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         property: Property,
@@ -1364,7 +1371,7 @@ impl Vm {
 
     fn instance_of(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1374,7 +1381,7 @@ impl Vm {
 
     pub(crate) fn ordinary_has_instance(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1384,7 +1391,7 @@ impl Vm {
 
     fn has_instance(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         constructor: &Value,
@@ -1504,7 +1511,7 @@ impl Vm {
 
     fn has_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1522,7 +1529,7 @@ impl Vm {
 
     pub(crate) fn has_property_key(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -1551,7 +1558,7 @@ impl Vm {
 
     pub(crate) fn delete_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: &Value,
         key: &Value,
@@ -1594,7 +1601,7 @@ impl Vm {
 
     fn write_member(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: &Value,
         key: &Value,
@@ -1720,7 +1727,7 @@ impl Vm {
     )]
     pub(crate) fn set_property(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         receiver: &Value,
@@ -1888,7 +1895,7 @@ impl Vm {
 
     fn copy_data_properties(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         source: &Value,
@@ -2045,7 +2052,7 @@ impl Vm {
     /// Initialize each own element in source order, stopping at the first throw.
     pub(crate) fn initialize_class_elements(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         class: ObjectId,
         receiver: ObjectId,
@@ -2236,7 +2243,7 @@ impl Vm {
 
     fn suspend(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &Frame,
         input: Slot,
@@ -2333,7 +2340,7 @@ impl Vm {
     /// object and the shared generator prototype otherwise.
     fn start_generator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
     ) -> Result<Step, VmError> {
@@ -2469,14 +2476,14 @@ pub(crate) enum GeneratorCompletion {
     Return,
 }
 
-impl Vm {
+impl VmCore {
     /// Queue one request for an async generator method call.
     ///
     /// A receiver that is not an async generator still returns a Promise: the
     /// method rejects with a `TypeError` instead of throwing synchronously.
     pub(crate) fn resume_async_generator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         completion: GeneratorCompletion,
@@ -2520,7 +2527,7 @@ impl Vm {
     /// queued request, so the body may already be executing or awaiting.
     pub(crate) fn resume_generator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         completion: GeneratorCompletion,
@@ -2663,7 +2670,7 @@ impl Vm {
     /// it, so a caller inside the body only appends.
     fn enqueue_async_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         completion: GeneratorCompletion,
@@ -2692,7 +2699,7 @@ impl Vm {
     /// is not emptied by recursion.
     fn drive_async_generator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<(), VmError> {
@@ -2702,7 +2709,7 @@ impl Vm {
 
     fn async_generator_step(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<bool, VmError> {
@@ -2752,7 +2759,7 @@ impl Vm {
     /// argument through a persisted Promise reaction before reporting `done`.
     fn settle_finished_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         head: &AsyncRequest,
@@ -2806,7 +2813,7 @@ impl Vm {
     /// Settle the request whose return argument finished assimilating.
     pub(crate) fn finish_closing_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         generator: ObjectId,
         request: ObjectId,

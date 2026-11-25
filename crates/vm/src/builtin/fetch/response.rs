@@ -18,7 +18,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ResponseType {
@@ -92,7 +92,7 @@ definitions! {
 
 pub(crate) const RESPONSE_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     install_interface(vm, NAME, ROOT, PROTOTYPE, GETTERS, METHODS);
     let constructor = vm.builtins.get(ROOT);
     for name in ["error", "redirect", "json"] {
@@ -103,7 +103,7 @@ fn install(vm: &mut Vm, _: &Value) {
 }
 
 fn record<'a>(
-    vm: &'a Vm,
+    vm: &'a VmCore,
     value: &Value,
 ) -> Result<Option<(ObjectId, &'a ResponseRecord)>, VmError> {
     let ValueRef::Object(id) = value.view() else {
@@ -116,10 +116,10 @@ fn record<'a>(
 }
 
 fn read(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     this: &Value,
-    getter: impl FnOnce(&ResponseRecord, &Vm) -> Value,
+    getter: impl FnOnce(&ResponseRecord, &VmCore) -> Value,
 ) -> Result<Invocation, VmError> {
     let Some((_, data)) = record(vm, this)? else {
         return vm.throw_type_error(roots, "Expected a Response receiver");
@@ -128,8 +128,8 @@ fn read(
 }
 
 fn consume(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     this: &Value,
     mode: BodyMode,
@@ -141,7 +141,7 @@ fn consume(
     body::consume(vm, host, roots, data.body.clone(), mode, mime)
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn alloc_response(
         &mut self,
         prototype: Option<ObjectId>,
@@ -183,8 +183,8 @@ impl Vm {
 }
 
 fn status(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
     default: u16,
@@ -202,8 +202,8 @@ fn status(
 }
 
 fn init(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> body::Completion<(u16, String, Value)> {
@@ -243,8 +243,8 @@ fn init(
 }
 
 fn initialize(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     proto: Option<ObjectId>,
     options: (u16, String, Value),
@@ -289,8 +289,8 @@ fn initialize(
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
     prototype: Option<ObjectId>,
@@ -310,11 +310,11 @@ fn construct(
     initialize(vm, host, roots, prototype, options, body)
 }
 
-fn error(vm: &mut Vm) -> Result<Invocation, VmError> {
+fn error(vm: &mut VmCore) -> Result<Invocation, VmError> {
     Ok(Invocation::Value(Value::object(vm.response_error())))
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn response_error(&mut self) -> ObjectId {
         let headers = self.alloc_headers(HeadersRecord::new(HeadersGuard::Immutable));
         let data = ResponseRecord {
@@ -330,8 +330,8 @@ impl Vm {
 }
 
 fn redirect(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Invocation, VmError> {
@@ -376,8 +376,8 @@ fn redirect(
 }
 
 fn json(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Invocation, VmError> {
@@ -412,8 +412,8 @@ fn json(
 }
 
 fn clone_response(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     this: &Value,
 ) -> Result<Invocation, VmError> {

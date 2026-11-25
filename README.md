@@ -23,6 +23,23 @@ cargo run -p yield-harness
 
 `yield-blitz` 从 JSX 和锁定版本的 React npm 源码编译首屏。按上面的命令安装依赖后，运行 `cargo test -p yield-blitz` 做无窗口验收，或运行 `cargo run -p yield-blitz` 打开原生窗口。Rust 不会自动安装 npm 依赖。
 
+## Rust 嵌入
+
+`Vm` 在新建或恢复时按值接管 `Host`；后续执行不再传入宿主。无宿主模块和服务时用 `Host::default()`；用 `host!` 注册静态绑定或仅注册平台服务。
+
+```rust
+use yield_vm::{Host, RestoreOptions, Vm, VmOptions};
+
+let mut vm = Vm::new(build.clone(), Host::default(), VmOptions::default())?;
+vm.run_until_idle()?;
+let snapshot = vm.snapshot(&[])?; // 没有需要额外保存的宿主持有值
+let mut restored = Vm::restore(snapshot, build, Host::default(), RestoreOptions::default())?;
+restored.start_recovered_operations()?;
+restored.run_until_idle()?;
+```
+
+快照保存 VM 状态，不保存 `Host` 或服务实例；恢复时提供兼容的新宿主。服务、根和恢复启动的契约见[宿主接口](docs/design/host-interface.md)与[快照设计](docs/design/snapshot.md)。
+
 ## 目录
 
 | 路径 | 内容 |

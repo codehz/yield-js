@@ -9,7 +9,7 @@ use yield_vm::{Value, Vm, VmError};
 
 fn vm_of(source: &str, options: &Compiler) -> Vm {
     let build = compile_main(source, options).unwrap();
-    Vm::new(build, &mut TestHost::default(), Default::default()).unwrap()
+    Vm::new(build, TestHost::default().host(), Default::default()).unwrap()
 }
 
 #[test]
@@ -42,22 +42,14 @@ fn hoisted_default_function_initializes_earlier_exports() {
         vm.get_export("f"),
         Err(VmError::InvalidState(message)) if message == "unknown export \"f\""
     ));
-    assert_eq!(
-        vm.start(&mut TestHost::default(), "default", vec![])
-            .unwrap(),
-        Value::number(7.0)
-    );
+    assert_eq!(vm.start("default", vec![]).unwrap(), Value::number(7.0));
 
     // A later assignment to the local name rebinds the default as well.
     let mut vm = vm_of(
         "export const early = f(); export default function f(){ return 7 }; f = () => 8;",
         &Compiler::default(),
     );
-    assert_eq!(
-        vm.start(&mut TestHost::default(), "default", vec![])
-            .unwrap(),
-        Value::number(8.0)
-    );
+    assert_eq!(vm.start("default", vec![]).unwrap(), Value::number(8.0));
 }
 
 #[test]
@@ -66,11 +58,7 @@ fn default_export_of_a_host_import_is_callable() {
         "import { seed as x } from 'test'; export { x as default };",
         &declared(TEST_DECLARATIONS),
     );
-    assert_eq!(
-        vm.start(&mut TestHost::default(), "default", vec![])
-            .unwrap(),
-        Value::number(10.0)
-    );
+    assert_eq!(vm.start("default", vec![]).unwrap(), Value::number(10.0));
 }
 
 #[test]
@@ -86,16 +74,16 @@ fn preload_default_name_is_default() {
             &Compiler::default(),
         )
         .unwrap();
-        let mut host = TestHost::default();
-        let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+        let host = TestHost::default();
+        let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
         assert_eq!(
-            vm.start(&mut host, "run", vec![]).unwrap(),
+            vm.start("run", vec![]).unwrap(),
             Value::string("default".into()),
             "{preload}"
         );
         // The host reads the main module's own default, not the preload's.
         let build = compile_preloaded("export default 9;", preload, &Compiler::default()).unwrap();
-        let vm = Vm::new(build, &mut TestHost::default(), Default::default()).unwrap();
+        let vm = Vm::new(build, TestHost::default().host(), Default::default()).unwrap();
         assert_eq!(vm.get_export("default").unwrap(), Value::number(9.0));
     }
 }
@@ -108,18 +96,12 @@ fn preload_default_alias_survives_restore() {
         &Compiler::default(),
     )
     .unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(2.0)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(2.0));
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(3.0)
-    );
+    let mut vm = Vm::restore(snapshot, build, host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(3.0));
     // The alias is still a getter-only preload global.
     let build = compile_preloaded(
         r#"
@@ -131,12 +113,9 @@ export function run(){
         &Compiler::default(),
     )
     .unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::boolean(true));
 }
 
 #[test]
@@ -147,13 +126,9 @@ fn named_default_class_shares_one_object_with_its_exported_name() {
     );
     let default = vm.get_export("default").unwrap();
     assert_eq!(default, vm.get_export("C").unwrap());
-    let mut host = TestHost::default();
     let mut vm2 = vm_of(
         "export default class C {}; export function run(){ return C.name }",
         &Compiler::default(),
     );
-    assert_eq!(
-        vm2.start(&mut host, "run", vec![]).unwrap(),
-        Value::string("C".into())
-    );
+    assert_eq!(vm2.start("run", vec![]).unwrap(), Value::string("C".into()));
 }

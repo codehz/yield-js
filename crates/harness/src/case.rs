@@ -32,7 +32,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     let fetch_environment = host.fetch_environment();
     let mut vm = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             test_clock: Some(clock),
             fetch_environment: Some(fetch_environment),
@@ -41,7 +41,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
     )
     .map_err(|error| format!("{name}: vm: {error}"))?;
     let result = vm
-        .start(&mut host, "run", args)
+        .start("run", args)
         .map_err(|error| format!("{name}: start: {}", format_vm_error(&error)))?;
     host.set_case_result(Some(result));
     host.drain_subtle(&mut vm)
@@ -93,7 +93,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line,
                     "@returns",
                     &expected,
-                    host.case_result().expect("case result set after start"),
+                    &host.case_result().expect("case result set after start"),
                 )?;
             }
             Directive::Fulfilled(expected) => {
@@ -102,7 +102,7 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line,
                     "@fulfilled",
                     &vm,
-                    host.case_result().expect("case result set after start"),
+                    &host.case_result().expect("case result set after start"),
                     true,
                     &expected,
                 )?;
@@ -113,13 +113,13 @@ pub fn run_case(name: &str, source: &str) -> Result<(), String> {
                     step.line,
                     "@rejected",
                     &vm,
-                    host.case_result().expect("case result set after start"),
+                    &host.case_result().expect("case result set after start"),
                     false,
                     &expected,
                 )?;
             }
             Directive::Uncaught(expected) => {
-                assert_uncaught(name, step.line, &expected, host.errors())?;
+                assert_uncaught(name, step.line, &expected, &host.errors())?;
             }
         }
     }
@@ -475,10 +475,11 @@ fn restore(
     build: &yield_vm::bytecode::Build,
     host: &mut TestHost,
 ) -> Result<(), String> {
-    let result = host.case_result().expect("case result set after start");
-    let snapshot = vm
-        .snapshot(std::slice::from_ref(result))
-        .map_err(|error| located(name, line, "@restore", error))?;
+    let snapshot = {
+        let result = host.case_result().expect("case result set after start");
+        vm.snapshot(std::slice::from_ref(&*result))
+            .map_err(|error| located(name, line, "@restore", error))?
+    };
     // Round-trip the codec. Restoring the in-memory snapshot would skip it.
     let json = snapshot
         .to_json()
@@ -490,7 +491,7 @@ fn restore(
     *vm = Vm::restore(
         snapshot,
         build.clone(),
-        host,
+        host.host(),
         RestoreOptions {
             test_clock: Some(clock),
             fetch_environment: Some(fetch_environment),

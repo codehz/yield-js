@@ -22,13 +22,13 @@ use crate::exec;
 use crate::heap::{Attributes, DescriptorUpdate, HAS_INSTANCE_SYMBOL, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{PropertyKey, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) struct Owner {
     root: &'static str,
     roots: &'static [RootSpec],
     groups: &'static [&'static [IntrinsicDef]],
-    install: Option<fn(&mut Vm, &Value)>,
+    install: Option<fn(&mut VmCore, &Value)>,
 }
 
 impl Owner {
@@ -36,7 +36,7 @@ impl Owner {
         root: &'static str,
         roots: &'static [RootSpec],
         groups: &'static [&'static [IntrinsicDef]],
-        install: Option<fn(&mut Vm, &Value)>,
+        install: Option<fn(&mut VmCore, &Value)>,
     ) -> Self {
         Self {
             root,
@@ -241,7 +241,7 @@ pub(crate) fn root_groups() -> impl Iterator<Item = &'static [RootSpec]> {
     }))
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn builtin_value(&self, index: u32) -> Result<Value, VmError> {
         if let Some(offset) = crate::bytecode::DisposeBuiltin::offset(index) {
             let key = super::disposal::SCOPE_INTRINSICS[offset].key;

@@ -40,24 +40,18 @@ export function run() {
         &Compiler::default(),
     )
     .unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(2.0)
-    );
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(2.0));
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     let mut vm = Vm::restore(
         snapshot.clone(),
         build.clone(),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(3.0)
-    );
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::number(3.0));
 
     let mut corrupt = snapshot;
     let global = corrupt.roots["globalThis"];
@@ -77,7 +71,7 @@ export function run() {
     assert!(matches!(Vm::restore(
         corrupt,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -127,26 +121,24 @@ fn options() -> Compiler {
 
 #[test]
 fn preload_globals_are_live_and_read_only() {
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let build = compile_preloaded(MAIN, PRELOAD, &options()).unwrap();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     assert!(vm.get_export("bump").is_err());
-    assert!(vm.start(&mut host, "bump", vec![]).is_err());
+    assert!(vm.start("bump", vec![]).is_err());
     assert_eq!(
-        vm.start(&mut host, "run", vec![yield_harness::number(2.0)])
-            .unwrap(),
+        vm.start("run", vec![yield_harness::number(2.0)]).unwrap(),
         Value::number(2.0)
     );
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     let changed = compile_preloaded(MAIN, &PRELOAD.replace("n = 1", "n = 5"), &options()).unwrap();
     assert!(matches!(
-        Vm::restore(snapshot.clone(), changed, &mut host, Default::default()),
+        Vm::restore(snapshot.clone(), changed, host.host(), Default::default()),
         Err(VmError::InvalidSnapshot(_))
     ));
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), Default::default()).unwrap();
     assert_eq!(
-        vm.start(&mut host, "run", vec![yield_harness::number(3.0)])
-            .unwrap(),
+        vm.start("run", vec![yield_harness::number(3.0)]).unwrap(),
         Value::number(3.0)
     );
     assert_eq!(host.count("inspect"), 1);
@@ -155,10 +147,10 @@ fn preload_globals_are_live_and_read_only() {
 #[test]
 fn preload_failure_prevents_main_initialization() {
     let main = "import { inspect } from 'test'; inspect();";
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let build = compile_preloaded(main, "throw 'boom';", &options()).unwrap();
     assert!(matches!(
-        Vm::new(build, &mut host, Default::default()),
+        Vm::new(build, host.host(), Default::default()),
         Err(VmError::Thrown(value)) if value == Value::string("boom".into())
     ));
     let build = compile_preloaded(
@@ -169,7 +161,7 @@ fn preload_failure_prevents_main_initialization() {
     .unwrap();
     assert!(matches!(Vm::new(
             build,
-            &mut host,
+            host.host(),
             Default::default(),
         ), Err(VmError::InvalidState(message)) if message.contains("cannot install preload global")));
     assert_eq!(host.count("inspect"), 0);
@@ -183,7 +175,7 @@ fn preload_can_shadow_global_this_without_recursive_lookup() {
         &Compiler::default(),
     )
     .unwrap();
-    let vm = Vm::new(build, &mut TestHost::default(), Default::default()).unwrap();
+    let vm = Vm::new(build, TestHost::default().host(), Default::default()).unwrap();
     assert_eq!(vm.get_export("result").unwrap(), Value::number(17.0));
 }
 
@@ -194,12 +186,9 @@ fn preload_initialization_does_not_wait_and_drains_microtasks_after_main() {
         "import { wait } from 'test'; wait('preload'); export let n = 1; queueMicrotask(() => { n = 2; });",
         &options(),
     ).unwrap();
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
     assert_eq!(host.pending_labels(), ["wait:preload"]);
     assert_eq!(vm.get_export("observed").unwrap(), Value::number(1.0));
-    assert_eq!(
-        vm.start(&mut host, "current", vec![]).unwrap(),
-        Value::number(2.0)
-    );
+    assert_eq!(vm.start("current", vec![]).unwrap(), Value::number(2.0));
 }

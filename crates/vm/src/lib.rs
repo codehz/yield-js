@@ -46,11 +46,8 @@
 //! struct Wait;
 //! ```
 //!
-//! Register bindings with [`host_bindings!`]; there is no public builder:
-//!
-//! ```compile_fail,E0599
-//! let _ = yield_vm::Bindings::builder();
-//! ```
+//! Assemble VM resources with [`host!`], or use [`Host::default`] for a VM
+//! with no external capabilities.
 
 extern crate self as yield_vm;
 
@@ -84,7 +81,7 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    Bindings, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromBindings, GuestOutcome,
+    ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices, GuestOutcome,
     HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
     MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
     Recovery, Registration, ServiceKey, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
@@ -102,8 +99,9 @@ pub use fetch::{
 pub use heap::{Object, PromiseState};
 pub use host::{
     CRYPTO_SUBTLE_PROTOCOL_VERSION, Completion, ConsoleKey, ConsoleSink, CryptoKey, CryptoService,
-    DummyTimeService, Host, SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService,
-    SystemTimeService, TimeKey, TimeService, TimerKey,
+    Diagnostic, Diagnostics, DiagnosticsKey, DummyTimeService, GcRoots, GcRootsKey, Host,
+    SubtleCryptoKey, SubtleCryptoRequest, SubtleCryptoService, SystemTimeService, TimeKey,
+    TimeService, TimerKey, UserAgentKey,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
 pub use regexp::{RegExpFlags, validate_regexp};
@@ -113,5 +111,5 @@ pub use snapshot::{SNAPSHOT_BINARY_VERSION, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, ValueRef};
 pub use vm::{PendingOperationInfo, VerifiedBuild, Vm};
 pub use yield_binding_macros::{
-    Decode, Encode, host_bindings, host_class, host_module, methods, module_exports, operation,
+    Decode, Encode, host, host_class, host_module, methods, module_exports, operation,
 };

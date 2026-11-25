@@ -12,7 +12,7 @@ use crate::error::VmError;
 use crate::fetch::{FetchEvent, HopRequest, ResponseHead};
 use crate::heap::{Heap, Object};
 use crate::value::ObjectId;
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum FetchStage {
@@ -204,7 +204,7 @@ impl FetchState {
     }
 }
 
-impl Vm {
+impl VmCore {
     /// Accepts one adapter event for a live transaction. Runs on the VM thread
     /// but never executes script: ordering and credit are checked here, then
     /// the event is queued as an ordinary task. Events for unknown, cancelled

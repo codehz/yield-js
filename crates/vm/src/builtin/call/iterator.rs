@@ -6,8 +6,8 @@ use crate::heap::{Attributes, Heap, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn create_arguments_object(
         heap: &mut Heap,
         iterator: ObjectId,
@@ -58,7 +58,7 @@ impl Vm {
 
     pub(crate) fn array_iterator_next(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
     ) -> Result<Invocation, VmError> {

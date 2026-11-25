@@ -11,8 +11,8 @@ use crate::host::Host;
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     /// `Object.hasOwn(O, P)`.
     ///
     /// ToObject runs before ToPropertyKey, so a nullish target throws without
@@ -20,7 +20,7 @@ impl Vm {
     /// gives proxy traps their invariants and exposes string indices.
     pub(crate) fn object_has_own(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -45,7 +45,7 @@ impl Vm {
 
     pub(crate) fn object_keys(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -75,7 +75,7 @@ impl Vm {
     /// their UTF-16 index keys and `length`; other primitives have none.
     pub(crate) fn object_own_property_keys(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         symbols: bool,
@@ -123,7 +123,7 @@ impl Vm {
 
     pub(crate) fn object_values_or_entries(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         entries: bool,
@@ -187,7 +187,7 @@ impl Vm {
 
     pub(crate) fn object_from_entries(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -218,7 +218,7 @@ impl Vm {
 
     fn add_object_entry(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         result: ObjectId,
         item: &Value,
@@ -254,7 +254,7 @@ impl Vm {
     /// after GetIterator closes the iterator and keeps the original throw.
     pub(crate) fn object_group_by(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -329,7 +329,7 @@ impl Vm {
 
     pub(crate) fn get_own_property_descriptor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -414,7 +414,7 @@ impl Vm {
 
     pub(crate) fn get_own_property_descriptors(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -475,7 +475,7 @@ impl Vm {
 
     pub(crate) fn define_property_builtin(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         reflect: bool,
@@ -520,7 +520,7 @@ impl Vm {
 
     pub(crate) fn object_assign(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -579,7 +579,7 @@ impl Vm {
 
     pub(crate) fn define_properties(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         properties: Option<&Value>,
@@ -638,7 +638,7 @@ impl Vm {
 
     pub(crate) fn read_property_descriptor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         descriptor: &Value,
     ) -> Result<Result<DescriptorUpdate, Value>, VmError> {
@@ -706,7 +706,7 @@ impl Vm {
 
     pub(crate) fn apply_property_update(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKey,
@@ -721,7 +721,7 @@ impl Vm {
 
     pub(crate) fn try_apply_property_update(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         key: PropertyKey,

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::binding::{Bindings, ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
+use crate::binding::{ClassId, HostFault, LiveRegistration, NativeTarget, Recovery};
 use crate::bytecode::Slot;
 use crate::error::VmError;
 use crate::frame::Frame;
@@ -112,7 +112,7 @@ pub(crate) struct PendingOperation {
 }
 
 impl PendingOperation {
-    pub(crate) fn checkpoint(&self, bindings: &Bindings) -> Result<Vec<u8>, HostFault> {
+    pub(crate) fn checkpoint(&self, services: &crate::Services) -> Result<Vec<u8>, HostFault> {
         if self.declaration.is_none() {
             // Only the VM deadline is durable; the timer registration is a wakeup.
             return Ok(Vec::new());
@@ -121,7 +121,7 @@ impl PendingOperation {
             return Ok(self.state.clone());
         };
         let mut state = Vec::new();
-        live.checkpoint(&self.state, &mut state, bindings)?;
+        live.checkpoint(&self.state, &mut state, services)?;
         Ok(state)
     }
 }
@@ -312,7 +312,7 @@ impl Settlement {
     }
 }
 
-impl crate::Vm {
+impl crate::vm::VmCore {
     /// Queue resolution of a native promise without running any script now.
     pub(crate) fn queue_adopt(&mut self, result: ObjectId, settlement: Settlement) {
         self.microtasks

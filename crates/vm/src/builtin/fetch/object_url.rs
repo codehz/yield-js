@@ -11,7 +11,7 @@ use crate::heap::{Heap, Object};
 use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const PREFIX: &str = "blob:null/";
 
@@ -60,8 +60,8 @@ impl ObjectUrls {
 }
 
 pub(crate) fn create(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -90,8 +90,8 @@ pub(crate) fn create(
 }
 
 pub(crate) fn revoke(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,

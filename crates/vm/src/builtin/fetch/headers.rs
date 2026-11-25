@@ -18,7 +18,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(crate) type HeaderPair = (Vec<u8>, Vec<u8>);
 type Completion<T> = Result<Result<T, Value>, VmError>;
@@ -94,7 +94,7 @@ methods! {
 
 pub(crate) const HEADERS_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, vm.builtins.get(ROOT), prototype);
     for &(name, key) in METHODS {
@@ -414,7 +414,7 @@ macro_rules! complete {
     };
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn alloc_headers(&mut self, data: HeadersRecord) -> ObjectId {
         self.heap.alloc(Object::Headers {
             object: PlainObject::new(Some(self.builtins.get(PROTOTYPE))),
@@ -424,7 +424,7 @@ impl Vm {
 
     fn headers_bytes(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<Vec<u8>> {
@@ -448,7 +448,7 @@ impl Vm {
 
     fn construct_headers(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -467,7 +467,7 @@ impl Vm {
 
     pub(crate) fn headers_from_init(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         init: &Value,
         guard: HeadersGuard,
@@ -514,7 +514,7 @@ impl Vm {
 
     fn headers_from_record(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         init: &Value,
         id: ObjectId,
@@ -548,7 +548,7 @@ impl Vm {
 
     fn headers_from_sequence(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         init: &Value,
         method: &Value,
@@ -571,7 +571,7 @@ impl Vm {
 
     fn headers_pair(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         item: &Value,
     ) -> Completion<Option<HeaderPair>> {
@@ -605,7 +605,7 @@ impl Vm {
 
     fn headers_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -696,7 +696,7 @@ impl Vm {
 
     fn headers_for_each(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,

@@ -4,8 +4,8 @@
 use yield_harness::{TestHost, build};
 use yield_vm::{Vm, VmOptions};
 
-fn read(vm: &mut Vm, host: &mut TestHost) -> String {
-    vm.start(host, "read", vec![])
+fn read(vm: &mut Vm) -> String {
+    vm.start("read", vec![])
         .expect("start read")
         .into_string()
         .expect("read returns a string")
@@ -32,25 +32,25 @@ export function read() {
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
 
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, VmOptions::default()).expect("create VM");
+    let mut vm = Vm::new(build.clone(), host.host(), VmOptions::default()).expect("create VM");
     let default = format!("true|true|true|yield-js|{platform}");
-    assert_eq!(read(&mut vm, &mut host), default);
+    assert_eq!(read(&mut vm), default);
 
     let snapshot = vm.snapshot(&[]).expect("snapshot");
     host.set_user_agent("changed/9");
     let mut restored =
-        Vm::restore(snapshot, build.clone(), &mut host, Default::default()).expect("restore");
+        Vm::restore(snapshot, build.clone(), host.host(), Default::default()).expect("restore");
     assert_eq!(
-        read(&mut restored, &mut host),
+        read(&mut restored),
         default,
         "restore keeps the recorded navigator instead of the host's new value"
     );
 
     let mut host = TestHost::default();
     host.set_user_agent("test-runtime/1.2");
-    let mut vm = Vm::new(build, &mut host, VmOptions::default()).expect("create VM");
+    let mut vm = Vm::new(build, host.host(), VmOptions::default()).expect("create VM");
     assert_eq!(
-        read(&mut vm, &mut host),
+        read(&mut vm),
         format!("true|true|true|test-runtime/1.2|{platform}")
     );
 }

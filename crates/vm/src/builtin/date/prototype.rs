@@ -9,14 +9,14 @@ use crate::heap::Object;
 use crate::host::{Host, TimeService};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const DAY_MS: i64 = 86_400_000;
 const MINUTE_MS: f64 = 60_000.0;
 
 pub(super) fn method(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     key: &str,
     receiver: &Value,
@@ -111,8 +111,8 @@ fn string(value: impl Into<crate::JsString>) -> Invocation {
 }
 
 fn to_json(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
 ) -> Result<Invocation, VmError> {
@@ -139,8 +139,8 @@ fn to_json(
 }
 
 pub(super) fn to_primitive(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     hint: &Value,
@@ -211,8 +211,8 @@ impl Setter {
 
     fn calculate(
         self,
-        vm: &mut Vm,
-        host: &mut dyn Host,
+        vm: &mut VmCore,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         initial: Option<i64>,
         args: &[Value],

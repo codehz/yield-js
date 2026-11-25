@@ -16,7 +16,7 @@ use crate::host::{Host, TimeService};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[yield_binding_macros::builtin_global(name = "Date", root = "date", kind = "constructor")]
 mod members {
@@ -101,7 +101,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     Some(install),
 );
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);
@@ -125,8 +125,8 @@ fn install(vm: &mut Vm, _: &Value) {
 }
 
 fn construct_date(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -176,8 +176,8 @@ fn construct_date(
 }
 
 fn calendar_arguments(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: &[Value],
 ) -> Result<Result<f64, Value>, VmError> {

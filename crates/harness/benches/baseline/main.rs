@@ -126,7 +126,7 @@ fn run_reuse(workload: &Workload, samples: usize) {
     let decode = || Build::from_bytes(&artifact).expect("decode build artifact");
     let mut source_host = TestHost::default();
     let mut source =
-        Vm::new(decode(), &mut source_host, Default::default()).expect("start snapshot source");
+        Vm::new(decode(), source_host.host(), Default::default()).expect("start snapshot source");
     let roots = suspend(&mut source, &mut source_host);
     let snapshot = source.snapshot(&roots).expect("capture source");
     drop(source);
@@ -152,12 +152,13 @@ fn run_reuse(workload: &Workload, samples: usize) {
             let shared_first = (i + j) % 2 == 0;
             for shared in [shared_first, !shared_first] {
                 let mut host = TestHost::default();
+                let vm_host = host.host();
                 let mut vm = if shared {
                     let start = Instant::now();
                     measure(
                         1,
                         start,
-                        Vm::new(verified.clone(), &mut host, Default::default()).unwrap(),
+                        Vm::new(verified.clone(), vm_host, Default::default()).unwrap(),
                     )
                 } else {
                     let build = decode();
@@ -165,20 +166,20 @@ fn run_reuse(workload: &Workload, samples: usize) {
                     measure(
                         0,
                         start,
-                        Vm::new(build, &mut host, Default::default()).unwrap(),
+                        Vm::new(build, vm_host, Default::default()).unwrap(),
                     )
                 };
                 (workload.run)(&mut vm, &mut host);
 
                 let mut host = TestHost::default();
+                let vm_host = host.host();
                 let image = snapshot.clone();
                 let mut vm = if shared {
                     let start = Instant::now();
                     measure(
                         3,
                         start,
-                        Vm::restore(image, verified.clone(), &mut host, Default::default())
-                            .unwrap(),
+                        Vm::restore(image, verified.clone(), vm_host, Default::default()).unwrap(),
                     )
                 } else {
                     let build = decode();
@@ -186,7 +187,7 @@ fn run_reuse(workload: &Workload, samples: usize) {
                     measure(
                         2,
                         start,
-                        Vm::restore(image, build, &mut host, Default::default()).unwrap(),
+                        Vm::restore(image, build, vm_host, Default::default()).unwrap(),
                     )
                 };
                 vm.start_recovered_operations().unwrap();
@@ -213,7 +214,7 @@ fn run_restore_profile(workload: &Workload, samples: usize) {
     let program = VerifiedBuild::new((workload.build)()).expect("verify build");
     let mut host = TestHost::default();
     let mut source =
-        Vm::new(program.clone(), &mut host, Default::default()).expect("start snapshot source");
+        Vm::new(program.clone(), host.host(), Default::default()).expect("start snapshot source");
     let roots = workload.suspend.unwrap()(&mut source, &mut host);
     let snapshot = source.snapshot(&roots).expect("capture source");
     drop(source);
@@ -229,10 +230,11 @@ fn run_restore_profile(workload: &Workload, samples: usize) {
         for profiled in [profiled_first, !profiled_first] {
             let image = Snapshot::from_bytes(&bytes).expect("decode binary snapshot");
             let mut host = TestHost::default();
+            let vm_host = host.host();
             let build = program.clone();
             let mut vm = if profiled {
                 let (vm, profile) =
-                    Vm::restore_profiled(image, build, &mut host).expect("restore and profile");
+                    Vm::restore_profiled(image, build, vm_host).expect("restore and profile");
                 sample.times.extend([
                     ("profiled_restore", profile.total),
                     ("compatibility", profile.compatibility),
@@ -247,7 +249,7 @@ fn run_restore_profile(workload: &Workload, samples: usize) {
                 vm
             } else {
                 sample.time("restore", || {
-                    Vm::restore(image, build, &mut host, Default::default()).expect("restore")
+                    Vm::restore(image, build, vm_host, Default::default()).expect("restore")
                 })
             };
             vm.start_recovered_operations().unwrap();
@@ -263,7 +265,7 @@ fn run_capture_profile(workload: &Workload, samples: usize) {
     let program = VerifiedBuild::new((workload.build)()).expect("verify build");
     let mut source_host = TestHost::default();
     let mut source =
-        Vm::new(program.clone(), &mut source_host, Default::default()).expect("start source");
+        Vm::new(program.clone(), source_host.host(), Default::default()).expect("start source");
     let roots = workload.suspend.unwrap()(&mut source, &mut source_host);
     let name = workload.name;
     println!("{name},build_id,0,{},text", program.build_id);
@@ -309,7 +311,7 @@ fn run_capture_profile(workload: &Workload, samples: usize) {
                 reference_bytes = Some(bytes);
             }
             let mut host = TestHost::default();
-            let mut vm = Vm::restore(image, program.clone(), &mut host, Default::default())
+            let mut vm = Vm::restore(image, program.clone(), host.host(), Default::default())
                 .expect("restore");
             vm.start_recovered_operations().expect("rearm operations");
             workload.resume.unwrap()(&mut vm, &mut host, &roots);
@@ -324,7 +326,7 @@ fn run_snapshot_codecs(workload: &Workload, samples: usize) {
     let program = VerifiedBuild::new((workload.build)()).expect("verify build");
     let mut host = TestHost::default();
     let mut source =
-        Vm::new(program.clone(), &mut host, Default::default()).expect("start snapshot source");
+        Vm::new(program.clone(), host.host(), Default::default()).expect("start snapshot source");
     let roots = workload.suspend.unwrap()(&mut source, &mut host);
     let snapshot = source.snapshot(&roots).expect("capture source");
     drop(source);
@@ -354,9 +356,10 @@ fn run_snapshot_codecs(workload: &Workload, samples: usize) {
                 (image, "json_restore")
             };
             let mut host = TestHost::default();
+            let vm_host = host.host();
             let program = program.clone();
             let mut vm = sample.time(metric, || {
-                Vm::restore(image, program, &mut host, Default::default()).unwrap()
+                Vm::restore(image, program, vm_host, Default::default()).unwrap()
             });
             vm.start_recovered_operations().unwrap();
             workload.resume.unwrap()(&mut vm, &mut host, &roots);
@@ -396,12 +399,13 @@ fn run(workload: &Workload, samples: usize) {
             Build::from_bytes(black_box(&artifact)).expect("decode build artifact")
         });
         let mut host = TestHost::default();
+        let vm_host = host.host();
         let mut vm = if perf::ENABLED {
             sample.runtime("startup", || {
-                Vm::new(decoded, &mut host, Default::default()).unwrap()
+                Vm::new(decoded, vm_host, Default::default()).unwrap()
             })
         } else {
-            let (vm, stages) = Vm::new_profiled(decoded, &mut host).expect("initialize VM");
+            let (vm, stages) = Vm::new_profiled(decoded, vm_host).expect("initialize VM");
             sample.times.push(("startup_prepare", stages.prepare));
             sample
                 .times
@@ -430,7 +434,7 @@ fn run(workload: &Workload, samples: usize) {
         if let (Some(suspend), Some(resume)) = (workload.suspend, workload.resume) {
             // Fresh VM: the image must not depend on prior benchmark iterations.
             let mut host = TestHost::default();
-            let mut vm = Vm::new(build.clone(), &mut host, Default::default())
+            let mut vm = Vm::new(build.clone(), host.host(), Default::default())
                 .expect("initialize snapshot source");
             let roots = sample.runtime("suspend", || suspend(&mut vm, &mut host));
             let snapshot = sample.time("snapshot_capture", || {
@@ -444,9 +448,10 @@ fn run(workload: &Workload, samples: usize) {
             drop(vm);
             drop(host);
             let mut host = TestHost::default();
+            let vm_host = host.host();
             let restore_build = build.clone();
             let mut restored = sample.runtime("restore", || {
-                Vm::restore(image, restore_build, &mut host, Default::default())
+                Vm::restore(image, restore_build, vm_host, Default::default())
                     .expect("restore same build")
             });
             // The roots are host-held Values; their ObjectIds survive in the image.
@@ -502,10 +507,10 @@ fn run_stack_traces(samples: usize) {
             .skip(i % builds.len())
             .take(builds.len())
         {
-            let mut host = TestHost::default();
-            let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+            let host = TestHost::default();
+            let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
             let start = Instant::now();
-            let result = black_box(vm.start(&mut host, "run", vec![]).unwrap());
+            let result = black_box(vm.start("run", vec![]).unwrap());
             let elapsed = start.elapsed();
             assert!(matches!(result.view(), ValueRef::Object(_)));
             if i >= WARMUP_SAMPLES {

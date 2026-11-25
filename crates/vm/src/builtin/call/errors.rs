@@ -4,8 +4,8 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::runtime::Invocation;
 use crate::value::Value;
-use crate::vm::Vm;
-impl Vm {
+use crate::vm::VmCore;
+impl VmCore {
     pub(crate) fn type_error(
         &mut self,
         roots: &ActiveRoots<'_>,

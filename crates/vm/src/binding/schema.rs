@@ -1,7 +1,6 @@
 //! Static host bindings: modules, classes, values, and recoverable operations.
 //!
-//! Declarations are immutable and can be shared between VMs. A VM owns every
-//! prototype, instance, module state, and operation record derived from them.
+//! Each VM owns its declarations, services, and the state derived from them.
 //! Host code never receives a heap id it can use outside the current call: a
 //! [`JsValue`] carries the calling VM generation and call id, and slot writes
 //! are the only way to retain a value across calls.
@@ -9,25 +8,25 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
 use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use crate::digest::Digest;
+use crate::host::Host;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
 
-/// A stable export identity inside one [`Bindings`] table.
+/// A stable export identity inside one VM’s linked declaration table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ExportId {
     pub module: u32,
     pub export: u32,
 }
 
-/// A stable prototype-method identity inside one [`Bindings`] table.
+/// A stable prototype-method identity inside one VM’s linked declaration table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MethodId {
     pub class: u32,
@@ -520,19 +519,19 @@ pub enum Recovery {
     Reject,
 }
 
-/// Construct fresh host module state using the bindings of the new VM.
-pub trait FromBindings: Sized {
-    fn from_bindings(bindings: &Bindings) -> Self;
+/// Construct fresh host module state using the services of the new VM.
+pub trait FromServices: Sized {
+    fn from_services(services: &Services) -> Self;
 }
 
-impl<T: Default> FromBindings for T {
-    fn from_bindings(_: &Bindings) -> Self {
+impl<T: Default> FromServices for T {
+    fn from_services(_: &Services) -> Self {
         Self::default()
     }
 }
 
 /// The name, VM-managed slots, and service dependencies of a host module.
-pub trait HostModule: FromBindings + Encode + Decode + 'static {
+pub trait HostModule: FromServices + Encode + Decode + 'static {
     const NAME: &'static str;
     const SLOTS: &'static [SlotDecl] = &[];
 
@@ -577,10 +576,10 @@ impl OperationToken {
 pub trait OperationDriver: Operation {
     type Live: Registration<Self>;
 
-    fn start(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault>;
+    fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault>;
 
-    fn resume(&self, token: OperationToken, bindings: &Bindings) -> Result<Self::Live, HostFault> {
-        self.start(token, bindings)
+    fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
+        self.start(token, services)
     }
 }
 
@@ -599,7 +598,7 @@ pub trait LiveRegistration: 'static {
         &self,
         original: &[u8],
         out: &mut Vec<u8>,
-        _: &Bindings,
+        _: &Services,
     ) -> Result<(), HostFault> {
         out.extend_from_slice(original);
         Ok(())
@@ -613,11 +612,11 @@ impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
         &self,
         original: &[u8],
         out: &mut Vec<u8>,
-        bindings: &Bindings,
+        services: &Services,
     ) -> Result<(), HostFault> {
         if let Some(state) = self.0.checkpoint()? {
             state
-                .encode(out, bindings)
+                .encode(out, services)
                 .map_err(|error| HostFault(error.0))?;
         } else {
             out.extend_from_slice(original);
@@ -627,11 +626,11 @@ impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
 }
 
 type ArmOperation =
-    fn(&[u8], OperationToken, &Bindings) -> Result<Box<dyn LiveRegistration>, HostFault>;
+    fn(&[u8], OperationToken, &Services) -> Result<Box<dyn LiveRegistration>, HostFault>;
 
 /// The stable contract for a host service role, independent of its implementation.
 ///
-/// Service values are confined to the thread that builds the [`Bindings`], like
+/// Service values are confined to the thread that builds the [`Host`], like
 /// the VM itself. A service that performs work on another thread declares
 /// `Send + Sync` in its own trait or value type; this table does not require it.
 pub trait ServiceKey: 'static {
@@ -661,6 +660,7 @@ struct ServiceEntry {
 struct Stored<K: ServiceKey>(K::Value);
 
 impl Services {
+    #[doc(hidden)]
     pub fn insert<K: ServiceKey>(&mut self, value: K::Value) -> Result<(), String> {
         use std::collections::btree_map::Entry;
 
@@ -678,6 +678,7 @@ impl Services {
         }
     }
 
+    /// Looks up an installed resource by its exact service key type.
     pub fn get<K: ServiceKey>(&self) -> Option<&K::Value> {
         Some(&self.values.get(K::ID)?.value.downcast_ref::<Stored<K>>()?.0)
     }
@@ -700,8 +701,8 @@ impl ServiceDependency {
     }
 }
 
-type DecodeFn = fn(&[u8], &Bindings) -> Result<Box<dyn Any>, CodecError>;
-type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Bindings) -> Result<(), CodecError>;
+type DecodeFn = fn(&[u8], &Services) -> Result<Box<dyn Any>, CodecError>;
+type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Services) -> Result<(), CodecError>;
 
 #[doc(hidden)]
 #[derive(Clone, Copy)]
@@ -714,12 +715,12 @@ impl ClassCodec {
     #[doc(hidden)]
     pub const fn of<T: Encode + Decode + 'static>() -> Self {
         Self {
-            decode: |input, bindings| Ok(Box::new(decode_exact::<T>(input, bindings)?)),
-            encode: |payload, out, bindings| {
+            decode: |input, services| Ok(Box::new(decode_exact::<T>(input, services)?)),
+            encode: |payload, out, services| {
                 let payload = payload
                     .downcast_ref::<T>()
                     .ok_or_else(|| CodecError::new("payload type mismatch"))?;
-                payload.encode(out, bindings)
+                payload.encode(out, services)
             },
         }
     }
@@ -748,7 +749,7 @@ struct ClassDecl {
 struct StateDecl {
     rust_type: TypeId,
     slots: &'static [SlotDecl],
-    new: fn(&Bindings) -> Box<dyn Any>,
+    new: fn(&Services) -> Box<dyn Any>,
     decode: DecodeFn,
     encode: EncodeFn,
 }
@@ -757,7 +758,7 @@ struct OperationDecl {
     name: String,
     recovery: Recovery,
     rejection: &'static str,
-    decode: fn(&[u8], &Bindings) -> Result<(), CodecError>,
+    decode: fn(&[u8], &Services) -> Result<(), CodecError>,
     rust_type: TypeId,
     start: ArmOperation,
     resume: ArmOperation,
@@ -777,14 +778,12 @@ pub mod __macro_support {
     use std::collections::BTreeSet;
 
     pub use super::super::call::with_module;
-    use super::{AccessorCall, UnlinkedBindings};
+    use super::{AccessorCall, CodecError, Host, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
         MethodDecl, ModuleDecl, ResumeCall, ReturnKind, ServiceDependency,
     };
-    use super::{
-        Bindings, ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl,
-    };
+    use super::{ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl};
     use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall, Services};
     use super::{ExportCall, ModuleCall};
 
@@ -810,7 +809,7 @@ pub mod __macro_support {
         }
     }
 
-    /// Builds the service table for a `host_bindings!` invocation, surfacing a
+    /// Builds the service table for a `host!` invocation, surfacing a
     /// duplicate service ID as the macro's `Err`.
     pub fn services(
         build: impl FnOnce(&mut Services) -> Result<(), String>,
@@ -824,7 +823,7 @@ pub mod __macro_support {
         modules: impl IntoIterator<Item = ModuleDecl>,
         deps: ModuleDependencies,
         services: Services,
-    ) -> Result<Bindings, String> {
+    ) -> Result<Host, String> {
         UnlinkedBindings {
             modules: modules.into_iter().collect(),
             classes: deps.classes,
@@ -832,6 +831,11 @@ pub mod __macro_support {
             services,
         }
         .build()
+        .map(Host::linked)
+    }
+
+    pub fn decode_operation(host: &Host, name: &str, bytes: &[u8]) -> Result<(), CodecError> {
+        host.bindings().decode_operation(name, bytes)
     }
 
     pub fn module<M: ModuleExports>(deps: &mut ModuleDependencies) -> ModuleDecl {
@@ -967,13 +971,8 @@ pub mod __macro_support {
     }
 }
 
-/// Immutable declaration table shared by the VMs on one thread.
-#[derive(Clone)]
-pub struct Bindings {
-    inner: Rc<BindingsInner>,
-}
-
-struct BindingsInner {
+/// Linked declarations and the services they use, owned by one host.
+pub(crate) struct Bindings {
     modules: Vec<ModuleDecl>,
     classes: Vec<ClassDecl>,
     operations: Vec<OperationDecl>,
@@ -985,55 +984,48 @@ impl std::fmt::Debug for Bindings {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Bindings")
-            .field("fingerprint", &self.inner.fingerprint)
-            .field("modules", &self.inner.modules.len())
-            .field("classes", &self.inner.classes.len())
-            .field("operations", &self.inner.operations.len())
+            .field("fingerprint", &self.fingerprint)
+            .field("modules", &self.modules.len())
+            .field("classes", &self.classes.len())
+            .field("operations", &self.operations.len())
             .finish()
     }
 }
 
 impl Bindings {
+    pub(crate) fn empty() -> Self {
+        Self {
+            modules: Vec::new(),
+            classes: Vec::new(),
+            operations: Vec::new(),
+            services: Services::default(),
+            fingerprint: fingerprint(&[], &[], &[], &BTreeSet::new()),
+        }
+    }
+
+    pub(crate) fn services(&self) -> &Services {
+        &self.services
+    }
+
     pub fn fingerprint(&self) -> &str {
-        &self.inner.fingerprint
-    }
-
-    pub fn module_names(&self) -> impl Iterator<Item = &str> {
-        self.inner.modules.iter().map(|module| module.name.as_str())
-    }
-
-    pub fn export_names<'a>(&'a self, module: &'a str) -> impl Iterator<Item = &'a str> {
-        self.module_index(module)
-            .and_then(|index| self.inner.modules.get(index))
-            .into_iter()
-            .flat_map(|module| module.exports.iter().map(|export| export.name()))
+        &self.fingerprint
     }
 
     pub fn module_count(&self) -> usize {
-        self.inner.modules.len()
-    }
-
-    pub fn export_count(&self, module: u32) -> usize {
-        self.inner.modules[module as usize].exports.len()
+        self.modules.len()
     }
 
     pub fn module_name(&self, index: usize) -> Option<&str> {
-        self.inner
-            .modules
-            .get(index)
-            .map(|module| module.name.as_str())
+        self.modules.get(index).map(|module| module.name.as_str())
     }
 
     pub fn module_index(&self, name: &str) -> Option<usize> {
-        self.inner
-            .modules
-            .iter()
-            .position(|module| module.name == name)
+        self.modules.iter().position(|module| module.name == name)
     }
 
     pub fn export(&self, module: &str, name: &str) -> Option<(ExportId, &ExportDecl)> {
         let module_index = self.module_index(module)?;
-        let (export_index, export) = self.inner.modules[module_index]
+        let (export_index, export) = self.modules[module_index]
             .exports
             .iter()
             .enumerate()
@@ -1048,8 +1040,7 @@ impl Bindings {
     }
 
     pub fn export_decl(&self, id: ExportId) -> Option<&ExportDecl> {
-        self.inner
-            .modules
+        self.modules
             .get(id.module as usize)?
             .exports
             .get(id.export as usize)
@@ -1074,45 +1065,41 @@ impl Bindings {
     }
 
     pub fn class_tag(&self, class: ClassId) -> Option<&str> {
-        self.inner
-            .classes
-            .get(class)
-            .map(|class| class.tag.as_str())
+        self.classes.get(class).map(|class| class.tag.as_str())
     }
 
     pub fn class_by_tag(&self, tag: &str) -> Option<ClassId> {
-        self.inner.classes.iter().position(|class| class.tag == tag)
+        self.classes.iter().position(|class| class.tag == tag)
     }
 
     pub fn classes(&self) -> impl Iterator<Item = (ClassId, &str)> + '_ {
-        self.inner
-            .classes
+        self.classes
             .iter()
             .enumerate()
             .map(|(index, class)| (index, class.tag.as_str()))
     }
 
     pub fn class_slots(&self, class: ClassId) -> &[SlotDecl] {
-        &self.inner.classes[class].slots
+        &self.classes[class].slots
     }
 
     /// Index of the class's first own slot in the combined layout.
     pub fn class_slot_base(&self, class: ClassId) -> usize {
-        self.inner.classes[class].slot_base
+        self.classes[class].slot_base
     }
 
     pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
-        self.inner.classes[class].parent
+        self.classes[class].parent
     }
 
     /// Whether instances of this class carry the EventTarget brand.
     pub fn class_is_event_target(&self, class: ClassId) -> bool {
-        self.inner.classes[class].event_target
+        self.classes[class].event_target
     }
 
     /// Absolute index of the event parent source in the flattened slot layout.
     pub fn class_event_parent(&self, class: ClassId) -> Option<usize> {
-        self.inner.classes[class].event_parent
+        self.classes[class].event_parent
     }
 
     /// Whether `class` is `base` or inherits from it.
@@ -1122,46 +1109,40 @@ impl Bindings {
             if class == base {
                 return true;
             }
-            current = self.inner.classes[class].parent;
+            current = self.classes[class].parent;
         }
         false
     }
 
     pub(crate) fn class_has_payload_codec(&self, class: ClassId) -> bool {
-        self.inner.classes[class].codec.is_some()
+        self.classes[class].codec.is_some()
     }
 
     pub(crate) fn class_payload_is_empty(&self, class: ClassId, payload: &dyn Any) -> bool {
-        (self.inner.classes[class].empty)(payload)
+        (self.classes[class].empty)(payload)
     }
 
     pub fn method_count(&self, class: ClassId) -> usize {
-        self.inner.classes[class].methods.len()
+        self.classes[class].methods.len()
     }
 
     pub fn method(&self, id: MethodId) -> Option<&MethodDecl> {
-        self.inner
-            .classes
+        self.classes
             .get(id.class as usize)?
             .methods
             .get(id.method as usize)
     }
 
     pub fn accessor(&self, class: ClassId, index: usize) -> Option<&AccessorDecl> {
-        self.inner.classes.get(class)?.accessors.get(index)
+        self.classes.get(class)?.accessors.get(index)
     }
 
     pub fn accessor_count(&self, class: ClassId) -> usize {
-        self.inner.classes[class].accessors.len()
-    }
-
-    pub fn operation_count(&self) -> usize {
-        self.inner.operations.len()
+        self.classes[class].accessors.len()
     }
 
     pub fn operation(&self, name: &str) -> Option<(usize, Recovery, &'static str)> {
-        self.inner
-            .operations
+        self.operations
             .iter()
             .enumerate()
             .find(|(_, operation)| operation.name == name)
@@ -1170,19 +1151,18 @@ impl Bindings {
 
     pub fn decode_operation(&self, name: &str, state: &[u8]) -> Result<(), CodecError> {
         let operation = self
-            .inner
             .operations
             .iter()
             .find(|operation| operation.name == name)
             .ok_or_else(|| CodecError::new(format!("unknown operation {name}")))?;
-        (operation.decode)(state, self)
+        (operation.decode)(state, &self.services)
     }
 
     pub(crate) fn operation_index<O: OperationDriver>(&self) -> Result<usize, HostFault> {
         let (index, _, _) = self
             .operation(O::NAME)
             .ok_or_else(|| HostFault::new(format!("operation {} is not declared", O::NAME)))?;
-        if self.inner.operations[index].rust_type != TypeId::of::<O>() {
+        if self.operations[index].rust_type != TypeId::of::<O>() {
             return Err(HostFault::new(format!(
                 "operation {} has the wrong Rust type",
                 O::NAME
@@ -1192,7 +1172,7 @@ impl Bindings {
     }
 
     pub(crate) fn operation_metadata(&self, decl: usize) -> (&str, Recovery, &'static str) {
-        let operation = &self.inner.operations[decl];
+        let operation = &self.operations[decl];
         (&operation.name, operation.recovery, operation.rejection)
     }
 
@@ -1202,7 +1182,7 @@ impl Bindings {
         bytes: &[u8],
         token: OperationToken,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        (self.inner.operations[decl].start)(bytes, token, self)
+        (self.operations[decl].start)(bytes, token, &self.services)
     }
 
     pub(crate) fn resume_operation(
@@ -1211,22 +1191,21 @@ impl Bindings {
         state: &[u8],
         token: OperationToken,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        (self.inner.operations[index].resume)(state, token, self)
+        (self.operations[index].resume)(state, token, &self.services)
     }
 
     pub(crate) fn state_type(&self, module: usize) -> Option<TypeId> {
-        self.inner
-            .modules
+        self.modules
             .get(module)
             .map(|module| module.state.rust_type)
     }
 
     pub(crate) fn state_slots(&self, module: usize) -> &[SlotDecl] {
-        self.inner.modules[module].state.slots
+        self.modules[module].state.slots
     }
 
     pub(crate) fn state_new(&self, module: usize) -> Box<dyn Any> {
-        (self.inner.modules[module].state.new)(self)
+        (self.modules[module].state.new)(&self.services)
     }
 
     pub(crate) fn state_decode(
@@ -1234,7 +1213,7 @@ impl Bindings {
         module: usize,
         input: &[u8],
     ) -> Result<Box<dyn Any>, CodecError> {
-        (self.inner.modules[module].state.decode)(input, self)
+        (self.modules[module].state.decode)(input, &self.services)
     }
 
     pub(crate) fn state_encode(
@@ -1243,11 +1222,11 @@ impl Bindings {
         payload: &dyn Any,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        (self.inner.modules[module].state.encode)(payload, out, self)
+        (self.modules[module].state.encode)(payload, out, &self.services)
     }
 
     pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
-        self.inner.services.get::<K>()
+        self.services.get::<K>()
     }
 
     pub(crate) fn class_decode(
@@ -1255,11 +1234,11 @@ impl Bindings {
         class: ClassId,
         input: &[u8],
     ) -> Result<Box<dyn Any>, CodecError> {
-        let declaration = &self.inner.classes[class];
+        let declaration = &self.classes[class];
         let codec = declaration
             .codec
             .ok_or_else(|| CodecError::new("class declaration has no payload decoder"))?;
-        (codec.decode)(input, self)
+        (codec.decode)(input, &self.services)
             .map_err(|error| CodecError::new(format!("{}: {error}", declaration.tag)))
     }
 
@@ -1269,14 +1248,14 @@ impl Bindings {
         payload: &dyn Any,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        let codec = self.inner.classes[class]
+        let codec = self.classes[class]
             .codec
             .ok_or_else(|| CodecError::new("class declaration has no payload encoder"))?;
-        (codec.encode)(payload, out, self)
+        (codec.encode)(payload, out, &self.services)
     }
 
     pub(crate) fn classes_len(&self) -> usize {
-        self.inner.classes.len()
+        self.classes.len()
     }
 }
 
@@ -1316,13 +1295,13 @@ impl StateDecl {
         Self {
             rust_type: TypeId::of::<S>(),
             slots: S::SLOTS,
-            new: |bindings| Box::new(S::from_bindings(bindings)),
-            decode: |input, bindings| Ok(Box::new(decode_exact::<S>(input, bindings)?)),
-            encode: |payload, out, bindings| {
+            new: |services| Box::new(S::from_services(services)),
+            decode: |input, services| Ok(Box::new(decode_exact::<S>(input, services)?)),
+            encode: |payload, out, services| {
                 let payload = payload
                     .downcast_ref::<S>()
                     .ok_or_else(|| CodecError::new("module state payload type mismatch"))?;
-                payload.encode(out, bindings)
+                payload.encode(out, services)
             },
         }
     }
@@ -1334,18 +1313,18 @@ impl OperationDecl {
             name: O::NAME.to_owned(),
             recovery: O::RECOVERY,
             rejection: O::REJECTION,
-            decode: |input, bindings| decode_exact::<O>(input, bindings).map(|_| ()),
+            decode: |input, services| decode_exact::<O>(input, services).map(|_| ()),
             rust_type: TypeId::of::<O>(),
-            start: |bytes, token, bindings| {
+            start: |bytes, token, services| {
                 let state =
-                    decode_exact::<O>(bytes, bindings).map_err(|error| HostFault(error.0))?;
-                let live = state.start(token, bindings)?;
+                    decode_exact::<O>(bytes, services).map_err(|error| HostFault(error.0))?;
+                let live = state.start(token, services)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },
-            resume: |bytes, token, bindings| {
+            resume: |bytes, token, services| {
                 let state =
-                    decode_exact::<O>(bytes, bindings).map_err(|error| HostFault(error.0))?;
-                let live = state.resume(token, bindings)?;
+                    decode_exact::<O>(bytes, services).map_err(|error| HostFault(error.0))?;
+                let live = state.resume(token, services)?;
                 Ok(Box::new(TypedRegistration::<O>(live)))
             },
         }
@@ -1422,13 +1401,11 @@ impl UnlinkedBindings {
             .collect();
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations, &service_ids);
         Ok(Bindings {
-            inner: Rc::new(BindingsInner {
-                modules: self.modules,
-                classes: self.classes,
-                operations: self.operations,
-                services: self.services,
-                fingerprint,
-            }),
+            modules: self.modules,
+            classes: self.classes,
+            operations: self.operations,
+            services: self.services,
+            fingerprint,
         })
     }
 }

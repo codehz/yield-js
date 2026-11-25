@@ -4,10 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use yield_harness::{TestHost, build};
-use yield_vm::{
-    Bindings, Host, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
-    VmError,
-};
+use yield_vm::{PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm, VmError};
 
 struct CountingTime {
     clock_reads: AtomicUsize,
@@ -25,34 +22,13 @@ impl yield_vm::host::TimeService for CountingTime {
     }
 }
 
-struct CountingHost {
-    bindings: Bindings,
-    time: Arc<CountingTime>,
-}
-
-impl Host for CountingHost {
-    fn bindings(&self) -> Bindings {
-        self.bindings.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected task error: {error}");
-    }
-}
-
 #[test]
 fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
     let time = Arc::new(CountingTime {
         clock_reads: AtomicUsize::new(0),
         zone_reads: AtomicUsize::new(0),
     });
-    let bindings =
-        TestHost::with_time_service(Arc::clone(&time) as Arc<dyn yield_vm::host::TimeService>)
-            .bindings();
-    let mut host = CountingHost {
-        bindings,
-        time: Arc::clone(&time),
-    };
+    let host = TestHost::with_time_service(time.clone());
     let mut vm = Vm::new(
         build(
             r#"
@@ -75,12 +51,12 @@ fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
             }
             "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
-    assert_eq!(host.time.clock_reads.load(Ordering::Relaxed), 0);
-    assert_eq!(host.time.zone_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(time.clock_reads.load(Ordering::Relaxed), 0);
+    assert_eq!(time.zone_reads.load(Ordering::Relaxed), 0);
 
     for (entry, expected, clock_reads, uses_zone) in [
         ("now", Value::number(0.0), 1, false),
@@ -105,20 +81,16 @@ fn date_implicit_now_reads_once_and_utc_paths_do_not_read_zone() {
             false,
         ),
     ] {
-        let before_clock = host.time.clock_reads.load(Ordering::Relaxed);
-        let before_zone = host.time.zone_reads.load(Ordering::Relaxed);
+        let before_clock = time.clock_reads.load(Ordering::Relaxed);
+        let before_zone = time.zone_reads.load(Ordering::Relaxed);
+        assert_eq!(vm.start(entry, vec![]).unwrap(), expected, "{entry}");
         assert_eq!(
-            vm.start(&mut host, entry, vec![]).unwrap(),
-            expected,
-            "{entry}"
-        );
-        assert_eq!(
-            host.time.clock_reads.load(Ordering::Relaxed) - before_clock,
+            time.clock_reads.load(Ordering::Relaxed) - before_clock,
             clock_reads,
             "{entry}"
         );
         assert_eq!(
-            host.time.zone_reads.load(Ordering::Relaxed) > before_zone,
+            time.zone_reads.load(Ordering::Relaxed) > before_zone,
             uses_zone,
             "{entry}"
         );
@@ -145,7 +117,7 @@ fn date_new_york_gap_overlap_and_seasonal_offsets() {
             export function winter() { return new Date('2024-01-01').getTimezoneOffset(); }
             "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
@@ -157,14 +129,14 @@ fn date_new_york_gap_overlap_and_seasonal_offsets() {
         ("setGap", "2024-03-10T07:30:00.000Z|3|true"),
     ] {
         assert_eq!(
-            vm.start(&mut host, entry, vec![]).unwrap(),
+            vm.start(entry, vec![]).unwrap(),
             Value::string(expected.into()),
             "{entry}"
         );
     }
     for (entry, offset) in [("summer", 240.0), ("winter", 300.0)] {
         assert_eq!(
-            vm.start(&mut host, entry, vec![]).unwrap(),
+            vm.start(entry, vec![]).unwrap(),
             Value::number(offset),
             "{entry}"
         );
@@ -196,7 +168,7 @@ fn date_new_york_far_future_rules_and_historical_subminute_offset() {
             }
             "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
@@ -206,13 +178,13 @@ fn date_new_york_far_future_rules_and_historical_subminute_offset() {
         ("historical", "1880-01-01T04:56:02.000Z|0"),
     ] {
         assert_eq!(
-            vm.start(&mut host, entry, vec![]).unwrap(),
+            vm.start(entry, vec![]).unwrap(),
             Value::string(expected.into()),
             "{entry}"
         );
     }
     assert_eq!(
-        vm.start(&mut host, "historicalOffset", vec![]).unwrap(),
+        vm.start("historicalOffset", vec![]).unwrap(),
         Value::number(17_762.0 / 60.0)
     );
 }
@@ -235,21 +207,18 @@ fn date_invalid_host_zone_faults_only_when_local_rules_are_needed() {
             export function parseLocal() { return Date.parse('2024-01-01T00:00'); }
             "#,
         ),
-        &mut host,
+        host.host(),
         Default::default(),
     )
     .unwrap();
     for entry in ["formatLocal", "getLocal", "constructLocal", "parseLocal"] {
-        let result = vm.start(&mut host, entry, vec![]);
+        let result = vm.start(entry, vec![]);
         assert!(
             matches!(&result, Err(VmError::HostFault(message)) if message.contains("Invalid/Zone")),
             "{entry}: {result:?}"
         );
     }
-    assert_eq!(
-        vm.start(&mut host, "utc", vec![]).unwrap(),
-        Value::number(1001.0)
-    );
+    assert_eq!(vm.start("utc", vec![]).unwrap(), Value::number(1001.0));
 }
 
 const WAIT_WITH_DATES: &str = r#"
@@ -270,8 +239,8 @@ const WAIT_WITH_DATES: &str = r#"
 fn date_snapshot_preserves_slots_and_properties_but_uses_restored_host() {
     let program = build(WAIT_WITH_DATES);
     let mut old_host = TestHost::new();
-    let mut vm = Vm::new(program.clone(), &mut old_host, Default::default()).unwrap();
-    let result = vm.start(&mut old_host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(program.clone(), old_host.host(), Default::default()).unwrap();
+    let result = vm.start("run", vec![]).unwrap();
     old_host.advance(&mut vm, 5).unwrap();
     assert_eq!(vm.promise_state(&result).unwrap(), PromiseState::Pending);
     let json = vm
@@ -288,13 +257,13 @@ fn date_snapshot_preserves_slots_and_properties_but_uses_restored_host() {
     let mut vm = Vm::restore(
         Snapshot::from_json(&json).unwrap(),
         program,
-        &mut new_host,
+        new_host.host(),
         Default::default(),
     )
     .unwrap();
     vm.start_recovered_operations().unwrap();
     assert_eq!(
-        vm.start(&mut new_host, "readClock", vec![]).unwrap(),
+        vm.start("readClock", vec![]).unwrap(),
         Value::number(10_000.0)
     );
     assert_eq!(new_host.clock().registrations().len(), 1);
@@ -313,9 +282,9 @@ fn date_snapshot_preserves_slots_and_properties_but_uses_restored_host() {
 fn date_restore_rejects_out_of_range_serialized_time_slot() {
     const OUT_OF_RANGE: i64 = 8_640_000_000_000_001;
     let program = build("export function run() { return new Date(123); }");
-    let mut host = TestHost::new();
-    let mut vm = Vm::new(program.clone(), &mut host, Default::default()).unwrap();
-    let date = vm.start(&mut host, "run", vec![]).unwrap();
+    let host = TestHost::new();
+    let mut vm = Vm::new(program.clone(), host.host(), Default::default()).unwrap();
+    let date = vm.start("run", vec![]).unwrap();
     let snapshot = vm.snapshot(&[date]).unwrap();
     let mut json = serde_json::to_value(&snapshot).unwrap();
     let slot = json["objects"]
@@ -334,7 +303,7 @@ fn date_restore_rejects_out_of_range_serialized_time_slot() {
         Vm::restore(
             corrupt,
             program,
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()

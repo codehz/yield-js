@@ -23,7 +23,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::ElementKind;
 
@@ -135,7 +135,7 @@ macro_rules! members {
 
         /// Shared members live on `%TypedArray%.prototype` only; concrete
         /// prototypes inherit them.
-        fn install_prototype(vm: &mut Vm) {
+        fn install_prototype(vm: &mut VmCore) {
             let prototype = vm.builtins.get(TYPED_ARRAY_PROTOTYPE);
             for key in [BUFFER, BYTE_LENGTH, BYTE_OFFSET, LENGTH] {
                 getter(vm, prototype, key.member, key);
@@ -203,7 +203,7 @@ members! {
     "with": 2,
 }
 
-pub(super) fn install(vm: &mut Vm) {
+pub(super) fn install(vm: &mut VmCore) {
     let constructor = vm.builtins.get(super::TYPED_ARRAY_ROOT);
     let prototype = vm.builtins.get(TYPED_ARRAY_PROTOTYPE);
     method(vm, constructor, FROM.member, FROM);
@@ -235,8 +235,8 @@ pub(super) fn install(vm: &mut Vm) {
 
 /// `%TypedArray%.prototype` is not callable as a constructor.
 pub(super) fn call_requires_new(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     _: &Value,
@@ -253,8 +253,8 @@ struct MapFn<'a> {
 
 /// The 23.2.5.1 `TypedArray (...args)` dispatch for one element kind.
 pub(super) fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     new_target: &Value,
@@ -322,13 +322,13 @@ fn family_prototype(kind: ElementKind) -> &'static str {
         .prototype
 }
 
-impl Vm {
+impl VmCore {
     /// AllocateTypedArray plus AllocateTypedArrayBuffer in one step: the object
     /// and its buffer are always created together here, so no view ever names a
     /// buffer that does not exist.
     fn allocate_typed(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         kind: ElementKind,
         new_target: &Value,
@@ -391,7 +391,7 @@ impl Vm {
     /// never observable through the source.
     fn init_from_typed_array(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         source: &Value,
@@ -453,7 +453,7 @@ impl Vm {
     /// InitializeTypedArrayFromArrayBuffer.
     fn init_from_array_buffer(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         buffer_value: &Value,
@@ -558,7 +558,7 @@ impl Vm {
     /// InitializeTypedArrayFromElements: iterable first, then array-like.
     fn init_from_elements(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         object: ObjectId,
         source: &Value,
@@ -627,7 +627,7 @@ impl Vm {
     /// IteratorToList over an explicit `@@iterator` method.
     pub(crate) fn iterator_to_list(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterable: &Value,
         method: &Value,
@@ -749,7 +749,7 @@ impl Vm {
     /// TypedArrayCreateSameType: always the intrinsic constructor of the kind.
     fn same_type_create(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -769,7 +769,7 @@ impl Vm {
     /// content-type check on whatever it built.
     fn species_create(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         args: Vec<Value>,
@@ -793,7 +793,7 @@ impl Vm {
     /// right content type and at least the requested length.
     fn typed_create_from_constructor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         args: Vec<Value>,
@@ -952,14 +952,14 @@ impl Vm {
 }
 
 /// One entry point for the shared prototype methods.
-impl Vm {
+impl VmCore {
     #[allow(
         clippy::too_many_lines,
         reason = "One dispatch over the shared prototype member table"
     )]
     pub(super) fn typed_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         name: &'static str,
         receiver: &Value,
@@ -1034,10 +1034,10 @@ enum Search {
     LastIndexOf,
 }
 
-impl Vm {
+impl VmCore {
     fn typed_at(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1055,7 +1055,7 @@ impl Vm {
 
     fn typed_copy_within(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1110,7 +1110,7 @@ impl Vm {
 
     fn typed_fill(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1162,7 +1162,7 @@ impl Vm {
 
     fn typed_predicate(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1233,7 +1233,7 @@ impl Vm {
 
     fn typed_search(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1319,7 +1319,7 @@ impl Vm {
 
     fn typed_join(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1349,7 +1349,7 @@ impl Vm {
 
     fn typed_locale_string(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1394,7 +1394,7 @@ impl Vm {
 
     fn typed_map(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1444,7 +1444,7 @@ impl Vm {
 
     fn typed_filter(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1500,7 +1500,7 @@ impl Vm {
 
     fn typed_reduce(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1590,7 +1590,7 @@ impl Vm {
 
     fn typed_set(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1624,7 +1624,7 @@ impl Vm {
 
     fn set_from_typed(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         kind: ElementKind,
@@ -1724,7 +1724,7 @@ impl Vm {
 
     fn set_from_array_like(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         offset: f64,
@@ -1781,7 +1781,7 @@ impl Vm {
 
     fn typed_slice(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1845,7 +1845,7 @@ impl Vm {
 
     fn typed_subarray(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         kind: ElementKind,
@@ -1904,7 +1904,7 @@ impl Vm {
 
     fn typed_to_reversed(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1934,7 +1934,7 @@ impl Vm {
 
     fn typed_with(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -1990,7 +1990,7 @@ impl Vm {
 
     fn typed_sort(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         length: usize,
@@ -2041,7 +2041,7 @@ impl Vm {
     /// whose comparator may run script code.
     fn sort_items(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         items: &mut [Value],
         comparator: &Value,
@@ -2100,7 +2100,7 @@ impl Vm {
     /// CompareTypedArrayElements: numeric order with NaN last and -0 before +0.
     fn compare_elements(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         x: &Value,
         y: &Value,
@@ -2173,7 +2173,7 @@ impl Vm {
 
     fn typed_from(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -2204,7 +2204,7 @@ impl Vm {
 
     fn typed_from_impl(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         source: &Value,
@@ -2318,7 +2318,7 @@ impl Vm {
 
     fn typed_of(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: Vec<Value>,
@@ -2336,7 +2336,7 @@ impl Vm {
 
     fn typed_of_impl(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         constructor: &Value,
         items: &[Value],

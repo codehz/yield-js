@@ -33,8 +33,8 @@ interface!(BYOB_REQUEST_OWNER, "readableStreamBYOBRequest", "ReadableStreamBYOBR
 );
 
 pub(super) fn enforce_unsigned(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: &Value,
 ) -> Completion<usize> {
@@ -53,8 +53,8 @@ pub(super) fn enforce_unsigned(
 }
 
 fn construct_byob_reader(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -75,8 +75,8 @@ fn construct_byob_reader(
 }
 
 fn byob_closed(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -88,8 +88,8 @@ fn byob_closed(
 }
 
 fn byob_cancel(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -104,8 +104,8 @@ fn byob_cancel(
 }
 
 fn byob_release(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -118,8 +118,8 @@ fn byob_release(
 }
 
 pub(in crate::builtin::streams) fn byob_read(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -133,7 +133,7 @@ pub(in crate::builtin::streams) fn byob_read(
     if !crate::builtin::binary::is_view(&vm.heap, view) {
         return vm.reject_readable_type(roots, "Expected an ArrayBufferView");
     }
-    let reject = |vm: &mut Vm, error| {
+    let reject = |vm: &mut VmCore, error| {
         Ok(promise_or_object(
             vm.readable_settled_promise(Settlement::Rejected(error))?,
         ))
@@ -214,8 +214,8 @@ pub(in crate::builtin::streams) fn byob_read(
 }
 
 fn byte_desired_size(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -232,8 +232,8 @@ fn byte_desired_size(
 }
 
 pub(in crate::builtin::streams) fn byte_close(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -253,8 +253,8 @@ pub(in crate::builtin::streams) fn byte_close(
 }
 
 fn byte_error(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -267,8 +267,8 @@ fn byte_error(
 }
 
 pub(in crate::builtin::streams) fn byte_enqueue(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -307,8 +307,8 @@ pub(in crate::builtin::streams) fn byte_enqueue(
 }
 
 fn byob_request(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -342,8 +342,8 @@ fn byob_request(
 }
 
 fn request_view(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -356,7 +356,7 @@ fn request_view(
     vm.throw_type_error(roots, "Expected a ReadableStreamBYOBRequest")
 }
 
-fn request_stream(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
+fn request_stream(vm: &VmCore, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
     let ValueRef::Object(id) = receiver.view() else {
         return Ok(None);
     };
@@ -370,8 +370,8 @@ fn request_stream(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmError
 }
 
 fn respond(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -400,8 +400,8 @@ fn respond(
 }
 
 fn respond_with_new_view(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -423,7 +423,7 @@ fn respond_with_new_view(
     )
 }
 
-impl Vm {
+impl VmCore {
     pub(in crate::builtin::streams) fn byte(
         &self,
         stream: ObjectId,
@@ -570,7 +570,7 @@ impl Vm {
 
     pub(super) fn read_byte_default(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         reader: ObjectId,
@@ -641,7 +641,7 @@ impl Vm {
     /// Enqueues an owned block without a script-visible controller.
     pub(crate) fn enqueue_byte_vec(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         bytes: Vec<u8>,
@@ -677,7 +677,7 @@ impl Vm {
 
     pub(crate) fn close_body_stream(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Result<(), VmError> {
@@ -900,7 +900,7 @@ impl Vm {
     /// call pull after delivery, because other callers pull once at the end.
     fn deliver_byte_reads(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         ready: Vec<(ObjectId, Value)>,
@@ -926,7 +926,7 @@ impl Vm {
 
     fn close_byte_stream(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
     ) -> Completion<()> {
@@ -955,7 +955,7 @@ impl Vm {
 
     pub(in crate::builtin::streams) fn respond_byte_request(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         stream: ObjectId,
         written: usize,

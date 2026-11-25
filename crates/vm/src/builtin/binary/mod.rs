@@ -30,7 +30,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 /// A script throw stays a value until it leaves the VM.
 pub(crate) type Completion<T> = Result<Result<T, Value>, VmError>;
@@ -108,14 +108,14 @@ mod family_constructors {
     use crate::host::Host;
     use crate::runtime::Invocation;
     use crate::value::Value;
-    use crate::vm::Vm;
+    use crate::vm::VmCore;
 
     macro_rules! constructors {
         ($($function:ident => $kind:ident),+ $(,)?) => {
             $(
                 pub(super) fn $function(
-                    vm: &mut Vm,
-                    host: &mut dyn Host,
+                    vm: &mut VmCore,
+                    host: &Host,
                     roots: &ActiveRoots<'_>,
                     args: Vec<Value>,
                     new_target: &Value,
@@ -168,7 +168,7 @@ pub(crate) const OWNER: Owner = Owner::new(ARRAY_BUFFER_ROOT, BINARY_ROOTS, GROU
 
 /// Binary roots are allocated as a block, so the first binary global installs
 /// all of them: two shared prototypes plus one constructor per element type.
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     for (root, prototype) in [
         (ARRAY_BUFFER_ROOT, ARRAY_BUFFER_PROTOTYPE),
         (DATA_VIEW_ROOT, DATA_VIEW_PROTOTYPE),
@@ -216,7 +216,7 @@ fn install(vm: &mut Vm, _: &Value) {
 }
 
 pub(crate) fn method(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     target: ObjectId,
     key: impl Into<PropertyKey>,
     intrinsic: IntrinsicKey,
@@ -226,7 +226,7 @@ pub(crate) fn method(
 }
 
 pub(crate) fn getter(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     target: ObjectId,
     key: impl Into<PropertyKey>,
     intrinsic: IntrinsicKey,
@@ -234,7 +234,7 @@ pub(crate) fn getter(
     install_getter(vm, target, key.into(), intrinsic);
 }
 
-impl Vm {
+impl VmCore {
     /// CreateByteDataBlock: zero-filled, with allocation failure as RangeError.
     fn allocate_block(&mut self, roots: &ActiveRoots<'_>, length: usize) -> Completion<Vec<u8>> {
         if length > MAX_BYTE_LENGTH {
@@ -293,7 +293,7 @@ impl Vm {
     /// ToIntegerOrInfinity: truncate towards zero, with NaN read as zero.
     pub(crate) fn integer_or_infinity(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<f64> {
@@ -313,7 +313,7 @@ impl Vm {
     /// ToIndex: an integer index in `0 ..= 2^53 - 1`.
     pub(crate) fn coerce_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<usize> {
@@ -330,7 +330,7 @@ impl Vm {
     /// ToAbsoluteIndex: a negative index counts from the end.
     pub(crate) fn absolute_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -349,7 +349,7 @@ impl Vm {
     /// ToClampedIndex: clamp a relative index into `0 ..= length`.
     pub(crate) fn clamped_index(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
         length: usize,
@@ -364,7 +364,7 @@ impl Vm {
     /// ToBigInt: unlike the `BigInt` constructor, a Number is a TypeError.
     pub(crate) fn coerce_to_bigint(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<JsBigInt> {
@@ -408,7 +408,7 @@ impl Vm {
     /// Convert a value into the raw bits one element stores.
     pub(crate) fn element_bits(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         kind: ElementKind,
         value: &Value,
@@ -430,7 +430,7 @@ impl Vm {
     /// TypedArraySetElement: convert first, then recheck, then store.
     pub(crate) fn typed_set_element(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: u64,
@@ -540,7 +540,7 @@ impl Vm {
     /// intrinsic, after any getter on `newTarget` has run.
     pub(crate) fn prototype_from(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         new_target: &Value,
         default: &'static str,

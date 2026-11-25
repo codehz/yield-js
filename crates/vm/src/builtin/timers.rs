@@ -11,7 +11,7 @@ use crate::host::{Host, TimerKey};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::Value;
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 macro_rules! timer_function {
     ($owner:ident, $name:literal, $length:literal, $call:expr) => {
@@ -45,8 +45,8 @@ timer_function!(CLEAR_TIMEOUT, "clearTimeout", 0, clear);
 timer_function!(CLEAR_INTERVAL, "clearInterval", 0, clear);
 
 fn set(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     repeat: bool,
@@ -59,7 +59,7 @@ fn set(
         Ok(number) => number.max(0) as u32,
         Err(error) => return Ok(Invocation::Thrown(error)),
     };
-    if vm.bindings.service::<TimerKey>().is_none() {
+    if host.services().get::<TimerKey>().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),
@@ -71,14 +71,14 @@ fn set(
     let callback = callback.clone();
     let mut args = args;
     args.drain(..args.len().min(2));
-    vm.schedule_script_timer(id, callback, args, repeat, period)
+    vm.schedule_script_timer(host, id, callback, args, repeat, period)
         .map_err(|fault| VmError::HostFault(fault.0))?;
     Ok(Invocation::Value(Value::number(f64::from(id))))
 }
 
 fn clear(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -91,8 +91,8 @@ fn clear(
 }
 
 fn long(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     value: Option<&Value>,
 ) -> Result<Result<i32, Value>, VmError> {

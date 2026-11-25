@@ -23,10 +23,10 @@ fn restore_preserves_fetch_environment_and_rejects_wider_authorization() {
         authorization: "loopback-only".into(),
     };
     let build = build("export function run() { return 1; }");
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     let vm = Vm::new(
         build.clone(),
-        &mut host,
+        host.host(),
         VmOptions {
             fetch_environment: Some(environment.clone()),
             ..Default::default()
@@ -39,7 +39,7 @@ fn restore_preserves_fetch_environment_and_rejects_wider_authorization() {
         Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions::default()
         ),
         Err(VmError::InvalidSnapshot(message)) if message.contains("not authorized")
@@ -52,7 +52,7 @@ fn restore_preserves_fetch_environment_and_rejects_wider_authorization() {
         Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 fetch_environment: Some(widened),
                 ..Default::default()
@@ -63,7 +63,7 @@ fn restore_preserves_fetch_environment_and_rejects_wider_authorization() {
     let mut restored = Vm::restore(
         snapshot,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             fetch_environment: Some(environment),
             ..Default::default()
@@ -71,7 +71,7 @@ fn restore_preserves_fetch_environment_and_rejects_wider_authorization() {
     )
     .unwrap();
     assert!(matches!(
-        restored.start(&mut host, "run", vec![]).unwrap().view(),
+        restored.start("run", vec![]).unwrap().view(),
         yield_vm::ValueRef::Number(number) if number == 1.0
     ));
 }
@@ -92,8 +92,8 @@ fn fetch_offline_objects_survive_gc_and_binary_restore() {
         export function revoke() { URL.revokeObjectURL(url); }
     "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
     vm.collect_garbage(&[]).unwrap();
     let snapshot = Snapshot::from_bytes(&vm.snapshot(&[]).unwrap().to_bytes().unwrap()).unwrap();
     assert!(
@@ -112,12 +112,12 @@ fn fetch_offline_objects_survive_gc_and_binary_restore() {
     record["file"]["data"]["blob"]["start"] = serde_json::json!(1000);
     form.object = serde_json::from_value(record).unwrap();
     assert!(
-        matches!(Vm::restore(corrupted, build.clone(), &mut host, full()), Err(VmError::InvalidSnapshot(message)) if message.contains("invalid File"))
+        matches!(Vm::restore(corrupted, build.clone(), host.host(), full()), Err(VmError::InvalidSnapshot(message)) if message.contains("invalid File"))
     );
-    let mut restored = Vm::restore(snapshot, build, &mut host, full()).unwrap();
-    let result = restored.start(&mut host, "run", vec![]).unwrap();
+    let mut restored = Vm::restore(snapshot, build, host.host(), full()).unwrap();
+    let result = restored.start("run", vec![]).unwrap();
     assert_eq!(result.into_string().unwrap().to_utf8().unwrap(), "one4two");
-    restored.start(&mut host, "revoke", vec![]).unwrap();
+    restored.start("revoke", vec![]).unwrap();
     restored.collect_garbage(&[]).unwrap();
     assert!(
         !restored

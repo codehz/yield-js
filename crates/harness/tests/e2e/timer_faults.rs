@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use super::support::{compile_main, declared, json_round_trip};
+use super::support::{UnexpectedUncaught, compile_main, declared, json_round_trip};
 use yield_harness::{FakeClock, TestHost, Timer, build};
-use yield_vm::binding::NativeTarget;
+use yield_vm::heap::NativeObject;
 use yield_vm::snapshot::DeliveryTarget;
 use yield_vm::{
-    Bindings, Host, JsResult, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation,
-    Value, Vm, VmError, host_bindings, host_module, module_exports,
+    Host, JsResult, JsValue, PromiseState, RestoreOptions, Snapshot, SnapshotValidation, Value, Vm,
+    VmError, host, host_module, module_exports,
 };
 
 const TIMERS: &str = r#"
@@ -14,17 +14,22 @@ const TIMERS: &str = r#"
     export let calls = 0;
     export function schedule() { spawnDelayedTask(() => { calls += 1; }, 10); }
     export function wait() { return sleep(10); }
+    export function sleepFunction() { return sleep; }
 "#;
 
 #[test]
 fn malformed_timer_snapshots_never_arm_a_timer() {
     let build = build(TIMERS);
-    let mut source = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
-    vm.start(&mut source, "schedule", vec![]).unwrap();
-    vm.start(&mut source, "schedule", vec![]).unwrap();
-    let promise = vm.start(&mut source, "wait", vec![]).unwrap();
-    let snapshot = json_round_trip(&vm.snapshot(&[promise]).unwrap());
+    let source = TestHost::new();
+    let mut vm = Vm::new(build.clone(), source.host(), Default::default()).unwrap();
+    vm.start("schedule", vec![]).unwrap();
+    vm.start("schedule", vec![]).unwrap();
+    let promise = vm.start("wait", vec![]).unwrap();
+    let sleep = vm.start("sleepFunction", vec![]).unwrap();
+    let yield_vm::ValueRef::Object(sleep_id) = sleep.view() else {
+        panic!("expected native sleep function");
+    };
+    let snapshot = json_round_trip(&vm.snapshot(&[promise, sleep]).unwrap());
     let [first, second] = snapshot.host_tasks.as_slice() else {
         panic!("expected two waiting timer callbacks");
     };
@@ -44,17 +49,27 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
         .iter()
         .position(|op| matches!(op.target, DeliveryTarget::Promise(_)))
         .unwrap();
-    let bindings = source.bindings();
-    let sleep_owner = NativeTarget::Export(bindings.export("test", "sleep").unwrap().0);
+    let sleep_owner = snapshot
+        .objects
+        .iter()
+        .find_map(|record| match &record.object {
+            yield_vm::Object::Native(NativeObject::Host { target, .. })
+                if record.id == sleep_id =>
+            {
+                Some(*target)
+            }
+            _ => None,
+        })
+        .expect("native sleep export");
     drop(vm);
 
-    let mut target = TestHost::new();
+    let target = TestHost::new();
     // The same image, unmodified, must get through validation without registering.
     drop(
         Vm::restore(
             snapshot.clone(),
             build.clone(),
-            &mut target,
+            target.host(),
             Default::default(),
         )
         .unwrap(),
@@ -72,7 +87,7 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
     for length in [3, 5] {
         let mut image = snapshot.clone();
         image.operations[first_op].state.resize(length, 0);
-        let error = Vm::restore(image, build.clone(), &mut target, Default::default())
+        let error = Vm::restore(image, build.clone(), target.host(), Default::default())
             .expect_err("timer codec length");
         assert_rejected(
             "timer codec length",
@@ -85,11 +100,11 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
             &target,
         );
     }
-    let mut reject = |label: &str, message: &str, image: Snapshot| {
+    let reject = |label: &str, message: &str, image: Snapshot| {
         let error = Vm::restore(
             image,
             build.clone(),
-            &mut target,
+            target.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -156,10 +171,10 @@ fn malformed_timer_snapshots_never_arm_a_timer() {
 #[test]
 fn timer_start_fault_leaves_no_pending_work() {
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build(TIMERS), &mut host, Default::default()).unwrap();
+    let mut vm = Vm::new(build(TIMERS), host.host(), Default::default()).unwrap();
     host.clock().set_fail_start(true);
     for entry in ["schedule", "wait"] {
-        let error = vm.start(&mut host, entry, vec![]).unwrap_err();
+        let error = vm.start(entry, vec![]).unwrap_err();
         assert!(matches!(&error, VmError::HostFault(_)), "{entry}: {error}");
         assert!(host.clock().registrations().is_empty());
         assert_eq!(host.clock().arm_count(), 0);
@@ -175,8 +190,8 @@ fn timer_start_fault_leaves_no_pending_work() {
 #[test]
 fn timer_checkpoint_fault_does_not_disarm_the_source() {
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build(TIMERS), &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "schedule", vec![]).unwrap();
+    let mut vm = Vm::new(build(TIMERS), host.host(), Default::default()).unwrap();
+    vm.start("schedule", vec![]).unwrap();
     let registrations = host.clock().registrations();
     assert_eq!(registrations.len(), 1);
     host.clock().set_fail_checkpoint(true);
@@ -198,23 +213,23 @@ fn timer_checkpoint_fault_does_not_disarm_the_source() {
 #[test]
 fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
     let build = build(TIMERS);
-    let mut source = TestHost::new();
-    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
-    vm.start(&mut source, "schedule", vec![]).unwrap();
-    let promise = vm.start(&mut source, "wait", vec![]).unwrap();
+    let source = TestHost::new();
+    let mut vm = Vm::new(build.clone(), source.host(), Default::default()).unwrap();
+    vm.start("schedule", vec![]).unwrap();
+    let promise = vm.start("wait", vec![]).unwrap();
     let snapshot = json_round_trip(&vm.snapshot(std::slice::from_ref(&promise)).unwrap());
     drop(vm);
 
     let mut host = TestHost::new();
     host.clock().set_fail_resume(true);
-    let mut vm = Vm::restore(snapshot, build, &mut host, Default::default()).unwrap();
+    let mut vm = Vm::restore(snapshot, build, host.host(), Default::default()).unwrap();
     assert_eq!(vm.promise_state(&promise).unwrap(), PromiseState::Pending);
     vm.start_recovered_operations().unwrap();
     assert!(
         host.errors().is_empty(),
         "delivery must not run the callback inline"
     );
-    vm.run_until_idle(&mut host).unwrap();
+    vm.run_until_idle().unwrap();
     assert_eq!(
         vm.promise_state(&promise).unwrap(),
         PromiseState::Rejected(Value::string("timer unavailable".into())),
@@ -222,7 +237,7 @@ fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
     vm.start_recovered_operations().unwrap();
     host.advance(&mut vm, 10).unwrap();
     assert_eq!(vm.get_export("calls").unwrap(), Value::number(0.0));
-    let [error] = host.errors() else {
+    let [error] = &*host.errors() else {
         panic!("expected exactly one background error");
     };
     assert_eq!(
@@ -249,10 +264,10 @@ fn a_throwing_timer_callback_does_not_block_the_next_timer() {
     "#,
     );
     let mut host = TestHost::new();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build, host.host(), Default::default()).unwrap();
+    vm.start("run", vec![]).unwrap();
     host.advance(&mut vm, 2).unwrap();
-    let [error] = host.errors() else {
+    let [error] = &*host.errors() else {
         panic!("expected exactly one callback error");
     };
     assert_eq!(
@@ -297,11 +312,12 @@ macro_rules! timer_contract {
                 $($after)*
             }
 
-            pub(super) fn bindings(clock: &Arc<FakeClock>) -> Bindings {
-                host_bindings! {
+            pub(super) fn make_host(clock: &Arc<FakeClock>) -> Host {
+                host! {
                     dts: "../dts/contract.d.ts",
                     modules: [Api],
                     services: {
+                        yield_vm::DiagnosticsKey => std::rc::Rc::new(UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics>,
                         yield_harness::timer::FakeClockKey => Arc::clone(clock),
                     },
                 }.unwrap()
@@ -326,22 +342,10 @@ timer_contract!(
     Vec::from([extra])
 );
 
-struct ContractHost(Bindings);
-
-impl Host for ContractHost {
-    fn bindings(&self) -> Bindings {
-        self.0.clone()
-    }
-
-    fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected callback error: {error}");
-    }
-}
-
 #[test]
 fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     let source_clock = Arc::new(FakeClock::default());
-    let mut source = ContractHost(original::bindings(&source_clock));
+    let source = original::make_host(&source_clock);
     let build = compile_main(
         r#"
         import { schedule } from 'contract';
@@ -351,28 +355,32 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
         &declared(include_str!("../dts/contract.d.ts")),
     )
     .unwrap();
-    let mut vm = Vm::new(build.clone(), &mut source, Default::default()).unwrap();
-    vm.start(&mut source, "run", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), source, Default::default()).unwrap();
+    vm.start("run", vec![]).unwrap();
     let snapshot = json_round_trip(&vm.snapshot(&[]).unwrap());
     assert_eq!(snapshot.host_tasks[0].saved.len(), 1);
     drop(vm);
 
     let changed_clock = Arc::new(FakeClock::default());
-    let mut changed = ContractHost(extra_slot::bindings(&changed_clock));
+    let changed = extra_slot::make_host(&changed_clock);
     // Establish that the alternate binding really saves the extra argument.
-    let mut alternate = Vm::new(build.clone(), &mut changed, Default::default()).unwrap();
-    alternate.start(&mut changed, "run", vec![]).unwrap();
+    let mut alternate = Vm::new(build.clone(), changed, Default::default()).unwrap();
+    alternate.start("run", vec![]).unwrap();
     let alternate_image = alternate.snapshot(&[]).unwrap();
     assert_eq!(alternate_image.host_tasks[0].saved.len(), 2);
     assert_eq!(alternate_image.host_tasks[0].saved[1], Value::number(42.0));
+    assert_ne!(
+        alternate_image.binding_fingerprint,
+        snapshot.binding_fingerprint
+    );
     drop(alternate);
 
     let rejected_clock = Arc::new(FakeClock::default());
-    let mut rejected = ContractHost(extra_slot::bindings(&rejected_clock));
+    let rejected = extra_slot::make_host(&rejected_clock);
     let error = Vm::restore(
         snapshot.clone(),
         build.clone(),
-        &mut rejected,
+        rejected,
         Default::default(),
     )
     .unwrap_err();
@@ -384,16 +392,18 @@ fn timer_slot_layout_changes_the_fingerprint_but_declaration_order_does_not() {
     assert!(rejected_clock.registrations().is_empty());
 
     let restored_clock = Arc::new(FakeClock::default());
-    let mut reordered = ContractHost(reordered::bindings(&restored_clock));
-    assert_eq!(reordered.0.fingerprint(), snapshot.binding_fingerprint);
-    let mut restored = Vm::restore(snapshot, build, &mut reordered, Default::default()).unwrap();
+    let reordered = reordered::make_host(&restored_clock);
+    let fingerprint = snapshot.binding_fingerprint.clone();
+    let mut restored = Vm::restore(snapshot, build, reordered, Default::default()).unwrap();
     assert!(restored_clock.registrations().is_empty());
     restored.start_recovered_operations().unwrap();
     assert_eq!(restored_clock.arm_count(), 1);
     assert_eq!(restored_clock.registrations().len(), 1);
-    restored_clock
-        .advance(&mut restored, &mut reordered, 10)
-        .unwrap();
+    restored_clock.advance(&mut restored, 10).unwrap();
     assert!(restored_clock.registrations().is_empty());
     assert_eq!(restored.get_export("calls").unwrap(), Value::number(1.0));
+    assert_eq!(
+        restored.snapshot(&[]).unwrap().binding_fingerprint,
+        fingerprint
+    );
 }

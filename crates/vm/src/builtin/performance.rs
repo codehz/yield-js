@@ -10,7 +10,7 @@ use crate::heap::{Attributes, DescriptorUpdate, Object, TO_STRING_TAG_SYMBOL};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const ROOT: &str = "Performance";
 const PROTOTYPE: &str = "performance.prototype";
@@ -86,7 +86,7 @@ pub(super) const OWNER: Owner = Owner::new(
     Some(install),
 );
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let global = vm.builtins.get("globalThis");
     let get = vm.alloc_intrinsic(GET_GLOBAL);
     let set = vm.alloc_intrinsic(SET_GLOBAL);
@@ -117,10 +117,10 @@ fn install(vm: &mut Vm, _: &Value) {
 }
 
 fn read(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
-    get: impl FnOnce(&mut Vm) -> Value,
+    get: impl FnOnce(&mut VmCore) -> Value,
 ) -> Result<Invocation, VmError> {
     if !matches!(receiver.view(), crate::value::ValueRef::Object(id) if matches!(vm.heap.get(id), Ok(Object::Performance { .. })))
     {

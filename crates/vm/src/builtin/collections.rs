@@ -12,7 +12,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 #[derive(Clone, Copy)]
 enum CollectionMethod {
@@ -365,7 +365,7 @@ fn canonical_key(value: &Value) -> Value {
     }
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn install_collection(
         &mut self,
         kind: CollectionKind,
@@ -451,7 +451,7 @@ impl Vm {
 
     fn construct_weakmap(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -467,7 +467,7 @@ impl Vm {
 
     fn weakmap_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         method: WeakMapMethod,
         receiver: &Value,
@@ -545,7 +545,7 @@ impl Vm {
 
     fn construct_weakset(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -594,7 +594,7 @@ impl Vm {
 
     fn construct_collection(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         args: &[Value],
@@ -620,7 +620,7 @@ impl Vm {
 
     fn populate_collection(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         collection: Value,
         args: &[Value],
@@ -677,7 +677,7 @@ impl Vm {
 
     fn collection_add_item(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         entry_pairs: bool,
         collection: &Value,
@@ -706,7 +706,7 @@ impl Vm {
 
     fn collection_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         kind: CollectionKind,
         method: CollectionMethod,
@@ -819,7 +819,7 @@ impl Vm {
 
     fn map_get_or_insert_computed(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         key: &Value,
@@ -877,7 +877,7 @@ impl Vm {
 
     fn map_group_by(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -953,7 +953,7 @@ impl Vm {
 
     fn set_operation(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         operation: SetOperation,
         receiver: &Value,
@@ -991,7 +991,7 @@ impl Vm {
 
     fn get_set_record(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         other: &Value,
     ) -> Result<Result<SetRecord, Value>, VmError> {
@@ -1084,7 +1084,7 @@ impl Vm {
 
     fn call_set_has(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         record: &SetRecord,
         value: &Value,
@@ -1106,7 +1106,7 @@ impl Vm {
 
     fn set_keys_iterator(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         record: &SetRecord,
     ) -> Result<Result<(Value, Value), Value>, VmError> {
@@ -1115,7 +1115,7 @@ impl Vm {
 
     fn set_union(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1143,7 +1143,7 @@ impl Vm {
 
     fn set_intersection(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1188,7 +1188,7 @@ impl Vm {
 
     fn set_difference(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1231,7 +1231,7 @@ impl Vm {
 
     fn set_symmetric_difference(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1266,7 +1266,7 @@ impl Vm {
 
     fn set_is_subset_of(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1290,7 +1290,7 @@ impl Vm {
 
     fn set_is_superset_of(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,
@@ -1321,7 +1321,7 @@ impl Vm {
 
     fn set_is_disjoint_from(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         record: &SetRecord,

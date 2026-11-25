@@ -9,7 +9,7 @@ use crate::heap::{
 };
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::value::{PropertyKey, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 pub(super) const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new(members::NAME, Slot::Global, "");
 const TO_PRIMITIVE: IntrinsicKey =
@@ -59,7 +59,7 @@ pub(crate) const OWNER: Owner = Owner::new(
     Some(install),
 );
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let constructor = vm.builtins.get(members::ROOT);
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, constructor, prototype);

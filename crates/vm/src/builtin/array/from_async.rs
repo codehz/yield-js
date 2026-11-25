@@ -175,15 +175,15 @@ impl ArrayFromAsyncJob {
 }
 
 struct ArrayAsync<'a> {
-    vm: &'a mut Vm,
-    host: &'a mut dyn Host,
+    vm: &'a mut VmCore,
+    host: &'a Host,
     roots: &'a ActiveRoots<'a>,
 }
 
-impl Vm {
+impl VmCore {
     pub(super) fn array_from_async(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         ctor: &Value,
         args: &[Value],
@@ -205,7 +205,7 @@ impl Vm {
 
     pub(crate) fn resume_array_from_async(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         job: &ArrayFromAsyncJob,
         settlement: &Settlement,

@@ -12,7 +12,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 macro_rules! strategy {
     ($owner:ident, $root:literal, $name:literal, $byte_length:literal, $length:literal, $size:expr) => {
@@ -89,8 +89,8 @@ fn arg(args: &[Value]) -> &Value {
 }
 
 fn construct(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     target: &Value,
@@ -124,7 +124,7 @@ fn construct(
 }
 
 fn get(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     expected: bool,

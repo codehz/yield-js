@@ -1,8 +1,8 @@
 use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
 use yield_vm::{
-    Bindings, Host, Instance, JsResult, JsValue, RestoreOptions, SnapshotValidation, This, Value,
-    Vm, host_bindings, host_class, host_module, methods, module_exports,
+    Host, Instance, JsResult, JsValue, RestoreOptions, SnapshotValidation, This, Value, Vm, host,
+    host_class, host_module, methods, module_exports,
 };
 
 #[test]
@@ -25,9 +25,8 @@ fn abort_gc_keeps_only_observable_dependents() {
         }
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
-    let mut host = EventHost::new();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    vm.start(&mut host, "setup", vec![]).unwrap();
+    let mut vm = Vm::new(build.clone(), event_host(), Default::default()).unwrap();
+    vm.start("setup", vec![]).unwrap();
     assert!(vm.collect_garbage(&[]).unwrap() > 0);
     let image = vm.snapshot(&[]).unwrap();
     let dependent_count = image.objects.iter().filter(|record| {
@@ -40,17 +39,14 @@ fn abort_gc_keeps_only_observable_dependents() {
     let mut restored = Vm::restore(
         image,
         build,
-        &mut host,
+        event_host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
         },
     )
     .unwrap();
-    assert_eq!(
-        restored.start(&mut host, "run", vec![]).unwrap(),
-        Value::number(1.0)
-    );
+    assert_eq!(restored.start("run", vec![]).unwrap(), Value::number(1.0));
 }
 
 #[host_class(tag = "EventNode", methods, event_parent = parent)]
@@ -96,28 +92,13 @@ impl EventModule {
     }
 }
 
-struct EventHost(Bindings);
-
-impl EventHost {
-    fn new() -> Self {
-        Self(
-            host_bindings! {
-                dts: "../dts/event-fixture.d.ts",
-                modules: [EventModule],
-                services: {},
-            }
-            .unwrap(),
-        )
+fn event_host() -> Host {
+    host! {
+        dts: "../dts/event-fixture.d.ts",
+        modules: [EventModule],
+        services: { yield_vm::DiagnosticsKey => std::rc::Rc::new(super::support::UnexpectedUncaught) as std::rc::Rc<dyn yield_vm::Diagnostics> },
     }
-}
-
-impl Host for EventHost {
-    fn bindings(&self) -> Bindings {
-        self.0.clone()
-    }
-    fn report_error(&mut self, error: JsValue) {
-        panic!("unexpected listener throw: {error:?}")
-    }
+    .unwrap()
 }
 
 #[test]
@@ -135,12 +116,8 @@ fn missing_timer_service_only_disables_timeout() {
         }
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
-    let mut host = EventHost::new();
-    let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
-    assert_eq!(
-        vm.start(&mut host, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
+    let mut vm = Vm::new(build, event_host(), Default::default()).unwrap();
+    assert_eq!(vm.start("run", vec![]).unwrap(), Value::boolean(true));
 }
 
 #[test]
@@ -180,25 +157,20 @@ fn host_events_keep_identity_and_freeze_parent_path_across_callbacks_and_restore
         }
     "#;
     let build = compile_main(source, &declared(include_str!("../dts/event-fixture.d.ts"))).unwrap();
-    let mut host = EventHost::new();
-    let vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
+    let vm = Vm::new(build.clone(), event_host(), Default::default()).unwrap();
     let image = vm.snapshot(&[]).unwrap();
-    let mut new_host = EventHost::new();
     let mut restored = Vm::restore(
         image,
         build,
-        &mut new_host,
+        event_host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
         },
     )
     .unwrap();
-    assert_eq!(
-        restored.start(&mut new_host, "run", vec![]).unwrap(),
-        Value::boolean(true)
-    );
-    restored.run_until_idle(&mut new_host).unwrap();
+    assert_eq!(restored.start("run", vec![]).unwrap(), Value::boolean(true));
+    restored.run_until_idle().unwrap();
 }
 
 #[test]
@@ -226,12 +198,12 @@ fn global_events_and_handler_order_survive_binary_restore() {
         }
     "#,
     );
-    let mut host = TestHost::default();
-    let mut vm = Vm::new(build.clone(), &mut host, Default::default()).unwrap();
-    let promise = vm.start(&mut host, "makeEvents", vec![]).unwrap();
-    vm.run_until_idle(&mut host).unwrap();
-    let error = vm.start(&mut host, "errorValue", vec![]).unwrap();
-    let reason = vm.start(&mut host, "reasonValue", vec![]).unwrap();
+    let host = TestHost::default();
+    let mut vm = Vm::new(build.clone(), host.host(), Default::default()).unwrap();
+    let promise = vm.start("makeEvents", vec![]).unwrap();
+    vm.run_until_idle().unwrap();
+    let error = vm.start("errorValue", vec![]).unwrap();
+    let reason = vm.start("reasonValue", vec![]).unwrap();
     vm.collect_garbage(&[]).unwrap();
     let image = vm.snapshot(&[]).unwrap();
     let decoded = Snapshot::from_bytes(&image.to_bytes().unwrap()).unwrap();
@@ -267,7 +239,7 @@ fn global_events_and_handler_order_survive_binary_restore() {
         Vm::restore(
             invalid_payload,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -275,12 +247,12 @@ fn global_events_and_handler_order_survive_binary_restore() {
         ),
         Err(VmError::InvalidSnapshot(_))
     ));
-    let mut host = TestHost::default();
+    let host = TestHost::default();
     assert!(matches!(
         Vm::restore(
             invalid_handler,
             build.clone(),
-            &mut host,
+            host.host(),
             RestoreOptions {
                 validation: SnapshotValidation::Full,
                 ..Default::default()
@@ -291,7 +263,7 @@ fn global_events_and_handler_order_survive_binary_restore() {
     let mut vm = Vm::restore(
         decoded,
         build,
-        &mut host,
+        host.host(),
         RestoreOptions {
             validation: SnapshotValidation::Full,
             ..Default::default()
@@ -304,17 +276,17 @@ fn global_events_and_handler_order_survive_binary_restore() {
         ("promiseValue", promise.clone()),
         ("reasonValue", reason.clone()),
     ] {
-        assert_eq!(vm.start(&mut host, name, vec![]).unwrap(), expected);
+        assert_eq!(vm.start(name, vec![]).unwrap(), expected);
     }
     assert_eq!(
         vm.promise_state(&promise).unwrap(),
         yield_vm::PromiseState::Rejected(reason)
     );
     for _ in 0..2 {
-        vm.run_until_idle(&mut host).unwrap();
+        vm.run_until_idle().unwrap();
     }
     assert_eq!(
-        vm.start(&mut host, "dispatchAgain", vec![]).unwrap(),
+        vm.start("dispatchAgain", vec![]).unwrap(),
         Value::boolean(false)
     );
     assert_eq!(

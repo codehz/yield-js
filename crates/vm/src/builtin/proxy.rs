@@ -11,7 +11,7 @@ use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Global, "");
 const REVOCABLE: IntrinsicKey = IntrinsicKey::new("Proxy", Slot::Static, "revocable");
@@ -32,7 +32,7 @@ const PROXY_INTRINSICS: &[IntrinsicDef] = &[
 pub(crate) const OWNER: Owner =
     Owner::new(ROOT_PROXY, PROXY_ROOTS, &[PROXY_INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let method = vm.alloc_intrinsic(REVOCABLE);
     super::define_builtin_data(
         vm,
@@ -58,7 +58,7 @@ macro_rules! unwrap_script {
     };
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn proxy_base(
         &mut self,
         roots: &ActiveRoots<'_>,
@@ -176,7 +176,7 @@ impl Vm {
 
     fn proxy_trap(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         handler: ObjectId,
         name: &str,
@@ -207,7 +207,7 @@ impl Vm {
 
     pub(crate) fn proxy_get(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
@@ -255,7 +255,7 @@ impl Vm {
     )]
     pub(crate) fn proxy_set(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         proxy: (ObjectId, ObjectId),
         receiver: &Value,
@@ -313,7 +313,7 @@ impl Vm {
 
     pub(crate) fn proxy_presence(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         target: ObjectId,
         handler: ObjectId,
@@ -355,7 +355,7 @@ impl Vm {
 
     pub(crate) fn own_keys(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         include_metadata: bool,
@@ -494,7 +494,7 @@ impl Vm {
 
     pub(crate) fn enumerable_string_keys(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
     ) -> Result<Result<Vec<JsString>, Value>, VmError> {
@@ -522,7 +522,7 @@ impl Vm {
 
     pub(crate) fn own_descriptor(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         key: PropertyKeyRef<'_>,
@@ -620,7 +620,7 @@ impl Vm {
 
     pub(crate) fn for_in_next(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         iterator: ObjectId,
     ) -> Result<Result<Option<JsString>, Value>, VmError> {

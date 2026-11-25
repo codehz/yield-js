@@ -59,7 +59,7 @@ pub(super) fn run(workload: &str, policy: &str) {
         None => build(include_str!("gc-buffer.js")),
     };
     let mut host = TestHost::default();
-    let mut vm = Vm::new(build, &mut host, Default::default()).expect("start GC workload");
+    let mut vm = Vm::new(build, host.host(), Default::default()).expect("start GC workload");
     let mut pauses = Vec::with_capacity(match &trigger {
         Trigger::None => 0,
         Trigger::Every(n) => (ROUNDS / n) as usize,
@@ -74,9 +74,9 @@ pub(super) fn run(workload: &str, policy: &str) {
         } else {
             let marker = f64::from(round);
             let value = vm
-                .start(&mut host, "run", vec![number(marker)])
+                .start("run", vec![number(marker)])
                 .expect("allocate and touch buffer");
-            vm.run_until_idle(&mut host).expect("drain buffer workload");
+            vm.run_until_idle().expect("drain buffer workload");
             assert_eq!(value, Value::number(marker));
         }
         let due = match &trigger {
@@ -89,7 +89,8 @@ pub(super) fn run(workload: &str, policy: &str) {
             }
         };
         if due {
-            let roots = host.case_result().map_or(&[][..], std::slice::from_ref);
+            let result = host.case_result();
+            let roots = result.as_deref().map_or(&[][..], std::slice::from_ref);
             let start = Instant::now();
             let removed = vm.collect_garbage(roots).expect("collect at idle boundary");
             let (allocated_objects, allocated_bytes) = vm.allocation_totals();

@@ -7,14 +7,14 @@ use crate::frame::Frame;
 use crate::gc::ActiveRoots;
 use crate::host::Host;
 use crate::value::{PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 use super::Step;
 
-impl Vm {
+impl VmCore {
     pub(super) fn step_value(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         frame: &mut Frame,
         instr: &Instr,

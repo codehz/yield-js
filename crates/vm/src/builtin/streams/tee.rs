@@ -13,7 +13,7 @@ use crate::heap::{
 use crate::host::Host;
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,8 +140,8 @@ fn invocation_id(result: Invocation) -> Result<ObjectId, VmError> {
 }
 
 pub(crate) fn tee(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -187,7 +187,7 @@ fn undefined() -> Settlement {
     Settlement::Fulfilled(Value::UNDEFINED)
 }
 
-impl Vm {
+impl VmCore {
     fn tee_record(&self, id: ObjectId) -> Result<&TeeRecord, VmError> {
         match self.heap.get(id)? {
             Object::Tee(record) => Ok(record),
@@ -229,7 +229,7 @@ impl Vm {
 
     pub(super) fn tee_pull(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         branch: ObjectId,
@@ -241,7 +241,7 @@ impl Vm {
 
     fn start_tee_read(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         index: usize,
@@ -305,7 +305,7 @@ impl Vm {
 
     pub(super) fn tee_cancel(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         branch: ObjectId,
@@ -327,7 +327,7 @@ impl Vm {
 
     fn cancel_tee_source(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: &Value,
@@ -356,7 +356,7 @@ impl Vm {
 
     fn fail_tee(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         error: &Value,
@@ -373,7 +373,7 @@ impl Vm {
 
     pub(super) fn resume_tee_job(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         job: TeeJob,
@@ -459,7 +459,7 @@ impl Vm {
 
     fn distribute_tee_bytes(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         byob: Option<usize>,
@@ -503,7 +503,7 @@ impl Vm {
 
     fn enqueue_tee_bytes(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         branch: ObjectId,
         chunk: &Value,
@@ -514,7 +514,7 @@ impl Vm {
 
     fn close_tee(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         byob: Option<usize>,

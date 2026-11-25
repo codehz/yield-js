@@ -19,7 +19,7 @@ use crate::host::Host;
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const NAME: &str = "URLSearchParams";
 const ROOT: &str = "urlSearchParams";
@@ -92,7 +92,7 @@ methods! {
 
 pub(crate) const PARAMS_OWNER: Owner = Owner::new(ROOT, ROOTS, &[INTRINSICS], Some(install));
 
-fn install(vm: &mut Vm, _: &Value) {
+fn install(vm: &mut VmCore, _: &Value) {
     let prototype = vm.builtins.get(PROTOTYPE);
     link_constructor(vm, vm.builtins.get(ROOT), prototype);
     for &(name, key) in METHODS {
@@ -159,10 +159,10 @@ macro_rules! convert {
     };
 }
 
-impl Vm {
+impl VmCore {
     fn params_usv(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         value: &Value,
     ) -> Completion<String> {
@@ -173,7 +173,7 @@ impl Vm {
 
     fn construct_search_params(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
         prototype: Option<ObjectId>,
@@ -219,7 +219,7 @@ impl Vm {
 
     fn params_from_record(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         init: &Value,
         id: ObjectId,
@@ -263,7 +263,7 @@ impl Vm {
 
     fn params_from_sequence(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         init: &Value,
         method: &Value,
@@ -294,7 +294,7 @@ impl Vm {
 
     fn params_pair(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         item: &Value,
     ) -> Completion<Option<(String, String)>> {
@@ -330,7 +330,7 @@ impl Vm {
 
     fn search_params_method(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -461,7 +461,7 @@ impl Vm {
 
     fn search_params_for_each(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         id: ObjectId,

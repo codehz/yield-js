@@ -7,7 +7,7 @@ use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
 use crate::heap::Attributes;
 use crate::value::Value;
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const ROOT: &str = "navigator";
 
@@ -29,7 +29,7 @@ pub(crate) fn target_platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-pub(crate) fn install(vm: &mut Vm, user_agent: Option<&str>) {
+pub(crate) fn install(vm: &mut VmCore, user_agent: Option<&str>) {
     let navigator = vm.builtins.get(ROOT);
     let readonly = Attributes {
         writable: false,

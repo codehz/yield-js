@@ -11,7 +11,7 @@ use crate::heap::{ElementKind, Object, TO_STRING_TAG_SYMBOL};
 use crate::host::Host;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const STANDARD: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -304,7 +304,7 @@ fn encode(units: &[u8], alphabet: Alphabet, omit_padding: bool) -> JsString {
     JsString::from_latin1(out)
 }
 
-impl Vm {
+impl VmCore {
     /// The `options` argument of the codec methods, or `None` when absent.
     fn options_object(
         &mut self,
@@ -320,7 +320,7 @@ impl Vm {
 
     fn string_option(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         options: Option<ObjectId>,
         key: &str,
@@ -353,7 +353,7 @@ impl Vm {
 
     pub(super) fn boolean_option(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         options: Option<ObjectId>,
         key: &str,
@@ -399,7 +399,7 @@ impl Vm {
     /// codec always uses the intrinsic constructor, never the receiver's.
     pub(super) fn uint8_from_bytes(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         bytes: &[u8],
     ) -> Completion<Value> {
@@ -477,7 +477,7 @@ impl Vm {
 
     pub(super) fn uint8_from_base64(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -535,7 +535,7 @@ impl Vm {
 
     pub(super) fn uint8_from_hex(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         args: &[Value],
     ) -> Result<Invocation, VmError> {
@@ -563,7 +563,7 @@ impl Vm {
 
     pub(super) fn uint8_set_from_base64(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],
@@ -668,7 +668,7 @@ impl Vm {
 
     pub(super) fn uint8_to_base64(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         receiver: &Value,
         args: &[Value],

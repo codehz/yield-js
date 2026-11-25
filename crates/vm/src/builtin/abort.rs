@@ -14,7 +14,7 @@ use crate::host::{Host, TimerKey};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{ObjectId, PropertyKey, Value, ValueRef};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const CONTROLLER_ROOT: &str = "abortController";
 const CONTROLLER_PROTOTYPE: &str = "abortController.prototype";
@@ -135,7 +135,7 @@ pub(crate) const SIGNAL_OWNER: Owner = Owner::new(
 );
 
 fn install(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     key: IntrinsicKey,
     root: &'static str,
     prototype: &'static str,
@@ -185,8 +185,8 @@ fn first_argument(args: Vec<Value>) -> Value {
 }
 
 fn construct_controller(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     new_target: &Value,
@@ -203,7 +203,7 @@ fn construct_controller(
     Ok(Invocation::Value(Value::object(id)))
 }
 
-fn controller_signal(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
+fn controller_signal(vm: &VmCore, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
     Ok(match receiver.view() {
         ValueRef::Object(id) => match vm.heap.get(id)? {
             Object::AbortController { signal, .. } => Some(*signal),
@@ -213,7 +213,7 @@ fn controller_signal(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmEr
     })
 }
 
-fn signal_receiver(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
+fn signal_receiver(vm: &VmCore, receiver: &Value) -> Result<Option<ObjectId>, VmError> {
     Ok(match receiver.view() {
         ValueRef::Object(id) if vm.abort_signal_state(id)?.is_some() => Some(id),
         _ => None,
@@ -221,7 +221,7 @@ fn signal_receiver(vm: &Vm, receiver: &Value) -> Result<Option<ObjectId>, VmErro
 }
 
 fn read_signal(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     roots: &ActiveRoots<'_>,
     receiver: &Value,
     read: impl FnOnce(&AbortSignalState) -> Invocation,
@@ -235,8 +235,8 @@ fn read_signal(
 }
 
 fn get_onabort(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     _: Vec<Value>,
     receiver: &Value,
@@ -255,8 +255,8 @@ fn get_onabort(
 }
 
 fn set_onabort(
-    vm: &mut Vm,
-    _: &mut dyn Host,
+    vm: &mut VmCore,
+    _: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     receiver: &Value,
@@ -309,8 +309,8 @@ fn set_onabort(
 }
 
 fn signal_timeout(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -324,21 +324,21 @@ fn signal_timeout(
     if !(0.0..=MAX_DELAY).contains(&delay) {
         return vm.throw_type_error(roots, "AbortSignal.timeout delay is out of range");
     }
-    if vm.bindings.service::<TimerKey>().is_none() {
+    if host.services().get::<TimerKey>().is_none() {
         return Ok(Invocation::Thrown(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Timer service is not available".into(),
         )));
     }
     let signal = vm.alloc_abort_signal(AbortSignalState::default());
-    vm.schedule_timeout(signal, delay as u64)
+    vm.schedule_timeout(host, signal, delay as u64)
         .map_err(|fault| VmError::HostFault(fault.0))?;
     Ok(Invocation::Value(Value::object(signal)))
 }
 
 fn signal_any(
-    vm: &mut Vm,
-    host: &mut dyn Host,
+    vm: &mut VmCore,
+    host: &Host,
     roots: &ActiveRoots<'_>,
     args: Vec<Value>,
     _: &Value,
@@ -412,7 +412,7 @@ fn signal_any(
     Ok(Invocation::Value(Value::object(id)))
 }
 
-impl Vm {
+impl VmCore {
     pub(crate) fn abort_signal_state(
         &self,
         id: ObjectId,
@@ -451,7 +451,7 @@ impl Vm {
 
     pub(crate) fn abort_signal(
         &mut self,
-        host: &mut dyn Host,
+        host: &Host,
         roots: &ActiveRoots<'_>,
         id: ObjectId,
         reason: Value,

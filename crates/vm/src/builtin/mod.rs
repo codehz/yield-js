@@ -10,13 +10,13 @@
 use crate::heap::{Attributes, DescriptorUpdate};
 use crate::intrinsic::IntrinsicKey;
 use crate::value::{ObjectId, PropertyKey, Value};
-use crate::vm::Vm;
+use crate::vm::VmCore;
 
 const OBJECT_PARENT: Option<&str> = Some("object.prototype");
 const FUNCTION_PARENT: Option<&str> = Some("function.prototype");
 
 fn define_builtin_data(
-    vm: &mut Vm,
+    vm: &mut VmCore,
     target: ObjectId,
     key: impl Into<PropertyKey>,
     value: Value,
@@ -27,7 +27,7 @@ fn define_builtin_data(
         .expect("builtin data property");
 }
 
-fn link_constructor(vm: &mut Vm, constructor: ObjectId, prototype: ObjectId) {
+fn link_constructor(vm: &mut VmCore, constructor: ObjectId, prototype: ObjectId) {
     define_builtin_data(
         vm,
         constructor,
@@ -44,7 +44,7 @@ fn link_constructor(vm: &mut Vm, constructor: ObjectId, prototype: ObjectId) {
     );
 }
 
-fn install_getter(vm: &mut Vm, target: ObjectId, key: PropertyKey, intrinsic: IntrinsicKey) {
+fn install_getter(vm: &mut VmCore, target: ObjectId, key: PropertyKey, intrinsic: IntrinsicKey) {
     let getter = vm.alloc_intrinsic(intrinsic);
     assert!(
         vm.heap
