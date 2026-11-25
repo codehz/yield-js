@@ -8,6 +8,7 @@ mod node;
 
 pub use node::NodeResolver;
 
+use crate::CompileError;
 use crate::ModuleId;
 
 /// A canonical module identity together with the framework mark of the module
@@ -32,6 +33,20 @@ pub trait ModuleResolver {
         specifier: &str,
     ) -> Result<ResolvedModule, String>;
     fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String>;
+
+    /// Load source for the compiler, optionally returning a diagnostic in the loaded source.
+    fn load_for_compile(
+        &self,
+        id: &ModuleId,
+        locate: &dyn Fn(String) -> CompileError,
+    ) -> Result<Cow<'_, str>, CompileError> {
+        self.load(id).map_err(locate)
+    }
+
+    /// The original source ID if this module's positions are in generated code.
+    fn generated_source_origin(&self, _id: &str) -> Option<ModuleId> {
+        None
+    }
 }
 
 impl<R: ModuleResolver + ?Sized> ModuleResolver for &R {
@@ -45,6 +60,18 @@ impl<R: ModuleResolver + ?Sized> ModuleResolver for &R {
 
     fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
         (**self).load(id)
+    }
+
+    fn load_for_compile(
+        &self,
+        id: &ModuleId,
+        locate: &dyn Fn(String) -> CompileError,
+    ) -> Result<Cow<'_, str>, CompileError> {
+        (**self).load_for_compile(id, locate)
+    }
+
+    fn generated_source_origin(&self, id: &str) -> Option<ModuleId> {
+        (**self).generated_source_origin(id)
     }
 }
 

@@ -62,6 +62,12 @@ impl CompileError {
         self
     }
 
+    pub(crate) fn at_generated_position(mut self, original: String) -> Self {
+        self.module = original;
+        self.message.insert_str(0, "post-conversion position: ");
+        self
+    }
+
     pub fn stage(&self) -> Option<&str> {
         self.stage.as_deref()
     }

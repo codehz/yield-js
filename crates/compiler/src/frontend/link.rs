@@ -517,7 +517,7 @@ fn insert<'a>(
         jsx_runtime,
     } = discovery;
     let allocator = *allocator;
-    let loaded = resolver.load(&id).map_err(&locate)?;
+    let loaded = resolver.load_for_compile(&id, &locate)?;
     if let Some(&index) = ids.get(&id) {
         if graph.modules[index as usize].original_source != loaded.as_ref() {
             return Err(locate(format!(

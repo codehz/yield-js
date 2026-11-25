@@ -146,6 +146,18 @@ impl Compiler {
 
     /// Runs source transforms, graph transforms, lowering and build transforms.
     pub fn compile(&self, mut project: Project<'_>) -> Result<Build, CompileError> {
+        let result = self.compile_project(&mut project);
+        result.map_err(|error| {
+            if error.stage() != Some("CommonJS conversion")
+                && let Some(original) = project.resolver.generated_source_origin(error.module())
+            {
+                return error.at_generated_position(original);
+            }
+            error
+        })
+    }
+
+    fn compile_project(&self, project: &mut Project<'_>) -> Result<Build, CompileError> {
         let allocator = Allocator::default();
         let resolver = project.resolver.as_ref();
         let mut graph = frontend::link::link(

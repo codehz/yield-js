@@ -1,7 +1,9 @@
 //! Source module linking, initialization, and snapshot integration.
 
+use std::path::Path;
+
 use super::support::{TEST_DECLARATIONS, declared, json_round_trip};
-use yield_compiler::{CompileError, MemoryResolver, Project};
+use yield_compiler::{CompileError, MemoryResolver, NodeResolver, Project};
 use yield_harness::TestHost;
 use yield_vm::bytecode::ModuleTarget;
 use yield_vm::heap::Property;
@@ -24,13 +26,26 @@ fn link<'a>(
 }
 
 fn run(files: &[(&str, &str)], expected: f64) {
-    let build = link(files.iter().copied(), None).unwrap();
+    run_build(link(files.iter().copied(), None).unwrap(), expected);
+}
+
+fn run_build(build: Build, expected: f64) {
     let mut host = TestHost::default();
     let mut vm = Vm::new(build, &mut host, Default::default()).unwrap();
     assert_eq!(
         vm.start(&mut host, "run", vec![]).unwrap(),
         Value::number(expected)
     );
+}
+
+#[test]
+fn commonjs_cycles_observe_partial_exports_and_preserve_object_identity() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/commonjs");
+    let resolver = NodeResolver::web_production(root).unwrap();
+    let build = declared(TEST_DECLARATIONS)
+        .compile(Project::new("./entry.mjs", resolver))
+        .unwrap();
+    run_build(build, 12.0);
 }
 
 #[test]

@@ -16,7 +16,7 @@
 - 同一函数内对尚未初始化的词法绑定的部分访问（如 `x; let x;`）在编译期拒绝，而不是运行时抛出可捕获的 `ReferenceError`。更完整的 TDZ 不在首版范围内。
 - `yield` / `yield*` 出现在非生成器函数中会被拒绝。
 - 模块初始化帧是同步的：顶层支持 `using`，但拒绝 `await` / `await using`，嵌套块也不能绕过该限制。
-- 文件系统解析只读 ESM 源码；不支持 CommonJS、JSON 模块、Node 内建、`main` / `module` 回退，也不支持 `exports` 通配符、数组或跨安装边界的符号链接。
+- 默认文件系统解析仅支持 ESM；显式 Web 生产解析仅支持静态 CommonJS 子集，不支持动态 `require`、`require` 逃逸、`require` ESM 或无法静态确定的导出形状。两种模式均不支持 JSON 模块、Node 内建、`module` 回退、`exports` 通配符或数组、跨安装边界的符号链接。
 - JSX 只在 `.jsx` 模块中启用；不支持 JSX 命名空间或 spread 子节点。
 - 自定义 AST 转换依赖固定版本的 Oxc，不提供跨 Oxc 版本的兼容层。图转换引入的源码依赖必须已在图中；需要发现新模块的转换应在源码阶段运行。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。

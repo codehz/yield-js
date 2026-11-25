@@ -2178,6 +2178,167 @@ fn fixture(root: &TempDir, relative: &str, source: &str) {
 }
 
 #[test]
+fn web_node_resolver_selects_browser_conditions_and_legacy_entries() {
+    let root = TempDir::new();
+    fixture(
+        &root,
+        "entry.mjs",
+        "import { browser } from 'pkg'; export { browser };",
+    );
+    fixture(
+        &root,
+        "node_modules/pkg/package.json",
+        r#"{"type":"module","exports":{".":{"default":"./default.js","browser":{"default":"./default.js","production":"./browser.js"}}}}"#,
+    );
+    fixture(
+        &root,
+        "node_modules/pkg/browser.js",
+        "export const browser = true;",
+    );
+    fixture(
+        &root,
+        "node_modules/pkg/default.js",
+        "export const fallback = true;",
+    );
+    fixture(&root, "node_modules/legacy/package.json", "{}");
+    fixture(&root, "node_modules/legacy/index.js", "exports.value = 1;");
+    fixture(
+        &root,
+        "node_modules/broken/package.json",
+        r#"{"main":"missing.js"}"#,
+    );
+    fixture(&root, "node_modules/broken/index.js", "exports.value = 2;");
+    let web = NodeResolver::web_production(&root.0).unwrap();
+    let strict = NodeResolver::new(&root.0).unwrap();
+    let entry = web.resolve(None, "./entry.mjs").unwrap().id;
+    assert!(
+        web.resolve(Some(&entry), "legacy")
+            .unwrap()
+            .id
+            .ends_with("/legacy/index.js")
+    );
+    assert!(
+        strict
+            .resolve(Some(&entry), "legacy")
+            .unwrap_err()
+            .contains("no exports")
+    );
+    assert!(
+        web.resolve(Some(&entry), "pkg/browser.js")
+            .unwrap_err()
+            .contains("not exported")
+    );
+    assert!(
+        web.resolve(Some(&entry), "broken")
+            .unwrap_err()
+            .contains("missing.js")
+    );
+    Compiler::default()
+        .compile(Project::new("./entry.mjs", &web))
+        .unwrap();
+    let error = Compiler::default()
+        .compile(Project::new("./entry.mjs", &strict))
+        .unwrap_err();
+    assert!(error.message().contains("browser"), "{error}");
+}
+
+#[test]
+fn web_commonjs_links_the_legacy_entry_and_keeps_factory_ids_private() {
+    let root = TempDir::new();
+    fixture(&root, "entry.mjs", "export { value } from 'legacy';");
+    fixture(&root, "node_modules/legacy/package.json", "{}");
+    fixture(&root, "node_modules/legacy/index.js", "exports.value = 1;");
+    let resolver = NodeResolver::web_production(&root.0).unwrap();
+    let build = Compiler::default()
+        .compile(Project::new("./entry.mjs", &resolver))
+        .unwrap();
+    assert!(entry_module(&build).exports.contains_key("value"));
+    fixture(
+        &root,
+        "entry.mjs",
+        "import 'cjs-factory:npm:node_modules/legacy/index.js';",
+    );
+    let error = Compiler::default()
+        .compile(Project::new("./entry.mjs", &resolver))
+        .unwrap_err();
+    assert!(
+        error.message().contains("private CommonJS factory"),
+        "{error}"
+    );
+}
+
+#[test]
+fn web_commonjs_discovers_only_live_unshadowed_requires() {
+    let root = TempDir::new();
+    fixture(&root, "entry.mjs", "export { value } from 'pkg';");
+    fixture(&root, "node_modules/pkg/package.json", "{}");
+    fixture(&root, "node_modules/pkg/prod.js", "exports.value = 1;");
+    let path = "node_modules/pkg/index.js";
+    fixture(
+        &root,
+        path,
+        r#"
+        function shadow(require, process) {
+            return process.env.NODE_ENV === 'production' ? 0 : require('local');
+        }
+        if (process.env.NODE_ENV === 'production') {
+            module.exports = 'production' == process.env.NODE_ENV
+                ? require('./prod.js') : require('./missing-dev.js');
+        } else {
+            require('./also-missing-dev.js');
+        }
+    "#,
+    );
+    let resolver = NodeResolver::web_production(&root.0).unwrap();
+    let compile = || Compiler::default().compile(Project::new("./entry.mjs", &resolver));
+    compile().unwrap();
+    fixture(&root, "node_modules/pkg/esm.mjs", "export default 1;");
+    for (line, marker, reason) in [
+        ("require(name)", "require(name)", "one string literal"),
+        ("const load = require", "require", "require escape"),
+        (
+            "exports[name] = 1",
+            "exports[name]",
+            "indeterminate CommonJS export name",
+        ),
+        (
+            "module.exports = load()",
+            "load()",
+            "indeterminate CommonJS export shape",
+        ),
+        (
+            "require('./esm.mjs')",
+            "require('./esm.mjs')",
+            "require of an ES module",
+        ),
+    ] {
+        let source = format!("\n  {line};\n  exports.value = 1;\n");
+        fixture(&root, path, &source);
+        let error = compile().unwrap_err();
+        let (start, line, column) = access_at(&source, marker, 0);
+        assert_eq!(error.module(), format!("npm:{path}"));
+        assert_eq!(
+            (error.span().start, error.line(), error.column()),
+            (start, line, column),
+            "{error}"
+        );
+        assert!(
+            error.message().starts_with("unsupported syntax:") && error.message().contains(reason),
+            "{error}"
+        );
+    }
+    fixture(&root, path, "debugger; exports.value = 1;");
+    let error = compile().unwrap_err();
+    assert_eq!(error.module(), format!("npm:{path}"));
+    assert!(
+        error
+            .message()
+            .contains("post-conversion position: unsupported syntax:"),
+        "{error}"
+    );
+}
+
+#[test]
 fn node_resolver_probes_exports_and_package_relative_imports() {
     let root = TempDir::new();
     fixture(
