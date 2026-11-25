@@ -3,8 +3,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yield_compiler::{
-    CompileError, Compiler, DependencyKind, GraphTransform, MemoryResolver, ModuleGraph, ModuleId,
-    ModuleResolver, NodeResolver, ParsedModule, Project, SourceTransform, TransformError,
+    BuildTransform, CompileError, Compiler, DependencyKind, GraphTransform, MemoryResolver,
+    ModuleGraph, ModuleId, ModuleResolver, NodeResolver, ParsedModule, Project, SourceTransform,
+    TransformError,
 };
 use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
 
@@ -24,6 +25,118 @@ fn compile_with_preload(
 ) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source), ("preload.js", preload)]).unwrap();
     options.compile(Project::new("main.js", resolver).with_preload("preload.js"))
+}
+
+struct Rewrite(&'static str, &'static str);
+
+impl SourceTransform for Rewrite {
+    fn transform(&mut self, module: &mut ParsedModule<'_>) -> Result<(), TransformError> {
+        if module.id() == "main.js" {
+            assert_eq!(module.source(), self.0);
+            module.replace_source(self.1)?;
+        }
+        Ok(())
+    }
+}
+
+impl GraphTransform for Rewrite {
+    fn transform(&mut self, graph: &mut ModuleGraph<'_>) -> Result<(), TransformError> {
+        let entry = graph.entry().clone();
+        SourceTransform::transform(self, graph.module_mut(&entry).unwrap())
+    }
+}
+
+#[test]
+fn pipeline_runs_each_stage_in_registration_order_and_relinks_exports() {
+    struct BuildStage(&'static str, &'static str);
+    impl BuildTransform for BuildStage {
+        fn transform(&mut self, build: &mut Build) -> Result<(), TransformError> {
+            assert_eq!(build.build_id, build.compute_id(), "stage input finalized");
+            let entry = &mut build.modules[build.entry as usize];
+            let export = entry.exports.remove(self.0).expect("prior stage export");
+            entry.exports.insert(self.1.into(), export);
+            Ok(())
+        }
+    }
+    let first = "export const first = 1;";
+    let second = "export const second = 2;";
+    let third = "export { value as third } from './dep.js';";
+    let fourth = "export { value as fourth } from './dep.js';";
+    let fifth = "export { value as fifth } from './dep.js';";
+    let resolver =
+        MemoryResolver::new([("main.js", first), ("dep.js", "export const value = 3;")]).unwrap();
+    let build = Compiler::default()
+        .compile(
+            Project::new("main.js", resolver)
+                .with_graph_transform(Rewrite(third, fourth))
+                .with_build_transform(BuildStage("fifth", "sixth"))
+                .with_source_transform(Rewrite(first, second))
+                .with_source_transform(Rewrite(second, third))
+                .with_graph_transform(Rewrite(fourth, fifth))
+                .with_build_transform(BuildStage("sixth", "final")),
+        )
+        .unwrap();
+    let entry = entry_module(&build);
+    assert_eq!(
+        entry.exports.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["final"]
+    );
+    assert!(
+        matches!(entry.exports["final"].target, ModuleTarget::Binding { module, .. }
+        if build.modules[module as usize].id == "dep.js")
+    );
+    assert_eq!(build.build_id, build.compute_id());
+    build.validate().unwrap();
+}
+
+#[test]
+fn pipeline_attributes_transform_failures_and_stops_before_later_stages() {
+    struct FailSource;
+    impl SourceTransform for FailSource {
+        fn transform(&mut self, module: &mut ParsedModule<'_>) -> Result<(), TransformError> {
+            module.replace_source("\nexport default 2;")?;
+            Err(TransformError::new("rejected transformed source").at(1..7))
+        }
+    }
+    struct InvalidBuild;
+    impl BuildTransform for InvalidBuild {
+        fn transform(&mut self, build: &mut Build) -> Result<(), TransformError> {
+            build.entry = u32::MAX;
+            Ok(())
+        }
+    }
+    struct UnreachableBuild;
+    impl BuildTransform for UnreachableBuild {
+        fn transform(&mut self, _: &mut Build) -> Result<(), TransformError> {
+            panic!("a preceding stage should have failed")
+        }
+    }
+    let resolver = MemoryResolver::new([("main.js", "export default 1;")]).unwrap();
+    let compiler = Compiler::default();
+    let error = compiler
+        .compile(
+            Project::new("main.js", &resolver)
+                .with_source_transform(FailSource)
+                .with_build_transform(UnreachableBuild),
+        )
+        .unwrap_err();
+    assert_eq!(error.stage(), Some("source transform 1"));
+    assert_eq!(error.module(), "main.js");
+    assert_eq!((error.line(), error.column()), (2, 1));
+    assert_eq!(error.message(), "rejected transformed source");
+
+    let error = compiler
+        .compile(
+            Project::new("main.js", &resolver)
+                .with_build_transform(InvalidBuild)
+                .with_build_transform(UnreachableBuild),
+        )
+        .unwrap_err();
+    assert_eq!(error.stage(), Some("build transform 1"));
+    assert!(
+        error.message().contains("invalid source module index"),
+        "{error}"
+    );
 }
 
 #[test]
