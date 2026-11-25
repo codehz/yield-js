@@ -264,7 +264,12 @@ fn require_request<'a>(
             }
         }
     };
-    Err(error(module, request.span, message))
+    let error = error(module, request.span, message);
+    Err(if request.span == Span::default() {
+        error.in_stage(super::super::jsx::STAGE)
+    } else {
+        error
+    })
 }
 
 fn explicit_cycle(records: &[Record], module: u32, name: &str) -> bool {

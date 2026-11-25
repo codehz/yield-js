@@ -136,6 +136,7 @@ impl<'a> ModuleGraph<'a> {
             .collect();
         let mut records = Vec::with_capacity(self.modules.len());
         for module in &mut self.modules {
+            super::jsx::lower(&mut module.parsed, &options.jsx_runtime)?;
             let mut record = Record::default();
             let mut deps = Vec::new();
             let mut dependencies = Vec::new();
@@ -280,12 +281,17 @@ fn dependency_error(
     specifier: &str,
     reason: String,
 ) -> CompileError {
-    CompileError::new(
+    let error = CompileError::new(
         source,
         span,
         format!("source dependency {specifier:?} from {referrer:?}: {reason}"),
     )
-    .in_module(referrer)
+    .in_module(referrer);
+    if span == Span::default() {
+        error.in_stage(super::jsx::STAGE)
+    } else {
+        error
+    }
 }
 
 pub(crate) fn link<'a>(
@@ -315,7 +321,15 @@ pub(crate) fn link<'a>(
         }
         let id = crate::resolved_id(resolver, None, root).map_err(root_error)?;
         let (index, fresh) = insert(
-            &mut graph, &mut ids, allocator, resolver, transforms, id, in_preload, root_error,
+            &mut graph,
+            &mut ids,
+            allocator,
+            resolver,
+            transforms,
+            &options.jsx_runtime,
+            id,
+            in_preload,
+            root_error,
         )?;
         if in_preload {
             graph.preload = Some(index);
@@ -350,7 +364,14 @@ pub(crate) fn link<'a>(
                     let id = crate::resolved_id(resolver, Some(&referrer), &specifier)
                         .map_err(location)?;
                     let (target, is_new) = insert(
-                        &mut graph, &mut ids, allocator, resolver, transforms, id, in_preload,
+                        &mut graph,
+                        &mut ids,
+                        allocator,
+                        resolver,
+                        transforms,
+                        &options.jsx_runtime,
+                        id,
+                        in_preload,
                         location,
                     )?;
                     if seen.insert(target) {
@@ -398,6 +419,7 @@ fn insert<'a>(
     allocator: &'a Allocator,
     resolver: &dyn ModuleResolver,
     transforms: &mut [Box<dyn SourceTransform + '_>],
+    jsx_runtime: &str,
     id: ModuleId,
     in_preload: bool,
     locate: impl Fn(String) -> CompileError,
@@ -414,7 +436,7 @@ fn insert<'a>(
     let index =
         u32::try_from(graph.modules.len()).map_err(|_| locate("too many source modules".into()))?;
     let source = allocator.alloc_str(loaded.as_ref());
-    let program = super::parse(allocator, source).map_err(|err| err.in_module(&id))?;
+    let program = super::parse(allocator, source, &id).map_err(|err| err.in_module(&id))?;
     let mut parsed = ParsedModule {
         id: id.clone(),
         allocator,
@@ -425,6 +447,7 @@ fn insert<'a>(
             error.diagnostic(&format!("source transform {}", index + 1), Some(&parsed))
         })?;
     }
+    super::jsx::lower(&mut parsed, jsx_runtime)?;
     ids.insert(id.clone(), index);
     graph.modules.push(Module {
         parsed,

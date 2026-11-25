@@ -24,9 +24,12 @@ impl<'a> ParsedModule<'a> {
     }
 
     /// Replaces the module's source and reparses it before the next stage.
+    /// During graph transforms, a JSX runtime introduced by replacement must
+    /// already be in the graph (or declared as a host module), like other imports.
     pub fn replace_source(&mut self, source: &str) -> Result<(), CompileError> {
-        let program = crate::frontend::parse(self.allocator, self.allocator.alloc_str(source))
-            .map_err(|error| error.in_module(&self.id))?;
+        let program =
+            crate::frontend::parse(self.allocator, self.allocator.alloc_str(source), &self.id)
+                .map_err(|error| error.in_module(&self.id))?;
         self.program = program;
         Ok(())
     }

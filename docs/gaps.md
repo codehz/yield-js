@@ -17,6 +17,7 @@
 - `yield` / `yield*` 出现在非生成器函数中会被拒绝。
 - 模块初始化帧是同步的：顶层支持 `using`，但拒绝 `await` / `await using`，嵌套块也不能绕过该限制。
 - 文件系统解析只读 ESM 源码；不支持 CommonJS、JSON 模块、Node 内建、`main` / `module` 回退，也不支持 `exports` 通配符、数组或跨安装边界的符号链接。
+- JSX 只在 `.jsx` 模块中启用；不支持 JSX 命名空间或 spread 子节点。
 - 首版明确排除的合法语法见第 6 节；无效 JavaScript 示例见第 7 节。
 
 ## 3. 能编过，但语义不完整

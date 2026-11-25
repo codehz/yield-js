@@ -545,10 +545,17 @@ impl<'ast, 'borrow, 'src> Lowerer<'ast, 'borrow, 'src> {
     }
 
     fn string_literal_text(&self, literal: &StringLiteral<'_>) -> Result<JsString, CompileError> {
-        let span = literal.span;
-        let quoted = span.source_text(self.source_text());
-        decode_string_body(&quoted[1..quoted.len() - 1], false)
-            .ok_or_else(|| unsupported(self.source_text(), span, "invalid string escape"))
+        if let Some(raw) = literal.raw {
+            let quoted = raw.as_str();
+            return decode_string_body(&quoted[1..quoted.len() - 1], false).ok_or_else(|| {
+                unsupported(self.source_text(), literal.span, "invalid string escape")
+            });
+        }
+        if let Some(text) = literal.value.as_str() {
+            return Ok(text.into());
+        }
+        let units = literal.value.encode_utf16().collect::<Vec<_>>();
+        Ok(JsString::from(units.as_slice()))
     }
     pub(super) fn emit_missing_global(&mut self, name: &str) -> Result<Reg, CompileError> {
         let constructor = self.alloc_reg()?;

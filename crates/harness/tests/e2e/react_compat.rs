@@ -7,6 +7,8 @@
 //!
 //! Host-provided environment globals are supplied by the preload module; the
 //! remaining framework-owned gaps are recorded in `docs/gaps.md` §8.
+use std::{fs, path::PathBuf, time::SystemTime};
+
 use super::support::{TEST_DECLARATIONS, compile_main, compile_preloaded, declared};
 use yield_compiler::{MemoryResolver, Project};
 use yield_harness::TestHost;
@@ -112,6 +114,77 @@ fn react_reconciler_custom_renderer_headless_smoke() {
         children,
         Value::number(1.0),
         "custom renderer committed one child"
+    );
+}
+
+#[test]
+fn react_compat_renders_on_disk_jsx_application() {
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "yield-react-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    fs::create_dir(&path).unwrap();
+    let fixture = Fixture(path);
+    let root = &fixture.0;
+    fs::create_dir_all(root.join("node_modules/react")).unwrap();
+    fs::write(
+        root.join("node_modules/react/package.json"),
+        r#"{"exports":{".":"./react.mjs","./jsx-runtime":{"import":"./jsx-runtime.mjs"}}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("node_modules/react/react.mjs"), REACT_19_BUNDLE).unwrap();
+    // A minimal production element factory for the vendored React renderer.
+    // It does not use createElement or require a global React object.
+    fs::write(
+        root.join("node_modules/react/jsx-runtime.mjs"),
+        r#"
+        export function jsx(type, props, key) {
+            return { $$typeof: Symbol.for('react.transitional.element'), type,
+                     props, key: key === undefined ? null : '' + key, ref: null };
+        }
+    "#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("reconciler.mjs"),
+        REACT_RECONCILER.replace("\"react.mjs\"", "\"react\""),
+    )
+    .unwrap();
+    fs::write(
+        root.join("renderer.mjs"),
+        CUSTOM_RENDERER.replace("\"react-reconciler-0.31.0.mjs\"", "\"./reconciler.mjs\""),
+    )
+    .unwrap();
+    fs::write(root.join("preload.mjs"), PRELOAD).unwrap();
+    fs::write(root.join("app.jsx"), include_str!("vendor/react-app.jsx")).unwrap();
+
+    let project = Project::from_directory(root, "app.jsx")
+        .unwrap()
+        .with_preload("preload.mjs");
+    let build = declared(TEST_DECLARATIONS).compile(project).unwrap();
+    let mut host = TestHost::default();
+    let options = VmOptions {
+        test_clock: Some(host.clock().clone()),
+        ..Default::default()
+    };
+    let mut vm = Vm::new(build, &mut host, options).unwrap();
+    vm.start(&mut host, "run", vec![]).unwrap();
+    host.advance(&mut vm, 10).unwrap();
+    assert!(host.errors().is_empty(), "{:?}", host.errors());
+    assert_eq!(
+        vm.start(&mut host, "committed", vec![]).unwrap(),
+        Value::number(1.0)
     );
 }
 

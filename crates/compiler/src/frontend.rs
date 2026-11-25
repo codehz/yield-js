@@ -1,5 +1,6 @@
 //! Strict ES module parsing and reachable source linking.
 
+pub(crate) mod jsx;
 pub(crate) mod link;
 
 use oxc::allocator::Allocator;
@@ -15,8 +16,10 @@ use crate::error::{CompileError, unsupported};
 pub(crate) fn parse<'a>(
     allocator: &'a Allocator,
     source: &'a str,
+    module_id: &str,
 ) -> Result<Program<'a>, CompileError> {
-    let parser_return = Parser::new(allocator, source, SourceType::mjs()).parse();
+    let source_type = SourceType::mjs().with_jsx(module_id.ends_with(".jsx"));
+    let parser_return = Parser::new(allocator, source, source_type).parse();
     if let Some(diagnostic) = parser_return.diagnostics.first() {
         let span = diagnostic
             .labels()
