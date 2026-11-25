@@ -1247,10 +1247,29 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     generics(&item.generics)?;
     let opts = options(
         args,
-        &["tag", "methods", "parent", "event_target", "event_parent"],
+        &[
+            "tag",
+            "methods",
+            "parent",
+            "event_target",
+            "event_parent",
+            "services",
+        ],
     )?;
     let span = item.ident.span();
     let tag = string(required(&opts, "tag", span)?)?;
+    let service_scope = opts
+        .get("services")
+        .map(|meta| {
+            let Expr::Path(expr) = value(meta)? else {
+                return Err(Error::new_spanned(meta, "expected a service scope path"));
+            };
+            Ok(super::registry::service_scope_const(&syn::TypePath {
+                qself: expr.qself.clone(),
+                path: expr.path.clone(),
+            }))
+        })
+        .transpose()?;
     let parent = opts.get("parent").map(path).transpose()?.map(|parent| {
         quote! {
             const PARENT: Option<&'static str> = Some(<#parent as ::yield_vm::HostClass>::TAG);
@@ -1311,6 +1330,7 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         impl ::yield_vm::HostClass for #class {
             const TAG: &'static str = #tag;
             const SLOTS: &'static [::yield_vm::binding::SlotDecl] = #declarations;
+            #service_scope
             #parent
             #event_target
             #event_parent

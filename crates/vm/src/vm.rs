@@ -13,7 +13,7 @@ use crate::gc::ActiveRoots;
 use crate::heap::EventPayload;
 use crate::heap::HostClassRecord;
 use crate::heap::{Attributes, Heap, PromiseState, ReactionJob, RejectionStatus};
-use crate::host::{Completion, Diagnostics, Host, TimerService};
+use crate::host::{Completion, Host};
 use crate::runtime::{
     Arguments, ContinuationTarget, ExecOutcome, HOST_TASK_ID_LIMIT, HostInstance, HostTask,
     HostTaskState, Invocation, Microtask, PendingOperation, Settlement,
@@ -176,7 +176,8 @@ pub(crate) struct RestoredState {
 pub(crate) fn time_source(bindings: &crate::binding::Bindings) -> TimeSource {
     TimeSource(
         bindings
-            .service::<Arc<dyn crate::host::TimeService>>()
+            .builtin_services()
+            .time()
             .cloned()
             .unwrap_or_else(|| Arc::new(crate::host::DummyTimeService)),
     )
@@ -368,9 +369,10 @@ pub struct Vm {
 }
 
 impl Vm {
-    /// Borrows a service installed in this VM's host.
-    pub fn service<T: Any>(&self) -> Option<&T> {
-        self.host.services().get::<T>()
+    /// Resolves an embedder service by its exact type. Cache the returned
+    /// borrow for repeated reads; callbacks use their declared service scope.
+    pub fn bind_service<T: Any>(&self) -> Option<&T> {
+        self.host.bind_service::<T>()
     }
 
     pub fn build_id(&self) -> &str {
@@ -667,6 +669,7 @@ impl VmCore {
         };
         let context = (receiver, prototype);
         let roots = &roots.with(&context);
+        let services = bindings.call_services(owner);
         loop {
             if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
                 return Ok(None);
@@ -679,6 +682,7 @@ impl VmCore {
                 vm: self,
                 roots,
                 bindings,
+                services,
                 epoch,
                 call: call_id,
                 args: args.into_iter().map(wrap).collect(),
@@ -1219,7 +1223,7 @@ impl VmCore {
         }
         if result?
             && !handled
-            && let Some(sink) = host.services().get::<Rc<dyn Diagnostics>>()
+            && let Some(sink) = host.builtin_services().diagnostics()
         {
             sink.report(crate::host::Diagnostic::UnhandledRejection {
                 promise: self.host_value(Value::object(id)),
@@ -1429,8 +1433,8 @@ impl VmCore {
         token: OperationToken,
         delay_ms: u64,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        host.services()
-            .get::<Arc<dyn TimerService>>()
+        host.builtin_services()
+            .timer()
             .ok_or_else(|| HostFault::new("timer service is unavailable"))?
             .clone()
             .arm(token, delay_ms)

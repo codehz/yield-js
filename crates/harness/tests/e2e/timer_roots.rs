@@ -169,7 +169,6 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
 #[yield_vm::host_module(
     name = "repeat_timer",
     operations = [yield_harness::Timer],
-    services = [std::sync::Arc<yield_harness::FakeClock>],
 )]
 struct RepeatTimer;
 

@@ -40,6 +40,8 @@ fn keeps_native_node_identity_and_mutates_the_tree() -> Result<(), String> {
         const frame = document.createElement('IFRAME');
         check(frame instanceof HTMLIFrameElement && frame instanceof Element &&
               frame instanceof Node && frame instanceof EventTarget, 'iframe class chain');
+        check(frame.tagName === 'IFRAME' && frame.nodeType === 1, 'iframe inherited DOM accessors');
+        frame.setAttribute('title', 'inherited DOM method');
         check(child.style !== frame.style, 'style is per-instance');
         child.style.color = 'red';
         child.expando = frame;

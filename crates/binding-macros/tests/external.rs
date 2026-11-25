@@ -161,7 +161,11 @@ impl yield_vm::Registration<MixedWork> for () {}
 impl yield_vm::OperationDriver for MixedWork {
     type Live = ();
 
-    fn start(&self, _: yield_vm::OperationToken, _: &Services) -> Result<(), yield_vm::HostFault> {
+    fn start(
+        &self,
+        _: yield_vm::OperationToken,
+        _: &Services<'_>,
+    ) -> Result<(), yield_vm::HostFault> {
         Ok(())
     }
 }

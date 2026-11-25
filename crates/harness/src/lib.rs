@@ -50,7 +50,17 @@ impl Counters {
 
 pub struct NodeFactory;
 
-#[host_class(tag = "Node", methods)]
+impl NodeFactory {
+    fn create(&self, label: String) -> Node {
+        Node { label }
+    }
+}
+
+yield_vm::service_scope! {
+    NodeServices { factory: NodeFactory }
+}
+
+#[host_class(tag = "Node", methods, services = NodeServices)]
 #[derive(Encode)]
 pub struct Node {
     pub label: String,
@@ -86,13 +96,11 @@ impl Node {
 }
 
 impl Decode for Node {
-    fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
-        if services.get::<NodeFactory>().is_none() {
-            return Err(CodecError::new("node factory service is unavailable"));
-        }
+    fn decode(input: &mut &[u8], services: &Services<'_>) -> Result<Self, CodecError> {
+        let factory = NodeServices::bind(services).factory();
         let label = String::decode(input, services)
             .map_err(|error| CodecError::new(format!("field label: {error}")))?;
-        Ok(Self { label })
+        Ok(factory.create(label))
     }
 }
 
@@ -270,25 +278,49 @@ fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
     equal(cx, left.clone(), right.clone(), &mut BTreeSet::new())
 }
 
-#[operation(name = "wait", recovery = resume, rejection = "wait rejected")]
+yield_vm::service_scope! {
+    LabelServices { labels: Rc<LabelService> }
+}
+
+#[operation(
+    name = "wait",
+    recovery = resume,
+    rejection = "wait rejected",
+    services = LabelServices,
+)]
 #[derive(Encode, Decode)]
 pub struct Wait {
     pub label: String,
 }
 
-#[operation(name = "pause", recovery = pause, rejection = "pause rejected")]
+#[operation(
+    name = "pause",
+    recovery = pause,
+    rejection = "pause rejected",
+    services = LabelServices,
+)]
 #[derive(Encode, Decode)]
 pub struct Pause {
     pub label: String,
 }
 
-#[operation(name = "reject", recovery = reject, rejection = "reject rejected during restore")]
+#[operation(
+    name = "reject",
+    recovery = reject,
+    rejection = "reject rejected during restore",
+    services = LabelServices,
+)]
 #[derive(Encode, Decode)]
 pub struct Reject {
     pub label: String,
 }
 
-#[operation(name = "reissue", recovery = reissue, rejection = "reissue rejected")]
+#[operation(
+    name = "reissue",
+    recovery = reissue,
+    rejection = "reissue rejected",
+    services = LabelServices,
+)]
 #[derive(Encode, Decode)]
 pub struct Reissue {
     pub label: String,
@@ -376,12 +408,16 @@ macro_rules! label_driver {
         $(impl OperationDriver for $operation {
             type Live = LabelRegistration;
 
-            fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
-                register_label::<Self>(services, &self.label, token, false)
+            fn start(&self, token: OperationToken, services: &Services<'_>) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(
+                    LabelServices::bind(services).labels(), &self.label, token, false,
+                )
             }
 
-            fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
-                register_label::<Self>(services, &self.label, token, true)
+            fn resume(&self, token: OperationToken, services: &Services<'_>) -> Result<Self::Live, HostFault> {
+                register_label::<Self>(
+                    LabelServices::bind(services).labels(), &self.label, token, true,
+                )
             }
         })+
     };
@@ -390,14 +426,11 @@ macro_rules! label_driver {
 label_driver!(Wait, Pause, Reject, Reissue);
 
 fn register_label<O: Operation>(
-    services: &Services,
+    service: &Rc<LabelService>,
     label: &str,
     token: OperationToken,
     restoring: bool,
 ) -> Result<LabelRegistration, HostFault> {
-    let service = services
-        .get::<Rc<LabelService>>()
-        .ok_or_else(|| HostFault::new("missing labels service"))?;
     service.register(format!("{}:{label}", O::NAME), token, restoring)
 }
 
@@ -834,11 +867,15 @@ impl TestHost {
     }
 }
 
+yield_vm::service_scope! {
+    TestServices { optional counters: Rc<Counters> }
+}
+
 #[host_module(
     name = "test",
     classes = [Node, Matcher],
     operations = [Wait, Pause, Reject, Reissue, Timer],
-    services = [NodeFactory, Rc<LabelService>, Arc<FakeClock>],
+    services = TestServices,
 )]
 struct TestModule;
 
@@ -889,7 +926,7 @@ impl TestModule {
 
     #[function(name = "inspect")]
     fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
-        if let Some(counters) = cx.service::<Rc<Counters>>() {
+        if let Some(counters) = TestServices::bind(cx.services()).counters() {
             counters.hit("inspect");
         }
         Ok(())
@@ -897,7 +934,7 @@ impl TestModule {
 
     #[function(name = "seed")]
     fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<Rc<Counters>>() {
+        if let Some(counters) = TestServices::bind(cx.services()).counters() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -905,7 +942,7 @@ impl TestModule {
 
     #[function(name = "wait")]
     fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: Option<JsValue>) -> JsResult<JsValue> {
-        if let Some(counters) = cx.service::<Rc<Counters>>() {
+        if let Some(counters) = TestServices::bind(cx.services()).counters() {
             counters.hit("wait");
         }
         let arg = match arg {
@@ -964,7 +1001,7 @@ impl TestModule {
         _node: Option<JsValue>,
         _label: Option<JsValue>,
     ) -> JsResult<()> {
-        if let Some(counters) = cx.service::<Rc<Counters>>() {
+        if let Some(counters) = TestServices::bind(cx.services()).counters() {
             counters.hit("setLabel");
         }
         Ok(())
@@ -975,13 +1012,14 @@ impl TestModule {
         cx: &mut yield_vm::ModuleCx<'_, Self>,
         actual: Option<JsValue>,
     ) -> JsResult<Instance<Matcher>> {
-        if let Some(counters) = cx.service::<Rc<Counters>>() {
+        let counters = TestServices::bind(cx.services()).counters();
+        if let Some(counters) = counters {
             counters.hit("expect");
         }
         let actual = actual.unwrap_or_else(JsValue::undefined);
         let matcher = cx.alloc(Matcher)?;
         if !actual.is_undefined()
-            && let Some(counters) = cx.service::<Rc<Counters>>()
+            && let Some(counters) = counters
         {
             counters.hit("expect:value");
         }

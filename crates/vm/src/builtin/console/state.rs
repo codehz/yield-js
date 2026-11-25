@@ -1,11 +1,10 @@
 //! Commit Console state in algorithm order; Printer failures do not roll it back.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::console::{ConsoleEvent, ConsoleGroup, ConsoleLevel, ConsolePayload};
 use crate::gc::ActiveRoots;
-use crate::host::{ConsoleSink, Host};
+use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::ValueRef;
 use crate::vm::VmCore;
@@ -178,7 +177,7 @@ fn print(
     level: ConsoleLevel,
     payload: ConsolePayload,
 ) -> Result<(), Value> {
-    let Some(sink) = host.services().get::<Arc<dyn ConsoleSink>>() else {
+    let Some(sink) = host.builtin_services().console() else {
         return Err(vm.alloc_dom_exception(
             "NotSupportedError".into(),
             "Console service is not available".into(),

@@ -18,16 +18,8 @@ use yield_vm::{
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
 
-fn register_label(
-    services: &Services,
-    label: &str,
-    token: OperationToken,
-    restoring: bool,
-) -> Result<LabelRegistration, HostFault> {
-    services
-        .get::<Rc<LabelService>>()
-        .ok_or_else(|| HostFault::new("missing labels service"))?
-        .register(label.to_owned(), token, restoring)
+yield_vm::service_scope! {
+    StrategyServices { labels: Rc<LabelService> }
 }
 
 macro_rules! label_driver {
@@ -38,17 +30,21 @@ macro_rules! label_driver {
             fn start(
                 &self,
                 token: OperationToken,
-                services: &Services,
+                services: &Services<'_>,
             ) -> Result<Self::Live, HostFault> {
-                register_label(services, $wire, token, false)
+                StrategyServices::bind(services)
+                    .labels()
+                    .register($wire.to_owned(), token, false)
             }
 
             fn resume(
                 &self,
                 token: OperationToken,
-                services: &Services,
+                services: &Services<'_>,
             ) -> Result<Self::Live, HostFault> {
-                register_label(services, $wire, token, true)
+                StrategyServices::bind(services)
+                    .labels()
+                    .register($wire.to_owned(), token, true)
             }
         }
     };
@@ -59,7 +55,7 @@ mod strategy_fixture {
 
     macro_rules! strategy_operation {
         ($name:ident, $wire:tt, $recovery:ident, $message:tt) => {
-            #[operation(name = $wire, recovery = $recovery, rejection = $message)]
+            #[operation(name = $wire, recovery = $recovery, rejection = $message, services = StrategyServices)]
             #[derive(Encode, Decode)]
             struct $name;
 
@@ -75,7 +71,6 @@ mod strategy_fixture {
     #[host_module(
         name = "ops",
         operations = [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
-        services = [Rc<LabelService>],
     )]
     struct Ops;
 
@@ -398,25 +393,28 @@ mod stale_fixture {
 
     type Stash = Rc<RefCell<Option<JsValue>>>;
 
-    #[host_module(name = "stale", classes = [Sink], services = [Stash])]
+    yield_vm::service_scope! {
+        StaleServices { stash: Stash }
+    }
+
+    #[host_module(name = "stale", classes = [Sink], services = StaleServices)]
     struct Stale;
 
     #[module_exports]
     impl Stale {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, value: JsValue) -> JsResult<()> {
-            let stash = cx
-                .service::<Stash>()
-                .ok_or_else(|| JsError::Fault(cx.fault("missing stash service")))?;
+            let stash = StaleServices::bind(cx.services()).stash();
             *stash.borrow_mut() = Some(value);
             Ok(())
         }
 
         #[function(name = "unstash")]
         fn unstash(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<Sink>> {
-            let value = cx
-                .service::<Stash>()
-                .and_then(|stash| stash.borrow().clone())
+            let value = StaleServices::bind(cx.services())
+                .stash()
+                .borrow()
+                .clone()
                 .ok_or_else(|| JsError::Fault(cx.fault("empty stash")))?;
             let sink = cx.alloc(Sink)?;
             sink.set_value(cx, value)?;
@@ -462,7 +460,12 @@ mod guest_call_fixture {
     use super::*;
 
     type Stash = Mutex<Option<HostStep>>;
-    #[host_module(name = "guest", services = [Stash, Rc<Cell<usize>>])]
+
+    yield_vm::service_scope! {
+        GuestServices { stash: Stash, runs: Rc<Cell<usize>> }
+    }
+
+    #[host_module(name = "guest", services = GuestServices)]
     struct Guest;
 
     #[module_exports]
@@ -481,22 +484,21 @@ mod guest_call_fixture {
         #[function(name = "stash")]
         fn stash(cx: &mut yield_vm::ModuleCx<'_, Self>, callee: JsValue) -> JsResult<()> {
             let request = Self::later(cx, callee)?;
-            *cx.service::<Stash>().unwrap().lock().unwrap() = Some(request);
+            *GuestServices::bind(cx.services()).stash().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "stashGc")]
         fn stash_gc(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
             let request = cx.request_gc(vec![], unexpected_resume)?;
-            *cx.service::<Stash>().unwrap().lock().unwrap() = Some(request);
+            *GuestServices::bind(cx.services()).stash().lock().unwrap() = Some(request);
             Ok(())
         }
 
         #[function(name = "replay")]
         fn replay(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<HostStep> {
-            Ok(cx
-                .service::<Stash>()
-                .unwrap()
+            Ok(GuestServices::bind(cx.services())
+                .stash()
                 .lock()
                 .unwrap()
                 .take()
@@ -510,7 +512,7 @@ mod guest_call_fixture {
 
         #[function(name = "mark")]
         fn mark(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
-            let runs = cx.service::<Rc<Cell<usize>>>().unwrap();
+            let runs = GuestServices::bind(cx.services()).runs();
             runs.set(runs.get() + 1);
             Ok(())
         }
@@ -709,7 +711,7 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "test", operations = [Wait], services = [Rc<LabelService>])]
+    #[host_module(name = "test", operations = [Wait])]
     struct TestModule;
 
     #[module_exports]
@@ -760,23 +762,27 @@ mod counter_fixture {
         pub(super) initialized: Cell<usize>,
     }
 
+    yield_vm::service_scope! {
+        PayloadServices { payload: Rc<PayloadService> }
+    }
+
     struct ServiceField(u32);
 
     impl Encode for ServiceField {
-        fn encode(&self, out: &mut Vec<u8>, services: &Services) -> Result<(), CodecError> {
-            let service = services.get::<Rc<PayloadService>>().unwrap();
+        fn encode(&self, out: &mut Vec<u8>, services: &Services<'_>) -> Result<(), CodecError> {
+            let service = PayloadServices::bind(services).payload();
             (self.0 + service.offset).encode(out, services)
         }
     }
 
     impl Decode for ServiceField {
-        fn decode(input: &mut &[u8], services: &Services) -> Result<Self, CodecError> {
-            let service = services.get::<Rc<PayloadService>>().unwrap();
+        fn decode(input: &mut &[u8], services: &Services<'_>) -> Result<Self, CodecError> {
+            let service = PayloadServices::bind(services).payload();
             Ok(Self(u32::decode(input, services)? + service.offset))
         }
     }
 
-    #[host_module(name = "counter", services = [Rc<PayloadService>])]
+    #[host_module(name = "counter", services = PayloadServices)]
     #[derive(Encode, Decode)]
     struct ServiceCounter {
         count: ServiceField,
@@ -785,8 +791,8 @@ mod counter_fixture {
     }
 
     impl FromServices for ServiceCounter {
-        fn from_services(services: &Services) -> Self {
-            let service = services.get::<Rc<PayloadService>>().unwrap();
+        fn from_services(services: &Services<'_>) -> Self {
+            let service = PayloadServices::bind(services).payload();
             service.initialized.set(service.initialized.get() + 1);
             Self {
                 count: ServiceField(service.initial),
@@ -1054,22 +1060,44 @@ export async function run() {
 }
 
 #[test]
-fn node_payload_decode_requires_factory_service() {
-    let services = Services::default();
-    let mut payload = [0u8; 4].as_slice();
-    let error = yield_harness::Node::decode(&mut payload, &services)
-        .err()
-        .expect("missing factory");
+fn linking_node_class_requires_factory_service() {
+    use yield_vm::__macro_support as abi;
+
+    let mut deps = abi::ModuleDependencies::default();
+    deps.class::<yield_harness::Node>();
+    let error = abi::link([], deps, abi::ServiceStorage::default()).expect_err("missing factory");
     assert!(
-        error.0.contains("node factory service is unavailable"),
+        error.contains("host class \"Node\": missing host service")
+            && error.contains("NodeFactory"),
         "{error}"
     );
+}
+
+#[test]
+fn linking_harness_operations_requires_driver_services() {
+    use yield_vm::__macro_support as abi;
+
+    fn missing_service<O: OperationDriver>(operation: &str, service: &str) {
+        let mut deps = abi::ModuleDependencies::default();
+        deps.operation::<O>();
+        let error = abi::link([], deps, abi::ServiceStorage::default())
+            .expect_err("missing driver service");
+        assert!(
+            error.contains(&format!(
+                "host operation {operation:?}: missing host service"
+            )) && error.contains(service),
+            "{error}"
+        );
+    }
+
+    missing_service::<yield_harness::Wait>("wait", "LabelService");
+    missing_service::<yield_harness::Timer>("timer", "FakeClock");
 }
 
 mod inherit_fixture {
     use super::*;
 
-    #[operation(name = "inherit-wait", recovery = resume)]
+    #[operation(name = "inherit-wait", recovery = resume, services = StrategyServices)]
     #[derive(Encode, Decode)]
     struct InheritWait;
 

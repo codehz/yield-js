@@ -12,12 +12,11 @@ use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Heap, HostClassRecord, IntegrityLevel, Object};
-use crate::host::{Diagnostics, Host, UserAgent};
+use crate::host::Host;
 use crate::runtime::{Arguments, VmClock};
 use crate::value::{ObjectId, PropertyKey, Value};
 use crate::{JsString, builtin::BuiltinRoots};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::rc::Rc;
 use std::sync::Arc;
 
 /// Settings applied before evaluating the preload and entry modules.
@@ -124,8 +123,8 @@ impl VmCore {
         let clock = VmClock::new(clock, std::time::Duration::ZERO);
         let mut vm = Self::empty(build, bindings, clock);
         vm.init_builtins(
-            host.services()
-                .get::<UserAgent>()
+            host.builtin_services()
+                .user_agent()
                 .map(|user_agent| user_agent.0.as_str()),
         );
         vm.install_templates();
@@ -718,7 +717,7 @@ impl VmCore {
             )?
             .into_result();
         if let Err(VmError::Thrown(error)) = &result
-            && let Some(sink) = host.services().get::<Rc<dyn Diagnostics>>()
+            && let Some(sink) = host.builtin_services().diagnostics()
         {
             sink.report(crate::host::Diagnostic::StartupException {
                 diagnostic: &self.exception_diagnostic(error),

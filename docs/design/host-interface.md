@@ -13,7 +13,7 @@
 
 `Vm::new(build, host, options)` 与 `Vm::restore(snapshot, build, host, options)` 消费具体的、不可克隆的 `Host`；`Vm` 不以宿主类型为参数。执行和投递始终使用该 VM 的宿主，调用方不再传入或替换宿主。宿主及其服务实例不随快照保存；分叉恢复时为每个 VM 构造宿主，可显式共享允许共享的服务句柄。
 
-`host!` 既可用 `dts`、`modules`、`services` 注册宿主绑定，也可单独使用 `services`；没有绑定或服务时使用 `Host::default()`。服务按确切的存储类型注册，嵌入方用 `vm.service::<T>()` 只读借用。外部工作可在后台执行，再由嵌入方回到 VM 线程投递代际令牌和结果；回调不得重入 VM。
+`host!` 既可用 `dts`、`modules`、`services` 注册宿主绑定，也可单独使用 `services`；没有绑定或服务时使用 `Host::default()`。服务按确切的存储类型注册，嵌入方用 `vm.bind_service::<T>()` 解析并只读借用，回调通过声明的 scope 访问预绑定服务。外部工作可在后台执行，再由嵌入方回到 VM 线程投递代际令牌和结果；回调不得重入 VM。
 
 可选服务 `Rc<dyn Diagnostics>` 通过 `report(&self, event: Diagnostic<'_>)` 接收 `Uncaught`（异常值与诊断文本）、`UnhandledRejection`（Promise 与理由）和 `StartupException`（诊断文本）。全局异常和未处理拒绝先派发可取消的脚本事件；仅未取消的报告进入服务，错误报告期间再次抛出的异常直接报告，不递归派发。模块初始化异常在返回原错误前报告，不派发脚本事件。未安装服务时没有宿主报告，脚本通知与错误返回不变。诊断携带的临时值不能脱离调用保存。`UserAgent(String)` 仅在新建时用于初始化 `navigator.userAgent`；恢复用快照中的属性。
 
@@ -61,5 +61,5 @@ impl Matcher {
 
 - `JsValue` 句柄仅用于当前 VM 的本次同步调用，不可藏在 Rust 数据或注册闭包中供下次调用。要长期持有任意 JS 值或另一个绑定实例，写入声明的 VM 托管槽。槽不是可枚举或可伪造的 JS 属性，而是对象图的强边；与普通引用一起追踪，保留身份、别名和环，不把所有实例提升为根。
 - `expect(x)` 把 `x` 本身放进槽，不投影或复制对象图。`toBe` 比较原值（`SameValue`）；`toEqual` 在调用方法时读取当时的自有可枚举数据，不执行 getter 或 Proxy trap。因此在 `expect(obj)` 之后修改 `obj.x`，后续比较能看到修改。断言失败以脚本可捕获的异常返回。
-- 需要 Rust 状态的实例可附带有类型、有版本的 payload。模块、类和 operation 共用接收当前 `&Services` 的 `Encode` / `Decode`；可派生字段级 codec 或手写业务校验。**服务提供能力，快照提供状态**：例如解码时用当前服务注册表的平台工厂和快照里的属性创建节点，而不是去旧宿主按节点 ID 取回对象。payload 不得暗藏指向 VM 对象的 ID；这类边一律走槽，无需给绑定作者另设追踪协议。
+- 需要 Rust 状态的实例可附带有类型、有版本的 payload。模块、类和 operation 共用接收当前 `&Services` 的 `Encode` / `Decode`；可派生字段级 codec 或手写业务校验。**服务提供能力，快照提供状态**：例如解码时用当前 scope 的平台工厂和快照里的属性创建节点，而不是去旧宿主按节点 ID 取回对象。payload 不得暗藏指向 VM 对象的 ID；这类边一律走槽，无需给绑定作者另设追踪协议。
 - 会影响后续调用的模块级可变状态属于 VM 托管的模块记录，作为持久根保存；JS 引用和非 JS 数据分别遵循上述槽和 codec 规则。静态模块描述只包含声明及实现入口，不持有某个 VM 的实例状态。

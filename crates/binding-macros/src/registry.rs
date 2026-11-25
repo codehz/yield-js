@@ -7,7 +7,8 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Error, Expr, Ident, ItemStruct, LitStr, Path, Result, Token, Type, TypePath, braced, bracketed,
+    Error, Expr, Ident, ItemStruct, LitStr, Path, Result, Token, Type, TypePath, Visibility,
+    braced, bracketed,
 };
 
 use super::typed::{extract_slots, slot_decls};
@@ -60,7 +61,7 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     check_struct(&item)?;
     let ty = &item.ident;
     let span = ty.span();
-    let (mut name, mut recovery, mut rejection) = (None, None, None);
+    let (mut name, mut recovery, mut rejection, mut services) = (None, None, None, None);
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut name, &key, || attribute_value::<LitStr>(input)),
@@ -81,6 +82,7 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
                 Ok(Ident::new(variant, value.span()))
             }),
             "rejection" => set(&mut rejection, &key, || attribute_value::<LitStr>(input)),
+            "services" => set(&mut services, &key, || attribute_value::<TypePath>(input)),
             _ => Err(Error::new(key.span(), "unknown operation option")),
         })
     })
@@ -88,12 +90,14 @@ pub(super) fn operation(args: TokenStream, item: TokenStream) -> Result<TokenStr
     let name = required(name, span, "name")?;
     let recovery = required(recovery, span, "recovery")?;
     let rejection = rejection.map(|value| quote!(const REJECTION: &'static str = #value;));
+    let service_scope = services.as_ref().map(service_scope_const);
 
     Ok(quote! {
         #item
         impl ::yield_vm::Operation for #ty {
             const NAME: &'static str = #name;
             const RECOVERY: ::yield_vm::Recovery = ::yield_vm::Recovery::#recovery;
+            #service_scope
             #rejection
         }
     })
@@ -120,10 +124,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 input.parse::<Token![=]>()?;
                 list::<TypePath>(input)
             }),
-            "services" => set(&mut services, &key, || {
-                input.parse::<Token![=]>()?;
-                list::<Type>(input)
-            }),
+            "services" => set(&mut services, &key, || attribute_value::<TypePath>(input)),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
     })
@@ -139,14 +140,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             }
         }
     });
-    let services = services.unwrap_or_default();
-    let service_dependencies = (!services.is_empty()).then(|| {
-        quote! {
-            const SERVICES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
-                #(::yield_vm::__macro_support::ServiceDependency::of::<#services>()),*
-            ];
-        }
-    });
+    let service_scope = services.as_ref().map(service_scope_const);
     let slots = extract_slots(&mut item)?;
     let empty = match &item.fields {
         syn::Fields::Unit => Some(quote!(Self)),
@@ -216,7 +210,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
             #dependencies
-            #service_dependencies
+            #service_scope
         }
         #encode
         #decode
@@ -230,6 +224,105 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .parse_terminated(T::parse, Token![,])?
         .into_iter()
         .collect())
+}
+
+pub(super) fn service_scope_const(scope: &TypePath) -> TokenStream {
+    quote! {
+        const SERVICE_SCOPE: ::yield_vm::__macro_support::ServiceScope =
+            ::yield_vm::__macro_support::ServiceScope::of::<#scope<'static>>();
+    }
+}
+
+struct ScopeField {
+    name: Ident,
+    ty: Type,
+    optional: bool,
+}
+
+impl Parse for ScopeField {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let mut name: Ident = input.parse()?;
+        let optional = name == "optional" && !input.peek(Token![:]);
+        if optional {
+            name = input.parse()?;
+        }
+        input.parse::<Token![:]>()?;
+        Ok(Self {
+            name,
+            ty: input.parse()?,
+            optional,
+        })
+    }
+}
+
+pub(super) struct ServiceScope {
+    vis: Visibility,
+    name: Ident,
+    fields: Vec<ScopeField>,
+}
+
+impl Parse for ServiceScope {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        let vis = input.parse()?;
+        let name = input.parse()?;
+        let fields;
+        braced!(fields in input);
+        let fields = fields.parse_terminated(ScopeField::parse, Token![,])?;
+        Ok(Self {
+            vis,
+            name,
+            fields: fields.into_iter().collect(),
+        })
+    }
+}
+
+pub(super) fn service_scope(scope: ServiceScope) -> TokenStream {
+    let ServiceScope { vis, name, fields } = scope;
+    let lifetime = syn::Lifetime::new("'__yield_service", MacroSpan::mixed_site());
+    let dependencies = fields.iter().map(|field| {
+        let name = &field.name;
+        if field.optional {
+            quote!(::yield_vm::__macro_support::ServiceDependency::for_optional(Self::#name))
+        } else {
+            quote!(::yield_vm::__macro_support::ServiceDependency::for_required(Self::#name))
+        }
+    });
+    let accessors = fields.iter().enumerate().map(|(index, field)| {
+        let ScopeField { name, ty, optional } = field;
+        if *optional {
+            quote! {
+                #vis fn #name(&self) -> ::core::option::Option<&#lifetime #ty> {
+                    // SAFETY: this index and type match the dependency table below.
+                    unsafe { self.0.get(#index) }
+                }
+            }
+        } else {
+            quote! {
+                #vis fn #name(&self) -> &#lifetime #ty {
+                    // SAFETY: the required dependency is resolved at link time.
+                    unsafe { self.0.get_required(#index) }
+                }
+            }
+        }
+    });
+    quote! {
+        #vis struct #name<#lifetime>(::yield_vm::__macro_support::BoundServices<#lifetime, #name<'static>>);
+
+        // SAFETY: the accessors use the same ordered fields and types as this table.
+        unsafe impl ::yield_vm::__macro_support::ServiceSet for #name<'static> {
+            const DEPENDENCIES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
+                #(#dependencies),*
+            ];
+        }
+
+        impl<#lifetime> #name<#lifetime> {
+            #vis fn bind(services: &::yield_vm::Services<#lifetime>) -> Self {
+                Self(services.bind::<#name<'static>>())
+            }
+
+            #(#accessors)*
+        }
+    }
 }
 
 struct ServiceBinding {
@@ -311,32 +404,66 @@ pub(super) fn host(input: TokenStream, origin: Option<PathBuf>) -> Result<TokenS
     } else {
         TokenStream::new()
     };
-    let inserts = services.iter().map(|binding| {
-        let ty = &binding.ty;
-        let value = &binding.value;
-        quote! {
-            __yield_services.insert::<#ty>(#value)?;
-        }
-    });
+    let storage = if services.is_empty() {
+        quote!(::core::result::Result::Ok(
+            ::yield_vm::__macro_support::ServiceStorage::default()
+        ))
+    } else {
+        let generated = |prefix: &str| -> Vec<Ident> {
+            (0..services.len())
+                .map(|index| Ident::new(&format!("{prefix}{index}"), MacroSpan::mixed_site()))
+                .collect()
+        };
+        let fields = generated("__s");
+        let params = generated("__T");
+        let values = generated("__yield_service");
+        let layout = Ident::new("__YieldServiceLayout", MacroSpan::mixed_site());
+        let types = services.iter().map(|binding| &binding.ty);
+        let expressions = services.iter().map(|binding| &binding.value);
+        quote! {{
+            // Coerce at the user type, before inferring the layout's parameters.
+            // Keep all caller tokens outside the generated item's scope.
+            #(let #values: #types = #expressions;)*
+            {
+                struct #layout<#(#params),*> {
+                    #(#fields: #params),*
+                }
+                impl<#(#params: 'static),*> #layout<#(#params),*> {
+                    fn into_storage(self) -> ::core::result::Result<
+                        ::yield_vm::__macro_support::ServiceStorage,
+                        ::std::string::String,
+                    > {
+                        // SAFETY: these offsets and types describe the fields of the
+                        // same concrete layout instantiation passed to `from_layout`.
+                        unsafe {
+                            ::yield_vm::__macro_support::ServiceStorage::from_layout(self, [
+                                #(::yield_vm::__macro_support::ServiceField::of::<#params>(
+                                    ::core::mem::offset_of!(Self, #fields)
+                                )),*
+                            ])
+                        }
+                    }
+                }
+                #layout { #(#fields: #values),* }.into_storage()
+            }
+        }}
+    };
     let mutable = (!modules.is_empty()).then(|| quote!(mut));
+    let deps = Ident::new("__yield_deps", MacroSpan::mixed_site());
+    let modules_var = Ident::new("__yield_modules", MacroSpan::mixed_site());
+    let services_var = Ident::new("__yield_services", MacroSpan::mixed_site());
+    let error = Ident::new("__yield_error", MacroSpan::mixed_site());
     Ok(quote! {
         {
             #declaration_validation
-            match ::yield_vm::__macro_support::services(|__yield_services| {
-                #(#inserts)*
-                ::core::result::Result::Ok(())
-            }) {
-                ::core::result::Result::Ok(__yield_services) => {
-                    let #mutable __yield_deps = <::yield_vm::__macro_support::ModuleDependencies as ::core::default::Default>::default();
-                    let __yield_modules = [#(::yield_vm::__macro_support::module::<#modules>(&mut __yield_deps)),*];
-                    ::yield_vm::__macro_support::link(
-                        __yield_modules,
-                        __yield_deps,
-                        __yield_services,
-                    )
+            match #storage {
+                ::core::result::Result::Ok(#services_var) => {
+                    let #mutable #deps = <::yield_vm::__macro_support::ModuleDependencies as ::core::default::Default>::default();
+                    let #modules_var = [#(::yield_vm::__macro_support::module::<#modules>(&mut #deps)),*];
+                    ::yield_vm::__macro_support::link(#modules_var, #deps, #services_var)
                 }
-                ::core::result::Result::Err(__yield_error) => {
-                    ::core::result::Result::Err(__yield_error)
+                ::core::result::Result::Err(#error) => {
+                    ::core::result::Result::Err(#error)
                 }
             }
         }
@@ -526,17 +653,12 @@ mod tests {
         );
         for args in [
             quote!(name = "counter"),
-            quote!(
-                name = "counter",
-                classes = [],
-                operations = [],
-                services = []
-            ),
+            quote!(name = "counter", classes = [], operations = [],),
             quote!(
                 operations = [work::Wait,],
                 name = "counter",
                 classes = [crate::Point,],
-                services = [Arc<dyn TimerService>,]
+                services = crate::Timers,
             ),
         ] {
             host_module(args, item.clone()).unwrap();
@@ -544,15 +666,15 @@ mod tests {
     }
 
     #[test]
-    fn host_module_rejects_optional_services() {
-        diagnostic(
+    fn host_module_rejects_legacy_service_lists() {
+        assert!(
             host_module(
-                quote!(name = "counter", services = [Clock?]),
+                quote!(name = "counter", services = [Clock]),
                 quote!(
                     struct Counter;
                 ),
-            ),
-            "expected `,`",
+            )
+            .is_err()
         );
     }
 
@@ -563,9 +685,14 @@ mod tests {
         );
         for key in ["classes", "operations", "services"] {
             let ident = Ident::new(key, MacroSpan::call_site());
+            let value = if key == "services" {
+                quote!(Scope)
+            } else {
+                quote!([])
+            };
             diagnostic(
                 host_module(
-                    quote!(name = "counter", #ident = [], #ident = []),
+                    quote!(name = "counter", #ident = #value, #ident = #value),
                     item.clone(),
                 ),
                 &format!("duplicate `{key}`"),
@@ -671,5 +798,55 @@ mod tests {
         for binding in [quote!(Clock tick()), quote!(Clock? => Some(17))] {
             diagnostic(host(quote!(services: { #binding })), "expected `=>`");
         }
+    }
+
+    #[test]
+    fn host_emits_typed_coercions_and_layout_fields() {
+        let expansion = host(quote!(services: {
+            Self => self.clone(),
+            Arc<dyn TimerService> => __yield_service0,
+        }))
+        .unwrap();
+        syn::parse2::<Expr>(expansion.clone()).unwrap();
+        let output = expansion.to_string();
+        assert!(output.contains(&quote!(let __yield_service0: Self = self.clone();).to_string()));
+        let coercion = quote!(let __yield_service1: Arc<dyn TimerService> = __yield_service0;);
+        assert!(output.contains(&coercion.to_string()));
+        assert!(output.contains(&quote!(offset_of!(Self, __s0)).to_string()));
+        assert!(output.contains(&quote!(offset_of!(Self, __s1)).to_string()));
+
+        let empty = host(quote!(services: {})).unwrap().to_string();
+        assert!(empty.contains(&quote!(ServiceStorage::default()).to_string()));
+        assert!(!empty.contains("offset_of"));
+    }
+
+    #[test]
+    fn operation_emits_service_scope() {
+        let output = operation(
+            quote!(name = "wait", recovery = pause, services = api::ClockScope),
+            quote!(
+                struct Wait;
+            ),
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            output.contains(&quote!(ServiceScope::of::<api::ClockScope<'static>>()).to_string())
+        );
+    }
+
+    #[test]
+    fn class_emits_service_scope() {
+        let output = super::super::typed::host_class(
+            quote!(tag = "clock", services = api::ClockScope),
+            quote!(
+                struct Clock;
+            ),
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            output.contains(&quote!(ServiceScope::of::<api::ClockScope<'static>>()).to_string())
+        );
     }
 }

@@ -1,11 +1,9 @@
 //! Synchronous exception reporting and VM-generated global notifications.
 
-use std::rc::Rc;
-
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{EventPayload, EventState, Object};
-use crate::host::{Diagnostics, Host};
+use crate::host::Host;
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -102,7 +100,7 @@ impl VmCore {
     }
 
     fn deliver_exception(&self, host: &Host, error: Value) {
-        let Some(sink) = host.services().get::<Rc<dyn Diagnostics>>() else {
+        let Some(sink) = host.builtin_services().diagnostics() else {
             return;
         };
         let diagnostic = self.exception_diagnostic(&error);

@@ -1,7 +1,5 @@
 //! Web Crypto interface objects and VM-side argument normalization.
 
-use std::sync::Arc;
-
 use super::worker::Output;
 use crate::VmError;
 use crate::builtin::binary::ARRAY_BUFFER_PROTOTYPE;
@@ -16,7 +14,7 @@ use crate::heap::{
     Attributes, CryptoKey, CryptoKeyAlgorithm, CryptoKeyUsage, MAX_CRYPTO_KEY_BYTES, Object,
     PlainObject, TO_STRING_TAG_SYMBOL, ViewRange,
 };
-use crate::host::{Host, SubtleCryptoRequest, SubtleCryptoService};
+use crate::host::{Host, SubtleCryptoRequest};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::{Invocation, Settlement};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -302,11 +300,7 @@ fn call(
     let result = if !matches!(receiver.view(), ValueRef::Object(id) if id == vm.builtins.get(INSTANCE))
     {
         Err(Failure::Type("Incompatible SubtleCrypto receiver"))
-    } else if host
-        .services()
-        .get::<Arc<dyn SubtleCryptoService>>()
-        .is_none()
-    {
+    } else if host.builtin_services().subtle_crypto().is_none() {
         Err(Failure::Dom(
             "NotSupportedError",
             "Host SubtleCrypto service is not available",

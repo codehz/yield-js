@@ -368,7 +368,6 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
 #[yield_vm::host_module(
     name = "chain",
     operations = [yield_harness::Timer],
-    services = [std::sync::Arc<yield_harness::FakeClock>],
 )]
 struct Chain;
 

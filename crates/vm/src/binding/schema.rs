@@ -5,7 +5,7 @@
 //! [`JsValue`] carries the calling VM generation and call id, and slot writes
 //! are the only way to retain a value across calls.
 
-use std::any::{Any, TypeId, type_name};
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
+use super::services::{
+    BuiltinOffsets, BuiltinServices, ResolvedServices, ServiceScope, ServiceStorage, Services,
+};
 use crate::digest::Digest;
 use crate::host::Host;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
@@ -502,6 +505,8 @@ pub trait HostClass: Sized + 'static {
     const METHODS: &'static [MethodDecl] = &[];
     const ACCESSORS: &'static [AccessorDecl] = &[];
     #[doc(hidden)]
+    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
+    #[doc(hidden)]
     // Payload bytes never contain VM object ids; JavaScript references belong in slots.
     const CODEC: Option<ClassCodec> = None;
 }
@@ -536,7 +541,7 @@ pub trait HostModule: FromServices + Encode + Decode + 'static {
     const SLOTS: &'static [SlotDecl] = &[];
 
     #[doc(hidden)]
-    const SERVICES: &'static [ServiceDependency] = &[];
+    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
 
     #[doc(hidden)]
     fn register_dependencies(_deps: &mut __macro_support::ModuleDependencies) {}
@@ -555,6 +560,8 @@ pub trait Operation: Encode + Decode + 'static {
     const NAME: &'static str;
     const RECOVERY: Recovery;
     const REJECTION: &'static str = "operation rejected during restore";
+    #[doc(hidden)]
+    const SERVICE_SCOPE: ServiceScope = ServiceScope::EMPTY;
 }
 
 /// Capability handed to the host when an operation starts. A restored VM has a
@@ -628,51 +635,6 @@ impl<O: OperationDriver> LiveRegistration for TypedRegistration<O> {
 type ArmOperation =
     fn(&[u8], OperationToken, &Services) -> Result<Box<dyn LiveRegistration>, HostFault>;
 
-/// Host resources assembled before linking and borrowed after linking.
-///
-/// The table is owned by one thread, like the VM. Store thread-affine resources
-/// (for example `Rc`) directly; a service that runs work on another thread must
-/// carry `Send + Sync` in its own type or trait.
-#[derive(Default)]
-pub struct Services {
-    values: BTreeMap<TypeId, Box<dyn Any>>,
-}
-
-impl Services {
-    #[doc(hidden)]
-    pub fn insert<T: Any>(&mut self, value: T) -> Result<(), String> {
-        use std::collections::btree_map::Entry;
-
-        match self.values.entry(TypeId::of::<T>()) {
-            Entry::Vacant(entry) => {
-                entry.insert(Box::new(value));
-                Ok(())
-            }
-            Entry::Occupied(_) => Err(format!("duplicate host service {:?}", type_name::<T>())),
-        }
-    }
-
-    /// Looks up an installed resource by its exact stored type.
-    pub fn get<T: Any>(&self) -> Option<&T> {
-        self.values.get(&TypeId::of::<T>())?.downcast_ref::<T>()
-    }
-}
-
-#[doc(hidden)]
-pub struct ServiceDependency {
-    type_id: TypeId,
-    type_name: fn() -> &'static str,
-}
-
-impl ServiceDependency {
-    pub const fn of<T: Any>() -> Self {
-        Self {
-            type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>,
-        }
-    }
-}
-
 type DecodeFn = fn(&[u8], &Services) -> Result<Box<dyn Any>, CodecError>;
 type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Services) -> Result<(), CodecError>;
 
@@ -716,6 +678,8 @@ struct ClassDecl {
     accessors: Vec<AccessorDecl>,
     codec: Option<ClassCodec>,
     empty: EmptyFn,
+    service_scope: ServiceScope,
+    services: ResolvedServices,
 }
 
 struct StateDecl {
@@ -734,6 +698,8 @@ struct OperationDecl {
     rust_type: TypeId,
     start: ArmOperation,
     resume: ArmOperation,
+    service_scope: ServiceScope,
+    services: ResolvedServices,
 }
 
 #[doc(hidden)]
@@ -741,7 +707,8 @@ pub struct ModuleDecl {
     name: String,
     exports: Vec<ExportDecl>,
     state: StateDecl,
-    services: &'static [ServiceDependency],
+    service_scope: ServiceScope,
+    services: ResolvedServices,
 }
 
 #[doc(hidden)]
@@ -750,13 +717,16 @@ pub mod __macro_support {
     use std::collections::BTreeSet;
 
     pub use super::super::call::with_module;
-    use super::{AccessorCall, CodecError, Host, UnlinkedBindings};
+    pub use super::super::services::{
+        BoundServices, ServiceDependency, ServiceField, ServiceScope, ServiceSet, ServiceStorage,
+    };
+    use super::{AccessorCall, CodecError, Host, ResolvedServices, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
-        MethodDecl, ModuleDecl, ResumeCall, ReturnKind, ServiceDependency,
+        MethodDecl, ModuleDecl, ResumeCall, ReturnKind,
     };
     use super::{ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl};
-    use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall, Services};
+    use super::{ConstValue, ConstantDecl, FunctionDecl, HostCall};
     use super::{ExportCall, ModuleCall};
 
     #[derive(Default)]
@@ -781,20 +751,10 @@ pub mod __macro_support {
         }
     }
 
-    /// Builds the service table for a `host!` invocation, surfacing a
-    /// duplicate service ID as the macro's `Err`.
-    pub fn services(
-        build: impl FnOnce(&mut Services) -> Result<(), String>,
-    ) -> Result<Services, String> {
-        let mut services = Services::default();
-        build(&mut services)?;
-        Ok(services)
-    }
-
     pub fn link(
         modules: impl IntoIterator<Item = ModuleDecl>,
         deps: ModuleDependencies,
-        services: Services,
+        services: ServiceStorage,
     ) -> Result<Host, String> {
         UnlinkedBindings {
             modules: modules.into_iter().collect(),
@@ -816,7 +776,8 @@ pub mod __macro_support {
             name: M::NAME.to_owned(),
             exports: M::exports(),
             state: StateDecl::of::<M>(),
-            services: M::SERVICES,
+            service_scope: M::SERVICE_SCOPE,
+            services: ResolvedServices::EMPTY,
         }
     }
 
@@ -825,7 +786,8 @@ pub mod __macro_support {
             name: name.to_owned(),
             exports,
             state: StateDecl::of::<RawModule>(),
-            services: &[],
+            service_scope: ServiceScope::EMPTY,
+            services: ResolvedServices::EMPTY,
         }
     }
 
@@ -948,7 +910,8 @@ pub(crate) struct Bindings {
     modules: Vec<ModuleDecl>,
     classes: Vec<ClassDecl>,
     operations: Vec<OperationDecl>,
-    services: Services,
+    services: ServiceStorage,
+    builtin_services: BuiltinOffsets,
     fingerprint: String,
 }
 
@@ -966,17 +929,52 @@ impl std::fmt::Debug for Bindings {
 
 impl Bindings {
     pub(crate) fn empty() -> Self {
+        let services = ServiceStorage::default();
+        let builtin_services = BuiltinOffsets::resolve(&services);
         Self {
             modules: Vec::new(),
             classes: Vec::new(),
             operations: Vec::new(),
-            services: Services::default(),
+            services,
+            builtin_services,
             fingerprint: fingerprint(&[], &[], &[]),
         }
     }
 
-    pub(crate) fn services(&self) -> &Services {
-        &self.services
+    pub(crate) fn bind_service<T: Any>(&self) -> Option<&T> {
+        self.services.bind::<T>()
+    }
+
+    pub(crate) fn builtin_services(&self) -> BuiltinServices<'_> {
+        // SAFETY: these offsets were resolved against this immutable storage.
+        unsafe { self.builtin_services.bind(&self.services) }
+    }
+
+    fn service_view<'a>(&'a self, services: &'a ResolvedServices) -> Services<'a> {
+        // SAFETY: only the service sets linked into these Bindings (or EMPTY)
+        // are passed here, and the storage is immutable after linking.
+        unsafe { self.services.view(services) }
+    }
+
+    pub(crate) fn call_services(&self, target: NativeTarget) -> Services<'_> {
+        let resolved = match target {
+            NativeTarget::Export(id) => &self.modules[id.module as usize].services,
+            NativeTarget::Method(id) => &self.classes[id.class as usize].services,
+            NativeTarget::Accessor { class, .. } => &self.classes[class as usize].services,
+        };
+        self.service_view(resolved)
+    }
+
+    pub(crate) fn operation_services(&self, index: usize) -> Services<'_> {
+        self.service_view(&self.operations[index].services)
+    }
+
+    fn state_services(&self, index: usize) -> Services<'_> {
+        self.service_view(&self.modules[index].services)
+    }
+
+    fn class_services(&self, index: usize) -> Services<'_> {
+        self.service_view(&self.classes[index].services)
     }
 
     pub fn fingerprint(&self) -> &str {
@@ -1127,7 +1125,7 @@ impl Bindings {
             .iter()
             .find(|operation| operation.name == name)
             .ok_or_else(|| CodecError::new(format!("unknown operation {name}")))?;
-        (operation.decode)(state, &self.services)
+        (operation.decode)(state, &self.service_view(&operation.services))
     }
 
     pub(crate) fn operation_index<O: OperationDriver>(&self) -> Result<usize, HostFault> {
@@ -1154,7 +1152,7 @@ impl Bindings {
         bytes: &[u8],
         token: OperationToken,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        (self.operations[decl].start)(bytes, token, &self.services)
+        (self.operations[decl].start)(bytes, token, &self.operation_services(decl))
     }
 
     pub(crate) fn resume_operation(
@@ -1163,7 +1161,7 @@ impl Bindings {
         state: &[u8],
         token: OperationToken,
     ) -> Result<Box<dyn LiveRegistration>, HostFault> {
-        (self.operations[index].resume)(state, token, &self.services)
+        (self.operations[index].resume)(state, token, &self.operation_services(index))
     }
 
     pub(crate) fn state_type(&self, module: usize) -> Option<TypeId> {
@@ -1177,7 +1175,7 @@ impl Bindings {
     }
 
     pub(crate) fn state_new(&self, module: usize) -> Box<dyn Any> {
-        (self.modules[module].state.new)(&self.services)
+        (self.modules[module].state.new)(&self.state_services(module))
     }
 
     pub(crate) fn state_decode(
@@ -1185,7 +1183,7 @@ impl Bindings {
         module: usize,
         input: &[u8],
     ) -> Result<Box<dyn Any>, CodecError> {
-        (self.modules[module].state.decode)(input, &self.services)
+        (self.modules[module].state.decode)(input, &self.state_services(module))
     }
 
     pub(crate) fn state_encode(
@@ -1194,13 +1192,8 @@ impl Bindings {
         payload: &dyn Any,
         out: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        (self.modules[module].state.encode)(payload, out, &self.services)
+        (self.modules[module].state.encode)(payload, out, &self.state_services(module))
     }
-
-    pub fn service<T: Any>(&self) -> Option<&T> {
-        self.services.get::<T>()
-    }
-
     pub(crate) fn class_decode(
         &self,
         class: ClassId,
@@ -1210,7 +1203,7 @@ impl Bindings {
         let codec = declaration
             .codec
             .ok_or_else(|| CodecError::new("class declaration has no payload decoder"))?;
-        (codec.decode)(input, &self.services)
+        (codec.decode)(input, &self.class_services(class))
             .map_err(|error| CodecError::new(format!("{}: {error}", declaration.tag)))
     }
 
@@ -1223,7 +1216,7 @@ impl Bindings {
         let codec = self.classes[class]
             .codec
             .ok_or_else(|| CodecError::new("class declaration has no payload encoder"))?;
-        (codec.encode)(payload, out, &self.services)
+        (codec.encode)(payload, out, &self.class_services(class))
     }
 
     pub(crate) fn classes_len(&self) -> usize {
@@ -1235,7 +1228,7 @@ struct UnlinkedBindings {
     modules: Vec<ModuleDecl>,
     classes: Vec<ClassDecl>,
     operations: Vec<OperationDecl>,
-    services: Services,
+    services: ServiceStorage,
 }
 
 impl ClassDecl {
@@ -1253,6 +1246,8 @@ impl ClassDecl {
             methods: T::METHODS.to_vec(),
             accessors: T::ACCESSORS.to_vec(),
             codec: T::CODEC,
+            service_scope: T::SERVICE_SCOPE,
+            services: ResolvedServices::EMPTY,
             empty: |payload| {
                 payload
                     .downcast_ref::<T>()
@@ -1287,6 +1282,8 @@ impl OperationDecl {
             rejection: O::REJECTION,
             decode: |input, services| decode_exact::<O>(input, services).map(|_| ()),
             rust_type: TypeId::of::<O>(),
+            service_scope: O::SERVICE_SCOPE,
+            services: ResolvedServices::EMPTY,
             start: |bytes, token, services| {
                 let state =
                     decode_exact::<O>(bytes, services).map_err(|error| HostFault(error.0))?;
@@ -1314,16 +1311,13 @@ impl UnlinkedBindings {
                 return Err(format!("duplicate host module {:?}", pair[0].name));
             }
         }
-        for module in &self.modules {
-            for service in module.services {
-                if !self.services.values.contains_key(&service.type_id) {
-                    return Err(format!(
-                        "host module {:?}: missing host service {:?}",
-                        module.name,
-                        (service.type_name)(),
-                    ));
-                }
-            }
+        for module in &mut self.modules {
+            module.services = self.services.resolve(module.service_scope).map_err(|ty| {
+                format!(
+                    "host module {:?}: missing host service {:?}",
+                    module.name, ty
+                )
+            })?;
         }
         self.classes.sort_by(|a, b| a.tag.cmp(&b.tag));
         for pair in self.classes.windows(2) {
@@ -1333,6 +1327,9 @@ impl UnlinkedBindings {
         }
         resolve_class_layouts(&mut self.classes)?;
         for class in &mut self.classes {
+            class.services = self.services.resolve(class.service_scope).map_err(|ty| {
+                format!("host class {:?}: missing host service {:?}", class.tag, ty)
+            })?;
             class.methods.sort_by_key(|method| method.name);
             class.accessors.sort_by_key(|accessor| accessor.name);
             let mut names = BTreeSet::new();
@@ -1356,17 +1353,28 @@ impl UnlinkedBindings {
         }
         self.operations.sort_by(|a, b| a.name.cmp(&b.name));
         let mut operation_names = BTreeSet::new();
-        for operation in &self.operations {
+        for operation in &mut self.operations {
             if !operation_names.insert(operation.name.as_str()) {
                 return Err(format!("duplicate host operation {:?}", operation.name));
             }
+            operation.services = self
+                .services
+                .resolve(operation.service_scope)
+                .map_err(|ty| {
+                    format!(
+                        "host operation {:?}: missing host service {:?}",
+                        operation.name, ty
+                    )
+                })?;
         }
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations);
+        let builtin_services = BuiltinOffsets::resolve(&self.services);
         Ok(Bindings {
             modules: self.modules,
             classes: self.classes,
             operations: self.operations,
             services: self.services,
+            builtin_services,
             fingerprint,
         })
     }

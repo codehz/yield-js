@@ -281,7 +281,7 @@ fn a_throwing_timer_callback_does_not_block_the_next_timer() {
     assert!(snapshot.operations.is_empty());
 }
 
-// All variants have the same wire exports, services and operation. Only
+// All variants have the same wire exports and operation (including its services). Only
 // `extra_slot` reads the second named argument after the external boundary.
 macro_rules! timer_contract {
     ($name:ident, $extra:ident, ($($before:tt)*), ($($after:tt)*), $($argv:tt)+) => {
@@ -291,7 +291,6 @@ macro_rules! timer_contract {
             #[host_module(
                 name = "contract",
                 operations = [Timer],
-                services = [std::sync::Arc<yield_harness::FakeClock>],
             )]
             struct Api;
 

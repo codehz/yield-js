@@ -111,7 +111,7 @@ impl VmCore {
     ) -> Result<(), VmError> {
         let state = &mut self.subtle_state;
         if state.worker.is_none() {
-            let Some(service) = host.services().get::<Arc<dyn SubtleCryptoService>>() else {
+            let Some(service) = host.builtin_services().subtle_crypto() else {
                 let reason = self.alloc_dom_exception(
                     "NotSupportedError".into(),
                     "SubtleCrypto service unavailable".into(),

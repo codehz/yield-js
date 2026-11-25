@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::fmt;
 
 use crate::gc::ActiveRoots;
@@ -7,6 +6,7 @@ use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, V
 use crate::vm::VmCore;
 
 use super::schema::*;
+use super::services::Services;
 
 // ---------------------------------------------------------------------------
 // Values
@@ -390,6 +390,7 @@ pub struct CallCx<'a> {
     pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
     pub(crate) bindings: &'a Bindings,
+    pub(crate) services: Services<'a>,
     pub(crate) epoch: u32,
     pub(crate) call: u64,
     pub(crate) args: Vec<JsValue>,
@@ -650,10 +651,10 @@ impl<'a> CallCx<'a> {
         crate::ops::same_value(&left.value, &right.value)
     }
 
-    /// Borrows a linked service for the activation, independent of the VM borrow.
-    /// Holding the reference does not prevent mutable access to this context.
-    pub fn service<T: Any>(&self) -> Option<&'a T> {
-        self.bindings.service::<T>()
+    /// The declaring module or class's services for this activation.
+    /// Typed accessors borrow the host independently of the context borrow.
+    pub fn services(&self) -> &Services<'a> {
+        &self.services
     }
 
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {
@@ -762,7 +763,7 @@ impl<'a> CallCx<'a> {
             .map_err(JsError::Fault)?;
         let mut bytes = Vec::new();
         state
-            .encode(&mut bytes, self.bindings.services())
+            .encode(&mut bytes, &self.bindings.operation_services(declaration))
             .map_err(|error| JsError::Fault(HostFault(error.0)))?;
         Ok((declaration, bytes))
     }
@@ -826,9 +827,10 @@ impl<'a> CallCx<'a> {
                 crate::snapshot::DeliveryTarget::Promise(promise),
                 signal,
                 |token, bindings, _| {
-                    Ok(Box::new(TypedRegistration::<O>(
-                        state.start(token, bindings.services())?,
-                    )))
+                    Ok(Box::new(TypedRegistration::<O>(state.start(
+                        token,
+                        &bindings.operation_services(declaration),
+                    )?)))
                 },
             )
             .map_err(JsError::Fault)?;

@@ -271,22 +271,22 @@ pub fn make_host() -> Result<Host, String> {
 }
 
 #[test]
-fn services_cannot_be_moved_to_another_thread() {
+fn service_storage_cannot_be_moved_to_another_thread() {
     let fixture = Fixture::new("thread-affine-services");
     fixture.write(
         "src/lib.rs",
-        r#"use yield_vm::Services;
+        r#"use yield_vm::Host;
 
 fn require_send<T: Send>() {}
 
 pub fn move_services() {
-    require_send::<Services>();
+    require_send::<Host>();
 }
 "#,
     );
     let (ok, output) = fixture.check();
     assert!(
-        !ok && output.contains("E0277") && output.contains("cannot be sent between threads"),
+        !ok && output.contains("src/lib.rs:6:") && output.contains("E0277"),
         "{output}"
     );
 }

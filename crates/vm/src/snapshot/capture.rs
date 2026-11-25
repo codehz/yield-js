@@ -301,7 +301,7 @@ impl VmCore {
                 name: operation.name.clone(),
                 recovery: operation.recovery,
                 state: operation
-                    .checkpoint(host.services())
+                    .checkpoint(host.bindings())
                     .map_err(|error| VmError::HostFault(error.0))?,
                 target: operation.target,
                 signal: operation.signal,

@@ -53,16 +53,34 @@ fn task_host(labels: &Rc<LabelService>) -> Host {
             ),
         ],
     );
-    let mut services = yield_vm::Services::default();
-    services
-        .insert::<Rc<LabelService>>(Rc::clone(labels))
-        .unwrap();
+    struct TaskServices {
+        labels: Rc<LabelService>,
+        diagnostics: Rc<dyn Diagnostics>,
+    }
+    let layout = TaskServices {
+        labels: Rc::clone(labels),
+        diagnostics: Rc::new(TaskDiagnostics::default()),
+    };
+    // SAFETY: These descriptors use the exact types and offsets of the layout's fields.
+    let storage = unsafe {
+        abi::ServiceStorage::from_layout(
+            layout,
+            [
+                abi::ServiceField::of::<Rc<LabelService>>(std::mem::offset_of!(
+                    TaskServices,
+                    labels
+                )),
+                abi::ServiceField::of::<Rc<dyn Diagnostics>>(std::mem::offset_of!(
+                    TaskServices,
+                    diagnostics
+                )),
+            ],
+        )
+    }
+    .unwrap();
     let mut deps = abi::ModuleDependencies::default();
     deps.operation::<Wait>();
-    services
-        .insert::<Rc<dyn Diagnostics>>(Rc::new(TaskDiagnostics::default()))
-        .unwrap();
-    abi::link([module], deps, services).unwrap()
+    abi::link([module], deps, storage).unwrap()
 }
 
 static STAGES: [CpsStage; 2] = [
@@ -213,10 +231,14 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
+yield_vm::service_scope! {
+    BranchServices { counters: Rc<Counters> }
+}
+
 #[yield_vm::host_module(
     name = "branch",
     operations = [Wait],
-    services = [Rc<LabelService>, Rc<Counters>],
+    services = BranchServices,
 )]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
@@ -446,15 +468,18 @@ impl Branch {
     }
 }
 
-fn next_match(cx: &mut CallCx<'_>, count: &mut JsValue) -> JsResult<Option<JsValue>> {
+fn next_match(
+    cx: &mut yield_vm::ModuleCx<'_, Branch>,
+    count: &mut JsValue,
+) -> JsResult<Option<JsValue>> {
     hit(cx, "while-let-check");
     let next = cx.number(count)? + 1.0;
     *count = JsValue::number(next);
     Ok((next <= 2.0).then(|| JsValue::number(next * 10.0)))
 }
 
-fn hit(cx: &CallCx<'_>, name: &str) {
-    cx.service::<Rc<Counters>>().unwrap().hit(name);
+fn hit(cx: &yield_vm::ModuleCx<'_, Branch>, name: &str) {
+    BranchServices::bind(cx.services()).counters().hit(name);
 }
 
 #[test]

@@ -51,7 +51,7 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [Rc<LabelService>])]` 中的三个依赖列表可省略，省略等同于空列表。每个模块要列出自身的必需依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
+`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = TestServices)]` 中的 `classes` 和 `operations` 可省略，默认为空列表；`services` 省略时没有服务依赖。模块、类和 operation 各声明自己使用的服务 scope。宏不扫描函数体，也不会因此新增 JS 导出。
 
 `host!` 接受 `dts`、`modules`、`services` 三段，或只有 `services`，返回 `Result<Host, String>`。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
@@ -200,19 +200,29 @@ pub trait Decode: Sized {
 
 规则：
 
-- **服务提供能力，快照提供状态。** 编码与解码均使用当前 VM 的 `&Services` 按值类型读取服务，例如 `services.get::<NodeFactory>()`。解码绝不能依赖「旧宿主里的节点 42」。
+- **服务提供能力，快照提供状态。** 编码与解码通过当前回调的 `&Services` 绑定声明的 scope，例如 `NodeServices::bind(services).factory()`。解码绝不能依赖「旧宿主里的节点 42」。
 - **解码期不改 VM 堆。** codec 只能创建自己的 Rust 数据和平台资源；需要 JS 引用的值必须来自快照槽，而不是在解码时构造新对象。这样恢复失败时可以整体丢弃，不留半成品。
 - **副作用可回滚。** codec 创建的平台资源必须在失败路径上可释放（`Drop` 或显式回收）。恢复器只在全部 payload 解码成功后发布 VM。
 - **完整解码。** 模块 payload 不声明 schema。顶层解码必须消费全部字节。
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
-`host!` 的 `services:` 段使用 `Type => value`。显式类型决定存储类型并允许表达式强制转换，例如把 `Arc<PlatformTimer>` 转成 `Arc<dyn TimerService>`。同一宿主按确切的 Rust 值类型存储，每个类型只允许注册一次，类型别名仍是同一类型；重复注册报错且不覆盖。`Services::get::<T>()`、`CallCx::service::<T>()` 和 `Vm::service::<T>()` 查询同一个注册表。
+`host!` 的 `services:` 段使用 `Type => value`。显式类型决定生成的字段类型并允许强制转换，例如把 `Arc<PlatformTimer>` 转成 `Arc<dyn TimerService>`。结构体整体擦除，`Host` 和 `Vm` 不带布局类型参数。同一宿主的确切 Rust 类型（含别名）只能注册一次，重复时报错。嵌入方通过 `host.bind_service::<T>()` 或 `vm.bind_service::<T>()` 在冷路径解析并借用服务；回调不使用此查询接口。
 
-模块用 `services = [Type, …]` 声明必需服务。`host!` 在组装服务表后、返回 `Host` 前检查选中模块，缺失时报模块名和服务类型。可选服务不列入依赖，调用方处理查询返回的 `None`；没有服务时省略对应注册项。依赖列表不是运行时访问白名单；VM 内建等调用方可直接使用额外注册的服务。
+`service_scope! { TestServices { counters: Rc<Counters>, optional labels: Rc<LabelService> } }` 生成命名访问器，通过 `services = TestServices` 声明在 `#[host_module]`、`#[host_class]` 或 `#[operation]` 上。链接将依赖按确切类型解析为该宿主布局的字段偏移；缺少必需服务时报声明名和服务类型，缺少可选服务则访问器返回 `None`。模块回调和状态 codec 用模块 scope；类方法和访问器（包括继承调用）及 payload codec 用声明类的 scope；operation 的启动、恢复和 checkpoint codec 用 operation 的 scope。VM 内建独立解析自己的可选服务。
 
-`CallCx::service` 返回的引用借自本次原生调用的服务表，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
+例如 `TestServices::bind(cx.services()).counters()` 返回的引用借自当前宿主，不占用对 `CallCx` 的借用。绑定可以在持有服务引用或借用守卫时用 `&mut CallCx` 分配对象或写入槽。`bind` 校验一次 scope 身份，之后各访问器只读取预解析的槽，不查类型表、不做 `Any` downcast。返回 `HostStep::Suspend` 后，续体须从新的 `CallCx` 重新绑定，不能保存本次调用的借用。
 
 ```rust
+service_scope! {
+    TestServices {
+        counters: Rc<Counters>,
+        optional labels: Rc<LabelService>,
+    }
+}
+
+#[host_module(name = "test", services = TestServices)]
+struct TestModule;
+
 let host = host! {
     dts: "test.d.ts",
     modules: [TestModule],
@@ -262,6 +272,7 @@ impl CallCx {
     fn throw(&mut self, value: JsValue) -> JsError;        // 可捕获脚本异常
     fn fault(&mut self, message: &str) -> HostFault;       // 不可捕获，终止执行
     fn inspect(&self, value: JsValue) -> Inspect<'_>;      // 只读自有数据视图
+    fn services(&self) -> &Services<'a>;
     fn promise<O: OperationDriver>(&mut self, state: O) -> JsResult<JsValue>;
     fn cancel_task(&mut self, handle: &JsValue) -> JsResult<()>;
 }

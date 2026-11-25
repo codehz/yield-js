@@ -45,7 +45,11 @@ impl DemoCounters {
     }
 }
 
-#[operation(name = "wait", recovery = resume)]
+yield_vm::service_scope! {
+    WaitServices { labels: Rc<LabelService> }
+}
+
+#[operation(name = "wait", recovery = resume, services = WaitServices)]
 #[derive(Encode, Decode)]
 struct Wait {
     label: String,
@@ -54,12 +58,20 @@ struct Wait {
 impl OperationDriver for Wait {
     type Live = LabelRegistration;
 
-    fn start(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
-        self.register(token, services, false)
+    fn start(
+        &self,
+        token: OperationToken,
+        services: &Services<'_>,
+    ) -> Result<Self::Live, HostFault> {
+        self.register(token, WaitServices::bind(services).labels(), false)
     }
 
-    fn resume(&self, token: OperationToken, services: &Services) -> Result<Self::Live, HostFault> {
-        self.register(token, services, true)
+    fn resume(
+        &self,
+        token: OperationToken,
+        services: &Services<'_>,
+    ) -> Result<Self::Live, HostFault> {
+        self.register(token, WaitServices::bind(services).labels(), true)
     }
 }
 
@@ -67,12 +79,9 @@ impl Wait {
     fn register(
         &self,
         token: OperationToken,
-        services: &Services,
+        labels: &Rc<LabelService>,
         restoring: bool,
     ) -> Result<LabelRegistration, HostFault> {
-        let labels = services
-            .get::<Rc<LabelService>>()
-            .ok_or_else(|| HostFault::new("missing labels service"))?;
         labels.register(self.label.clone(), token, restoring)
     }
 }
@@ -125,10 +134,14 @@ impl DemoHost {
     }
 }
 
+yield_vm::service_scope! {
+    DemoServices { optional counters: Rc<DemoCounters> }
+}
+
 #[host_module(
     name = "demo",
     operations = [Wait],
-    services = [Rc<LabelService>],
+    services = DemoServices,
 )]
 struct Demo;
 
@@ -137,7 +150,7 @@ impl Demo {
     #[function(name = "inspect")]
     fn inspect(cx: &mut yield_vm::ModuleCx<'_, Self>, _value: Option<JsValue>) -> JsResult<()> {
         println!("  host call: inspect({:?})", cx.args());
-        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
+        if let Some(counters) = DemoServices::bind(cx.services()).counters() {
             counters.hit("inspect");
         }
         Ok(())
@@ -146,7 +159,7 @@ impl Demo {
     #[function(name = "seed")]
     fn seed(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
         println!("  host call: seed()");
-        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
+        if let Some(counters) = DemoServices::bind(cx.services()).counters() {
             counters.hit("seed");
         }
         Ok(JsValue::number(10.0))
@@ -159,7 +172,7 @@ impl Demo {
             .to_utf8()
             .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
         println!("  host call: wait({label:?})");
-        if let Some(counters) = cx.service::<Rc<DemoCounters>>() {
+        if let Some(counters) = DemoServices::bind(cx.services()).counters() {
             counters.hit("wait");
         }
         cx.promise(Wait { label })

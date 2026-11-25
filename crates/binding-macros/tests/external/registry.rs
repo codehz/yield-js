@@ -3,10 +3,11 @@ use std::any::type_name;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use yield_vm::binding::CodecError;
 use yield_vm::{
-    __macro_support::decode_operation, ConsoleEvent, ConsoleSink, Decode, Encode, FromServices,
-    Host, HostFault, HostModule, Operation, OperationDriver, OperationToken, Recovery,
-    Registration, Services, host, host_class, host_module, module_exports, operation,
+    __macro_support::decode_operation, ConsoleEvent, ConsoleSink, Decode, Encode, Host, HostFault,
+    HostModule, Operation, OperationDriver, OperationToken, Recovery, Registration, Services, host,
+    host_class, host_module, module_exports, operation, service_scope,
 };
 
 fn fingerprint(host: Host) -> String {
@@ -16,7 +17,11 @@ fn fingerprint(host: Host) -> String {
         .binding_fingerprint
 }
 
-#[host_module(name = "state", operations = [Work], services = [Clock])]
+service_scope! {
+    StateServices { clock: Clock }
+}
+
+#[host_module(name = "state", operations = [Work], services = StateServices)]
 #[derive(Encode, Decode)]
 struct State {
     #[js_slot]
@@ -46,7 +51,7 @@ impl Registration<Work> for Live {}
 impl OperationDriver for Work {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Services) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -103,7 +108,7 @@ impl Registration<ConflictingWork> for Live {}
 impl OperationDriver for ConflictingWork {
     type Live = Live;
 
-    fn start(&self, _: OperationToken, _: &Services) -> Result<Live, HostFault> {
+    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<Live, HostFault> {
         Ok(Live)
     }
 }
@@ -233,8 +238,8 @@ fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
         services: { ClockAlias => Clock(17) },
     }?;
     let vm = start_vm(host, Default::default());
-    assert_eq!(vm.service::<Clock>(), Some(&Clock(17)));
-    assert_eq!(vm.service::<OtherClock>(), None);
+    assert_eq!(vm.bind_service::<Clock>(), Some(&Clock(17)));
+    assert_eq!(vm.bind_service::<OtherClock>(), None);
     Ok(())
 }
 
@@ -249,7 +254,7 @@ fn services_accept_thread_local_values() -> Result<(), String> {
     let vm = start_vm(host, Default::default());
     local.set(11);
     assert_eq!(
-        vm.service::<Rc<Cell<u32>>>().map(|value| value.get()),
+        vm.bind_service::<Rc<Cell<u32>>>().map(|value| value.get()),
         Some(11)
     );
     Ok(())
@@ -257,29 +262,24 @@ fn services_accept_thread_local_values() -> Result<(), String> {
 
 #[test]
 fn registers_state_operation_and_services() -> Result<(), String> {
-    let mut services = Services::default();
-    services.insert(Clock(17))?;
-    services.insert(OtherClock(23))?;
-    assert_eq!(services.get::<OtherClock>(), Some(&OtherClock(23)));
-    assert_eq!(
-        services.insert(Clock(42)).unwrap_err(),
-        format!("duplicate host service {:?}", type_name::<Clock>())
-    );
-    assert_eq!(services.get::<ClockAlias>(), Some(&Clock(17)));
-
     let evaluations = Cell::new(0);
     let host = host! {
         dts: "../dts/state.d.ts",
         modules: [State],
         services: {
             Clock => { evaluations.set(evaluations.get() + 1); Clock(17) },
+            OtherClock => OtherClock(23),
         },
     }?;
     assert_eq!(evaluations.get(), 1);
-    assert_eq!(<State as FromServices>::from_services(&services).count, 3);
+    let empty = Services::default();
+    assert_eq!(
+        <State as yield_vm::FromServices>::from_services(&empty).count,
+        3
+    );
     let vm = start_vm(host, Default::default());
-    assert_eq!(vm.service::<Clock>(), Some(&Clock(17)));
-    assert_eq!(vm.service::<OtherClock>(), None);
+    assert_eq!(vm.bind_service::<ClockAlias>(), Some(&Clock(17)));
+    assert_eq!(vm.bind_service::<OtherClock>(), Some(&OtherClock(23)));
     assert_eq!(State::SLOTS[State::SLOT_CURRENT].name, "current");
     assert_eq!(State::SLOTS[State::SLOT_HISTORY].name, "history");
     assert_eq!(Work::RECOVERY, Recovery::Pause);
@@ -314,10 +314,10 @@ fn explicit_service_type_coerces_to_a_trait_object() -> Result<(), String> {
     let vm = start_vm(host, Default::default());
     let expected: Arc<dyn ConsoleSink> = sink;
     assert!(Arc::ptr_eq(
-        vm.service::<Arc<dyn ConsoleSink>>().unwrap(),
+        vm.bind_service::<Arc<dyn ConsoleSink>>().unwrap(),
         &expected
     ));
-    assert!(vm.service::<Arc<Sink>>().is_none());
+    assert!(vm.bind_service::<Arc<Sink>>().is_none());
     Ok(())
 }
 
@@ -347,5 +347,94 @@ fn fingerprints_ignore_services() -> Result<(), String> {
 
     let empty = fingerprint(host! { services: {} }?);
     assert_eq!(baseline, empty);
+    Ok(())
+}
+
+#[repr(align(128))]
+struct AlignedService(Rc<Cell<u32>>);
+
+impl Drop for AlignedService {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+struct Marker;
+
+service_scope! {
+    LayoutServices {
+        clock: Clock,
+        optional aligned: AlignedService,
+        optional marker: Marker,
+    }
+}
+
+#[host_module(name = "layout", operations = [ProbeLayout])]
+struct LayoutModule;
+
+#[module_exports]
+impl LayoutModule {}
+
+#[operation(name = "probe-layout", recovery = pause, services = LayoutServices)]
+#[derive(Encode)]
+struct ProbeLayout;
+
+impl Decode for ProbeLayout {
+    fn decode(input: &mut &[u8], services: &Services<'_>) -> Result<Self, CodecError> {
+        let clock = u64::decode(input, services)?;
+        let has_extras = bool::decode(input, services)?;
+        let scope = LayoutServices::bind(services);
+        assert_eq!(scope.clock(), &Clock(clock));
+        assert_eq!(scope.marker().is_some(), has_extras);
+        assert_eq!(scope.aligned().is_some(), has_extras);
+        if let Some(aligned) = scope.aligned() {
+            assert_eq!(std::ptr::from_ref(aligned).addr() % 128, 0);
+            assert_eq!(aligned.0.get(), 0);
+        }
+        Ok(Self)
+    }
+}
+
+impl Registration<ProbeLayout> for () {}
+
+impl OperationDriver for ProbeLayout {
+    type Live = ();
+
+    fn start(&self, _: OperationToken, _: &Services<'_>) -> Result<(), HostFault> {
+        Ok(())
+    }
+}
+
+#[test]
+fn resolves_the_same_scope_against_each_host_layout() -> Result<(), String> {
+    let drops = Rc::new(Cell::new(0));
+    let wide = host! {
+        dts: "../dts/empty.d.ts",
+        modules: [LayoutModule],
+        services: {
+            AlignedService => AlignedService(Rc::clone(&drops)),
+            Marker => Marker,
+            Clock => Clock(17),
+        },
+    }?;
+    let narrow = host! {
+        dts: "../dts/empty.d.ts",
+        modules: [LayoutModule],
+        services: { Clock => Clock(23) },
+    }?;
+    let decode = |host: &Host, clock: u64, has_extras: bool| {
+        let mut bytes = Vec::new();
+        let empty = Services::default();
+        clock.encode(&mut bytes, &empty).unwrap();
+        has_extras.encode(&mut bytes, &empty).unwrap();
+        decode_operation(host, "probe-layout", &bytes).unwrap();
+    };
+    decode(&wide, 17, true);
+    decode(&narrow, 23, false);
+    decode(&wide, 17, true);
+    assert_eq!(drops.get(), 0);
+    drop(wide);
+    assert_eq!(drops.get(), 1);
+    decode(&narrow, 23, false);
     Ok(())
 }

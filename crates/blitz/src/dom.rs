@@ -17,21 +17,19 @@ impl Dom {
     }
 }
 
-fn dom_service<'a>(cx: &CallCx<'a>) -> JsResult<&'a RefCell<Dom>> {
-    cx.service::<Rc<RefCell<Dom>>>()
-        .map(|dom| dom.as_ref())
-        .ok_or_else(|| JsError::fault("no active Blitz document"))
+yield_vm::service_scope! {
+    DomServices { dom: Rc<RefCell<Dom>> }
 }
 
-fn dom_ref<'a>(cx: &CallCx<'a>) -> JsResult<Ref<'a, Dom>> {
-    Ok(dom_service(cx)?.borrow())
+fn dom_ref<'a>(cx: &CallCx<'a>) -> Ref<'a, Dom> {
+    DomServices::bind(cx.services()).dom().borrow()
 }
 
-fn dom_mut<'a>(cx: &CallCx<'a>) -> JsResult<RefMut<'a, Dom>> {
-    Ok(dom_service(cx)?.borrow_mut())
+fn dom_mut<'a>(cx: &CallCx<'a>) -> RefMut<'a, Dom> {
+    DomServices::bind(cx.services()).dom().borrow_mut()
 }
 
-#[host_class(tag = "Node", event_target, methods)]
+#[host_class(tag = "Node", event_target, methods, services = DomServices)]
 struct Node {
     #[js_slot]
     index: JsValue,
@@ -39,7 +37,7 @@ struct Node {
     owner: JsValue,
 }
 
-#[host_class(tag = "Document", parent = Node, methods)]
+#[host_class(tag = "Document", parent = Node, methods, services = DomServices)]
 struct Document {
     #[js_list]
     nodes: Vec<JsValue>,
@@ -47,7 +45,7 @@ struct Document {
     window: JsValue,
 }
 
-#[host_class(tag = "Element", parent = Node, methods)]
+#[host_class(tag = "Element", parent = Node, methods, services = DomServices)]
 struct Element;
 
 fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
@@ -62,7 +60,7 @@ impl Node {
     #[get(name = "nodeType")]
     fn node_type(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let index = node_index(cx, this.instance())?;
-        let dom = dom_ref(cx)?;
+        let dom = dom_ref(cx);
         let node = dom.node(index)?;
         Ok(JsValue::number(match node.data {
             NodeData::Element(_) => 1.0,
@@ -82,7 +80,7 @@ impl Node {
     fn first_child(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.node(index)?.children.first().copied();
         dom.resolve_node(cx, owner, id)
     }
@@ -91,7 +89,7 @@ impl Node {
     fn next_sibling(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let node = dom.node(index)?;
         let id = node
             .parent
@@ -109,7 +107,7 @@ impl Node {
     fn parent_node(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
         let index = node_index(cx, this.instance())?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.node(index)?.parent;
         dom.resolve_node(cx, owner, id)
     }
@@ -127,7 +125,7 @@ impl Node {
     #[get(name = "textContent")]
     fn text_content(cx: &mut CallCx<'_>, this: This<Node>) -> JsResult<JsValue> {
         let index = node_index(cx, this.instance())?;
-        let dom = dom_ref(cx)?;
+        let dom = dom_ref(cx);
         let node = dom.node(index)?;
         Ok(match &node.data {
             NodeData::Document(_) => JsValue::null(),
@@ -143,7 +141,7 @@ impl Node {
             return Ok(());
         }
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let node = dom.node(index)?;
         let id = node.id;
         let is_text = matches!(node.data, NodeData::Text(_) | NodeData::Comment { .. });
@@ -172,7 +170,7 @@ impl Node {
         }
         let parent_index = node_index(cx, this.instance())?;
         let child_index = node_index(cx, child_node)?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let parent = dom.node(parent_index)?;
         let child_node = dom.node(child_index)?;
         if !matches!(parent.data, NodeData::Element(_)) {
@@ -200,7 +198,7 @@ impl Node {
 
 fn node_name(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<JsValue> {
     let index = node_index(cx, node)?;
-    let dom = dom_ref(cx)?;
+    let dom = dom_ref(cx);
     let node = dom.node(index)?;
     Ok(match &node.data {
         NodeData::Element(element) => JsValue::string(element.name.local.to_uppercase()),
@@ -235,7 +233,7 @@ impl Element {
         let index = node_index(cx, node)?;
         let name = cx.string(&name)?.to_string().to_ascii_lowercase();
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.node(index)?.id;
         let name = QualName::new(None, ns!(), LocalName::from(name));
         dom.doc.mutate().set_attribute(id, name, &value);
@@ -260,7 +258,7 @@ impl Document {
     #[get(name = "documentElement")]
     fn document_element(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.doc.try_root_element().map(|node| node.id);
         dom.resolve_node(cx, owner, id)
     }
@@ -268,7 +266,7 @@ impl Document {
     #[get(name = "body")]
     fn body(cx: &mut CallCx<'_>, this: This<Document>) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.doc.try_root_element().and_then(|root| {
             root.children
                 .iter()
@@ -295,7 +293,7 @@ impl Document {
     ) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
         let id = cx.string(&id)?.to_string();
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.doc.get_element_by_id(&id);
         dom.resolve_node(cx, owner, id)
     }
@@ -309,7 +307,7 @@ impl Document {
         let owner = bound_document(cx, &this)?;
         let tag = cx.string(&tag)?.to_string().to_ascii_lowercase();
         let name = QualName::new(None, ns!(html), LocalName::from(tag));
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.doc.mutate().create_element(name, Vec::new());
         dom.resolve_node(cx, owner, Some(id))
     }
@@ -322,7 +320,7 @@ impl Document {
     ) -> JsResult<JsValue> {
         let owner = bound_document(cx, &this)?;
         let value = cx.string(&value)?.to_string();
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom.doc.mutate().create_text_node(&value);
         dom.resolve_node(cx, owner, Some(id))
     }
@@ -388,7 +386,7 @@ impl Dom {
 #[host_module(
     name = "yield:dom",
     classes = [Node, Document, Element, HTMLIFrameElement],
-    services = [Rc<RefCell<Dom>>],
+    services = DomServices,
 )]
 pub(super) struct DomModule {
     #[js_slot]
@@ -423,7 +421,7 @@ impl DomModule {
         if !cached.is_undefined() {
             return Ok(cached);
         }
-        let mut dom = dom_mut(cx)?;
+        let mut dom = dom_mut(cx);
         let id = dom
             .doc
             .try_root_element()

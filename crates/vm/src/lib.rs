@@ -111,4 +111,5 @@ pub use value::{BindingId, ContinuationId, JsBigInt, JsString, ObjectId, Value, 
 pub use vm::{PendingOperationInfo, VerifiedBuild, Vm};
 pub use yield_binding_macros::{
     Decode, Encode, host, host_class, host_module, methods, module_exports, operation,
+    service_scope,
 };

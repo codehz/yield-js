@@ -35,7 +35,6 @@ mod original {
         name = "contract",
         classes = [Entity],
         operations = [Wait],
-        services = [Rc<LabelService>],
     )]
     struct Api;
 
@@ -93,7 +92,6 @@ macro_rules! independent_contract {
                 name = "contract",
                 classes = [Entity],
                 operations = [Wait],
-                services = [Rc<LabelService>],
             )]
             struct AlternateApi;
 

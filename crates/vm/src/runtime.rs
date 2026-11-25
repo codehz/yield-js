@@ -112,16 +112,23 @@ pub(crate) struct PendingOperation {
 }
 
 impl PendingOperation {
-    pub(crate) fn checkpoint(&self, services: &crate::Services) -> Result<Vec<u8>, HostFault> {
-        if self.declaration.is_none() {
+    pub(crate) fn checkpoint(
+        &self,
+        bindings: &crate::binding::Bindings,
+    ) -> Result<Vec<u8>, HostFault> {
+        let Some(declaration) = self.declaration else {
             // Only the VM deadline is durable; the timer registration is a wakeup.
             return Ok(Vec::new());
-        }
+        };
         let Some(live) = &self.live else {
             return Ok(self.state.clone());
         };
         let mut state = Vec::new();
-        live.checkpoint(&self.state, &mut state, services)?;
+        live.checkpoint(
+            &self.state,
+            &mut state,
+            &bindings.operation_services(declaration),
+        )?;
         Ok(state)
     }
 }

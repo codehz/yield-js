@@ -1,7 +1,8 @@
-//! Per-VM host declarations and resources. All platform capabilities are
-//! installed through the typed service registry before the VM starts.
+//! Per-VM host declarations and resources, linked before the VM starts.
 
-use crate::binding::{Bindings, JsValue, Services};
+use std::any::Any;
+
+use crate::binding::{Bindings, BuiltinServices, JsValue};
 use crate::value::{JsString, Value};
 
 mod console;
@@ -41,8 +42,14 @@ impl Host {
         &self.bindings
     }
 
-    pub(crate) fn services(&self) -> &Services {
-        self.bindings.services()
+    /// Resolves an embedder service by its exact type. Cache the returned
+    /// borrow for repeated reads; callbacks use their declared service scope.
+    pub fn bind_service<T: Any>(&self) -> Option<&T> {
+        self.bindings.bind_service::<T>()
+    }
+
+    pub(crate) fn builtin_services(&self) -> BuiltinServices<'_> {
+        self.bindings.builtin_services()
     }
 }
 
