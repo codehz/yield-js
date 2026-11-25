@@ -35,7 +35,11 @@
 | Solid 非 Web | [`solid-js@1.9.9`](https://unpkg.com/solid-js@1.9.9/package.json) 的生产响应式核心、`solid-js/universal` 的 `createRenderer` 和 `solid-js/store` 的 `createStore`。构建显式选用 `dist/solid.js` 和 `store/dist/store.js`，不能因 `node`/`worker` 条件误选 SSR 入口。 | `solid-js/web`、SSR、浏览器 hydration；不启用依赖浏览器 `MessageChannel` 的可选 `enableScheduling()` 路径。 |
 | React 非 Web | `react@19.2.0`、`react/jsx-runtime`、[`react-reconciler@0.33.0`](https://unpkg.com/react-reconciler@0.33.0/package.json) 和 `scheduler@0.27.0` 的生产包；使用自定义 mutation-mode `HostConfig`，按该版本实现调度与事件优先级接口。 | React DOM、React Native/Fabric 平台层、SSR/RSC、hydration 和开发工具。 |
 
-应用可写 JS/TS/JSX/TSX。离线构建负责去除类型、用 Solid 的 universal JSX 转换或 React 的 JSX runtime 转换，并解析 npm 依赖及条件导出、固定生产分支、转换 CommonJS、打成一个自包含的 ESM 入口。`compiler` 接收这份源码、声明的宿主绑定及可选源码映射；不承担 JSX/TS 转译或包解析，VM 不加载其他 JS 模块。转换必须保留 ESM 活绑定和 CommonJS 初始化等可观察行为，并保留入口显式声明的公开导出名及其绑定语义，不把依赖的内部导出自动暴露给宿主。产物只允许保留指向已声明宿主模块的静态导入，不得残留 JS 依赖导入、再导出或运行时 `require`。不得替换框架核心或 scheduler 来通过验收。
+应用入口可直接使用 JS/TS/JSX/TSX，并从源码按模块解析依赖。扩展编译器管理可达模块图；核心解析与链接层保留 ESM 语义，不要求先将依赖打成单文件。可组合的扩展管线负责模块解析/加载、语法转换和资源处理；核心提供默认 ESM 路径，扩展可分别替换或组合各阶段。项目提供可选的 npm/React 扩展配置，而非把包解析与转译规则固化为核心必需能力。该配置从调用方已安装的 `node_modules` 读取依赖，不安装、更新或锁定包，也不承诺构建可复现；不执行依赖安装或构建脚本。官方配置固定其自身支持的包入口选择策略与工具版本，但包版本由调用方管理。
+
+扩展按模块将 TypeScript 去类型、JSX 转换（React JSX runtime 或其他配置）和 CommonJS 转成核心可链接的 ESM；转换器输出的 ESM 导入继续进入同一模块图。官方 React 配置以生产包为目标，提供常见 `exports`/`require`、属性访问和循环依赖所需的实用 CJS 互操作，不承诺完整 Node.js 模块语义；无法静态确定目标的动态 `require` 在构建阶段报错。条件导出按配置选择，不因宿主环境意外选择开发或服务器入口。入口显式导出仍是宿主公开 API，依赖内部导出不自动暴露；VM 不加载其他 JS 模块。转换不得破坏 ESM 活绑定及所覆盖的 CJS 初始化行为。
+
+资源扩展可把资源导入登记到 Build 的资源表，资源以规范化 ID 去重，内容及其脚本映射参与构建身份；资源不进入 VM 堆，也不由 VM 自动应用。宿主读取 Build 资源并自行决定消费方式。CSS 支持作为 entry 可达图中的副作用资源导入；CSS Modules 配置可同时生成供脚本导入的类名映射模块，以及供宿主消费的改写 CSS 资源。项目不实现样式应用。编译错误应关联原始模块 ID、源码位置与转换阶段；源码映射为可选诊断旁路，不参与执行或构建身份。扩展配置、loader 顺序和具体 API 形状留待实施阶段确定。
 
 新建 VM 时先验证构建与宿主导入，再在同步初始化帧执行一次入口模块，并排空由此调度的微任务；未完成的宿主 operation 仍由宿主交付。顶层 `var`、`let`、`const` 和函数声明的绑定属于模块环境；它们可以遮蔽同名全局，但不会创建或覆盖全局变量或 `globalThis` 属性。顶层 `this` 为 `undefined`，给未声明名字赋值不会隐式创建全局。只有显式 `export` 的绑定对宿主公开；未导出的顶层函数和变量不构成宿主接口。快照保留模块环境，恢复时不重播初始化。
 
@@ -174,18 +178,20 @@ async generator 复用同一套挂起指令；`yield` 的操作数先按 `await`
 
 ```mermaid
 flowchart LR
-    A[自包含 ESM 源码] --> B[解析与编译]
-    B --> C[版本化字节码]
-    C --> D[VM：栈、帧、堆、Promise]
-    E[静态宿主模块描述] --> B
-    E --> D
-    D <--> H[宿主函数、codec 与 operation 策略]
-    D <--> F[单一快照：对象图、绑定数据与 pending operations]
+    A[入口与扩展管线] --> B[模块图解析、转换与资源收集]
+    B --> C[ESM 链接与编译]
+    C --> D[版本化 Build：字节码与资源]
+    D --> E[VM：栈、帧、堆、Promise]
+    F[静态宿主模块描述] --> C
+    F --> E
+    E <--> H[宿主函数、codec 与 operation 策略]
+    E <--> I[单一快照：对象图、绑定数据与 pending operations]
+    D --> J[宿主消费的资源表]
 ```
 
 ### 编译器
 
-`compiler` 是唯一接收 JS 源码的运行核心模块。它复用 Rust JavaScript parser，以 ESM 为解析目标，将离线构建输出转换为项目自有 IR；负责校验语法子集、解析词法绑定、降低异常与异步控制流、分析绑定逃逸与活性、省略可证明不可观察的绑定环境并分配帧槽，最后输出版本化字节码。不支持的语法在编译期报错。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
+`compiler` 是唯一接收 JS 源码的运行核心模块。扩展编译接口在编译器前端组织可组合的模块解析/加载、按模块转换和资源处理阶段；默认路径仍可直接编译 ESM，扩展转换后的模块也统一以 ESM 进入链接器。包管理不属于该接口的职责：调用方提供依赖文件，扩展只解析和读取。解析与转换完成后，核心复用 Rust JavaScript parser，以 ESM 为目标，将模块图转换为项目自有 IR；负责校验语法子集、解析词法绑定、降低异常与异步控制流、分析绑定逃逸与活性、省略可证明不可观察的绑定环境并分配帧槽，最后输出包含版本化字节码及资源表的 Build。不支持的语法在编译期报错。资源由宿主从 Build 中消费，不参与 VM 执行；资源内容和映射进入 Build 身份。源码映射与变量名等调试信息作为可选旁路产物，不参与执行或恢复。
 
 ### 虚拟机
 
