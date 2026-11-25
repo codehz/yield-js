@@ -2,7 +2,7 @@ use blitz_dom::{LocalName, Node, NodeData, NodeId, QualName, local_name, ns};
 use yield_binding_macros::{host_module, module_exports};
 use yield_vm::{JsError, JsResult, JsValue, ModuleCx};
 
-use super::{ACTIVE_DOM, Dom};
+use super::{Dom, DomKey};
 
 type Cx<'a> = ModuleCx<'a, DomModule>;
 type DomResult<T> = Result<T, &'static str>;
@@ -37,12 +37,11 @@ impl Dom {
 }
 
 fn with_dom<T>(cx: &mut Cx<'_>, f: impl FnOnce(&mut Dom) -> DomResult<T>) -> JsResult<T> {
-    if !ACTIVE_DOM.is_set() {
-        return Err(JsError::Fault(cx.fault("no active Blitz document")));
-    }
-    ACTIVE_DOM
-        .with(|dom| f(&mut dom.borrow_mut()))
-        .map_err(|error| cx.type_error(error))
+    let result = match cx.service::<DomKey>() {
+        Some(dom) => f(&mut dom.borrow_mut()),
+        None => return Err(JsError::Fault(cx.fault("no active Blitz document"))),
+    };
+    result.map_err(|error| cx.type_error(error))
 }
 
 #[host_module(name = "yield:dom")]

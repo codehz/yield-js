@@ -12,4 +12,3 @@ blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6e
 blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6e072335f531f7b405b3382a0678" }
 blitz-shell = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6e072335f531f7b405b3382a0678" }
 anyrender_vello = "0.16"
-scoped-tls = "1.0"

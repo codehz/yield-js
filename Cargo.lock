@@ -5127,7 +5127,6 @@ dependencies = [
  "blitz-dom",
  "blitz-html",
  "blitz-shell",
- "scoped-tls",
  "yield-binding-macros",
  "yield-compiler",
  "yield-vm",

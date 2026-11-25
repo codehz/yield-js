@@ -10,7 +10,7 @@ use blitz_dom::{DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
 use yield_binding_macros::host_bindings;
 use yield_compiler::{Compiler, MemoryResolver, Project};
-use yield_vm::{Bindings, Host, JsString, JsValue, Vm, VmError};
+use yield_vm::{Bindings, Host, JsString, JsValue, ServiceKey, Vm, VmError};
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
 
@@ -36,8 +36,15 @@ impl Dom {
     }
 }
 
-// Host bindings are shared; the active Blitz document is thread-affine.
-scoped_tls::scoped_thread_local!(static ACTIVE_DOM: RefCell<Dom>);
+struct DomKey;
+
+impl ServiceKey for DomKey {
+    type Value = Rc<RefCell<Dom>>;
+    const ID: &'static str = "yield:dom/document";
+    const VERSION: u32 = 1;
+    // Live per-run state, not a platform capability that snapshots restore.
+    const IN_FINGERPRINT: bool = false;
+}
 
 struct DomHost {
     bindings: Rc<Bindings>,
@@ -75,27 +82,30 @@ pub fn render_module(source: &str) -> Result<HtmlDocument, String> {
     let build = compiler
         .compile(Project::new("main.mjs", resolver).with_preload("dom.mjs"))
         .map_err(|e| e.to_string())?;
+    let dom = Rc::new(RefCell::new(Dom::new()));
     let bindings = host_bindings! {
         dts: "dom.d.ts",
         modules: [dom::DomModule],
-        services: {},
+        services: {
+            DomKey => dom.clone(),
+        },
     }?;
     let mut host = DomHost {
         bindings: Rc::new(bindings),
         errors: Vec::new(),
     };
-    let dom = RefCell::new(Dom::new());
-    let result = ACTIVE_DOM.set(&dom, || {
-        let mut vm = Vm::new(build, &mut host, Default::default())?;
-        vm.run_until_idle(&mut host)
-    });
+    let result = Vm::new(build, &mut host, Default::default())
+        .and_then(|mut vm| vm.run_until_idle(&mut host));
     if let Err(error) = result
         && (!matches!(error, VmError::Thrown(_)) || host.errors.is_empty())
     {
         host.errors.push(error.to_string());
     }
-    if !host.errors.is_empty() {
-        return Err(host.errors.join("\n"));
+    let errors = std::mem::take(&mut host.errors);
+    drop(host);
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
     }
+    let dom = Rc::try_unwrap(dom).map_err(|_| "Blitz document is still shared".to_owned())?;
     Ok(dom.into_inner().doc)
 }
