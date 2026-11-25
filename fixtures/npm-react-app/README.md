@@ -8,21 +8,21 @@
 | --- | --- |
 | 应用入口直接使用 TSX | `src/index.tsx` |
 | 静态导入解析到 `react/jsx-runtime` 的生产入口（`exports` 条件选择） | `src/index.tsx` 顶部导入 |
-| 锁定版本 `react@19.2.0`、`react-reconciler@0.33.0`、`scheduler@0.27.0` | `package.json` 精确版本 |
-| mutation-mode `HostConfig`、可观察内存节点树 | `src/host-config.ts` |
+| 锁定版本 `react@19.2.0`、`react-dom@19.2.0`、`scheduler@0.27.0` | `package.json` 精确版本 |
 | 函数组件、`useState`、effect 及清理、keyed 子节点重排、Promise 驱动 Suspense | `src/index.tsx` 的 `Counter` / `Reorder` / `App` |
 | 转换产物作为模块进入同一 ESM 链接层 | `src/sheet.tsx`（由动态 import 到达） |
 | CJS 静态可分析子集 + 预设条件选择 | `node_modules/scheduler/index.js`（`process.env.NODE_ENV` 分支 + 字面量 `require`，预设条件取 `cjs/scheduler.production.js`） |
-| 无 `exports` 包的字段回退规则 | `scheduler`、`react-reconciler`（无 `exports`，按预设定义回退到 `main`/`index.js`，不猜测其他字段） |
+| 无 `exports` 包的字段回退规则 | `scheduler`（无 `exports`，按预设定义回退到 `main`/`index.js`，不猜测其他字段） |
 | CSS 副作用资源导入，按资源 ID 去重，宿主自行消费 | `src/styles.css` |
+| React DOM 自带 reconciler 的首屏入口 | `src/blitz.jsx`（签入产物 `blitz.mjs`） |
 
 ## 约定
 
 - 依赖由调用方预先安装到本目录 `node_modules`；官方 npm 预设只读取已安装依赖，不安装、不更新。
 - `tsconfig.json` 仅用于开发期类型检查（`tsc --noEmit`）；构建期 TypeScript 转换只移除类型语法，不做类型检查。
-- `src/host-elements.d.ts` 为非 DOM 宿主声明 `IntrinsicElements`，元素名与 `host-config.ts` 的节点树对应。
+- 组件使用 `react-dom` 的 DOM intrinsic elements；不声明非 Web 的 `IntrinsicElements`，也不提供自定义 `HostConfig`。
 - CJS 依赖（`scheduler` 生产包为 CJS）用于验收 CJS 静态可分析子集转换；动态 `require` 应在构建期报错，本夹具不含此类用法的成功场景。
-- 资源（CSS）不进入 VM 堆；`roots` 数组是宿主消费的节点树观察点。
+- 资源（CSS）不进入 VM 堆，由宿主从 Build 读取后自行消费。
 
 ## 使用方式（compiler 实现后）
 
@@ -31,11 +31,11 @@ npm install --prefix fixtures/npm-react-app   # 调用方负责安装依赖
 cargo run -p yield-harness …                  # 以 src/index.tsx 为 entry 构建并执行
 ```
 
-预期：构建产出可链接 ESM 字节码；执行后 `roots` 中出现 `app` 节点树；同一构建产物在参考 JS 引擎（ESM 模式 + 同一 HostConfig）下节点树与事件日志一致。
+预期：构建产出可链接 ESM 字节码；`react/jsx-runtime`、动态到达的 `sheet` 模块与 CSS 资源进入同一构建图。React DOM 的运行验收由下面的 Blitz 入口承担。
 
 ## Blitz 首屏入口
 
-`src/blitz.jsx` 是独立于上述 reconciler 验收入口的 `react-dom/client` 首次挂载用例。已生成的 `blitz.mjs` 是 Rust crate 的签入输入；消费者不需要 Node.js 或 `node_modules`。维护 fixture 时在本目录运行：
+`src/blitz.jsx` 是使用 `react-dom/client` 的首次挂载用例。已生成的 `blitz.mjs` 是 Rust crate 的签入输入；消费者不需要 Node.js 或 `node_modules`。维护 fixture 时在本目录运行：
 
 ```sh
 npm ci

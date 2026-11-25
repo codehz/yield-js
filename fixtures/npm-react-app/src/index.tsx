@@ -1,7 +1,7 @@
 // TSX 应用入口：验收 docs/design/build.md 的 TSX→JSX-runtime 转换与
 // 静态 ESM 导入解析（react@19.2.0 的 exports 条件选择，React 预设取生产入口）。
 import type { JSX } from "react";
-import { Fragment, useState, useEffect, Suspense, lazy } from "react";
+import { useState, useEffect, Suspense, lazy } from "react";
 import "./styles.css";
 
 export function Button(props: { label: string; onClick: () => void }): JSX.Element {
@@ -10,11 +10,11 @@ export function Button(props: { label: string; onClick: () => void }): JSX.Eleme
 
 export function ItemList(props: { items: string[] }): JSX.Element {
   return (
-    <Fragment>
+    <ul>
       {props.items.map((item) => (
-        <item key={item}>{item}</item>
+        <li key={item}>{item}</li>
       ))}
-    </Fragment>
+    </ul>
   );
 }
 
@@ -49,16 +49,16 @@ const Sheet = lazy(async () => {
 export function App(): JSX.Element {
   const names = ["alpha", "beta", "gamma"];
   return (
-    <app>
-      <Suspense fallback={<loading />}>
+    <main>
+      <Suspense fallback={<span />}>
         <Sheet names={names} />
       </Suspense>
-    </app>
+    </main>
   );
 }
 
 export function render(
-  reconciler: (element: JSX.Element) => void,
+  mount: (element: JSX.Element) => void,
 ): void {
-  reconciler(<App />);
+  mount(<App />);
 }

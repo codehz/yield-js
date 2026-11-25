@@ -24,7 +24,7 @@
 - Rust 与宿主之间采用手工设计的 C ABI，以不透明 VM 句柄表达跨调用生命周期状态。
 - compiler 复用 Rust JavaScript parser（如 Oxc），转换到项目自有 IR；实现时选择当时最新稳定版本并锁定依赖。Oxc AST 不进入 VM 或字节码契约。
 - VM 堆采用 VM 自有对象表/句柄与 tracing GC，支持对象环、闭包共享状态及快照对象身份。
-- 首版以能运行锁定版本的 React DOM Web 客户端子集为兼容基线；当前用自建 mutation renderer 简化宿主树验收，按[构建产物](design/bytecode.md)与[框架验收用例](design/framework-acceptance.md)验收，而不是按 ECMAScript 年份或 npm 包名宣称兼容。
+- 首版以能运行锁定版本的 React DOM Web 客户端子集为兼容基线；按[构建产物](design/bytecode.md)与[框架验收用例](design/framework-acceptance.md)验收，而不是按 ECMAScript 年份或 npm 包名宣称兼容。
 - Rust 宏可以生成静态模块描述；编译器、VM 和未来的 TypeScript 声明生成器消费同一份声明，不要求宿主实现统一的字符串分派入口。
 
 ## 总体架构

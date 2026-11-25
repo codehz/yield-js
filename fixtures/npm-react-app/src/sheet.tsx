@@ -4,10 +4,10 @@ import type { JSX } from "react";
 
 export function Sheet(props: { names: string[] }): JSX.Element {
   return (
-    <sheet>
+    <ul>
       {props.names.map((name) => (
-        <item key={name}>{name}</item>
+        <li key={name}>{name}</li>
       ))}
-    </sheet>
+    </ul>
   );
 }

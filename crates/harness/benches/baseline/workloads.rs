@@ -226,13 +226,10 @@ pub(super) fn build_react_with_options(options: &Compiler) -> Build {
             "react-reconciler-0.31.0.mjs",
             concat!(
                 "const kEvents = Symbol('kEvents');\n",
-                include_str!("../../tests/e2e/vendor/react-reconciler-0.31.0.mjs"),
+                include_str!("vendor/react-reconciler-0.31.0.mjs"),
             ),
         ),
-        (
-            "renderer.mjs",
-            include_str!("../../tests/e2e/vendor/react-renderer.mjs"),
-        ),
+        ("renderer.mjs", include_str!("vendor/react-renderer.mjs")),
     ])
     .expect("valid React fixture paths");
     options
