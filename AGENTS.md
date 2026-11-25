@@ -8,10 +8,11 @@ Keep this file an index plus binding rules. Mechanisms, invariants, and per-file
 
 | File | Content |
 | --- | --- |
-| `docs/design.md` | Target design, Chinese. Not a status report. |
+| `docs/design.md` | Target design overview and topic index, Chinese. Not a status report. |
+| `docs/design/` | Topic designs: build inputs, language subset, framework acceptance, WinterTC/Fetch, host interface, host bindings, bytecode, snapshot, risks. |
+| `docs/design/host-bindings.md` | Host binding contract: declarations, `JsValue`, operations, snapshot records. |
 | `docs/implemented.md` | What the current JS subset implements, derived from code. |
 | `docs/gaps.md` | What is rejected or missing today, derived from code. |
-| `docs/host-bindings.md` | Host binding contract: declarations, `JsValue`, operations, snapshot records. |
 | `docs/internals.md` | Crate pipeline, public entry points, suspend/resume and snapshot invariants, change-location table, easy-to-break areas, code conventions. |
 | `docs/testing.md` | Test layers, `// @` case contract, case categories, host declaration fixtures. |
 
@@ -24,7 +25,7 @@ Keep this file an index plus binding rules. Mechanisms, invariants, and per-file
 - Do not weaken the suspend/resume, snapshot, or host-binding invariants in `docs/internals.md`. Incompatible bytecode changes bump `BYTECODE_VERSION`; snapshot record-shape changes bump `SNAPSHOT_FORMAT_VERSION`; build artifact container or encoding changes bump `BUILD_FORMAT_VERSION`. Bump each contract only when it changed.
 - Observable JS behavior is a `.js` case, not a new Rust harness. Snapshot identity, heap identity, slot tables, and rejected restores belong in `crates/harness/tests/e2e.rs` / `e2e/`. Keep every fixture in a category directory of `crates/harness/tests/cases/`, never at its top level.
 - `README.md` stays overview-level: no slot/snapshot mechanics, format versions, opcodes, builtin lists, or per-feature behavior notes.
-- After a behavior change, refresh `docs/gaps.md` and `docs/implemented.md` in the same commit; update `README.md` / `docs/design.md` when the target design is affected.
+- After a behavior change, refresh `docs/gaps.md` and `docs/implemented.md` in the same commit; update `README.md` and the affected file under `docs/design.md` / `docs/design/` when the target design is affected.
 - Rust only. No npm, Node, or package manager for the engine; JS files are fixtures compiled by this compiler.
 - Edition 2024, rustfmt and clippy defaults. No `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`, `[lints]`, `[features]`, or `.cargo/config.toml`.
 - Add a dependency only if the bytecode/VM/host boundary needs it. Oxc stays pinned and must not leak past `CompileError`.

@@ -1,6 +1,6 @@
 # JS 基础语法特性实现缺口（现状盘点）
 
-> 基线：`docs/design.md` 的「首版 JavaScript 支持范围」，对照当前 `crates/compiler` + `crates/vm`。
+> 基线：[`design/language.md`](design/language.md) 的「首版语言与运行时语义」及 [`design/build.md`](design/build.md) 的构建输入，对照当前 `crates/compiler` + `crates/vm`。
 > 已实现范围见 [`implemented.md`](implemented.md)，语法子集与缺口对照本文。
 > 语法子集拒绝通常报告带行列的 `unsupported syntax: …`；这与无效 JavaScript 的语法诊断不同。运行期的语义偏差另列；不把宿主或 VM 故障当作脚本异常的缺口。
 

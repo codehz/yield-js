@@ -1,6 +1,6 @@
 # 内部契约与改动指引
 
-> 本文记录**现状**契约与索引：crate 流水线、公共入口、挂起/恢复与快照不变量、改动落点、易错点、代码约定细节。目标设计见 [`design.md`](design.md)，当前覆盖面见 [`implemented.md`](implemented.md)，缺口见 [`gaps.md`](gaps.md)，宿主绑定见 [`host-bindings.md`](host-bindings.md)，测试契约见 [`testing.md`](testing.md)。
+> 本文记录**现状**契约与索引：crate 流水线、公共入口、挂起/恢复与快照不变量、改动落点、易错点、代码约定细节。目标设计见 [`design.md`](design.md)，当前覆盖面见 [`implemented.md`](implemented.md)，缺口见 [`gaps.md`](gaps.md)，宿主绑定见 [`design/host-bindings.md`](design/host-bindings.md)，测试契约见 [`testing.md`](testing.md)。
 
 ## 1. 架构与数据流
 
