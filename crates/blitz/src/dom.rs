@@ -384,7 +384,11 @@ impl Dom {
     }
 }
 
-#[host_module(name = "yield:dom", classes = [Node, Document, Element, HTMLIFrameElement])]
+#[host_module(
+    name = "yield:dom",
+    classes = [Node, Document, Element, HTMLIFrameElement],
+    services = [DomKey],
+)]
 pub(super) struct DomModule {
     #[js_slot]
     document: JsValue,

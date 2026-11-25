@@ -51,9 +51,9 @@
 
 ### 4.1 模块描述
 
-`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait])]` 中的两个依赖列表可省略，省略等同于空列表。每个模块要列出自身的完整依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
+`#[host_module]` 为 Rust 类型声明模块名和由 VM 管理的槽；`#[module_exports]` 标注同一类型的一个 inherent impl。`#[host_module(name = "test", classes = [Node], operations = [Wait], services = [LabelServiceKey])]` 中的三个依赖列表可省略，省略等同于空列表。每个模块要列出自身的完整依赖，包括父类、类方法、间接调用和恢复路径用到的类型。宏不扫描函数体；声明依赖也不会新增 JS 导出。
 
-`host_bindings!` 只接受 `dts`、`modules`、`services` 三个必填段。链接只收集选中模块的依赖：同一 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。Rust 类型身份只用于链接时去重，不进入绑定指纹或快照。
+`host_bindings!` 只接受 `dts`、`modules`、`services` 三个必填段。链接只处理选中模块的依赖：同一类或 operation 的 Rust 类型（含别名）只注册一次，不同类型使用相同类标签或 operation 名则报错。模块本身不去重。服务依赖按下述规则检查，不会自动注册；Rust 类型身份和依赖列表本身不进入绑定指纹或快照。
 
 `dts` 的相对路径以宏调用所在源文件为基准（与 `include_str!` 一致），例如 `tests/e2e/bindings.rs` 中写 `../dts/ops.d.ts`；绝对路径原样使用。只有无法确定调用文件（例如宏生成代码）时才回退到 `CARGO_MANIFEST_DIR`。VM 与编译器消费同一份规范声明：编译器只从 `.d.ts` 取得模块与值导出清单，宏把同一份声明当作实现必须满足的断言。宿主不需要实现统一的字符串分派入口。
 
@@ -206,6 +206,8 @@ pub trait Decode: Sized {
 - **字段协议。** `#[derive(Encode, Decode)]` 按声明顺序共享输出与输入游标，并附字段路径。定宽数值为小端，`bool` 和 `Option` 使用单字节 `0` / `1` 标签，`()` 无字节；`String` 与 `Vec<T>` 分别以前置 `u32` 小端字节数和元素数编码。业务校验可手写 codec；不隐式使用 `serde`。
 
 服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings` 和 `CallCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
+
+模块用 `services = [RequiredKey, OptionalKey?]` 声明依赖。`host_bindings!` 在组装服务表后、返回 `Bindings` 前检查选中模块：必需服务缺失，或任一已注册服务以同一 ID 使用了不同的 Rust 键类型，都会返回包含模块名和服务 ID 的错误。可选依赖允许服务缺失；注册端的 `Key? => None` 不会满足必需依赖。不要求每个已注册服务都被模块声明，例如 VM 内建可直接使用自己的服务。已注册服务的指纹规则不变。
 
 `CallCx::service` 返回的引用借自本次原生调用的 `Bindings`，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
 

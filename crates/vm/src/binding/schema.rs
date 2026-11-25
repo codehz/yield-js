@@ -531,10 +531,13 @@ impl<T: Default> FromBindings for T {
     }
 }
 
-/// The name and VM-managed slots of a host module.
+/// The name, VM-managed slots, and service dependencies of a host module.
 pub trait HostModule: FromBindings + Encode + Decode + 'static {
     const NAME: &'static str;
     const SLOTS: &'static [SlotDecl] = &[];
+
+    #[doc(hidden)]
+    const SERVICES: &'static [ServiceDependency] = &[];
 
     #[doc(hidden)]
     fn register_dependencies(_deps: &mut __macro_support::ModuleDependencies) {}
@@ -680,6 +683,23 @@ impl Services {
     }
 }
 
+#[doc(hidden)]
+pub struct ServiceDependency {
+    id: &'static str,
+    optional: bool,
+    matches: fn(&dyn Any) -> bool,
+}
+
+impl ServiceDependency {
+    pub const fn of<K: ServiceKey>(optional: bool) -> Self {
+        Self {
+            id: K::ID,
+            optional,
+            matches: |value| value.is::<Stored<K>>(),
+        }
+    }
+}
+
 type DecodeFn = fn(&[u8], &Bindings) -> Result<Box<dyn Any>, CodecError>;
 type EncodeFn = fn(&dyn Any, &mut Vec<u8>, &Bindings) -> Result<(), CodecError>;
 
@@ -748,6 +768,7 @@ pub struct ModuleDecl {
     name: String,
     exports: Vec<ExportDecl>,
     state: StateDecl,
+    services: &'static [ServiceDependency],
 }
 
 #[doc(hidden)]
@@ -759,7 +780,7 @@ pub mod __macro_support {
     use super::{AccessorCall, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
-        MethodDecl, ModuleDecl, ResumeCall, ReturnKind,
+        MethodDecl, ModuleDecl, ResumeCall, ReturnKind, ServiceDependency,
     };
     use super::{
         Bindings, ClassDecl, HostClass, ModuleExports, OperationDecl, OperationDriver, StateDecl,
@@ -819,6 +840,7 @@ pub mod __macro_support {
             name: M::NAME.to_owned(),
             exports: M::exports(),
             state: StateDecl::of::<M>(),
+            services: M::SERVICES,
         }
     }
 
@@ -827,6 +849,7 @@ pub mod __macro_support {
             name: name.to_owned(),
             exports,
             state: StateDecl::of::<RawModule>(),
+            services: &[],
         }
     }
 
@@ -1338,6 +1361,20 @@ impl UnlinkedBindings {
         for pair in self.modules.windows(2) {
             if pair[0].name == pair[1].name {
                 return Err(format!("duplicate host module {:?}", pair[0].name));
+            }
+        }
+        for module in &self.modules {
+            for service in module.services {
+                let id = service.id;
+                let problem = match self.services.values.get(id) {
+                    Some(entry) if !(service.matches)(entry.value.as_ref()) => "wrong key type for",
+                    None if !service.optional => "missing",
+                    _ => continue,
+                };
+                return Err(format!(
+                    "host module {:?}: {problem} host service {id:?}",
+                    module.name
+                ));
             }
         }
         self.classes.sort_by(|a, b| a.tag.cmp(&b.tag));

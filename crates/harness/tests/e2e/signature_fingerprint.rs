@@ -32,7 +32,12 @@ mod original {
         }
     }
 
-    #[host_module(name = "contract", classes = [Entity], operations = [Wait])]
+    #[host_module(
+        name = "contract",
+        classes = [Entity],
+        operations = [Wait],
+        services = [LabelServiceKey],
+    )]
     struct Api;
 
     #[module_exports]
@@ -85,7 +90,12 @@ macro_rules! independent_contract {
                 fn renamed_getter($getter_cx: &mut CallCx<'_>, _: This<Entity>) -> JsResult<$($getter)+> $view
             }
 
-            #[host_module(name = "contract", classes = [Entity], operations = [Wait])]
+            #[host_module(
+                name = "contract",
+                classes = [Entity],
+                operations = [Wait],
+                services = [LabelServiceKey],
+            )]
             struct AlternateApi;
 
             #[module_exports]

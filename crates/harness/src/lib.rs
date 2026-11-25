@@ -817,6 +817,7 @@ fn test_bindings(
     name = "test",
     classes = [Node, Matcher],
     operations = [Wait, Pause, Reject, Reissue, Timer],
+    services = [NodeFactoryKey, LabelServiceKey, timer::FakeClockKey, CountersKey?],
 )]
 struct TestModule;
 

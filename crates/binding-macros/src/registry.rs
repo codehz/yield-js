@@ -108,6 +108,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
     let mut module = None;
     let mut classes = None;
     let mut operations = None;
+    let mut services = None;
     (|input: ParseStream<'_>| {
         entries(input, |key, input| match key.to_string().as_str() {
             "name" => set(&mut module, &key, || attribute_value::<LitStr>(input)),
@@ -118,6 +119,10 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             "operations" => set(&mut operations, &key, || {
                 input.parse::<Token![=]>()?;
                 list::<TypePath>(input)
+            }),
+            "services" => set(&mut services, &key, || {
+                input.parse::<Token![=]>()?;
+                list::<ServiceDependency>(input)
             }),
             _ => Err(Error::new(key.span(), "unknown host_module option")),
         })
@@ -132,6 +137,18 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
                 #(deps.class::<#classes>();)*
                 #(deps.operation::<#operations>();)*
             }
+        }
+    });
+    let services = services.unwrap_or_default();
+    let service_dependencies = (!services.is_empty()).then(|| {
+        let declarations = services.iter().map(|service| {
+            let ServiceDependency { key, optional } = service;
+            quote!(::yield_vm::__macro_support::ServiceDependency::of::<#key>(#optional))
+        });
+        quote! {
+            const SERVICES: &'static [::yield_vm::__macro_support::ServiceDependency] = &[
+                #(#declarations),*
+            ];
         }
     });
     let slots = extract_slots(&mut item)?;
@@ -203,6 +220,7 @@ pub(super) fn host_module(args: TokenStream, item: TokenStream) -> Result<TokenS
             const NAME: &'static str = #module;
             const SLOTS: &'static [::yield_vm::SlotDecl] = #decls;
             #dependencies
+            #service_dependencies
         }
         #encode
         #decode
@@ -216,6 +234,20 @@ fn list<T: Parse>(input: ParseStream<'_>) -> Result<Vec<T>> {
         .parse_terminated(T::parse, Token![,])?
         .into_iter()
         .collect())
+}
+
+struct ServiceDependency {
+    key: TypePath,
+    optional: bool,
+}
+
+impl Parse for ServiceDependency {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        Ok(Self {
+            key: input.parse()?,
+            optional: input.parse::<Option<Token![?]>>()?.is_some(),
+        })
+    }
 }
 
 /// One `services:` entry. `Key? => option` registers the value only when the

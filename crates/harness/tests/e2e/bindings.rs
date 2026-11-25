@@ -99,6 +99,7 @@ mod strategy_fixture {
     #[host_module(
         name = "ops",
         operations = [PauseOperation, ResumeOperation, ReissueOperation, RejectOperation],
+        services = [LabelServiceKey],
     )]
     struct Ops;
 
@@ -435,7 +436,7 @@ mod stale_fixture {
         const VERSION: u32 = 1;
     }
 
-    #[host_module(name = "stale", classes = [Sink])]
+    #[host_module(name = "stale", classes = [Sink], services = [StashKey])]
     struct Stale;
 
     #[module_exports]
@@ -514,7 +515,7 @@ mod guest_call_fixture {
         const VERSION: u32 = 1;
     }
 
-    #[host_module(name = "guest")]
+    #[host_module(name = "guest", services = [StashKey, RunsKey])]
     struct Guest;
 
     #[module_exports]
@@ -762,7 +763,7 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "test", operations = [Wait])]
+    #[host_module(name = "test", operations = [Wait], services = [LabelServiceKey])]
     struct TestModule;
 
     #[module_exports]
@@ -837,7 +838,7 @@ mod counter_fixture {
         }
     }
 
-    #[host_module(name = "counter")]
+    #[host_module(name = "counter", services = [PayloadKey])]
     #[derive(Encode, Decode)]
     struct ServiceCounter {
         count: ServiceField,

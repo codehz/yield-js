@@ -273,7 +273,11 @@ macro_rules! timer_contract {
         mod $name {
             use super::*;
 
-            #[host_module(name = "contract", operations = [Timer])]
+            #[host_module(
+                name = "contract",
+                operations = [Timer],
+                services = [yield_harness::timer::FakeClockKey],
+            )]
             struct Api;
 
             #[module_exports]

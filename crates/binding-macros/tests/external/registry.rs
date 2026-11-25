@@ -7,7 +7,7 @@ use yield_vm::{
     Services, host_bindings, host_class, host_module, module_exports, operation,
 };
 
-#[host_module(name = "state", operations = [Work])]
+#[host_module(name = "state", operations = [Work], services = [ClockV2, CounterKey?])]
 #[derive(Encode, Decode)]
 struct State {
     #[js_slot]
@@ -215,6 +215,40 @@ impl ServiceKey for LocalKey {
     type Value = Rc<Cell<u32>>;
     const ID: &'static str = "local";
     const VERSION: u32 = 1;
+}
+
+type ClockAlias = ClockV2;
+
+#[test]
+fn validates_service_dependencies_of_selected_modules() -> Result<(), String> {
+    let missing = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [State],
+        services: { ClockAlias? => None::<u64> },
+    };
+    assert_eq!(
+        missing.unwrap_err(),
+        "host module \"state\": missing host service \"clock\""
+    );
+
+    let wrong_key = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [State],
+        services: { OtherClock => 17 },
+    };
+    assert_eq!(
+        wrong_key.unwrap_err(),
+        "host module \"state\": wrong key type for host service \"clock\""
+    );
+
+    let bindings = host_bindings! {
+        dts: "../dts/state.d.ts",
+        modules: [State],
+        services: { ClockAlias? => Some(17), CounterKey? => None::<u64> },
+    }?;
+    assert_eq!(bindings.service::<ClockV2>(), Some(&17));
+    assert_eq!(bindings.service::<CounterKey>(), None);
+    Ok(())
 }
 
 #[test]

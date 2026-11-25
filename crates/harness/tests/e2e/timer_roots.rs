@@ -168,7 +168,11 @@ fn callback_gc_keeps_ready_tasks_and_nested_guest_frames_alive() {
     assert!(idle.operations.is_empty());
 }
 
-#[yield_vm::host_module(name = "repeat_timer", operations = [yield_harness::Timer])]
+#[yield_vm::host_module(
+    name = "repeat_timer",
+    operations = [yield_harness::Timer],
+    services = [yield_harness::timer::FakeClockKey],
+)]
 struct RepeatTimer;
 
 #[yield_vm::module_exports]

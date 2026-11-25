@@ -146,7 +146,11 @@ fn demo_bindings(
     }
 }
 
-#[host_module(name = "demo", operations = [Wait])]
+#[host_module(
+    name = "demo",
+    operations = [Wait],
+    services = [LabelServiceKey, DemoCountersKey?],
+)]
 struct Demo;
 
 #[module_exports]

@@ -380,7 +380,11 @@ fn zero_deadline_delivery_is_ordered_and_handles_are_never_reused() {
     assert_eq!(vm.get_export("total").unwrap(), Value::number(3.0));
 }
 
-#[yield_vm::host_module(name = "chain", operations = [yield_harness::Timer])]
+#[yield_vm::host_module(
+    name = "chain",
+    operations = [yield_harness::Timer],
+    services = [yield_harness::timer::FakeClockKey],
+)]
 struct Chain;
 
 #[yield_vm::module_exports]

@@ -221,7 +221,11 @@ fn linked_task_survives_restore_and_can_be_cancelled_while_ready() {
     }
 }
 
-#[yield_vm::host_module(name = "branch", operations = [Wait])]
+#[yield_vm::host_module(
+    name = "branch",
+    operations = [Wait],
+    services = [LabelServiceKey, CountersKey],
+)]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 struct Branch {
     count: u8,
