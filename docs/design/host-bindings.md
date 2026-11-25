@@ -207,6 +207,8 @@ pub trait Decode: Sized {
 
 服务所属模块用零大小标记类型实现 `ServiceKey`，声明值类型 `Value`、稳定 ID 和版本。`host_bindings!` 的 `services:` 段是一张 `Key => value` 表，宏在链接前逐项 `insert`；`Key? => option` 只在 `option` 为 `Some` 时注册，用于可选平台能力。重复 ID 使整个调用返回错误且不覆盖。链接后，`Bindings` 和 `CallCx` 均用 `service::<Key>()` 借用资源；即使 ID 与值类型相同，不同的键也不能读到彼此的值。
 
+`CallCx::service` 返回的引用借自本次原生调用的 `Bindings`，不占用对 `CallCx` 的借用。绑定可以一边持有服务引用或借用守卫，一边用 `&mut CallCx` 分配对象或写入槽。服务内部的借用规则不变；返回 `HostStep::Suspend` 后，续体须通过新的 `CallCx` 重新获取服务，不能保存本次调用的借用。
+
 ```rust
 host_bindings! {
     dts: "test.d.ts",

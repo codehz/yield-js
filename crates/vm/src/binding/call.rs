@@ -653,7 +653,9 @@ impl<'a> CallCx<'a> {
         crate::ops::same_value(&left.value, &right.value)
     }
 
-    pub fn service<K: ServiceKey>(&self) -> Option<&K::Value> {
+    /// Borrows a linked service for the activation, independent of the VM borrow.
+    /// Holding the reference does not prevent mutable access to this context.
+    pub fn service<K: ServiceKey>(&self) -> Option<&'a K::Value> {
         self.bindings.service::<K>()
     }
 
