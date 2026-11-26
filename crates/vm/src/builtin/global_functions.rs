@@ -43,7 +43,7 @@ function!(IS_FINITE, "isFinite", 1, |vm, host, roots, args, _| {
 function!(EVAL, "eval", 1, |vm, _, roots, _, _| {
     vm.alloc_class_error(
         roots,
-        ErrorKind::EvalError.into(),
+        ErrorKind::EvalError,
         Some("Dynamic code evaluation is disabled".into()),
     )
     .map(Invocation::Thrown)
@@ -147,11 +147,7 @@ fn call_uri<P: PlatformServices>(
     match transform(text) {
         Some(text) => Ok(Invocation::Value(Value::string(text))),
         None => vm
-            .alloc_class_error(
-                roots,
-                ErrorKind::URIError.into(),
-                Some("URI malformed".into()),
-            )
+            .alloc_class_error(roots, ErrorKind::URIError, Some("URI malformed".into()))
             .map(Invocation::Thrown),
     }
 }

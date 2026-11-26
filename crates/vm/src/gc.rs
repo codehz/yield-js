@@ -303,10 +303,6 @@ impl VmCore {
         for class in &self.host_classes {
             tracer.mark_object(class.prototype)?;
         }
-        for (_, export) in &self.error_exports {
-            tracer.mark_object(export.constructor)?;
-            tracer.mark_object(export.prototype)?;
-        }
         for state in &self.module_states {
             for slot in &state.slots {
                 tracer.mark_slot(slot)?;

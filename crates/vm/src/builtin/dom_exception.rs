@@ -156,16 +156,10 @@ fn construct<P: PlatformServices>(
     new_target: &Value,
 ) -> Result<Invocation, VmError> {
     let roots = &roots.with(&args);
-    let mut strings = [JsString::default(), JsString::from("Error")];
-    for (text, arg) in strings.iter_mut().zip(&args) {
-        if !matches!(arg.view(), ValueRef::Undefined) {
-            *text = match vm.coerce_string(host, roots, arg)? {
-                Ok(text) => text,
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            };
-        }
-    }
-    let [message, name] = strings;
+    let [message, name] = match vm.dom_exception_strings(host, roots, &args)? {
+        Ok(strings) => strings,
+        Err(error) => return Ok(Invocation::Thrown(error)),
+    };
     let prototype =
         match vm.read_property(host, roots, new_target, PropertyKeyRef::String("prototype"))? {
             Invocation::Value(value) => match value.view() {
@@ -174,31 +168,47 @@ fn construct<P: PlatformServices>(
             },
             thrown @ Invocation::Thrown(_) => return Ok(thrown),
         };
-    let value = if let Some(prototype) = prototype {
-        vm.alloc_dom_exception_with(prototype, name, message)
-    } else {
-        vm.alloc_dom_exception(name, message)
-    };
-    Ok(Invocation::Value(value))
+    let prototype = prototype.unwrap_or_else(|| vm.builtins.get(PROTOTYPE));
+    Ok(Invocation::Value(Value::object(
+        vm.alloc_dom_exception_with(prototype, name, message),
+    )))
 }
 
 impl VmCore {
-    /// Allocate from internal strings without consulting the global constructor or its properties.
-    pub(crate) fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
-        self.alloc_dom_exception_with(self.builtins.get(PROTOTYPE), name, message)
+    pub(crate) fn dom_exception_strings<'a, P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        args: impl IntoIterator<Item = &'a Value>,
+    ) -> Result<Result<[JsString; 2], Value>, VmError> {
+        let mut strings = [JsString::default(), JsString::from("Error")];
+        for (text, arg) in strings.iter_mut().zip(args) {
+            if !matches!(arg.view(), ValueRef::Undefined) {
+                *text = match self.coerce_string(host, roots, arg)? {
+                    Ok(text) => text,
+                    Err(error) => return Ok(Err(error)),
+                };
+            }
+        }
+        Ok(Ok(strings))
     }
 
-    fn alloc_dom_exception_with(
+    /// Allocate from internal strings without consulting the global constructor or its properties.
+    pub(crate) fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
+        Value::object(self.alloc_dom_exception_with(self.builtins.get(PROTOTYPE), name, message))
+    }
+
+    pub(crate) fn alloc_dom_exception_with(
         &mut self,
         prototype: ObjectId,
         name: JsString,
         message: JsString,
-    ) -> Value {
-        Value::object(self.heap.alloc(Object::DomException {
+    ) -> ObjectId {
+        self.heap.alloc(Object::DomException {
             object: PlainObject::new(Some(prototype)),
             name,
             message,
-        }))
+        })
     }
 }
 

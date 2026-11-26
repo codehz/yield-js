@@ -296,16 +296,15 @@ impl CallCx {
 
 区分原则：**可由脚本处理的语义错误用 `JsError`；违反宿主契约用 `HostFault`。**
 
-宿主通过 `ErrorClass` 声明脚本可见的异常类别：`Builtin(ErrorKind)` 覆盖七个内建错误种类，`Host { module, name }` 指向宿主模块的一个 `#[error_class]` 声明常量（如 `ErrorClass::Host { module: "parser", name: "ParseError" }`）。同一常量可传给 `CallCx::alloc_error`、`Vm::alloc_error` 或 `JsError::new_error`，产生可捕获、可 `instanceof`、可跨挂起保存的 branded Error：
+宿主用普通 `#[host_class]` 声明异常：`builtin_parent = Error` 或 `builtin_parent = DOMException` 与直接宿主 `parent` 互斥；继承来的标准异常根也不能与 EventTarget 品牌并存。`#[constructor(name = "ParseError", class = ParseError)]` 导出同一个原生构造器，异常类须用 `new`。静态继承沿声明连到最近有导出的父类构造器，最终连到标准构造器。
 
-- `#[error_class]` 常量（写法 `#[error_class] const ParseError: ErrorClass = ErrorClass::Host { … };`）在 `#[module_exports]` 内声明；宏校验常量名与 `name` 一致，宿主构建时校验 `module` 与所属模块一致，否则拒绝构建。声明的父类固定为内建 `Error`；`ErrorConstructor` 导出没有 Rust 回调，构造/调用共用内建 Error 的 message 转换、`options.cause` 与活动栈逻辑。
-- VM 在模块初始化前为每个声明 intern 唯一的构造器与原型（`ctor -> Error`、`ctor.prototype -> Error.prototype`、`prototype.constructor -> ctor`、非枚举 `name`），普通导入、namespace 与 Rust 分配共享同一对对象；二者列入 GC 与快照根，快照按导出保存其 ID（格式版本 93），恢复按绑定指纹重链，Full 校验声明全集、唯一 ID、构造器 native target 与原型形状。
-- 宿主类身份是声明的 `module:name`，不是可被脚本改写的 `.name`；同一导出名在不同模块互不相认。声明缺失或指向非 Error 导出是宿主配置错误，返回 `HostFault`，不回退到普通 Error。
+- `CallCx::alloc` 使用标准基类默认值；`alloc_with_super(payload, args)` 只接受有标准异常祖先的类，由 VM 同步执行标准转换与 `cause` 读取，将脚本异常原样传播。实例保留宿主槽和 payload；`Error` 保留创建点活动栈，`DOMException` 使用内部 name/message 和标准 code。`prototype_name` 显式声明原型的非枚举可写可配置 `name`，不参与身份判断。
+- `Error.isError` 识别底层品牌；改写原型不改变品牌，伪造原型和代理不会取得品牌。`instanceof` 仍使用脚本原型。异常实例以 `cx.throw(value)` 抛出，内建分配 API 仅接收 `ErrorKind`。快照与 GC 使用普通宿主类路径，快照格式 94 的 Full 恢复核对实例底层形态，不重设可变原型或栈。
 - 恢复策略（`Reject`）与恢复期中断合成的拒绝原因是带声明原文的普通 `Error` 对象；脚本显式 `throw`、`Promise.reject`、用户提供的 abort reason 与外部 completion 的拒绝值原样透传，不被拦截或包装。
 
 ### 6.4 重入与执行线程
 
-- 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。
+- 绑定不得通过 VM 执行入口重入，不排空微任务，不接受事件。`alloc_with_super` 的标准参数转换是受控的同步脚本调用，调用内有效句柄在转换期间仍受 GC 保护。
 - `Host` 随 VM 在同一线程持有；并行时各线程独立构造宿主。跨线程的能力与状态由具体服务值自行声明和同步。
 - 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `timer`（`TimerService`）（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。

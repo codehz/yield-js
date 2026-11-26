@@ -1,13 +1,14 @@
+use std::cell::RefCell;
 use std::fmt;
 
-use crate::gc::ActiveRoots;
+use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Attributes, EventState, EventTargetState, Object, PlainObject, Property};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::VmCore;
 
 use super::schema::*;
 use super::services::Services;
-use crate::error::{ErrorClass, ErrorKind};
+use crate::error::ErrorKind;
 
 // ---------------------------------------------------------------------------
 // Values
@@ -67,6 +68,11 @@ impl JsValue {
             value,
             origin: Origin::Handle { epoch, call },
         }
+    }
+
+    fn rooted_handle(value: Value, epoch: u32, call: u64, roots: &RefCell<HandleRoots>) -> Self {
+        roots.borrow_mut().retain(&value);
+        Self::handle(value, epoch, call)
     }
 
     pub fn is_undefined(&self) -> bool {
@@ -434,6 +440,50 @@ pub fn with_class<'a, C: HostClass, R>(
     run(&mut ClassCx { call, services })
 }
 
+impl TraceRoots for JsValue {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), crate::VmError> {
+        self.value.trace(tracer)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct HandleRoots {
+    first: Option<Value>,
+    rest: Vec<Value>,
+}
+
+impl HandleRoots {
+    fn retain(&mut self, value: &Value) {
+        if !matches!(value.view(), ValueRef::Object(_) | ValueRef::Symbol(_)) {
+            return;
+        }
+        match &self.first {
+            None => self.first = Some(value.clone()),
+            Some(first) if self.rest.last().unwrap_or(first) != value => {
+                self.rest.push(value.clone())
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+impl TraceRoots for HandleRoots {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), crate::VmError> {
+        self.first.trace(tracer)?;
+        self.rest.trace(tracer)
+    }
+}
+
+pub(crate) type AllocateSuper<'a> = dyn Fn(
+        &mut VmCore,
+        &ActiveRoots<'_>,
+        BuiltinClassParent,
+        ObjectId,
+        &str,
+        &[JsValue],
+    ) -> Result<Result<ObjectId, Value>, crate::VmError>
+    + 'a;
+
 pub struct CallCx<'a> {
     pub(crate) vm: &'a mut VmCore,
     pub(crate) roots: &'a ActiveRoots<'a>,
@@ -445,6 +495,9 @@ pub struct CallCx<'a> {
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
+    pub(crate) allocate_super: &'a AllocateSuper<'a>,
+    // Argument coercion can execute guest code and collect while the callback is active.
+    pub(crate) handles: RefCell<HandleRoots>,
 }
 
 impl<'a> CallCx<'a> {
@@ -692,15 +745,15 @@ impl<'a> CallCx<'a> {
         }
     }
 
-    /// Allocate an error of `class` with the current call's active stack.
+    /// Allocate a built-in error with the current call's active stack.
     pub fn alloc_error(
         &mut self,
-        class: impl Into<ErrorClass>,
+        kind: ErrorKind,
         message: impl Into<JsString>,
     ) -> JsResult<JsValue> {
         match self
             .vm
-            .alloc_class_error(self.roots, class.into(), Some(message.into()))
+            .alloc_class_error(self.roots, kind, Some(message.into()))
         {
             Ok(value) => Ok(self.js_value(value)),
             Err(error) => Err(JsError::Fault(HostFault::new(error.to_string()))),
@@ -728,10 +781,35 @@ impl<'a> CallCx<'a> {
     }
 
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {
+        self.alloc_instance(payload, None)
+    }
+
+    /// Pass explicit arguments to the declared standard base constructor.
+    /// Conversion may execute guest code and throw the original JavaScript value.
+    pub fn alloc_with_super<T: HostClass>(
+        &mut self,
+        payload: T,
+        args: &[JsValue],
+    ) -> JsResult<Instance<T>> {
+        self.alloc_instance(payload, Some(args))
+    }
+
+    fn alloc_instance<T: HostClass>(
+        &mut self,
+        payload: T,
+        args: Option<&[JsValue]>,
+    ) -> JsResult<Instance<T>> {
         let class = self
             .bindings
             .class_by_tag(T::TAG)
             .ok_or_else(|| JsError::Fault(self.fault(format!("unregistered class {}", T::TAG))))?;
+        let builtin = self.bindings.class_builtin_root(class);
+        if args.is_some() && builtin.is_none() {
+            return Err(JsError::fault(format!(
+                "class {} has no standard base",
+                T::TAG
+            )));
+        }
         let record = self.vm.host_classes.get(class).ok_or_else(|| {
             JsError::Fault(self.fault(format!("class {} has no prototype", T::TAG)))
         })?;
@@ -750,7 +828,30 @@ impl<'a> CallCx<'a> {
                 T::TAG
             ))));
         }
-        let object = if self.bindings.class_is_event_target(class) {
+        let object = if let Some(builtin) = builtin {
+            let name = self.bindings.class_error_stack_name(class);
+            let object = if let Some(args) = args.filter(|args| !args.is_empty()) {
+                for arg in args {
+                    self.check_value(arg)?;
+                }
+                let handles = self.handles.borrow();
+                let live = (&*handles, &self.args, args);
+                (self.allocate_super)(
+                    self.vm,
+                    &self.roots.with(&live),
+                    builtin,
+                    prototype,
+                    name,
+                    args,
+                )
+            } else {
+                (self.allocate_super)(self.vm, self.roots, builtin, prototype, name, &[])
+            };
+            object
+                .map_err(|error| JsError::fault(error.to_string()))?
+                .map_err(|error| self.throw(self.js_value(error)))?
+        } else if self.bindings.class_is_event_target(class) {
+            // EventTarget branding is independent of standard exception bases.
             self.vm.heap.alloc(Object::EventTarget {
                 object: PlainObject::new(Some(prototype)),
                 target: EventTargetState::default(),
@@ -775,6 +876,7 @@ impl<'a> CallCx<'a> {
                 payload: Some(payload),
             },
         );
+        self.handles.get_mut().retain(&Value::object(object));
         Ok(Instance::new(object))
     }
 
@@ -823,6 +925,7 @@ impl<'a> CallCx<'a> {
             value,
             epoch: self.epoch,
             call: self.call,
+            handles: &self.handles,
         })
     }
 
@@ -914,7 +1017,7 @@ impl<'a> CallCx<'a> {
     }
 
     pub(crate) fn js_value(&self, value: Value) -> JsValue {
-        JsValue::handle(value, self.epoch, self.call)
+        JsValue::rooted_handle(value, self.epoch, self.call, &self.handles)
     }
 
     /// Translate a declaration-local slot index into the combined layout.
@@ -1120,6 +1223,7 @@ pub struct Inspect<'a> {
     value: JsValue,
     epoch: u32,
     call: u64,
+    handles: &'a RefCell<HandleRoots>,
 }
 
 impl<'a> Inspect<'a> {
@@ -1227,8 +1331,11 @@ impl<'a> Inspect<'a> {
         let object = self.vm.heap.get(id).ok()?;
         match object.own_property(key.borrowed()) {
             Some(property) => match property.into_owned() {
-                Property::Data(value) => Some(InspectValue::Data(JsValue::handle(
-                    value, self.epoch, self.call,
+                Property::Data(value) => Some(InspectValue::Data(JsValue::rooted_handle(
+                    value,
+                    self.epoch,
+                    self.call,
+                    self.handles,
                 ))),
                 Property::Accessor { .. } => Some(InspectValue::Accessor),
             },

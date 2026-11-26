@@ -7,7 +7,7 @@ use super::vm::{
     ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, VmCore,
     host_function_metadata, module_getter_capture, next_epoch, property_caches,
 };
-use crate::binding::{Bindings, ExportDecl, NativeTarget};
+use crate::binding::{Bindings, BuiltinClassParent, ExportDecl, NativeTarget};
 use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
@@ -132,7 +132,6 @@ impl VmCore {
         );
         vm.install_templates();
         vm.install_classes(bindings)?;
-        vm.install_error_exports(bindings)?;
         vm.install_module_states(bindings);
         vm.install_imports(bindings, resolved)?;
         Ok(vm)
@@ -202,7 +201,6 @@ impl VmCore {
             object_urls: Default::default(),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
-            error_exports: Vec::new(),
         }
     }
 
@@ -285,6 +283,14 @@ impl VmCore {
     fn install_classes(&mut self, bindings: &Bindings) -> Result<(), VmError> {
         for (class, _) in bindings.classes() {
             let prototype = self.heap.alloc_plain_with(None);
+            if let Some(name) = bindings.class_prototype_name(class) {
+                self.heap.define_data(
+                    prototype,
+                    "name",
+                    Value::string(name.into()),
+                    Attributes::METHOD,
+                )?;
+            }
             self.host_classes.push(HostClassRecord {
                 prototype,
                 source: class,
@@ -343,6 +349,11 @@ impl VmCore {
         for (class, _) in bindings.classes() {
             let parent = if let Some(parent) = bindings.class_parent(class) {
                 self.host_classes[parent].prototype
+            } else if let Some(parent) = bindings.class_builtin_parent(class) {
+                self.builtins.get(match parent {
+                    BuiltinClassParent::Error => "error.prototype",
+                    BuiltinClassParent::DOMException => "domException.prototype",
+                })
             } else if bindings.class_is_event_target(class) {
                 self.builtins.get(crate::builtin::event::TARGET_PROTOTYPE)
             } else {
@@ -351,49 +362,51 @@ impl VmCore {
             self.heap
                 .set_prototype(self.host_classes[class].prototype, Some(parent))?;
         }
-        Ok(())
-    }
-
-    /// Interns one constructor and prototype for every declared error
-    /// subclass, before module initialization and import installation.
-    /// Allocations through `ErrorClass::Host` share these objects with the
-    /// script-visible constructor.
-    fn install_error_exports(&mut self, bindings: &Bindings) -> Result<(), VmError> {
-        for (id, class, name) in bindings.error_constructor_decls() {
-            let target = NativeTarget::Export(id);
-            let constructor = self
-                .heap
-                .intern_native(target, true, 1, JsString::from(name));
-            let prototype = self
-                .heap
-                .alloc_plain_with(Some(self.builtins.get("error.prototype")));
-            self.heap
-                .set_prototype(constructor, Some(self.builtins.get("error")))?;
+        let mut constructors = vec![None; self.host_classes.len()];
+        let mut exports = Vec::new();
+        for (id, class) in bindings.class_constructor_decls() {
+            let value = self.import_export_value(bindings, ResolvedExport::Function(id))?;
+            let crate::value::ValueRef::Object(constructor) = value.view() else {
+                unreachable!("native constructor");
+            };
+            let prototype = self.host_classes[class].prototype;
             self.heap.define_data(
                 constructor,
                 "prototype",
                 Value::object(prototype),
                 Attributes::FIXED,
             )?;
-            self.heap.define_data(
-                prototype,
-                "constructor",
-                Value::object(constructor),
-                Attributes::METHOD,
-            )?;
-            self.heap.define_data(
-                prototype,
-                "name",
-                Value::string(JsString::from(name)),
-                Attributes::METHOD,
-            )?;
-            self.error_exports.push((
-                class,
-                crate::vm::ErrorExport {
-                    constructor,
+            if constructors[class].is_none() {
+                constructors[class] = Some(constructor);
+                self.heap.define_data(
                     prototype,
-                },
-            ));
+                    "constructor",
+                    Value::object(constructor),
+                    Attributes::METHOD,
+                )?;
+            }
+            exports.push((class, constructor));
+        }
+        for (class, constructor) in exports {
+            let mut current = bindings.class_parent(class);
+            let mut parent = None;
+            while let Some(ancestor) = current {
+                if constructors[ancestor].is_some() {
+                    parent = constructors[ancestor];
+                    break;
+                }
+                current = bindings.class_parent(ancestor);
+            }
+            if let Some(parent) = parent.or_else(|| {
+                bindings.class_builtin_root(class).map(|root| {
+                    self.builtins.get(match root {
+                        BuiltinClassParent::Error => "error",
+                        BuiltinClassParent::DOMException => "domException",
+                    })
+                })
+            }) {
+                self.heap.set_prototype(constructor, Some(parent))?;
+            }
         }
         Ok(())
     }

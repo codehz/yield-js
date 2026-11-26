@@ -1281,17 +1281,6 @@ impl VmCore {
         let mut current = Some(target);
         while let Some(id) = current {
             let object = self.heap.get(id)?;
-            if let Object::Native(NativeObject::Host {
-                target: crate::binding::NativeTarget::Export(export),
-                ..
-            }) = *object
-                && key.is_str("prototype")
-                && let Some(class) = host.bindings().export_class(export)
-            {
-                return Ok(Invocation::Value(Value::object(
-                    self.host_classes[class].prototype,
-                )));
-            }
             if let Object::Proxy { slots, .. } = *object {
                 let Some((target, handler)) = slots else {
                     return self.throw_type_error(roots, "Proxy has been revoked");

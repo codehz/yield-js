@@ -1471,7 +1471,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_class_error(roots, ErrorKind::RangeError.into(), Some(message.into()))
+        self.alloc_class_error(roots, ErrorKind::RangeError, Some(message.into()))
     }
 }
 

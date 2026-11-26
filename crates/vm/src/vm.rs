@@ -6,7 +6,7 @@ use crate::binding::{
 };
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
-use crate::error::{ErrorClass, ErrorKind, VmError};
+use crate::error::{ErrorKind, VmError};
 use crate::fetch::FetchEvent;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
@@ -168,7 +168,6 @@ pub(crate) struct RestoredState {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
-    pub(crate) error_exports: Vec<(ErrorClass, ErrorExport)>,
 }
 
 /// Runtime-only metadata indexed by the original, validated function table.
@@ -513,16 +512,16 @@ impl<P: PlatformServices> Vm<P> {
         self.core.alloc_dom_exception(name, message)
     }
 
-    /// Allocates an error of `class` with an empty stack, since no script is
+    /// Allocates a built-in error with an empty stack, since no script is
     /// running. The value participates in GC and snapshots like any other VM
     /// object; use it as an explicit root to keep it across snapshots.
     pub fn alloc_error(
         &mut self,
-        class: impl Into<ErrorClass>,
+        kind: ErrorKind,
         message: impl Into<JsString>,
     ) -> Result<Value, VmError> {
         self.core
-            .alloc_class_error(&ActiveRoots::EMPTY, class.into(), Some(message.into()))
+            .alloc_class_error(&ActiveRoots::EMPTY, kind, Some(message.into()))
     }
 }
 
@@ -581,39 +580,11 @@ pub(crate) struct VmCore {
     pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
-    /// Declared host error subclasses, in declaration order: the class and
-    /// its interned constructor plus prototype. GC and snapshot roots.
-    pub(crate) error_exports: Vec<(ErrorClass, ErrorExport)>,
     /// Per-function, per-PC monomorphic property cache. Never serialized.
     pub(crate) property_caches: Vec<Vec<PropertyCache>>,
 }
 
-/// The objects backing one declared error subclass. Allocations and the
-/// script-visible constructor share these; scripts cannot replace them.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ErrorExport {
-    pub(crate) constructor: ObjectId,
-    pub(crate) prototype: ObjectId,
-}
-
 impl VmCore {
-    /// The stored objects for one declared host error subclass.
-    pub(crate) fn error_export(&self, class: ErrorClass) -> Option<ErrorExport> {
-        self.error_exports
-            .iter()
-            .find(|(declared, _)| *declared == class)
-            .map(|(_, export)| *export)
-    }
-
-    pub(crate) fn error_export_prototype(
-        &self,
-        module: &'static str,
-        name: &'static str,
-    ) -> Option<ObjectId> {
-        self.error_export(ErrorClass::Host { module, name })
-            .map(|export| export.prototype)
-    }
-
     pub(crate) fn monotonic_millis<P: PlatformServices>(&self, _: &Host<P>) -> f64 {
         self.clock.now()
     }
@@ -630,22 +601,16 @@ impl VmCore {
         let bindings = host.bindings();
         let declaration = match target {
             NativeTarget::Export(id) => match bindings.export_decl(id) {
-                Some(ExportDecl::Function(function))
-                    if let ExportCall::ErrorConstructor(class) = function.call =>
-                {
-                    let export = self.error_export(class).ok_or_else(|| {
-                        VmError::HostFault(format!("undeclared error class {class:?}"))
-                    })?;
-                    let args = args.to_vec()?;
-                    let result =
-                        self.construct_error(host, roots, &function.name, export.prototype, args)?;
-                    return self.with_result_prototype(
-                        roots,
-                        result,
-                        construction.and_then(|construction| construction.prototype),
-                    );
-                }
                 Some(ExportDecl::Function(function)) => {
+                    if construction.is_none()
+                        && function.constructable
+                        && bindings
+                            .export_class(id)
+                            .is_some_and(|class| bindings.class_builtin_root(class).is_some())
+                    {
+                        return self
+                            .throw_type_error(roots, &format!("{} requires new", function.name));
+                    }
                     (function.call, function.constructable, function.name.clone())
                 }
                 _ => {
@@ -750,6 +715,33 @@ impl VmCore {
         };
         let context = (receiver, prototype);
         let roots = &roots.with(&context);
+        let allocate_super = |vm: &mut VmCore,
+                              roots: &ActiveRoots<'_>,
+                              base,
+                              prototype,
+                              name: &str,
+                              args: &[JsValue]| {
+            let arg = |index| args.get(index).map(|arg: &JsValue| &arg.value);
+            match base {
+                crate::BuiltinClassParent::Error => {
+                    let message = match vm.error_message(host, roots, arg(0))? {
+                        Ok(message) => message,
+                        Err(error) => return Ok(Err(error)),
+                    };
+                    let id = vm.alloc_error_with(roots, prototype, name, message)?;
+                    Ok(vm
+                        .install_error_cause(host, &roots.with(&id), id, arg(1))?
+                        .map(|()| id))
+                }
+                crate::BuiltinClassParent::DOMException => {
+                    let strings =
+                        vm.dom_exception_strings(host, roots, args.iter().map(|arg| &arg.value))?;
+                    Ok(strings.map(|[message, name]| {
+                        vm.alloc_dom_exception_with(prototype, name, message)
+                    }))
+                }
+            }
+        };
         loop {
             if task.is_some_and(|id| !self.host_tasks.contains_key(&id)) {
                 return Ok(None);
@@ -769,12 +761,14 @@ impl VmCore {
                 this: wrap(receiver.clone()),
                 construct: construction.is_some() && matches!(entry, HostEntry::Call(_)),
                 allocation_prototype,
+                allocate_super: &allocate_super,
+                handles: Default::default(),
             };
             let (cx, step) = match entry {
                 HostEntry::Resume(resume, outcome) => {
                     let outcome = match outcome {
-                        Invocation::Value(value) => GuestOutcome::Returned(wrap(value)),
-                        Invocation::Thrown(value) => GuestOutcome::Thrown(wrap(value)),
+                        Invocation::Value(value) => GuestOutcome::Returned(cx.js_value(value)),
+                        Invocation::Thrown(value) => GuestOutcome::Thrown(cx.js_value(value)),
                     };
                     match resume {
                         ResumeCall::Plain(resume) => {
@@ -791,9 +785,6 @@ impl VmCore {
                     (cx, step)
                 }
                 HostEntry::Call(ExportCall::Module(call)) => call(ModuleDispatch::new(cx, owner)),
-                // Error constructor exports never reach the host step loop;
-                // call_host constructs them directly.
-                HostEntry::Call(ExportCall::ErrorConstructor(_)) => unreachable!(),
             };
             let request = match step {
                 Ok(HostStep::Return(value)) => {
@@ -810,10 +801,10 @@ impl VmCore {
                         .map(Some)
                         .map_err(|error| VmError::Host(error.0));
                 }
-                Err(JsError::Error { class, message }) => {
+                Err(JsError::Error { kind, message }) => {
                     return cx
                         .vm
-                        .alloc_class_error(cx.roots, class, Some(message.clone()))
+                        .alloc_class_error(cx.roots, kind, Some(message))
                         .map(Invocation::Thrown)
                         .map(Some);
                 }
@@ -1476,7 +1467,7 @@ impl VmCore {
                 self.remove_operation(id);
                 let reason = self.alloc_class_error(
                     &ActiveRoots::EMPTY,
-                    ErrorKind::Error.into(),
+                    ErrorKind::Error,
                     Some(rejection.into()),
                 )?;
                 self.deliver_operation(target, Settlement::Rejected(reason))?;
@@ -1921,7 +1912,6 @@ impl VmCore {
             templates,
             module_envs,
             module_namespaces,
-            error_exports,
         } = state;
         heap.promise_prototype = Some(builtins.get("promise.prototype"));
         heap.generator_prototype = Some(builtins.get("generator.prototype"));
@@ -1994,7 +1984,6 @@ impl VmCore {
             object_urls,
             module_envs,
             module_namespaces,
-            error_exports,
         }
     }
 }

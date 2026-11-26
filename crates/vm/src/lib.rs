@@ -84,17 +84,18 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    ClassCx, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices, GuestOutcome,
-    HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue, MemberName,
-    MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver, OperationToken,
-    Recovery, Registration, Services, SlotDecl, SuspendRequest, This, WellKnownSymbol,
+    BuiltinClassParent, ClassCx, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId,
+    FromServices, GuestOutcome, HostClass, HostFault, HostModule, HostStep, Instance, JsError,
+    JsResult, JsValue, MemberName, MethodId, ModuleCx, ModuleExports, NativeTarget, Operation,
+    OperationDriver, OperationToken, Recovery, Registration, Services, SlotDecl, SuspendRequest,
+    This, WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
     ResumeEntry, Slot, SlotKind,
 };
 pub use console::ConsoleEvent;
-pub use error::{ErrorClass, ErrorKind, VmError};
+pub use error::{ErrorKind, VmError};
 pub use fetch::{
     CredentialsMode, FetchEnvironment, FetchEvent, FetchFailure, FetchRegistration, FetchService,
     HopRequest, Origin, ResponseHead, UploadBody,

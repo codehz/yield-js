@@ -547,7 +547,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: JsString,
     ) -> Result<Invocation, VmError> {
-        let error = self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message))?;
+        let error = self.alloc_class_error(roots, ErrorKind::SyntaxError, Some(message))?;
         Ok(Invocation::Thrown(error))
     }
 

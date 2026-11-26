@@ -12,7 +12,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_class_error(roots, ErrorKind::TypeError.into(), Some(message.into()))
+        self.alloc_class_error(roots, ErrorKind::TypeError, Some(message.into()))
     }
 
     pub(crate) fn reference_error(
@@ -20,11 +20,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_class_error(
-            roots,
-            ErrorKind::ReferenceError.into(),
-            Some(message.into()),
-        )
+        self.alloc_class_error(roots, ErrorKind::ReferenceError, Some(message.into()))
     }
 
     pub(crate) fn throw_type_error(
@@ -40,7 +36,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_class_error(roots, ErrorKind::RangeError.into(), Some(message.into()))
+        self.alloc_class_error(roots, ErrorKind::RangeError, Some(message.into()))
     }
 
     pub(crate) fn throw_range_error(

@@ -520,7 +520,7 @@ impl VmCore {
         let decoded = from_base64(&text, alphabet, last_chunk(last), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
             let error =
-                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
+                self.alloc_class_error(roots, ErrorKind::SyntaxError, Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         match self.uint8_from_bytes(host, roots, &decoded.bytes)? {
@@ -544,7 +544,7 @@ impl VmCore {
         let decoded = from_hex(&text.to_utf16(), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
             let error =
-                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
+                self.alloc_class_error(roots, ErrorKind::SyntaxError, Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         match self.uint8_from_bytes(host, roots, &decoded.bytes)? {
@@ -643,7 +643,7 @@ impl VmCore {
     ) -> Result<Invocation, VmError> {
         if let Some(message) = error {
             let error =
-                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
+                self.alloc_class_error(roots, ErrorKind::SyntaxError, Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         let result = self.heap.alloc_plain();

@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::error::{ErrorClass, VmError};
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
 use crate::host::{Host, PlatformServices};
@@ -10,29 +10,19 @@ use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
-    /// Allocate an error of `class`, resolving built-in kinds through their
-    /// constructor roots and declared host subclasses through the stored
-    /// export prototypes. An undeclared host class is a host contract fault.
+    /// Allocate a built-in error using its intrinsic prototype.
     pub(crate) fn alloc_class_error(
         &mut self,
         roots: &ActiveRoots<'_>,
-        class: ErrorClass,
+        kind: ErrorKind,
         message: Option<JsString>,
     ) -> Result<Value, VmError> {
-        match class {
-            ErrorClass::Builtin(kind) => self.alloc_error(
-                roots,
-                self.builtins.get(kind.builtin_root()),
-                kind.name(),
-                message,
-            ),
-            ErrorClass::Host { module, name } => {
-                let prototype = self.error_export_prototype(module, name).ok_or_else(|| {
-                    VmError::HostFault(format!("undeclared error class {module}:{name}"))
-                })?;
-                self.alloc_error(roots, prototype, name, message)
-            }
-        }
+        self.alloc_error(
+            roots,
+            self.builtins.get(kind.builtin_root()),
+            kind.name(),
+            message,
+        )
     }
 
     pub(crate) fn construct_error<P: PlatformServices>(
@@ -49,12 +39,9 @@ impl VmCore {
             "SuppressedError" => args.get(2),
             _ => args.first(),
         };
-        let message = match message_arg.unwrap_or(&Value::UNDEFINED) {
-            value if matches!(value.view(), ValueRef::Undefined) => None,
-            value => match self.coerce_string(host, roots, value)? {
-                Ok(message) => Some(message),
-                Err(error) => return Ok(Invocation::Thrown(error)),
-            },
+        let message = match self.error_message(host, roots, message_arg)? {
+            Ok(message) => message,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
         if name == "SuppressedError" {
             let error = args.first().cloned().unwrap_or(Value::UNDEFINED);
@@ -74,22 +61,8 @@ impl VmCore {
         };
         let roots = &roots.with(&error);
         let options = args.get(if name == "AggregateError" { 2 } else { 1 });
-        if let Some(options) = options
-            && let ValueRef::Object(options_id) = options.view()
-        {
-            let key = PropertyKeyRef::String("cause");
-            match self.has_property_key(host, roots, options_id, key)? {
-                Invocation::Value(present) if present.truthy() => {
-                    let cause = match self.read_property(host, roots, options, key)? {
-                        Invocation::Value(cause) => cause,
-                        Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
-                    };
-                    self.heap
-                        .define_data(id, "cause", cause, Attributes::METHOD)?;
-                }
-                Invocation::Value(_) => {}
-                Invocation::Thrown(error) => return Ok(Invocation::Thrown(error)),
-            }
+        if let Err(error) = self.install_error_cause(host, roots, id, options)? {
+            return Ok(Invocation::Thrown(error));
         }
         if name == "AggregateError" {
             let undefined = Value::UNDEFINED;
@@ -120,6 +93,46 @@ impl VmCore {
         Ok(Invocation::Value(error))
     }
 
+    pub(crate) fn error_message<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        message: Option<&Value>,
+    ) -> Result<Result<Option<JsString>, Value>, VmError> {
+        match message {
+            None => Ok(Ok(None)),
+            Some(value) if matches!(value.view(), ValueRef::Undefined) => Ok(Ok(None)),
+            Some(value) => Ok(self.coerce_string(host, roots, value)?.map(Some)),
+        }
+    }
+
+    pub(crate) fn install_error_cause<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        options: Option<&Value>,
+    ) -> Result<Result<(), Value>, VmError> {
+        if let Some(options) = options
+            && let ValueRef::Object(options_id) = options.view()
+        {
+            let key = PropertyKeyRef::String("cause");
+            match self.has_property_key(host, roots, options_id, key)? {
+                Invocation::Value(present) if present.truthy() => {
+                    let cause = match self.read_property(host, roots, options, key)? {
+                        Invocation::Value(cause) => cause,
+                        Invocation::Thrown(error) => return Ok(Err(error)),
+                    };
+                    self.heap
+                        .define_data(id, "cause", cause, Attributes::METHOD)?;
+                }
+                Invocation::Value(_) => {}
+                Invocation::Thrown(error) => return Ok(Err(error)),
+            }
+        }
+        Ok(Ok(()))
+    }
+
     pub(crate) fn alloc_error(
         &mut self,
         roots: &ActiveRoots<'_>,
@@ -127,9 +140,31 @@ impl VmCore {
         name: &str,
         message: Option<JsString>,
     ) -> Result<Value, VmError> {
+        let id = self.alloc_error_with(roots, prototype, name, message)?;
+        Ok(Value::object(id))
+    }
+
+    pub(crate) fn alloc_error_with(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        prototype: ObjectId,
+        name: &str,
+        message: Option<JsString>,
+    ) -> Result<ObjectId, VmError> {
         let mut object = PlainObject::new(Some(prototype));
         object.is_error = true;
         let id = self.heap.alloc(Object::Plain(object));
+        self.write_error_properties(roots, id, name, message)?;
+        Ok(id)
+    }
+
+    fn write_error_properties(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        id: ObjectId,
+        name: &str,
+        message: Option<JsString>,
+    ) -> Result<(), VmError> {
         let mut stack = JsString::from(format!("{name}: "));
         if let Some(message) = message {
             stack.push_str(&message);
@@ -144,7 +179,7 @@ impl VmCore {
         stack.push_str(&JsString::from(suffix));
         self.heap
             .define_data(id, "stack", Value::string(stack), Attributes::METHOD)?;
-        Ok(Value::object(id))
+        Ok(())
     }
 
     pub(crate) fn visit_stack_frames(

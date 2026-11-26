@@ -15,7 +15,7 @@ use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use super::services::{ServiceOwner, ServiceStorage, Services};
 use crate::digest::Digest;
-use crate::error::{ErrorClass, ErrorKind};
+use crate::error::ErrorKind;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
@@ -83,12 +83,8 @@ impl fmt::Display for HostFault {
 pub enum JsError {
     /// Catchable by script `try`/`catch`.
     Throw(JsValue),
-    /// Catchable error of a declared class, allocated when crossing into
-    /// script. An undeclared host class faults the host contract instead.
-    Error {
-        class: ErrorClass,
-        message: JsString,
-    },
+    /// Catchable built-in error, allocated when crossing into script.
+    Error { kind: ErrorKind, message: JsString },
     /// Invalid host use; terminates the VM instead of the script.
     Fault(HostFault),
 }
@@ -100,10 +96,10 @@ impl JsError {
         Self::Fault(HostFault::new(message))
     }
 
-    /// Catchable error of `class`, allocated lazily when crossing into script.
-    pub fn new_error(class: impl Into<ErrorClass>, message: impl Into<JsString>) -> Self {
+    /// Catchable built-in error, allocated lazily when crossing into script.
+    pub fn new_error(kind: ErrorKind, message: impl Into<JsString>) -> Self {
         Self::Error {
-            class: class.into(),
+            kind,
             message: message.into(),
         }
     }
@@ -122,9 +118,6 @@ type ModuleCall = for<'a> fn(super::ModuleDispatch<'a>) -> (CallCx<'a>, JsResult
 pub(crate) enum ExportCall {
     Plain(HostCall),
     Module(ModuleCall),
-    /// No Rust callback: the VM constructs the declared error subclass with
-    /// built-in message and `cause` handling.
-    ErrorConstructor(ErrorClass),
 }
 
 /// The result of one synchronous host binding step.
@@ -498,6 +491,13 @@ impl AccessorCall {
     }
 }
 
+/// Standard base supported by host class declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinClassParent {
+    Error,
+    DOMException,
+}
+
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
 /// hidden typed slots, and an optional non-JS payload.
 pub trait HostClass: ServiceOwner + Sized {
@@ -506,6 +506,10 @@ pub trait HostClass: ServiceOwner + Sized {
     /// A derived instance is accepted by base-class methods, and base slots
     /// occupy the leading part of its slot layout.
     const PARENT: Option<&'static str> = None;
+    /// Direct standard base; mutually exclusive with `PARENT`.
+    const BUILTIN_PARENT: Option<BuiltinClassParent> = None;
+    /// Optional own `name` data property on the class prototype.
+    const PROTOTYPE_NAME: Option<&'static str> = None;
     /// Opt into the EventTarget brand. Host subclasses inherit the brand.
     /// An opted-in class with a host parent requires that parent to carry
     /// the brand, so the ordinary host prototype chain is preserved.
@@ -688,6 +692,9 @@ struct ClassDecl {
     tag: String,
     parent_tag: Option<&'static str>,
     parent: Option<ClassId>,
+    builtin_parent: Option<BuiltinClassParent>,
+    builtin_root: Option<BuiltinClassParent>,
+    prototype_name: Option<&'static str>,
     declares_event_target: bool,
     declared_event_parent: Option<usize>,
     event_target: bool,
@@ -741,7 +748,6 @@ pub mod __macro_support {
         BuildView, Provide, ServiceField, ServiceOwner, ServiceStorage, Services, Slot,
         assert_unique,
     };
-    use super::ErrorClass;
     use super::{AccessorCall, CodecError, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
@@ -921,25 +927,6 @@ pub mod __macro_support {
         })
     }
 
-    /// Declares an error subclass constructor export. The VM owns the
-    /// constructor; there is no Rust callback.
-    pub fn error_class_export(name: &str, class: ErrorClass) -> ExportDecl {
-        ExportDecl::Function(FunctionDecl {
-            name: name.to_owned(),
-            arity: 1,
-            constructable: true,
-            class: None,
-            call: ExportCall::ErrorConstructor(class),
-            signature: CallSignature {
-                args: ERROR_CTOR_ARGS,
-                result: ReturnKind::Value,
-            },
-            cps: None,
-        })
-    }
-
-    const ERROR_CTOR_ARGS: &[ArgKind] = &[ArgKind::Value];
-
     pub const fn method(name: MemberName, call: HostCall, signature: CallSignature) -> MethodDecl {
         MethodDecl {
             name,
@@ -1103,31 +1090,30 @@ impl Bindings {
             .get(id.export as usize)
     }
 
-    /// Every declared error subclass, in module and export declaration order.
-    pub(crate) fn error_constructor_decls(
-        &self,
-    ) -> impl Iterator<Item = (ExportId, ErrorClass, &str)> + '_ {
+    pub(crate) fn class_constructor_decls(&self) -> impl Iterator<Item = (ExportId, ClassId)> + '_ {
         self.modules
             .iter()
             .enumerate()
-            .flat_map(|(module, module_decl)| {
-                module_decl.exports.iter().enumerate().filter_map(
-                    move |(export, decl)| match decl {
-                        ExportDecl::Function(function)
-                            if let ExportCall::ErrorConstructor(class) = function.call =>
-                        {
-                            Some((
-                                ExportId {
-                                    module: module as u32,
-                                    export: export as u32,
-                                },
-                                class,
-                                function.name.as_str(),
-                            ))
+            .flat_map(move |(module, decl)| {
+                decl.exports
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(export, decl)| {
+                        let ExportDecl::Function(function) = decl else {
+                            return None;
+                        };
+                        if !function.constructable {
+                            return None;
                         }
-                        _ => None,
-                    },
-                )
+                        let class = self.class_by_tag(function.class?)?;
+                        Some((
+                            ExportId {
+                                module: module as u32,
+                                export: export as u32,
+                            },
+                            class,
+                        ))
+                    })
             })
     }
 
@@ -1175,6 +1161,30 @@ impl Bindings {
 
     pub fn class_parent(&self, class: ClassId) -> Option<ClassId> {
         self.classes[class].parent
+    }
+
+    pub(crate) fn class_builtin_parent(&self, class: ClassId) -> Option<BuiltinClassParent> {
+        self.classes[class].builtin_parent
+    }
+
+    pub(crate) fn class_builtin_root(&self, class: ClassId) -> Option<BuiltinClassParent> {
+        self.classes[class].builtin_root
+    }
+
+    pub(crate) fn class_prototype_name(&self, class: ClassId) -> Option<&'static str> {
+        self.classes[class].prototype_name
+    }
+
+    pub(crate) fn class_error_stack_name(&self, mut class: ClassId) -> &'static str {
+        loop {
+            if let Some(name) = self.class_prototype_name(class) {
+                return name;
+            }
+            let Some(parent) = self.class_parent(class) else {
+                return "Error";
+            };
+            class = parent;
+        }
     }
 
     /// Whether instances of this class carry the EventTarget brand.
@@ -1352,6 +1362,9 @@ impl ClassDecl {
             tag: T::TAG.to_owned(),
             parent_tag: T::PARENT,
             parent: None,
+            builtin_parent: T::BUILTIN_PARENT,
+            builtin_root: None,
+            prototype_name: T::PROTOTYPE_NAME,
             declares_event_target: T::EVENT_TARGET,
             declared_event_parent: T::EVENT_PARENT,
             event_target: false,
@@ -1480,32 +1493,6 @@ impl UnlinkedBindings {
                 return Err(format!("duplicate host operation {:?}", operation.name));
             }
         }
-        for module in &self.modules {
-            for export in &module.exports {
-                let ExportDecl::Function(function) = export else {
-                    continue;
-                };
-                let ExportCall::ErrorConstructor(class) = function.call else {
-                    continue;
-                };
-                let ErrorClass::Host {
-                    module: class_module,
-                    name: class_name,
-                } = class
-                else {
-                    return Err(format!(
-                        "error class {} must declare a host module and name",
-                        function.name
-                    ));
-                };
-                if class_module != module.name || class_name != function.name {
-                    return Err(format!(
-                        "error class {class_name} names {class_module}:{class_name} but is exported as {}:{}",
-                        module.name, function.name
-                    ));
-                }
-            }
-        }
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations);
         Ok(Bindings {
             modules: self.modules,
@@ -1526,6 +1513,12 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
     let parents = classes
         .iter()
         .map(|class| {
+            if class.parent_tag.is_some() && class.builtin_parent.is_some() {
+                return Err(format!(
+                    "class {:?} declares both a host and a builtin parent",
+                    class.tag
+                ));
+            }
             class
                 .parent_tag
                 .map(|tag| {
@@ -1574,7 +1567,16 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         let slot_base = inherited.len();
         let inherited_event_target = parent.is_some_and(|parent| classes[parent].event_target);
         let inherited_event_parent = parent.and_then(|parent| classes[parent].event_parent);
+        let builtin_root = parent
+            .and_then(|parent| classes[parent].builtin_root)
+            .or(classes[index].builtin_parent);
         let class = &mut classes[index];
+        if builtin_root.is_some() && (class.declares_event_target || inherited_event_target) {
+            return Err(format!(
+                "class {:?} cannot combine an exception base with EventTarget",
+                class.tag
+            ));
+        }
         if parent.is_some() && class.declares_event_target && !inherited_event_target {
             return Err(format!(
                 "class {:?} opts into EventTarget but its host parent is not an EventTarget",
@@ -1605,6 +1607,7 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         let mut slots = inherited;
         slots.extend(own);
         class.parent = parent;
+        class.builtin_root = builtin_root;
         class.event_target = event_target;
         class.event_parent = event_parent;
         class.slot_base = slot_base;
@@ -1684,12 +1687,6 @@ fn fingerprint(
                             function.name, function.arity, function.constructable, function.class
                         ),
                     );
-                    if let ExportCall::ErrorConstructor(class) = function.call {
-                        hash_line(
-                            &mut hasher,
-                            format!("export {} error-class {class:?}", function.name),
-                        );
-                    }
                     hash_signature(&mut hasher, 0, function.signature);
                     hash_cps(&mut hasher, function.cps);
                 }
@@ -1707,8 +1704,14 @@ fn fingerprint(
     for class in classes {
         hash_line(
             &mut hasher,
-            format!("class {} parent={:?}", class.tag, class.parent_tag),
+            format!(
+                "class {} parent={:?} builtin-parent={:?}",
+                class.tag, class.parent_tag, class.builtin_parent
+            ),
         );
+        if let Some(name) = class.prototype_name {
+            hash_line(&mut hasher, format!("prototype-name={name:?}"));
+        }
         if class.declares_event_target || class.declared_event_parent.is_some() {
             hash_line(
                 &mut hasher,

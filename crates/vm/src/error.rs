@@ -41,25 +41,6 @@ impl ErrorKind {
     }
 }
 
-/// Identifies the error object a host or the VM creates. Identity is the
-/// declared class, not a script-visible `.name`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorClass {
-    Builtin(ErrorKind),
-    /// A host module's declared error subclass. The module and export name are
-    /// checked when the host links its declarations.
-    Host {
-        module: &'static str,
-        name: &'static str,
-    },
-}
-
-impl From<ErrorKind> for ErrorClass {
-    fn from(kind: ErrorKind) -> Self {
-        Self::Builtin(kind)
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VmError {
     #[error("invalid bytecode build: {0}")]

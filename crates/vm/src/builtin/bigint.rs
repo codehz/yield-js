@@ -131,7 +131,7 @@ impl VmCore {
                     Some(value) => Ok(value),
                     None => Err(self.alloc_class_error(
                         roots,
-                        ErrorKind::SyntaxError.into(),
+                        ErrorKind::SyntaxError,
                         Some("Cannot convert string to a BigInt".into()),
                     )?),
                 }

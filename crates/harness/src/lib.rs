@@ -818,9 +818,32 @@ impl<F, E, S> TestHost<F, E, TestTimeService, S> {
     }
 }
 
+#[host_class(tag = "test:ParseError", builtin_parent = Error, prototype_name = "ParseError")]
+struct ParseError;
+
+#[host_class(tag = "test:ErrorBase", builtin_parent = Error, methods)]
+struct ErrorBase {
+    #[js_slot]
+    detail: JsValue,
+}
+
+#[methods(ErrorBase)]
+impl ErrorBase {
+    #[method(name = "detail")]
+    fn detail(cx: &mut CallCx<'_>, this: This<Self>) -> JsResult<JsValue> {
+        this.detail(cx)
+    }
+}
+
+#[host_class(tag = "test:ErrorDerived", parent = ErrorBase)]
+struct ErrorDerived;
+
+#[host_class(tag = "test:HostDOMException", builtin_parent = DOMException)]
+struct HostDOMException;
+
 #[host_module(
     name = "test",
-    classes = [Node, Matcher],
+    classes = [Node, Matcher, ParseError, ErrorBase, ErrorDerived, HostDOMException],
     operations = [Wait, Pause, Reject, Reissue, Timer],
     services = [counters: Rc<Counters>],
 )]
@@ -828,14 +851,48 @@ struct TestModule;
 
 #[module_exports]
 impl TestModule {
-    /// Declared host error subclass. The same constant drives allocation and
-    /// lazy throws through the shared error APIs.
-    #[error_class()]
-    #[allow(non_upper_case_globals)]
-    const ParseError: yield_vm::ErrorClass = yield_vm::ErrorClass::Host {
-        module: "test",
-        name: "ParseError",
-    };
+    #[constructor(name = "ParseError", class = ParseError)]
+    fn parse_error(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        message: Option<JsValue>,
+    ) -> JsResult<Instance<ParseError>> {
+        let args = [
+            message.unwrap_or_else(JsValue::undefined),
+            cx.args().get(1).cloned().unwrap_or_else(JsValue::undefined),
+        ];
+        cx.alloc_with_super(ParseError, &args)
+    }
+
+    #[constructor(name = "ErrorBase", class = ErrorBase)]
+    fn error_base(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<ErrorBase>> {
+        cx.alloc(ErrorBase {})
+    }
+
+    #[constructor(name = "ErrorDerived", class = ErrorDerived)]
+    fn error_derived(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        detail: JsValue,
+    ) -> JsResult<Instance<ErrorDerived>> {
+        let instance = cx.alloc(ErrorDerived)?;
+        let value = instance.value(cx);
+        cx.instance::<ErrorBase>(&value)?.set_detail(cx, detail)?;
+        Ok(instance)
+    }
+
+    #[constructor(name = "HostDOMException", class = HostDOMException)]
+    fn host_dom_exception(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        message: Option<JsValue>,
+        name: Option<JsValue>,
+    ) -> JsResult<Instance<HostDOMException>> {
+        cx.alloc_with_super(
+            HostDOMException,
+            &[
+                message.unwrap_or_else(JsValue::undefined),
+                name.unwrap_or_else(JsValue::undefined),
+            ],
+        )
+    }
 
     #[function(name = "allocError")]
     fn alloc_error(
@@ -846,12 +903,15 @@ impl TestModule {
             Some(value) => cx.string(&value)?.clone(),
             None => JsString::from("host allocError"),
         };
-        cx.alloc_error(Self::ParseError, message)
+        Ok(cx
+            .alloc_with_super(ParseError, &[JsValue::string(message)])?
+            .value(cx))
     }
 
     #[function(name = "lazyThrow")]
-    fn lazy_throw(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
-        Err(JsError::new_error(Self::ParseError, "lazy parse failure"))
+    fn lazy_throw(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
+        let error = cx.alloc_with_super(ParseError, &[JsValue::string("lazy parse failure")])?;
+        Err(cx.throw(error.value(cx)))
     }
     #[function(name = "spawnDelayedTask")]
     fn spawn_delayed_task(

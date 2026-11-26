@@ -34,8 +34,17 @@ declare module "test" {
     export class ParseError extends Error {
         constructor(message?: unknown, options?: unknown);
     }
+    export class ErrorBase extends Error {
+        detail(): unknown;
+    }
+    export class ErrorDerived extends ErrorBase {
+        constructor(detail: unknown);
+    }
+    export class HostDOMException extends DOMException {
+        constructor(message?: unknown, name?: unknown);
+    }
     /** Allocates a ParseError instance from the host. */
     export function allocError(message?: unknown): unknown;
-    /** Throws a lazily allocated ParseError. */
+    /** Allocates and throws a ParseError on the active stack. */
     export function lazyThrow(): void;
 }

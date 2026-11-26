@@ -248,7 +248,7 @@ impl VmCore {
             Ok(compiled) => compiled,
             Err(message) => {
                 return self
-                    .alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))
+                    .alloc_class_error(roots, ErrorKind::SyntaxError, Some(message.into()))
                     .map(Invocation::Thrown);
             }
         };
