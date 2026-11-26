@@ -4,7 +4,100 @@ use blitz_traits::events::{
     UiEvent,
 };
 use yield_blitz::{BlitzSession, compile_fixture, compile_module, render_module};
-use yield_vm::{RestoreOptions, Snapshot, SnapshotValidation, Value};
+use yield_vm::{Build, BuildResource, RestoreOptions, Snapshot, SnapshotValidation, Value};
+
+#[test]
+fn restores_react_author_styles_in_import_order() -> Result<(), String> {
+    let build = compile_fixture()?;
+    let [first, second] = build.resources.as_slice() else {
+        panic!("expected two reachable stylesheets")
+    };
+    assert_eq!(first.uri, "asset:src/styles.css");
+    assert_eq!(second.uri, "asset:src/cascade.css");
+    let expected = [
+        include_str!("../../../fixtures/npm-react-app/src/styles.css"),
+        include_str!("../../../fixtures/npm-react-app/src/cascade.css"),
+    ];
+    assert_eq!(&*first.bytes, expected[0].as_bytes());
+    assert_eq!(&*second.bytes, expected[1].as_bytes());
+
+    let check_layout = |session: &mut BlitzSession| {
+        session.resolve_layout(0.0);
+        let doc = session.document();
+        let root = doc
+            .get_node(doc.get_element_by_id("root").unwrap())
+            .unwrap();
+        assert_eq!(root.final_layout().size.width, 137.0);
+        assert_eq!(style_texts(&doc), expected);
+        assert_eq!(doc.author_stylesheets().count(), 2);
+    };
+    let artifact = build.to_bytes();
+    let mut session = BlitzSession::new(Build::from_bytes(&artifact)?)?;
+    session.run_until_idle()?;
+    check_layout(&mut session);
+    let snapshot = session.snapshot(&[])?.to_bytes()?;
+    drop(session);
+
+    let mut restored = BlitzSession::restore(
+        Snapshot::from_bytes(&snapshot)?,
+        Build::from_bytes(&artifact)?,
+        RestoreOptions::default(),
+    )?;
+    check_layout(&mut restored);
+    Ok(())
+}
+
+#[test]
+fn rejects_unknown_and_invalid_css_without_mutating_head() -> Result<(), String> {
+    let mut build = compile_module(
+        "import { insertCss } from 'yield:dom';\n\
+         export function check(uri) {\n\
+           try { insertCss(uri); } catch (error) {\n\
+             return error instanceof TypeError ? error.message : 'not a TypeError';\n\
+           }\n\
+         }",
+    )?;
+    build.resources.push(BuildResource {
+        uri: "asset:opaque".into(),
+        bytes: [0x00, 0xff, 0x80].into(),
+    });
+    build.finalize();
+    let mut session = BlitzSession::new(Build::from_bytes(&build.to_bytes())?)?;
+    for (uri, expected) in [
+        (
+            "asset:missing.css",
+            "unknown CSS resource: asset:missing.css",
+        ),
+        ("asset:opaque", "invalid UTF-8 CSS resource: asset:opaque"),
+    ] {
+        let result = session.start("check", vec![yield_vm::JsValue::string(uri)])?;
+        assert_eq!(result.into_string().unwrap().to_utf8().unwrap(), expected);
+        assert!(style_texts(&session.document()).is_empty());
+    }
+    Ok(())
+}
+
+fn style_texts(doc: &blitz_dom::BaseDocument) -> Vec<String> {
+    let head = doc
+        .root_element()
+        .children
+        .iter()
+        .filter_map(|&id| doc.get_node(id))
+        .find(|node| {
+            node.element_data()
+                .is_some_and(|el| &*el.name.local == "head")
+        })
+        .unwrap();
+    head.children
+        .iter()
+        .filter_map(|&id| doc.get_node(id))
+        .filter(|node| {
+            node.element_data()
+                .is_some_and(|el| &*el.name.local == "style")
+        })
+        .map(|node| node.text_content())
+        .collect()
+}
 
 #[test]
 fn mounts_react_and_resumes_the_click_counter() -> Result<(), String> {

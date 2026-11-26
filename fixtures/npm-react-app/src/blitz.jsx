@@ -1,3 +1,5 @@
+import './blitz-styles.mjs';
+import './styles.css';
 import { useState } from 'react';
 import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';

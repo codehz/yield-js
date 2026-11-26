@@ -10,17 +10,18 @@ use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use blitz_dom::{BaseDocument, DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
 use yield_binding_macros::host;
 use yield_compiler::{
-    CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
-    ResolvedModule,
+    BuildTransform, CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver,
+    Project, ResolvedModule, TransformError,
 };
 use yield_vm::{
-    Absent, Build, Diagnostic, Diagnostics, Host, JsValue, RestoreOptions, Snapshot, Value, Vm,
-    VmError,
+    Absent, Build, BuildResource, Diagnostic, Diagnostics, Host, JsValue, RestoreOptions, Snapshot,
+    Value, Vm, VmError,
 };
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
@@ -30,25 +31,35 @@ struct Dom {
     nodes: Vec<NodeId>,
     handles: BTreeMap<NodeId, u32>,
     click_target: Option<NodeId>,
+    resources: BTreeMap<String, Arc<[u8]>>,
 }
 
 impl Dom {
-    fn new() -> Self {
+    fn new(resources: &[BuildResource]) -> Self {
         Self {
             doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
             click_target: None,
+            resources: Self::index_resources(resources),
         }
     }
 
-    fn empty() -> Self {
+    fn empty(resources: &[BuildResource]) -> Self {
         Self {
             doc: BaseDocument::new(document_config()),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
             click_target: None,
+            resources: Self::index_resources(resources),
         }
+    }
+
+    fn index_resources(resources: &[BuildResource]) -> BTreeMap<String, Arc<[u8]>> {
+        resources
+            .iter()
+            .map(|resource| (resource.uri.clone(), Arc::clone(&resource.bytes)))
+            .collect()
     }
 }
 
@@ -114,7 +125,9 @@ pub struct BlitzSession {
 impl BlitzSession {
     /// Start a fresh document and evaluate the build.
     pub fn new(build: Build) -> Result<Self, String> {
-        Self::with_dom(Dom::new(), |host| Vm::new(build, host, Default::default()))
+        Self::with_dom(Dom::new(&build.resources), |host| {
+            Vm::new(build, host, Default::default())
+        })
     }
 
     /// Restore a trusted snapshot with the same build, without evaluating modules.
@@ -123,7 +136,7 @@ impl BlitzSession {
         build: Build,
         options: RestoreOptions,
     ) -> Result<Self, String> {
-        Self::with_dom(Dom::empty(), |host| {
+        Self::with_dom(Dom::empty(&build.resources), |host| {
             Vm::restore(snapshot, build, host, options)
         })
     }
@@ -201,6 +214,11 @@ impl BlitzSession {
         Ref::map(self.dom.borrow(), |dom| &dom.doc)
     }
 
+    /// Resolve styles and layout at the given animation time.
+    pub fn resolve_layout(&mut self, time: f64) {
+        self.dom.borrow_mut().doc.resolve(time);
+    }
+
     /// Run pending work and return any reported script errors.
     pub fn run_until_idle(&mut self) -> Result<(), String> {
         self.diagnostics.check(self.vm.run_until_idle())
@@ -215,9 +233,38 @@ impl BlitzSession {
 
 const DOM_PRELOAD: &str = "yield:blitz-dom-preload";
 
-struct FixtureResolver(NodeResolver);
+type CssResources = RefCell<BTreeMap<ModuleId, BuildResource>>;
 
-impl ModuleResolver for FixtureResolver {
+struct FixtureResolver<'a>(NodeResolver, &'a CssResources);
+
+impl FixtureResolver<'_> {
+    fn load_css(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
+        if id.ends_with(".module.css") {
+            return Err(format!("unsupported syntax: CSS Modules ({id})"));
+        }
+        let source = self.0.load(id)?;
+        let uri = format!("asset:{id}");
+        let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
+        match self.1.borrow_mut().entry(id.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(BuildResource {
+                    uri,
+                    bytes: source.as_bytes().into(),
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if &*entry.get().bytes != source.as_bytes() {
+                    return Err(format!("conflicting CSS resource: {uri}"));
+                }
+            }
+        }
+        Ok(Cow::Owned(format!(
+            "import {{ insertCss }} from 'yield:dom'; insertCss({literal});"
+        )))
+    }
+}
+
+impl ModuleResolver for FixtureResolver<'_> {
     fn resolve(
         &self,
         referrer: Option<&ModuleId>,
@@ -236,6 +283,9 @@ impl ModuleResolver for FixtureResolver {
         if id == DOM_PRELOAD {
             return Ok(Cow::Borrowed(include_str!("dom.mjs")));
         }
+        if id.ends_with(".css") {
+            return self.load_css(id);
+        }
         self.0.load(id)
     }
 
@@ -244,7 +294,7 @@ impl ModuleResolver for FixtureResolver {
         id: &ModuleId,
         locate: &dyn Fn(String) -> CompileError,
     ) -> Result<Cow<'_, str>, CompileError> {
-        if id == DOM_PRELOAD {
+        if id == DOM_PRELOAD || id.ends_with(".css") {
             return self.load(id).map_err(locate);
         }
         self.0.load_for_compile(id, locate)
@@ -252,6 +302,31 @@ impl ModuleResolver for FixtureResolver {
 
     fn generated_source_origin(&self, id: &str) -> Option<ModuleId> {
         self.0.generated_source_origin(id)
+    }
+}
+
+struct CollectCss<'a>(&'a CssResources);
+
+impl BuildTransform for CollectCss<'_> {
+    fn transform(&mut self, build: &mut Build) -> Result<(), TransformError> {
+        let mut cached = self.0.take();
+        let mut visited = vec![false; build.modules.len()];
+        let mut pending = vec![build.entry];
+        pending.extend(build.preload);
+        while let Some(index) = pending.pop() {
+            if std::mem::replace(&mut visited[index as usize], true) {
+                continue;
+            }
+            let module = &build.modules[index as usize];
+            if module.id.ends_with(".css") {
+                let resource = cached.remove(&module.id).ok_or_else(|| {
+                    TransformError::new(format!("missing CSS resource: asset:{}", module.id))
+                })?;
+                build.resources.push(resource);
+            }
+            pending.extend(module.dependencies.iter().rev().copied());
+        }
+        Ok(())
     }
 }
 
@@ -268,8 +343,16 @@ pub fn compile_fixture() -> Result<Build, String> {
                 .into(),
         );
     }
-    let resolver = FixtureResolver(NodeResolver::web_production(root)?);
-    compile(Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD))
+    let resources = CssResources::default();
+    let resolver = FixtureResolver(
+        NodeResolver::web_production(root)?.with_resource_extension("css"),
+        &resources,
+    );
+    compile(
+        Project::new("./src/blitz.jsx", resolver)
+            .with_preload(DOM_PRELOAD)
+            .with_build_transform(CollectCss(&resources)),
+    )
 }
 
 /// Execute the JSX fixture and return its first rendered document, discarding the VM.
@@ -286,4 +369,52 @@ fn render(build: Build) -> Result<BaseDocument, String> {
     let mut session = BlitzSession::new(build)?;
     session.run_until_idle()?;
     session.into_document()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collects_only_reachable_css_in_preload_and_source_order() {
+        let resolver = MemoryResolver::new([
+            ("preload.js", "import './c.css';"),
+            ("entry.js", "import './dep.js'; import './b.css';"),
+            (
+                "dep.js",
+                "import './entry.js'; import './b.css'; import './a.css';",
+            ),
+            ("a.css", ""),
+            ("b.css", ""),
+            ("c.css", ""),
+        ])
+        .unwrap();
+        let resources: CssResources = ["a.css", "b.css", "c.css", "unused.css"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.into(),
+                    BuildResource {
+                        uri: format!("asset:{id}"),
+                        bytes: [].into(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+            .into();
+        let build = Compiler::default()
+            .compile(
+                Project::new("entry.js", resolver)
+                    .with_preload("preload.js")
+                    .with_build_transform(CollectCss(&resources)),
+            )
+            .unwrap();
+        let uris: Vec<_> = build
+            .resources
+            .iter()
+            .map(|item| item.uri.as_str())
+            .collect();
+        assert_eq!(uris, ["asset:c.css", "asset:b.css", "asset:a.css"]);
+        build.validate().unwrap();
+    }
 }

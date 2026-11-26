@@ -1,6 +1,6 @@
 # React + TSX 构建输入夹具
 
-对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。`src/blitz.jsx` 用于真实 React DOM 首屏验收；`src/index.tsx`、类型剥离、CSS 与动态 sheet 不在本次首屏验收范围内。
+对齐 [docs/design/build.md](../../docs/design/build.md) 与 [framework-acceptance.md](../../docs/design/framework-acceptance.md) 的验收输入。`src/blitz.jsx` 用于真实 React DOM 首屏和普通 CSS 导入验收；`src/index.tsx`、类型剥离和动态 sheet 不在本次验收范围内。
 
 ## 覆盖点
 
@@ -13,7 +13,7 @@
 | 转换产物作为模块进入同一 ESM 链接层 | `src/sheet.tsx`（由动态 import 到达） |
 | CJS 静态可分析子集 + 预设条件选择 | `node_modules/scheduler/index.js`（`process.env.NODE_ENV` 分支 + 字面量 `require`，预设条件取 `cjs/scheduler.production.js`） |
 | 无 `exports` 包的字段回退规则 | `scheduler`（无 `exports`，按预设定义回退到 `main`/`index.js`，不猜测其他字段） |
-| CSS 副作用资源导入，按资源 ID 去重，宿主自行消费 | `src/styles.css` |
+| CSS 副作用导入、模块去重、作者样式层叠与快照恢复 | `src/blitz-styles.mjs`、`src/styles.css`、`src/cascade.css` |
 | React DOM 自带 reconciler 的首屏入口 | `src/blitz.jsx` |
 
 ## 约定
@@ -30,7 +30,7 @@
 
 ```sh
 npm ci --ignore-scripts --prefix fixtures/npm-react-app
-cargo test -p yield-blitz --test render mounts_react_dom_into_blitz
+cargo test -p yield-blitz --test render
 ```
 
-验收检查 `#root > main > h1` 的文本为 `Hello from React DOM`；缺少 `node_modules` 时测试失败并提示准备命令。
+验收检查 `#root > main > h1` 的文本为 `Hello from React DOM`，并确认二进制恢复前后 `#root` 宽度均为 137px、`head` 各有两个样式节点；缺少 `node_modules` 时测试失败并提示准备命令。

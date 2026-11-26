@@ -28,6 +28,7 @@ const INDEX_FILES: &[&str] = &["index.js", "index.mjs", "index.jsx"];
 pub struct NodeResolver {
     root: PathBuf,
     web_production: bool,
+    resource_extensions: BTreeSet<String>,
     commonjs_sources: Mutex<BTreeMap<ModuleId, ModuleId>>,
 }
 
@@ -41,6 +42,13 @@ impl NodeResolver {
         Self::with_mode(root.as_ref(), true)
     }
 
+    /// Allow explicitly named resource files without adding extension probes.
+    /// A caller can wrap the UTF-8 text loaded for these IDs in a source module.
+    pub fn with_resource_extension(mut self, extension: &str) -> Self {
+        self.resource_extensions.insert(extension.to_owned());
+        self
+    }
+
     fn with_mode(root: &Path, web_production: bool) -> Result<Self, String> {
         let root = root
             .canonicalize()
@@ -51,6 +59,7 @@ impl NodeResolver {
         Ok(Self {
             root,
             web_production,
+            resource_extensions: BTreeSet::new(),
             commonjs_sources: Mutex::default(),
         })
     }
@@ -101,6 +110,19 @@ impl NodeResolver {
                 }
                 _ => {}
             }
+        }
+        let requested_ext = requested.extension().and_then(|ext| ext.to_str());
+        let file_ext = file.extension().and_then(|ext| ext.to_str());
+        let is_resource = |extension: Option<&str>| {
+            extension.is_some_and(|ext| self.resource_extensions.contains(ext))
+        };
+        if is_resource(requested_ext) || is_resource(file_ext) {
+            if requested_ext == file_ext {
+                return Ok(false);
+            }
+            return Err(format!(
+                "resource extension does not match target: {requested:?}"
+            ));
         }
         match file.extension().and_then(|ext| ext.to_str()) {
             Some("mjs") => return Ok(false),

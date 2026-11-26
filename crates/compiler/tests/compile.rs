@@ -2085,6 +2085,21 @@ impl Drop for TempDir {
 }
 
 #[test]
+fn node_resolver_resources_require_an_explicit_opted_in_extension() {
+    let root = TempDir::new();
+    fs::write(root.0.join("theme.css"), "#root { width: 101px }").unwrap();
+    let resolver = NodeResolver::web_production(&root.0).unwrap();
+    assert!(resolver.resolve(None, "./theme.css").is_err());
+
+    let resolver = resolver.with_resource_extension("css");
+    assert!(resolver.resolve(None, "./theme").is_err());
+    let module = resolver.resolve(None, "./theme.css").unwrap();
+    assert_eq!(module.id, "theme.css");
+    assert!(!module.is_framework);
+    assert_eq!(resolver.load(&module.id).unwrap(), "#root { width: 101px }");
+}
+
+#[test]
 fn node_resolver_resolves_relative_paths_and_explicit_roots() {
     let root = TempDir::new();
     fs::create_dir(root.0.join("src")).unwrap();

@@ -5128,6 +5128,7 @@ dependencies = [
  "blitz-html",
  "blitz-shell",
  "blitz-traits",
+ "serde_json",
  "yield-binding-macros",
  "yield-compiler",
  "yield-vm",
