@@ -57,6 +57,8 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 `yield-blitz` 接入了原生主键点击，但尚无完整浏览器 DOM、`MouseEvent` 坐标与按键字段、其他输入的 JS 派发、样式计算 API 或热更新。DOM payload 只支持当前绑定所需的 Document、Element、Text 和 Comment 树，不保存布局、渲染器、焦点或未投递的原生输入，不支持模板内容子树。无窗口测试不等于 Vello 目视验收。
 首屏路径只编译 `src/blitz.jsx` 及其依赖。CSS 仅支持显式 `.css` 副作用导入；不支持 CSS Modules、类名映射、CSS 内的 `@import` / `url()` 构建解析或动态样式模块。`compile_module` 仍为自包含源码入口，不访问文件系统。不验收 `src/index.tsx` 或 TypeScript 类型剥离。
 
+Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制文件；内嵌 preload 不是虚拟文件系统，不向普通导入注册别名。
+
 未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
 
 ## 5. 结构性缺口

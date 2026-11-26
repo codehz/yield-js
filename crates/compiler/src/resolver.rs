@@ -8,6 +8,8 @@ mod node;
 
 pub use node::NodeResolver;
 
+use yield_vm::BuildResource;
+
 use crate::CompileError;
 use crate::ModuleId;
 
@@ -24,6 +26,22 @@ pub struct ResolvedModule {
     pub is_framework: bool,
 }
 
+/// The source and build resources for one module definition.
+#[derive(Debug)]
+pub struct LoadedModule<'a> {
+    pub source: Cow<'a, str>,
+    pub resources: Vec<BuildResource>,
+}
+
+impl<'a> LoadedModule<'a> {
+    pub fn source(source: impl Into<Cow<'a, str>>) -> Self {
+        Self {
+            source: source.into(),
+            resources: Vec::new(),
+        }
+    }
+}
+
 /// Resolves source specifiers to stable, nonempty canonical module IDs.
 pub trait ModuleResolver {
     /// `None` identifies an explicit compilation root.
@@ -32,16 +50,13 @@ pub trait ModuleResolver {
         referrer: Option<&ModuleId>,
         specifier: &str,
     ) -> Result<ResolvedModule, String>;
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String>;
 
-    /// Load source for the compiler, optionally returning a diagnostic in the loaded source.
-    fn load_for_compile(
+    /// Load a definition, using `locate` to report failures at the request site.
+    fn load(
         &self,
         id: &ModuleId,
         locate: &dyn Fn(String) -> CompileError,
-    ) -> Result<Cow<'_, str>, CompileError> {
-        self.load(id).map_err(locate)
-    }
+    ) -> Result<LoadedModule<'_>, CompileError>;
 
     /// The original source ID if this module's positions are in generated code.
     fn generated_source_origin(&self, _id: &str) -> Option<ModuleId> {
@@ -58,16 +73,12 @@ impl<R: ModuleResolver + ?Sized> ModuleResolver for &R {
         (**self).resolve(referrer, specifier)
     }
 
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
-        (**self).load(id)
-    }
-
-    fn load_for_compile(
+    fn load(
         &self,
         id: &ModuleId,
         locate: &dyn Fn(String) -> CompileError,
-    ) -> Result<Cow<'_, str>, CompileError> {
-        (**self).load_for_compile(id, locate)
+    ) -> Result<LoadedModule<'_>, CompileError> {
+        (**self).load(id, locate)
     }
 
     fn generated_source_origin(&self, id: &str) -> Option<ModuleId> {
@@ -106,12 +117,16 @@ impl ModuleResolver for MemoryResolver<'_> {
         })
     }
 
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
+    fn load(
+        &self,
+        id: &ModuleId,
+        locate: &dyn Fn(String) -> CompileError,
+    ) -> Result<LoadedModule<'_>, CompileError> {
         self.files
             .get(id)
             .copied()
-            .map(Cow::Borrowed)
-            .ok_or_else(|| format!("source file not found: {id:?}"))
+            .map(LoadedModule::source)
+            .ok_or_else(|| locate(format!("source file not found: {id:?}")))
     }
 }
 

@@ -27,6 +27,7 @@ yield-harness  →  yield-compiler  →  yield-vm
   → analyze      按前驱重查 CFG live-in（含恢复边与异常边），移除无副作用的死写入
   → allocate     按原块序布局，流式记录瞬时槽区间并分配槽；保存集合取 CFG 块入口活性
   → Build        版本化字节码；build_id = 执行相关字段的摘要
+  → module resources  若有资源，从最终图按 preload 优先的深度优先顺序收集，更新摘要并校验
   → build stages 按注册顺序转换 Build，每次重新计算 build_id 并校验
   → Vm           校验、运行、宿主操作、快照 / 恢复
 ```
@@ -34,6 +35,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 公共入口：
 
 - `Compiler::compile(Project) -> Result<Build, CompileError>` 链接显式根；`Compiler::from_dts(source)` 从宿主的 `.d.ts` 读出独立的宿主导入清单。默认生成 Error 栈位置；`stack_traces = false` 全部禁用。`ModuleResolver::resolve` 返回 `ResolvedModule`，同时给出规范模块 ID 与该定义模块的框架标记；`NodeResolver` 把 `node_modules` 中定义的模块标为框架，覆盖包 `exports` 目标、嵌套依赖和包内相对导入，其他解析器默认不标记。标记只决定是否生成栈位置，不改变解析、链接或运行语义；隐藏仅影响本模块，框架回调进入其他模块时后者仍可见。
+- `ModuleResolver::load` 以规范 ID 为定义身份，每次编译只为每个 ID 加载一次。资源随模块一起裁剪；收集时按最终边顺序遍历，不按发现顺序或 URI 排序。`Project::with_preload_source` 只绕过该显式根的解析和加载，不改变普通依赖和图转换重链接的解析路径。
 - `Vm::new(build, host, VmOptions::default())` 按值接管不可克隆的 `Host`，校验构建与导入，实例化全部源码模块，求值可选 preload 子图并安装其活绑定 getter，再求值 entry 并排空初始化微任务。`Vm<P>` 按值持有 `Host<P>`；`Host::default()` 提供空宿主。
 - `VmOptions::default()` 不设置基准 URL 或测试时钟。用 `VmOptions { base_url: Some("https://example.com/"), ..Default::default() }` 可在任何模块求值之前设置默认基准。构造和恢复的选项都可通过 `test_clock` 注入 `Arc<dyn TestClock>`，默认使用正常时钟。
 - `Vm::get_export("name")` 读取入口链接导出的当前值（含再导出）；名字不唯一或不存在即错误。

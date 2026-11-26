@@ -2,7 +2,6 @@
 
 mod commonjs;
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -12,6 +11,7 @@ use std::sync::Mutex;
 
 use oxc::span::Span;
 
+use super::LoadedModule;
 use super::ModuleResolver;
 use super::ResolvedModule;
 use super::manifest::{self, Map, Value};
@@ -24,11 +24,13 @@ const CONVERSION_STAGE: &str = "CommonJS conversion";
 const EXTENSIONS: &[&str] = &[".js", ".mjs", ".jsx", ".json"];
 const INDEX_FILES: &[&str] = &["index.js", "index.mjs", "index.jsx"];
 
+type TextLoader = dyn Fn(&str, String) -> Result<LoadedModule<'static>, String>;
+
 /// Resolves project files and installed packages within one root.
 pub struct NodeResolver {
     root: PathBuf,
     web_production: bool,
-    resource_extensions: BTreeSet<String>,
+    loaders: BTreeMap<String, Box<TextLoader>>,
     commonjs_sources: Mutex<BTreeMap<ModuleId, ModuleId>>,
 }
 
@@ -42,10 +44,15 @@ impl NodeResolver {
         Self::with_mode(root.as_ref(), true)
     }
 
-    /// Allow explicitly named resource files without adding extension probes.
-    /// A caller can wrap the UTF-8 text loaded for these IDs in a source module.
-    pub fn with_resource_extension(mut self, extension: &str) -> Self {
-        self.resource_extensions.insert(extension.to_owned());
+    /// Load explicitly named UTF-8 resources using an extension without the leading dot.
+    /// Registration replaces any previous loader for that extension and does not add
+    /// extension probes or override built-in source types.
+    pub fn with_loader(
+        mut self,
+        extension: &str,
+        loader: impl Fn(&str, String) -> Result<LoadedModule<'static>, String> + 'static,
+    ) -> Self {
+        self.loaders.insert(extension.to_owned(), Box::new(loader));
         self
     }
 
@@ -59,7 +66,7 @@ impl NodeResolver {
         Ok(Self {
             root,
             web_production,
-            resource_extensions: BTreeSet::new(),
+            loaders: BTreeMap::new(),
             commonjs_sources: Mutex::default(),
         })
     }
@@ -95,6 +102,13 @@ impl NodeResolver {
             .map_err(|err| format!("{path:?}: {err}"))
     }
 
+    fn resource_loader(&self, extension: Option<&str>) -> Option<&TextLoader> {
+        match extension? {
+            "js" | "mjs" | "jsx" | "cjs" | "json" => None,
+            extension => self.loaders.get(extension).map(Box::as_ref),
+        }
+    }
+
     fn validate_source(
         &self,
         requested: &Path,
@@ -113,10 +127,8 @@ impl NodeResolver {
         }
         let requested_ext = requested.extension().and_then(|ext| ext.to_str());
         let file_ext = file.extension().and_then(|ext| ext.to_str());
-        let is_resource = |extension: Option<&str>| {
-            extension.is_some_and(|ext| self.resource_extensions.contains(ext))
-        };
-        if is_resource(requested_ext) || is_resource(file_ext) {
+        if self.resource_loader(requested_ext).is_some() || self.resource_loader(file_ext).is_some()
+        {
             if requested_ext == file_ext {
                 return Ok(false);
             }
@@ -456,26 +468,20 @@ impl ModuleResolver for NodeResolver {
         Ok(ResolvedModule { id, is_framework })
     }
 
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
-        self.load_for_compile(id, &CompileError::internal)
-            .map_err(|error| {
-                if error.module().is_empty() {
-                    error.message().to_owned()
-                } else {
-                    error.to_string()
-                }
-            })
-    }
-
-    fn load_for_compile(
+    fn load(
         &self,
         id: &ModuleId,
         locate: &dyn Fn(String) -> CompileError,
-    ) -> Result<Cow<'_, str>, CompileError> {
+    ) -> Result<LoadedModule<'_>, CompileError> {
         if let Some(origin) = self.generated_source_origin(id) {
-            self.generate(id, origin, locate).map(Cow::Owned)
+            self.generate(id, origin, locate).map(LoadedModule::source)
         } else {
-            self.read_source(id).map(Cow::Owned).map_err(locate)
+            let text = self.read_source(id).map_err(locate)?;
+            let extension = Path::new(id).extension().and_then(|ext| ext.to_str());
+            match self.resource_loader(extension) {
+                Some(loader) => loader(id, text).map_err(locate),
+                None => Ok(LoadedModule::source(text)),
+            }
         }
     }
 

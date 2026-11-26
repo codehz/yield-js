@@ -8,6 +8,7 @@
 - 严格 ESM 支持本地命名导出：`export function`、`export async function`、`export var` / `let` / `const`、`export { local }` 和 `export { local as publicName }`。默认导出也已支持：`export default <表达式>`（语句处求值一次，不求值不生效）、`export default function`（含匿名与 `async`，按函数声明提升并在模块入口初始化）、`export default class`（含匿名；具名类沿用类声明的语句处初始化与局部名字），以及保留活绑定的 `export { x as default }`（含宿主导入绑定）。具名 default 声明把局部 id 投影到公开名 `default`，不自动导出原名；同一模块只能有一个 default（解析期拒绝）。`Vm::new(build, host, VmOptions::default())` 验证构建和导入后执行一次模块初始化，再排空微任务。宿主通过 `Vm::get_export` 读取公开名对应的当前绑定值，`Vm::start` 读取并调用该值；未导出的声明（包括名为 `run` 的函数）对宿主不可见。恢复保留活绑定，不重跑初始化。
 - `Compiler::compile(Project)` 用同步 `ModuleResolver` 链接可达源码，并按注册顺序运行源码、图和 Build 转换。`Project::from_directory` 使用 `NodeResolver`，从引用模块向根目录逐级搜索 `node_modules`，只解析包 `exports` 的精确子路径和 `import` / `default` 条件。`MemoryResolver` 保留根相对路径规则。解析返回 `ResolvedModule`：规范模块 ID 加上该定义模块的框架标记；`NodeResolver` 把 `node_modules` 内定义的模块（含包 `exports` 目标、嵌套依赖和包内相对导入）标为框架，`MemoryResolver` 从不标记。标记只决定是否为该模块生成 Error 栈位置，不改变解析、链接或运行语义。`Compiler::from_dts` 独立读取宿主模块与值导出清单。ESM 支持具名、默认、命名空间和副作用导入，以及具名、星号和命名空间转导出；星号不传递 `default`，不同最终目标的同名导出从命名空间排除。
 - 显式 `NodeResolver::web_production` 按 `browser` → `import` → `production` → `default` 选择包导出条件。无 `exports` 时支持 `main` / `index.js` 与包内子路径。静态 CommonJS 在发现依赖前转换为同一 ESM 图中的 facade 和惰性 factory；字面量 `require` 共享模块缓存，循环可读到部分导出，ESM 具名导入取得初始化后的属性快照。默认 ESM 解析与活绑定不变。
+- `ModuleResolver::load` 每次编译按规范 ID 加载一次，返回源码及有序资源。图转换裁剪后，编译器按 preload 优先、依赖声明顺序深度优先遍历最终图，在 Build 转换前收集资源、更新摘要并校验 URI 唯一性。`NodeResolver::with_loader` 为显式扩展名注册 UTF-8 文件加载策略，不增加扩展名探测。`Project::with_preload_source` 仅内嵌该显式根；其依赖仍按该 ID 解析。
 - 源码和图转换可用 `ParsedModule::program_mut` 原地修改固定版本的 Oxc AST。源码转换产生的导入参与依赖发现；图转换后重新校验依赖并计算链接绑定，不直接公开链接表。
 - `.jsx` 模块使用自动 JSX runtime；编译器将元素与片段转换为 `<jsx_runtime>/jsx-runtime` 的静态导入和 `jsx` / `jsxs` 调用。默认包为 `react`，不依赖 `React` 全局或 `createElement`。
 - `import("literal")` 在编译期解析为依赖；目标模块按依赖图提前求值，每个模块仍只求值一次。每次执行该表达式都会返回一个新的已兑现 Promise，值是目标模块的命名空间，不执行 thenable 同化。
@@ -45,7 +46,7 @@
 - C 风格 `for` 的 `using` / `await using` 头在整个循环退出时释放；`continue` 不结束头部资源的生命周期。`for…of` 和 `for await…of` 的单名资源头每轮先登记、再初始化绑定和执行正文，当轮清理先于迭代器关闭。迭代方式独立于释放 hint，`for…in` 不允许资源头。模块顶层 `using` 在本模块求值返回前完成清理，不在实例化、恢复或 VM 销毁时运行。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - `yield-blitz` 通过 `BlitzSession` 持有 VM 与文档；版本化 DOM payload 随 `yield:dom` 模块状态快照，恢复时直接重建 Blitz 节点树、脱离子树及包装索引，不重跑模块初始化。快照保留 JS 节点、闭包、expando 与监听器身份，恢复后脚本可继续更新树；`render_module` / `render_fixture` 仍提供执行后移交文档的一次性入口。锁定 React 首屏 fixture 使用 `BaseDocument` 并由 Blitz shell/Vello 显示。
-- Blitz 的文件构建支持显式 `.css` 副作用导入。生成的 ESM 调用 `yield:dom.insertCss`，以最终模块图中 preload 后 entry 的深度优先依赖顺序收集资源。模块身份去重；同一 CSS ID 的重复定义复用首次读取的字节、不再读文件且不报错，宿主按精确 URI 读取构建字节，将 UTF-8 原文作为 `head` 末尾的作者样式节点插入。恢复重建已保存的样式节点，不重新执行导入。
+- Blitz 为显式 `.css` 副作用导入注册文本加载器，返回原始字节和调用 `yield:dom.insertCss` 的 ESM。宿主按精确 URI 读取构建字节，在模块执行时将 UTF-8 原文作为 `head` 末尾的作者样式节点插入。恢复重建已保存的样式节点，不重新执行导入。
 - `BlitzSession::click` 和原生窗口的主键点击共用 VM 的 `EventTarget` 派发：向当前文档的元素发送可信、可冒泡、可取消的 `click`；取消会阻止 Blitz 默认动作。节点的事件父级用 VM 托管槽保存，随节点移动或脱离更新。快照恢复监听器、闭包和 React 计数状态，不重放原生输入；恢复后应从新文档取得目标，再投递下一次点击。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的值分配到瞬时槽，活性区间不相交的值可复用同一个瞬时槽；持久槽不复用。挂起时丢弃瞬时槽，恢复时只重建指定持久槽。

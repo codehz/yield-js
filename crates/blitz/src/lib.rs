@@ -5,7 +5,6 @@ mod dom;
 mod snapshot;
 mod window;
 
-use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,10 +14,7 @@ use std::sync::Arc;
 use blitz_dom::{BaseDocument, DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
 use yield_binding_macros::host;
-use yield_compiler::{
-    BuildTransform, CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver,
-    Project, ResolvedModule, TransformError,
-};
+use yield_compiler::{Compiler, LoadedModule, MemoryResolver, NodeResolver, Project};
 use yield_vm::{
     Absent, Build, BuildResource, Diagnostic, Diagnostics, Host, JsValue, RestoreOptions, Snapshot,
     Value, Vm, VmError,
@@ -233,99 +229,19 @@ impl BlitzSession {
 
 const DOM_PRELOAD: &str = "yield:blitz-dom-preload";
 
-type CssResources = RefCell<BTreeMap<ModuleId, BuildResource>>;
-
-struct FixtureResolver<'a>(NodeResolver, &'a CssResources);
-
-impl FixtureResolver<'_> {
-    fn load_css(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
-        if id.ends_with(".module.css") {
-            return Err(format!("unsupported syntax: CSS Modules ({id})"));
-        }
-        let uri = format!("asset:{id}");
-        if !self.1.borrow().contains_key(id) {
-            // A canonical ID is defined once: later imports reuse the first
-            // resource and never reread the file.
-            let bytes = self.0.load(id)?.as_bytes().into();
-            self.1.borrow_mut().insert(
-                id.clone(),
-                BuildResource {
-                    uri: uri.clone(),
-                    bytes,
-                },
-            );
-        }
-        let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
-        Ok(Cow::Owned(format!(
-            "import {{ insertCss }} from 'yield:dom'; insertCss({literal});"
-        )))
+fn load_css(id: &str, text: String) -> Result<LoadedModule<'static>, String> {
+    if id.ends_with(".module.css") {
+        return Err(format!("unsupported syntax: CSS Modules ({id})"));
     }
-}
-
-impl ModuleResolver for FixtureResolver<'_> {
-    fn resolve(
-        &self,
-        referrer: Option<&ModuleId>,
-        specifier: &str,
-    ) -> Result<ResolvedModule, String> {
-        if referrer.is_none() && specifier == DOM_PRELOAD {
-            return Ok(ResolvedModule {
-                id: DOM_PRELOAD.into(),
-                is_framework: false,
-            });
-        }
-        self.0.resolve(referrer, specifier)
-    }
-
-    fn load(&self, id: &ModuleId) -> Result<Cow<'_, str>, String> {
-        if id == DOM_PRELOAD {
-            return Ok(Cow::Borrowed(include_str!("dom.mjs")));
-        }
-        if id.ends_with(".css") {
-            return self.load_css(id);
-        }
-        self.0.load(id)
-    }
-
-    fn load_for_compile(
-        &self,
-        id: &ModuleId,
-        locate: &dyn Fn(String) -> CompileError,
-    ) -> Result<Cow<'_, str>, CompileError> {
-        if id == DOM_PRELOAD || id.ends_with(".css") {
-            return self.load(id).map_err(locate);
-        }
-        self.0.load_for_compile(id, locate)
-    }
-
-    fn generated_source_origin(&self, id: &str) -> Option<ModuleId> {
-        self.0.generated_source_origin(id)
-    }
-}
-
-struct CollectCss<'a>(&'a CssResources);
-
-impl BuildTransform for CollectCss<'_> {
-    fn transform(&mut self, build: &mut Build) -> Result<(), TransformError> {
-        let mut cached = self.0.take();
-        let mut visited = vec![false; build.modules.len()];
-        let mut pending = vec![build.entry];
-        pending.extend(build.preload);
-        while let Some(index) = pending.pop() {
-            if std::mem::replace(&mut visited[index as usize], true) {
-                continue;
-            }
-            let module = &build.modules[index as usize];
-            if module.id.ends_with(".css") {
-                let resource = cached.remove(&module.id).ok_or_else(|| {
-                    TransformError::new(format!("missing CSS resource: asset:{}", module.id))
-                })?;
-                build.resources.push(resource);
-            }
-            pending.extend(module.dependencies.iter().rev().copied());
-        }
-        Ok(())
-    }
+    let uri = format!("asset:{id}");
+    let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
+    Ok(LoadedModule {
+        source: format!("import {{ insertCss }} from 'yield:dom'; insertCss({literal});").into(),
+        resources: vec![BuildResource {
+            uri,
+            bytes: text.into_bytes().into(),
+        }],
+    })
 }
 
 /// Compile the JSX fixture against its installed production npm sources.
@@ -341,15 +257,10 @@ pub fn compile_fixture() -> Result<Build, String> {
                 .into(),
         );
     }
-    let resources = CssResources::default();
-    let resolver = FixtureResolver(
-        NodeResolver::web_production(root)?.with_resource_extension("css"),
-        &resources,
-    );
+    let resolver = NodeResolver::web_production(root)?.with_loader("css", load_css);
     compile(
         Project::new("./src/blitz.jsx", resolver)
-            .with_preload(DOM_PRELOAD)
-            .with_build_transform(CollectCss(&resources)),
+            .with_preload_source(DOM_PRELOAD, include_str!("dom.mjs")),
     )
 }
 
@@ -372,47 +283,122 @@ fn render(build: Build) -> Result<BaseDocument, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            loop {
+                let path = std::env::temp_dir().join(format!(
+                    "yield-blitz-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                match fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("creating {path:?}: {error}"),
+                }
+            }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn collects_only_reachable_css_in_preload_and_source_order() {
-        let resolver = MemoryResolver::new([
-            ("preload.js", "import './c.css';"),
+        let root = TempDir::new();
+        let styles = [
+            ("c.css", "p { color: red }"),
+            ("b.css", "p { color: blue }"),
+            ("a.css", "p { color: green }"),
+        ];
+        for (id, text) in styles.into_iter().chain([
             ("entry.js", "import './dep.js'; import './b.css';"),
             (
                 "dep.js",
                 "import './entry.js'; import './b.css'; import './a.css';",
             ),
-            ("a.css", ""),
-            ("b.css", ""),
-            ("c.css", ""),
-        ])
-        .unwrap();
-        let resources: CssResources = ["a.css", "b.css", "c.css", "unused.css"]
-            .into_iter()
-            .map(|id| {
-                (
-                    id.into(),
-                    BuildResource {
-                        uri: format!("asset:{id}"),
-                        bytes: [].into(),
-                    },
+            ("unused.css", "p { color: black }"),
+        ]) {
+            fs::write(root.0.join(id), text).unwrap();
+        }
+        let calls = Rc::new(RefCell::new(BTreeMap::new()));
+        let resolver = NodeResolver::web_production(&root.0)
+            .unwrap()
+            .with_loader("css", {
+                let calls = calls.clone();
+                move |id, text| {
+                    *calls.borrow_mut().entry(id.to_owned()).or_insert(0) += 1;
+                    load_css(id, text)
+                }
+            });
+        let compiler = Compiler::from_dts(include_str!("dom.d.ts")).unwrap();
+        let compile = || {
+            compiler
+                .compile(
+                    Project::new("entry.js", &resolver)
+                        .with_preload_source("preload.js", "import './c.css';"),
                 )
-            })
-            .collect::<BTreeMap<_, _>>()
-            .into();
-        let build = Compiler::default()
-            .compile(
-                Project::new("entry.js", resolver)
-                    .with_preload("preload.js")
-                    .with_build_transform(CollectCss(&resources)),
-            )
-            .unwrap();
+                .unwrap()
+        };
+        let build = compile();
         let uris: Vec<_> = build
             .resources
             .iter()
             .map(|item| item.uri.as_str())
             .collect();
         assert_eq!(uris, ["asset:c.css", "asset:b.css", "asset:a.css"]);
+        for (resource, (_, text)) in build.resources.iter().zip(styles) {
+            assert_eq!(&*resource.bytes, text.as_bytes());
+        }
+        assert_eq!(
+            *calls.borrow(),
+            BTreeMap::from(styles.map(|(id, _)| (id.into(), 1)))
+        );
         build.validate().unwrap();
+
+        let updated = "p { color: orange }";
+        fs::write(root.0.join("b.css"), updated).unwrap();
+        let rebuilt = compile();
+        assert_eq!(&*rebuilt.resources[1].bytes, updated.as_bytes());
+        assert_ne!(rebuilt.build_id, build.build_id);
+        assert_eq!(
+            *calls.borrow(),
+            BTreeMap::from(styles.map(|(id, _)| (id.into(), 2)))
+        );
+        rebuilt.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_css_modules_at_the_import_site() {
+        let root = TempDir::new();
+        fs::write(root.0.join("theme.module.css"), "").unwrap();
+        fs::write(root.0.join("entry.js"), "\nimport './theme.module.css';").unwrap();
+        let resolver = NodeResolver::web_production(&root.0)
+            .unwrap()
+            .with_loader("css", load_css);
+        let error = Compiler::from_dts(include_str!("dom.d.ts"))
+            .unwrap()
+            .compile(Project::new("entry.js", resolver))
+            .unwrap_err();
+        assert_eq!(
+            (error.module(), error.line(), error.column()),
+            ("entry.js", 2, 8)
+        );
+        assert!(
+            error
+                .message()
+                .contains("unsupported syntax: CSS Modules (theme.module.css)"),
+            "{error}"
+        );
     }
 }

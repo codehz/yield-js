@@ -47,7 +47,7 @@ use yield_vm::bytecode::Build;
 
 pub use error::CompileError;
 pub use frontend::link::{Dependency, DependencyKind, ModuleGraph};
-pub use resolver::{MemoryResolver, ModuleResolver, NodeResolver, ResolvedModule};
+pub use resolver::{LoadedModule, MemoryResolver, ModuleResolver, NodeResolver, ResolvedModule};
 pub use transform::{
     BuildTransform, GraphTransform, ParsedModule, SourceTransform, TransformError,
 };
@@ -59,6 +59,7 @@ pub type ModuleId = String;
 pub struct Project<'a> {
     pub entry: ModuleId,
     pub preload: Option<ModuleId>,
+    preload_source: Option<(ModuleId, &'a str)>,
     resolver: Box<dyn ModuleResolver + 'a>,
     sources: Vec<Box<dyn SourceTransform + 'a>>,
     graphs: Vec<Box<dyn GraphTransform + 'a>>,
@@ -70,6 +71,7 @@ impl<'a> Project<'a> {
         Self {
             entry: entry.into(),
             preload: None,
+            preload_source: None,
             resolver: Box::new(resolver),
             sources: Vec::new(),
             graphs: Vec::new(),
@@ -87,6 +89,16 @@ impl<'a> Project<'a> {
 
     pub fn with_preload(mut self, id: impl Into<ModuleId>) -> Self {
         self.preload = Some(id.into());
+        self.preload_source = None;
+        self
+    }
+
+    /// Define the explicit preload root without resolving or loading it.
+    /// Imports still go through the normal resolver, with this ID as referrer.
+    pub fn with_preload_source(mut self, id: impl Into<ModuleId>, source: &'a str) -> Self {
+        let id = id.into();
+        self.preload = Some(id.clone());
+        self.preload_source = Some((id, source));
         self
     }
 
@@ -148,7 +160,11 @@ impl Compiler {
     pub fn compile(&self, mut project: Project<'_>) -> Result<Build, CompileError> {
         let result = self.compile_project(&mut project);
         result.map_err(|error| {
-            if error.stage() != Some("CommonJS conversion")
+            let inline_preload = project.preload_source.as_ref().is_some_and(|(id, _)| {
+                project.preload.as_ref() == Some(id) && error.module() == id
+            });
+            if !inline_preload
+                && error.stage() != Some("CommonJS conversion")
                 && let Some(original) = project.resolver.generated_source_origin(error.module())
             {
                 return error.at_generated_position(original);
@@ -164,6 +180,10 @@ impl Compiler {
             &allocator,
             &project.entry,
             project.preload.as_deref(),
+            project
+                .preload_source
+                .as_ref()
+                .map(|(id, source)| (id.as_str(), *source)),
             resolver,
             self,
             &mut project.sources,
@@ -183,6 +203,28 @@ impl Compiler {
             })?;
         }
         let mut build = lower::lower_graph(&graph, self)?;
+        if graph
+            .modules
+            .iter()
+            .any(|module| !module.resources.is_empty())
+        {
+            // Visit preload first, then entry, following each module's final edge order.
+            let mut visited = vec![false; build.modules.len()];
+            let mut pending = vec![build.entry];
+            pending.extend(build.preload);
+            while let Some(index) = pending.pop() {
+                let index = index as usize;
+                if std::mem::replace(&mut visited[index], true) {
+                    continue;
+                }
+                build.resources.append(&mut graph.modules[index].resources);
+                pending.extend(build.modules[index].dependencies.iter().rev().copied());
+            }
+            build.finalize();
+            build.validate().map_err(|error| {
+                CompileError::internal(error.to_string()).in_stage("module resources")
+            })?;
+        }
         for (index, transform) in project.builds.iter_mut().enumerate() {
             let stage = format!("build transform {}", index + 1);
             transform

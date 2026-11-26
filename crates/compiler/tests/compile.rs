@@ -6,15 +6,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use yield_compiler::{
-    BuildTransform, CompileError, Compiler, DependencyKind, GraphTransform, MemoryResolver,
-    ModuleGraph, ModuleId, ModuleResolver, NodeResolver, ParsedModule, Project, SourceTransform,
-    TransformError,
+    BuildTransform, CompileError, Compiler, DependencyKind, GraphTransform, LoadedModule,
+    MemoryResolver, ModuleGraph, ModuleId, ModuleResolver, NodeResolver, ParsedModule, Project,
+    SourceTransform, TransformError,
 };
-use yield_vm::bytecode::{Build, CallArgs, Instr, ModuleTarget, SourceModule};
+use yield_vm::bytecode::{Build, BuildResource, CallArgs, Instr, ModuleTarget, SourceModule};
 
 fn compile(source: &str, options: &Compiler) -> Result<Build, CompileError> {
     let resolver = MemoryResolver::new([("main.js", source)]).unwrap();
     options.compile(Project::new("main.js", resolver))
+}
+
+fn unexpected_load_error(message: String) -> CompileError {
+    panic!("unexpected load error: {message}")
 }
 
 fn entry_module(build: &Build) -> &SourceModule {
@@ -90,6 +94,82 @@ fn pipeline_runs_each_stage_in_registration_order_and_relinks_exports() {
     );
     assert_eq!(build.build_id, build.compute_id());
     build.validate().unwrap();
+}
+
+#[test]
+fn build_transforms_receive_only_resources_from_the_final_graph() {
+    struct CheckResources;
+    impl BuildTransform for CheckResources {
+        fn transform(&mut self, build: &mut Build) -> Result<(), TransformError> {
+            let resources: Vec<_> = build
+                .resources
+                .iter()
+                .map(|resource| (resource.uri.as_str(), &*resource.bytes))
+                .collect();
+            assert_eq!(
+                resources,
+                [("asset:keep.txt", &b"keep"[..]), ("asset:extra", &b""[..])]
+            );
+            assert_eq!(build.build_id, build.compute_id());
+            assert!(build.modules.iter().all(|module| module.id != "drop.txt"));
+            Ok(())
+        }
+    }
+
+    let root = TempDir::new();
+    let source = "import './drop.txt'; import './keep.txt';";
+    fixture(&root, "main.js", source);
+    fixture(&root, "drop.txt", "drop");
+    fixture(&root, "keep.txt", "keep");
+    let resolver = NodeResolver::new(&root.0)
+        .unwrap()
+        .with_loader("txt", |id, text| {
+            let mut loaded = LoadedModule::source("");
+            loaded.resources.push(BuildResource {
+                uri: format!("asset:{id}"),
+                bytes: text.into_bytes().into(),
+            });
+            if id == "keep.txt" {
+                loaded.resources.push(BuildResource {
+                    uri: "asset:extra".into(),
+                    bytes: [].into(),
+                });
+            }
+            Ok(loaded)
+        });
+    Compiler::default()
+        .compile(
+            Project::new("main.js", resolver)
+                .with_graph_transform(Rewrite(source, "import './keep.txt';"))
+                .with_build_transform(CheckResources),
+        )
+        .unwrap();
+}
+
+#[test]
+fn duplicate_module_resource_uris_fail_without_a_build_transform() {
+    let root = TempDir::new();
+    fixture(&root, "main.js", "import './one.txt'; import './two.txt';");
+    fixture(&root, "one.txt", "one");
+    fixture(&root, "two.txt", "two");
+    let resolver = NodeResolver::new(&root.0)
+        .unwrap()
+        .with_loader("txt", |_, text| {
+            let mut loaded = LoadedModule::source("");
+            loaded.resources.push(BuildResource {
+                uri: "asset:shared".into(),
+                bytes: text.into_bytes().into(),
+            });
+            Ok(loaded)
+        });
+    let error = Compiler::default()
+        .compile(Project::new("main.js", resolver))
+        .unwrap_err();
+    assert_eq!(error.stage(), Some("module resources"));
+    assert_eq!(
+        error.message(),
+        "duplicate build resource URI \"asset:shared\""
+    );
 }
 
 #[test]
@@ -2041,11 +2121,23 @@ fn memory_resolver_resolves_relative_and_root_relative_paths() {
         .unwrap()
         .id;
     assert_eq!(local, "src/dep.js");
-    assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
+    assert_eq!(
+        resolver
+            .load(&local, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "export const local = 2;"
+    );
     let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap().id;
     assert_eq!(shared, "dep.js");
     assert_eq!(resolver.resolve(Some(&entry), "dep.js").unwrap().id, shared);
-    assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
+    assert_eq!(
+        resolver
+            .load(&shared, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "export const shared = 3;"
+    );
     assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
 }
 
@@ -2091,12 +2183,25 @@ fn node_resolver_resources_require_an_explicit_opted_in_extension() {
     let resolver = NodeResolver::web_production(&root.0).unwrap();
     assert!(resolver.resolve(None, "./theme.css").is_err());
 
-    let resolver = resolver.with_resource_extension("css");
+    let resolver = resolver.with_loader("css", |id, text| {
+        let mut module = LoadedModule::source("export default 'theme';");
+        module.resources.push(BuildResource {
+            uri: format!("asset:{id}"),
+            bytes: text.into_bytes().into(),
+        });
+        Ok(module)
+    });
     assert!(resolver.resolve(None, "./theme").is_err());
     let module = resolver.resolve(None, "./theme.css").unwrap();
     assert_eq!(module.id, "theme.css");
     assert!(!module.is_framework);
-    assert_eq!(resolver.load(&module.id).unwrap(), "#root { width: 101px }");
+    let loaded = resolver.load(&module.id, &unexpected_load_error).unwrap();
+    assert_eq!(loaded.source, "export default 'theme';");
+    let [resource] = loaded.resources.as_slice() else {
+        panic!("expected one resource");
+    };
+    assert_eq!(resource.uri, "asset:theme.css");
+    assert_eq!(&*resource.bytes, b"#root { width: 101px }");
 }
 
 #[test]
@@ -2115,12 +2220,24 @@ fn node_resolver_resolves_relative_paths_and_explicit_roots() {
         .unwrap()
         .id;
     assert_eq!(local, "src/dep.js");
-    assert_eq!(resolver.load(&local).unwrap(), "export const local = 2;");
+    assert_eq!(
+        resolver
+            .load(&local, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "export const local = 2;"
+    );
     let shared = resolver.resolve(Some(&entry), "../dep.js").unwrap().id;
     assert_eq!(shared, "dep.js");
     assert!(resolver.resolve(Some(&entry), "dep.js").is_err());
     assert_eq!(resolver.resolve(None, "dep.js").unwrap().id, shared);
-    assert_eq!(resolver.load(&shared).unwrap(), "export const shared = 3;");
+    assert_eq!(
+        resolver
+            .load(&shared, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "export const shared = 3;"
+    );
     assert!(resolver.resolve(Some(&entry), "../../dep.js").is_err());
 }
 
@@ -2141,8 +2258,15 @@ fn node_resolver_canonicalizes_symlink_aliases_and_rejects_escapes() {
     assert_eq!(resolver.resolve(None, "alias.js").unwrap().id, "dep.js");
     let error = resolver.resolve(None, "escape.js").unwrap_err();
     assert!(error.contains("outside the source root"), "{error}");
-    let error = resolver.load(&ModuleId::from("escape.js")).unwrap_err();
-    assert!(error.contains("outside the source root"), "{error}");
+    fs::write(root.join("main.js"), "\nimport './escape.js';").unwrap();
+    let error = Compiler::default()
+        .compile(Project::new("main.js", resolver))
+        .unwrap_err();
+    assert!(
+        error.message().contains("outside the source root"),
+        "{error}"
+    );
+    assert_eq!((error.module(), error.line()), ("main.js", 2));
 }
 
 #[test]
@@ -2407,7 +2531,13 @@ fn node_resolver_probes_exports_and_package_relative_imports() {
         "installed packages are framework code"
     );
     let private = resolver.resolve(Some(&package.id), "./private").unwrap().id;
-    assert_eq!(resolver.load(&private).unwrap(), "export const value = 1;");
+    assert_eq!(
+        resolver
+            .load(&private, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "export const value = 1;"
+    );
     assert!(
         resolver
             .resolve(Some(&entry), "@scope/pkg/public")
@@ -2475,9 +2605,18 @@ fn node_resolver_retains_installation_context_for_package_collisions() {
     let outer_sibling = resolver.resolve(Some(&entry), "sibling").unwrap().id;
     let inner_sibling = resolver.resolve(Some(&inner), "sibling").unwrap().id;
     assert_ne!(outer_sibling, inner_sibling);
-    assert_eq!(resolver.load(&outer_sibling).unwrap(), "node_modules/");
     assert_eq!(
-        resolver.load(&inner_sibling).unwrap(),
+        resolver
+            .load(&outer_sibling, &unexpected_load_error)
+            .unwrap()
+            .source,
+        "node_modules/"
+    );
+    assert_eq!(
+        resolver
+            .load(&inner_sibling, &unexpected_load_error)
+            .unwrap()
+            .source,
         "node_modules/dep/node_modules/"
     );
 }
