@@ -1,14 +1,17 @@
 //! Shared `Dom` helpers: id→handle resolution and wrapper initialization.
 
-use blitz_dom::{NodeData, NodeId, local_name};
+use blitz_dom::{NodeData, NodeId, ns};
 use yield_vm::binding::CallCx;
 use yield_vm::intrinsics::TypeError;
 use yield_vm::{JsError, JsResult, JsValue};
 
 use super::Dom;
 use super::document::{Document, DocumentSlots};
-use super::element::{Element, HTMLIFrameElement, alloc_element};
-use super::input::{HTMLInputElement, is_input};
+use super::element::{
+    Element, HTMLButtonElement, HTMLElement, HTMLIFrameElement, HTMLLIElement, HTMLLabelElement,
+    HTMLUListElement, alloc_element,
+};
+use super::input::HTMLInputElement;
 use super::node::{Node, NodeSlots};
 
 impl Dom {
@@ -58,11 +61,16 @@ impl Dom {
             let index = u32::try_from(self.nodes.len())
                 .map_err(|_| JsError::new::<TypeError>("too many DOM nodes"))?;
             let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
-                NodeData::Element(element) if element.name.local == local_name!("iframe") => {
-                    alloc_element(cx, HTMLIFrameElement)?.value(cx)
-                }
-                NodeData::Element(element) if is_input(element) => {
-                    alloc_element(cx, HTMLInputElement)?.value(cx)
+                NodeData::Element(element) if element.name.ns == ns!(html) => {
+                    match element.name.local.as_ref() {
+                        "iframe" => alloc_element(cx, HTMLIFrameElement)?.value(cx),
+                        "input" => alloc_element(cx, HTMLInputElement)?.value(cx),
+                        "button" => alloc_element(cx, HTMLButtonElement)?.value(cx),
+                        "label" => alloc_element(cx, HTMLLabelElement)?.value(cx),
+                        "ul" => alloc_element(cx, HTMLUListElement)?.value(cx),
+                        "li" => alloc_element(cx, HTMLLIElement)?.value(cx),
+                        _ => alloc_element(cx, HTMLElement)?.value(cx),
+                    }
                 }
                 NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
                 NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),

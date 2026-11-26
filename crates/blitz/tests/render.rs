@@ -27,7 +27,7 @@ fn restores_react_author_styles_in_import_order() -> Result<(), String> {
         let root = doc
             .get_node(doc.get_element_by_id("root").unwrap())
             .unwrap();
-        assert_eq!(root.final_layout().size.width, 137.0);
+        assert_eq!(root.final_layout().size.width, 480.0);
         assert_eq!(style_texts(&doc), expected);
         assert_eq!(doc.author_stylesheets().count(), 2);
     };
@@ -100,59 +100,32 @@ fn style_texts(doc: &blitz_dom::BaseDocument) -> Vec<String> {
 }
 
 #[test]
-fn mounts_react_and_resumes_the_click_counter() -> Result<(), String> {
+fn operates_react_todos_before_and_after_restore() -> Result<(), String> {
     let build = compile_fixture()?;
     let mut session = BlitzSession::new(build.clone())?;
     session.run_until_idle()?;
-    let doc = session.document();
-    let root = doc
-        .get_node(doc.get_element_by_id("root").unwrap())
-        .unwrap();
-    let [main] = root.children.as_slice() else {
-        panic!("expected one child of #root")
-    };
-    let main = doc.get_node(*main).unwrap();
-    assert_eq!(&*main.element_data().unwrap().name.local, "main");
-    let [heading, counter, _] = main.children.as_slice() else {
-        panic!("expected a heading, counter and name editor in main")
-    };
-    let heading = doc.get_node(*heading).unwrap();
-    assert_eq!(&*heading.element_data().unwrap().name.local, "h1");
-    assert_eq!(heading.text_content(), "Hello from React DOM");
-    assert_eq!(doc.get_node(*counter).unwrap().text_content(), "Clicks: 0");
-    let counter = *counter;
-    drop(doc);
-    deliver_blitz_click(&mut session, counter);
-    let text = |session: &BlitzSession, id| session.document().get_node(id).unwrap().text_content();
-    assert_eq!(text(&session, counter), "Clicks: 1");
-    let bytes = session.snapshot(&[])?.to_bytes()?;
-    drop(session);
+    assert_todos(&session, &[], 0);
 
-    let mut restored = BlitzSession::restore(
-        Snapshot::from_bytes(&bytes)?,
-        build,
-        RestoreOptions {
-            validation: SnapshotValidation::Full,
-            ..Default::default()
-        },
-    )?;
-    let counter = restored.document().get_element_by_id("counter").unwrap();
-    assert_eq!(text(&restored, counter), "Clicks: 1");
-    assert!(restored.click(counter)?);
-    assert_eq!(text(&restored, counter), "Clicks: 2");
-    Ok(())
-}
+    commit_text(&mut session, "new-todo", "   ");
+    assert_input_text(&session, "new-todo", "   ");
+    click_id(&mut session, "add-todo");
+    assert_todos(&session, &[], 0);
 
-#[test]
-fn edits_and_clears_the_controlled_react_input_after_restore() -> Result<(), String> {
-    let build = compile_fixture()?;
-    let mut session = BlitzSession::new(build.clone())?;
-    session.run_until_idle()?;
-    assert_greeting(&session, "Hello, guest!");
+    commit_text(&mut session, "new-todo", "小明");
+    click_id(&mut session, "add-todo");
+    assert_todos(&session, &[(1, "小明", false)], 1);
+    assert_input_text(&session, "new-todo", "");
+    commit_text(&mut session, "new-todo", " Beta ");
+    click_id(&mut session, "add-todo");
+    assert_todos(&session, &[(1, "小明", false), (2, "Beta", false)], 2);
+    assert_input_text(&session, "new-todo", "");
 
-    commit_text(&mut session, "小明");
-    assert_name(&session, "小明");
-    assert_greeting(&session, "Hello, 小明!");
+    click_id(&mut session, "toggle-1");
+    assert_todos(&session, &[(1, "小明", true), (2, "Beta", false)], 1);
+    click_id(&mut session, "filter-active");
+    assert_todos(&session, &[(2, "Beta", false)], 1);
+    click_id(&mut session, "filter-completed");
+    assert_todos(&session, &[(1, "小明", true)], 1);
 
     let bytes = session.snapshot(&[])?.to_bytes()?;
     drop(session);
@@ -164,21 +137,87 @@ fn edits_and_clears_the_controlled_react_input_after_restore() -> Result<(), Str
             ..Default::default()
         },
     )?;
-    assert_name(&session, "小明");
-    assert_greeting(&session, "Hello, 小明!");
+    assert_todos(&session, &[(1, "小明", true)], 1);
+    click_id(&mut session, "filter-all");
+    assert_todos(&session, &[(1, "小明", true), (2, "Beta", false)], 1);
 
-    commit_text(&mut session, "🙂");
-    assert_name(&session, "小明🙂");
-    assert_greeting(&session, "Hello, 小明🙂!");
+    click_id(&mut session, "edit-2");
+    assert_input_text(&session, "draft-2", "Beta");
+    commit_text(&mut session, "draft-2", "🙂");
+    assert_input_text(&session, "draft-2", "Beta🙂");
+    click_id(&mut session, "cancel-2");
+    assert!(session.document().get_element_by_id("draft-2").is_none());
+    assert_todos(&session, &[(1, "小明", true), (2, "Beta", false)], 1);
+    click_id(&mut session, "edit-2");
+    commit_text(&mut session, "draft-2", "🙂 ");
+    click_id(&mut session, "save-2");
+    assert!(session.document().get_element_by_id("draft-2").is_none());
+    assert_todos(&session, &[(1, "小明", true), (2, "Beta🙂", false)], 1);
 
-    let clear = session.document().get_element_by_id("clear-name").unwrap();
-    deliver_blitz_click(&mut session, clear);
-    assert_name(&session, "");
-    assert_greeting(&session, "Hello, guest!");
-    commit_text(&mut session, "Ada");
-    assert_name(&session, "Ada");
-    assert_greeting(&session, "Hello, Ada!");
+    click_id(&mut session, "filter-active");
+    click_id(&mut session, "toggle-all");
+    assert_todos(&session, &[], 0);
+    assert_checkbox(&session, "toggle-all", true);
+    click_id(&mut session, "filter-all");
+    assert_todos(&session, &[(1, "小明", true), (2, "Beta🙂", true)], 0);
+    click_id(&mut session, "toggle-all");
+    assert_checkbox(&session, "toggle-all", false);
+    assert_todos(&session, &[(1, "小明", false), (2, "Beta🙂", false)], 2);
+    click_id(&mut session, "toggle-1");
+    click_id(&mut session, "filter-active");
+    click_id(&mut session, "clear-completed");
+    click_id(&mut session, "filter-all");
+    assert_todos(&session, &[(2, "Beta🙂", false)], 1);
+    click_id(&mut session, "delete-2");
+    assert_todos(&session, &[], 0);
+    assert_checkbox(&session, "toggle-all", false);
     Ok(())
+}
+
+fn assert_todos(session: &BlitzSession, expected: &[(usize, &str, bool)], active: usize) {
+    let doc = session.document();
+    let list = doc
+        .get_node(doc.get_element_by_id("todo-list").unwrap())
+        .unwrap();
+    assert_eq!(list.children.len(), expected.len());
+    for (&row, &(id, title, checked)) in list.children.iter().zip(expected) {
+        assert_eq!(doc.get_element_by_id(&format!("todo-{id}")), Some(row));
+        let toggle = format!("toggle-{id}");
+        let label = doc
+            .get_node(row)
+            .unwrap()
+            .children
+            .iter()
+            .filter_map(|&child| doc.get_node(child))
+            .flat_map(|node| &node.children)
+            .filter_map(|&child| doc.get_node(child))
+            .find(|node| node.attr(blitz_dom::local_name!("for")) == Some(&toggle))
+            .unwrap();
+        assert_eq!(label.text_content(), title);
+        assert_checkbox(session, &toggle, checked);
+    }
+    let count = doc
+        .get_node(doc.get_element_by_id("todo-count").unwrap())
+        .unwrap();
+    assert_eq!(count.text_content(), format!("{active} left"));
+}
+
+fn assert_checkbox(session: &BlitzSession, id: &str, checked: bool) {
+    let doc = session.document();
+    let element = doc
+        .get_node(doc.get_element_by_id(id).unwrap())
+        .unwrap()
+        .element_data()
+        .unwrap();
+    assert_eq!(element.checkbox_input_checked(), Some(checked), "#{id}");
+}
+
+fn click_id(session: &mut BlitzSession, id: &str) {
+    let target = session
+        .document()
+        .get_element_by_id(id)
+        .unwrap_or_else(|| panic!("missing #{id}"));
+    deliver_blitz_click(session, target);
 }
 
 #[test]
@@ -206,7 +245,7 @@ fn restores_text_edited_independently_of_the_value_attribute() -> Result<(), Str
     "#,
     )?;
     let mut session = BlitzSession::new(build.clone())?;
-    commit_text(&mut session, "!");
+    commit_text(&mut session, "name", "!");
     session.start("check", vec![])?;
     let snapshot = session.snapshot(&[])?;
     drop(session);
@@ -216,9 +255,9 @@ fn restores_text_edited_independently_of_the_value_attribute() -> Result<(), Str
     Ok(())
 }
 
-fn commit_text(session: &mut BlitzSession, text: &str) {
+fn commit_text(session: &mut BlitzSession, id: &str, text: &str) {
     session.resolve_layout(0.0);
-    let target = session.document().get_element_by_id("name").unwrap();
+    let target = session.document().get_element_by_id(id).unwrap();
     let mut doc = session.inner_mut();
     doc.set_focus_to(target);
     assert_eq!(doc.get_focussed_node_id(), Some(target));
@@ -228,11 +267,9 @@ fn commit_text(session: &mut BlitzSession, text: &str) {
     session.handle_ui_event(UiEvent::Ime(BlitzImeEvent::Commit(text.into())));
 }
 
-fn assert_name(session: &BlitzSession, expected: &str) {
+fn assert_input_text(session: &BlitzSession, id: &str, expected: &str) {
     let doc = session.document();
-    let input = doc
-        .get_node(doc.get_element_by_id("name").unwrap())
-        .unwrap();
+    let input = doc.get_node(doc.get_element_by_id(id).unwrap()).unwrap();
     assert_eq!(
         input
             .element_data()
@@ -242,16 +279,6 @@ fn assert_name(session: &BlitzSession, expected: &str) {
             .editor
             .text()
             .to_string(),
-        expected
-    );
-}
-
-fn assert_greeting(session: &BlitzSession, expected: &str) {
-    let doc = session.document();
-    assert_eq!(
-        doc.get_node(doc.get_element_by_id("greeting").unwrap())
-            .unwrap()
-            .text_content(),
         expected
     );
 }
@@ -384,6 +411,101 @@ fn keeps_native_node_identity_and_mutates_the_tree() -> Result<(), String> {
 }
 
 #[test]
+fn restores_html_wrappers_and_reflected_attributes() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        const button = document.createElement('button');
+        const label = document.createElement('label');
+        const list = document.createElement('ul');
+        const item = document.createElement('li');
+        if (button.disabled || label.htmlFor !== '' || item.id !== '' || item.className !== '') {
+            throw new Error('missing attributes must reflect as false or empty strings');
+        }
+        for (const [node, id] of [[button, 'action'], [label, 'label'], [list, 'list'], [item, 'item']]) {
+            node.id = id;
+            root.appendChild(node);
+        }
+        list.appendChild(item);
+        label.htmlFor = { toString() { return 'action'; } };
+        item.className = 'task';
+        button.disabled = 'yes';
+        if (button.getAttribute('disabled') !== '') throw new Error('boolean attribute not set');
+        button.disabled = 0;
+        if (button.getAttribute('disabled') !== null) throw new Error('boolean attribute not removed');
+        button.setAttribute('disabled', 'false');
+
+        export function check() {
+            for (const [node, id, type] of [[button, 'action', HTMLButtonElement],
+                [label, 'label', HTMLLabelElement], [list, 'list', HTMLUListElement],
+                [item, 'item', HTMLLIElement]]) {
+                if (Object.getPrototypeOf(node) !== type.prototype || !(node instanceof HTMLElement) ||
+                    document.getElementById(id) !== node || document.getElementById(id) !== node) {
+                    throw new Error('wrapper identity or prototype changed: ' + id);
+                }
+            }
+            return root instanceof HTMLElement && list.firstChild === item && button.disabled &&
+                button.id === 'action' && label.htmlFor === 'action' && label.getAttribute('for') === 'action' &&
+                item.className === 'task' && item.getAttribute('class') === 'task';
+        }
+        "#,
+    )?;
+    let mut session = BlitzSession::new(build.clone())?;
+    assert_eq!(session.start("check", vec![])?, Value::boolean(true));
+    let bytes = session.snapshot(&[])?.to_bytes()?;
+    drop(session);
+    let mut restored = BlitzSession::restore(
+        Snapshot::from_bytes(&bytes)?,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(restored.start("check", vec![])?, Value::boolean(true));
+    Ok(())
+}
+
+#[test]
+fn inserts_moves_and_removes_children_without_rewrapping() -> Result<(), String> {
+    render_module(
+        r#"
+        import { Node } from 'yield:dom';
+        const root = document.getElementById('root');
+        const [a, b, c] = ['a', 'b', 'c'].map(text => {
+            const item = document.createElement('div');
+            item.textContent = text;
+            return item;
+        });
+        function check(value, message) { if (!value) throw new Error(message); }
+        function rejects(action) {
+            try { action(); } catch (error) { return error instanceof TypeError; }
+            return false;
+        }
+        root.appendChild(a);
+        check(root.insertBefore(c, null) === c, 'null appends');
+        check(root.insertBefore(b, c) === b && root.firstChild === a &&
+              a.nextSibling === b && b.nextSibling === c, 'insert B in [A,C]');
+        check(root.insertBefore(c, a) === c && root.insertBefore(a, a) === a,
+              'move C before A and leave A in place');
+        check(rejects(() => root.insertBefore(a, root)) && rejects(() => root.insertBefore(a, new Node())) &&
+              rejects(() => root.removeChild(a.firstChild)) && rejects(() => root.removeChild({})) &&
+              rejects(() => a.insertBefore(root, null)), 'invalid mutations throw');
+        check(root.firstChild === c && c.nextSibling === a && a.nextSibling === b &&
+              b.nextSibling === null, 'failed mutations preserve [C,A,B]');
+        let bubbles = 0;
+        root.addEventListener('child-event', () => { bubbles++; });
+        a.firstChild.dispatchEvent(new Event('child-event', { bubbles: true }));
+        check(root.removeChild(a) === a && a.parentNode === null && a.textContent === 'a' &&
+              c.nextSibling === b, 'remove A without destroying its subtree');
+        a.firstChild.dispatchEvent(new Event('child-event', { bubbles: true }));
+        check(bubbles === 1, 'detached subtree does not bubble to the old parent');
+        "#,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn restores_detached_nodes_and_resumes_script_updates() -> Result<(), String> {
     let build = compile_module(
         r#"
@@ -501,5 +623,113 @@ fn dispatches_click_after_snapshot_restore() -> Result<(), String> {
     assert!(!session.click(target)?);
     assert!(session.click(target)?);
     assert_eq!(session.start("count", vec![])?, Value::number(1.0));
+    Ok(())
+}
+
+#[test]
+fn restores_dirty_checkboxes_and_rolls_back_canceled_activation() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.id = 'checkbox';
+        checkbox.setAttribute('checked', 'false');
+        if (!checkbox.defaultChecked || !checkbox.checked) throw new Error('clean checkedness follows presence');
+        checkbox.removeAttribute('checked');
+        if (checkbox.checked) throw new Error('clean checkedness follows removal');
+        checkbox.defaultChecked = true;
+        if (!checkbox.checked) throw new Error('clean checkedness follows defaultChecked');
+        checkbox.checked = 0;
+        root.appendChild(checkbox);
+        const detached = document.createElement('input');
+        detached.type = 'checkbox';
+        detached.checked = {};
+        let seen = 0;
+        root.addEventListener('click', event => {
+            if (event.target !== checkbox || !checkbox.checked) throw new Error('missing pre-activation');
+            if (++seen === 1) event.preventDefault();
+        });
+        export function check() {
+            return !checkbox.checked && checkbox.defaultChecked && detached.checked &&
+                   !detached.defaultChecked && detached.parentNode === null &&
+                   !Object.hasOwn(checkbox, 'checked');
+        }
+        export function verifyDirtyFlags() {
+            checkbox.defaultChecked = false;
+            checkbox.defaultChecked = true;
+            detached.setAttribute('checked', '');
+            detached.removeAttribute('checked');
+            return check();
+        }
+        export function clicks() { return seen; }
+        "#,
+    )?;
+    let mut session = BlitzSession::new(build.clone())?;
+    assert_eq!(session.start("check", vec![])?, Value::boolean(true));
+    let bytes = session.snapshot(&[])?.to_bytes()?;
+    drop(session);
+    let mut session = BlitzSession::restore(
+        Snapshot::from_bytes(&bytes)?,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        session.start("verifyDirtyFlags", vec![])?,
+        Value::boolean(true)
+    );
+    let target = session.document().get_element_by_id("checkbox").unwrap();
+    session.resolve_layout(0.0);
+    let native_checked = |session: &BlitzSession| {
+        session
+            .document()
+            .get_node(target)
+            .unwrap()
+            .element_data()
+            .unwrap()
+            .checkbox_input_checked()
+    };
+    assert_eq!(native_checked(&session), Some(false));
+    deliver_blitz_click(&mut session, target);
+    assert_eq!(session.start("clicks", vec![])?, Value::number(1.0));
+    assert_eq!(native_checked(&session), Some(false));
+    assert_eq!(session.start("check", vec![])?, Value::boolean(true));
+    deliver_blitz_click(&mut session, target);
+    assert_eq!(session.start("clicks", vec![])?, Value::number(2.0));
+    assert_eq!(native_checked(&session), Some(true));
+    Ok(())
+}
+
+#[test]
+fn resumes_pending_scheduler_wake_without_replaying_canceled_work() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        root.textContent = 'waiting';
+        clearTimeout(setTimeout(() => { throw new Error('canceled timer ran'); }, 0));
+        setTimeout(() => { root.textContent += '!'; }, 0);
+        "#,
+    )?;
+    let session = BlitzSession::new(build.clone())?;
+    let bytes = session.snapshot(&[])?.to_bytes()?;
+    drop(session);
+    let mut restored = BlitzSession::restore(
+        Snapshot::from_bytes(&bytes)?,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    restored.run_until_idle()?;
+    restored.run_until_idle()?;
+    let doc = restored.document();
+    let root = doc
+        .get_node(doc.get_element_by_id("root").unwrap())
+        .unwrap();
+    assert_eq!(root.text_content(), "waiting!");
     Ok(())
 }

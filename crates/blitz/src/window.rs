@@ -17,6 +17,19 @@ impl Document for BlitzSession {
         DocGuardMut::RefCell(RefMut::map(self.dom.borrow_mut(), |dom| &mut dom.doc))
     }
 
+    fn poll(&mut self, cx: Option<std::task::Context<'_>>) -> bool {
+        if let Some(cx) = cx {
+            self.timers.set_waker(cx.waker());
+        }
+        match self.drain_turns() {
+            Ok(woke) => woke,
+            Err(error) => {
+                eprintln!("yield-blitz: {error}");
+                false
+            }
+        }
+    }
+
     fn handle_ui_event(&mut self, event: UiEvent) {
         // The driver and the session access the same document in separate,
         // short borrows, so listeners can mutate it before default actions.
@@ -81,10 +94,49 @@ impl EventHandler for GuestEventHandler<'_> {
         };
         if let Some(target) = target {
             match self.0.dispatch_user_event(kind, target) {
-                Ok(false) => state.prevent_default(),
-                Ok(true) => {}
+                Ok((false, _)) => state.prevent_default(),
+                Ok((true, true)) => {
+                    // The VM already toggled before dispatch. Preserve focus
+                    // without repeating Blitz's checkbox default action.
+                    state.prevent_default();
+                    focus_checkbox(document, target);
+                }
+                Ok((true, false)) if matches!(kind, UserEvent::Click) => {
+                    let checkbox = {
+                        let doc = document.inner();
+                        let label = doc.get_node(target).and_then(|node| node.element_data());
+                        if !label.is_some_and(|el| {
+                            el.name.ns == blitz_dom::ns!(html)
+                                && el.name.local == blitz_dom::local_name!("label")
+                        }) {
+                            return;
+                        }
+                        doc.label_bound_input_element(target)
+                            .filter(|node| node.element_data().is_some_and(crate::dom::is_checkbox))
+                            .map(|node| node.id)
+                    };
+                    if let Some(checkbox) = checkbox {
+                        state.prevent_default();
+                        match self.0.dispatch_user_event(kind, checkbox) {
+                            Ok((true, true)) => focus_checkbox(document, checkbox),
+                            Ok(_) => {}
+                            Err(error) => eprintln!("yield-blitz: {error}"),
+                        }
+                    }
+                }
+                Ok(_) => {}
                 Err(error) => eprintln!("yield-blitz: {error}"),
             }
         }
+    }
+}
+
+fn focus_checkbox(document: &mut dyn Document, target: NodeId) {
+    let mut doc = document.inner_mut();
+    if doc
+        .get_node(target)
+        .is_some_and(|node| node.flags.is_in_document())
+    {
+        doc.set_focus_to(target);
     }
 }

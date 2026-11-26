@@ -150,44 +150,116 @@ impl Node {
         this: This<Node>,
         child: JsValue,
     ) -> JsResult<JsValue> {
-        let child_node = cx.instance::<Node>(&child)?;
+        Self::mutate_child(
+            cx,
+            this,
+            child,
+            ChildMutation::InsertBefore(JsValue::null()),
+        )
+    }
+
+    #[method(name = "insertBefore")]
+    fn insert_before(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Node>,
+        child: JsValue,
+        reference: JsValue,
+    ) -> JsResult<JsValue> {
+        Self::mutate_child(cx, this, child, ChildMutation::InsertBefore(reference))
+    }
+
+    #[method(name = "removeChild")]
+    fn remove_child(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Node>,
+        child: JsValue,
+    ) -> JsResult<JsValue> {
+        Self::mutate_child(cx, this, child, ChildMutation::Remove)
+    }
+}
+
+enum ChildMutation {
+    InsertBefore(JsValue),
+    Remove,
+}
+
+impl Node {
+    fn mutate_child(
+        cx: &mut ClassCx<'_, '_, Self>,
+        this: This<Node>,
+        child: JsValue,
+        operation: ChildMutation,
+    ) -> JsResult<JsValue> {
         let owner = this.owner(cx)?;
-        let child_owner = child_node.owner(cx)?;
-        if !cx.same_value(&owner, &child_owner) {
-            let error = cx.construct::<TypeError>(&[JsValue::string(
-                "appendChild requires nodes from the same document",
-            )])?;
-            return Err(cx.throw(error));
-        }
+        let same_document_node = |cx: &mut CallCx<'_>, value: &JsValue| {
+            let node = cx.instance::<Node>(value)?;
+            let node_owner = node.owner(cx)?;
+            if !cx.same_value(&owner, &node_owner) {
+                return Err(JsError::new::<TypeError>(
+                    "child mutation requires nodes from the same document",
+                ));
+            }
+            Ok((node, node_index(cx, node)?))
+        };
+        let (child_wrapper, child_index) = same_document_node(cx, &child)?;
         let parent_index = node_index(cx, this.instance())?;
-        let child_index = node_index(cx, child_node)?;
+        let reference = match &operation {
+            ChildMutation::InsertBefore(reference) if !reference.is_null() => {
+                Some(same_document_node(cx, reference)?.1)
+            }
+            _ => None,
+        };
         let mut dom = Self::dom(cx.services()).borrow_mut();
         let parent = dom.node(parent_index)?;
         let child_node = dom.node(child_index)?;
+        let (parent_id, child_id) = (parent.id, child_node.id);
+        if matches!(operation, ChildMutation::Remove) {
+            if child_node.parent != Some(parent_id) {
+                return Err(JsError::new::<TypeError>("node is not a direct child"));
+            }
+            child_wrapper.set_event_parent(cx, JsValue::null())?;
+            dom.doc.mutate().remove_node(child_id);
+            return Ok(child);
+        }
         if !matches!(parent.data, NodeData::Element(_)) {
             return Err(JsError::new::<TypeError>(
-                "append requires an element parent",
+                "insert requires an element parent",
             ));
         }
         if !matches!(child_node.data, NodeData::Element(_) | NodeData::Text(_)) {
             return Err(JsError::new::<TypeError>(
-                "append requires an element or text child",
+                "insert requires an element or text child",
             ));
+        }
+        let reference = reference
+            .map(|index| {
+                let node = dom.node(index)?;
+                if node.parent != Some(parent_id) {
+                    return Err(JsError::new::<TypeError>("reference is not a direct child"));
+                }
+                Ok(node.id)
+            })
+            .transpose()?;
+        if reference == Some(child_id) {
+            return Ok(child);
         }
         let mut ancestor = Some(parent);
         while let Some(node) = ancestor {
-            if node.id == child_node.id {
+            if node.id == child_id {
                 return Err(JsError::new::<TypeError>(
                     "cannot insert a node into itself or its descendants",
                 ));
             }
             ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
         }
-        let (parent, child_id) = (parent.id, child_node.id);
         let parent_wrapper = this.instance().value(cx);
-        cx.instance::<Node>(&child)?
-            .set_event_parent(cx, parent_wrapper)?;
-        dom.doc.mutate().append_children(parent, &[child_id]);
+        child_wrapper.set_event_parent(cx, parent_wrapper)?;
+        let mut mutation = dom.doc.mutate();
+        if let Some(reference) = reference {
+            mutation.insert_nodes_before(reference, &[child_id]);
+        } else {
+            mutation.append_children(parent_id, &[child_id]);
+        }
         Ok(child)
     }
 }

@@ -1,6 +1,12 @@
-import { Node, Document, Element, HTMLIFrameElement, HTMLInputElement, openDocument } from 'yield:dom';
+import {
+  Node, Document, Element, HTMLElement, HTMLIFrameElement, HTMLInputElement,
+  HTMLButtonElement, HTMLLabelElement, HTMLUListElement, HTMLLIElement, openDocument,
+} from 'yield:dom';
 
-export { HTMLIFrameElement, HTMLInputElement };
+export {
+  HTMLElement, HTMLIFrameElement, HTMLInputElement, HTMLButtonElement,
+  HTMLLabelElement, HTMLUListElement, HTMLLIElement,
+};
 export const window = globalThis;
 export const document = openDocument(window);
 
@@ -12,6 +18,8 @@ const getAttributeNative = Element.prototype.getAttribute;
 const removeAttributeNative = Element.prototype.removeAttribute;
 const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
 const inputDefaultValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'defaultValue');
+const inputChecked = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked');
+const inputDefaultChecked = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'defaultChecked');
 const getElementByIdNative = Document.prototype.getElementById;
 const createElementNative = Document.prototype.createElement;
 const createTextNodeNative = Document.prototype.createTextNode;
@@ -30,9 +38,37 @@ Object.defineProperty(Element.prototype, 'getAttribute', {
 Object.defineProperty(Element.prototype, 'removeAttribute', {
   value: function removeAttribute(name) { return removeAttributeNative.call(this, String(name)); },
 });
+function stringAttribute(name) {
+  return {
+    configurable: true,
+    get() { return getAttributeNative.call(this, name) ?? ''; },
+    set(value) { setAttributeNative.call(this, name, String(value)); },
+  };
+}
+
+function booleanAttribute(name) {
+  return {
+    configurable: true,
+    get() { return getAttributeNative.call(this, name) !== null; },
+    set(value) {
+      if (value) setAttributeNative.call(this, name, '');
+      else removeAttributeNative.call(this, name);
+    },
+  };
+}
+
+Object.defineProperties(HTMLElement.prototype, {
+  id: stringAttribute('id'),
+  className: stringAttribute('class'),
+});
+Object.defineProperty(HTMLLabelElement.prototype, 'htmlFor', stringAttribute('for'));
+Object.defineProperty(HTMLButtonElement.prototype, 'disabled', booleanAttribute('disabled'));
+
 Object.defineProperties(HTMLInputElement.prototype, {
   value: { set(value) { inputValue.set.call(this, value === null ? '' : String(value)); } },
   defaultValue: { set(value) { inputDefaultValue.set.call(this, String(value)); } },
+  checked: { set(value) { inputChecked.set.call(this, Boolean(value)); } },
+  defaultChecked: { set(value) { inputDefaultChecked.set.call(this, Boolean(value)); } },
   type: {
     get() { return getAttributeNative.call(this, 'type') || 'text'; },
     set(value) { setAttributeNative.call(this, 'type', String(value)); },

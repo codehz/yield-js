@@ -3,10 +3,11 @@
 
 mod dom;
 mod snapshot;
+mod timer;
 mod window;
 
 use std::cell::{Ref, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,6 +46,7 @@ struct Dom {
     doc: BaseDocument,
     nodes: Vec<NodeId>,
     handles: BTreeMap<NodeId, u32>,
+    dirty_checkboxes: BTreeSet<NodeId>,
     pending_event: Option<(UserEvent, NodeId)>,
     resources: BTreeMap<String, Arc<[u8]>>,
 }
@@ -55,6 +57,7 @@ impl Dom {
             doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
+            dirty_checkboxes: BTreeSet::new(),
             pending_event: None,
             resources: Self::index_resources(resources),
         }
@@ -65,6 +68,7 @@ impl Dom {
             doc: BaseDocument::new(document_config()),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
+            dirty_checkboxes: BTreeSet::new(),
             pending_event: None,
             resources: Self::index_resources(resources),
         }
@@ -128,13 +132,23 @@ pub fn render_module(source: &str) -> Result<BaseDocument, String> {
     render(compile_module(source)?)
 }
 
-type BlitzPlatform = yield_vm::Platform<Absent, Absent, Rc<RenderDiagnostics>>;
+type BlitzPlatform = yield_vm::Platform<
+    Absent,
+    Absent,
+    Rc<RenderDiagnostics>,
+    Absent,
+    Absent,
+    Absent,
+    Absent,
+    timer::Timers,
+>;
 
 /// A live VM and its private Blitz document.
 pub struct BlitzSession {
     vm: Vm<BlitzPlatform>,
     dom: Rc<RefCell<Dom>>,
     diagnostics: Rc<RenderDiagnostics>,
+    timers: timer::Timers,
 }
 
 impl BlitzSession {
@@ -151,9 +165,13 @@ impl BlitzSession {
         build: Build,
         options: RestoreOptions,
     ) -> Result<Self, String> {
-        Self::with_dom(Dom::empty(&build.resources), |host| {
+        let mut session = Self::with_dom(Dom::empty(&build.resources), |host| {
             Vm::restore(snapshot, build, host, options)
-        })
+        })?;
+        session
+            .diagnostics
+            .check(session.vm.start_recovered_operations())?;
+        Ok(session)
     }
 
     fn with_dom(
@@ -162,12 +180,14 @@ impl BlitzSession {
     ) -> Result<Self, String> {
         let dom = Rc::new(RefCell::new(dom));
         let diagnostics = Rc::new(RenderDiagnostics::default());
+        let timers = timer::Timers::default();
         let host = host! {
             dts: "dom.d.ts",
             modules: [dom::DomModule],
             services: {
                 Rc<RefCell<Dom>> => dom.clone(),
                 diagnostics: diagnostics.clone(),
+                timer: timers.clone(),
             },
         }?;
         let vm = diagnostics.check(create(host))?;
@@ -175,6 +195,7 @@ impl BlitzSession {
             vm,
             dom,
             diagnostics,
+            timers,
         })
     }
 
@@ -188,13 +209,18 @@ impl BlitzSession {
     /// Deliver a primary click to an element and drain VM work. Returns `false`
     /// if canceled. Node IDs are local to this document; reacquire them after restore.
     pub fn click(&mut self, target: NodeId) -> Result<bool, String> {
-        let accepted = self.dispatch_user_event(UserEvent::Click, target)?;
+        let (accepted, _) = self.dispatch_user_event(UserEvent::Click, target)?;
         self.run_until_idle()?;
         Ok(accepted)
     }
 
-    fn dispatch_user_event(&mut self, kind: UserEvent, target: NodeId) -> Result<bool, String> {
-        {
+    // The second result indicates that we already handled checkbox activation.
+    fn dispatch_user_event(
+        &mut self,
+        kind: UserEvent,
+        target: NodeId,
+    ) -> Result<(bool, bool), String> {
+        let activation = {
             let mut dom = self.dom.borrow_mut();
             let node = dom
                 .doc
@@ -208,14 +234,35 @@ impl BlitzSession {
             if root.id != dom.doc.root_node().id {
                 return Err(format!("{} target is detached", kind.name()));
             }
+            let element = node.element_data().unwrap();
+            let activation = (matches!(kind, UserEvent::Click)
+                && dom::is_checkbox(element)
+                && !element.has_attr(blitz_dom::local_name!("disabled")))
+            .then(|| dom::checkbox_checked(element));
+            let activation = activation.map(|checked| {
+                let was_dirty = !dom.dirty_checkboxes.insert(target);
+                dom::write_checkbox_checked(&mut dom.doc, target, !checked);
+                (checked, was_dirty)
+            });
             dom.pending_event = Some((kind, target));
-        }
+            activation
+        };
         let result = self
             .vm
             .start_host_export("yield:dom", "dispatchUserEvent", vec![]);
-        self.dom.borrow_mut().pending_event = None;
-        result
-            .map(|value| value == Value::boolean(true))
+        let mut dom = self.dom.borrow_mut();
+        dom.pending_event = None;
+        let accepted = result.map(|value| value == Value::boolean(true));
+        if let Some((checked, was_dirty)) = activation
+            && !matches!(accepted, Ok(true))
+        {
+            dom::write_checkbox_checked(&mut dom.doc, target, checked);
+            if !was_dirty {
+                dom.dirty_checkboxes.remove(&target);
+            }
+        }
+        accepted
+            .map(|accepted| (accepted, activation.is_some()))
             .map_err(|error| error.to_string())
     }
 
@@ -236,7 +283,19 @@ impl BlitzSession {
 
     /// Run pending work and return any reported script errors.
     pub fn run_until_idle(&mut self) -> Result<(), String> {
-        self.diagnostics.check(self.vm.run_until_idle())
+        self.drain_turns().map(|_| ())
+    }
+
+    fn drain_turns(&mut self) -> Result<bool, String> {
+        let mut woke = false;
+        loop {
+            self.diagnostics.check(self.vm.run_until_idle())?;
+            let Some(token) = self.timers.due() else {
+                return Ok(woke);
+            };
+            self.diagnostics.check(self.vm.wake_timer(token))?;
+            woke = true;
+        }
     }
 
     fn into_document(self) -> Result<BaseDocument, String> {

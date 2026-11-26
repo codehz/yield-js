@@ -21,7 +21,9 @@ use yield_vm::{Instance, JsError, JsResult, JsValue};
 use self::node::NodeSlots;
 use super::Dom;
 
-pub(crate) use input::{is_text_input, write_input_value};
+pub(crate) use input::{
+    checkbox_checked, is_checkbox, is_text_input, write_checkbox_checked, write_input_value,
+};
 pub use module::DomModule;
 pub(crate) use node::Node;
 

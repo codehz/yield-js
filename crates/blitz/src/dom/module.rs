@@ -8,7 +8,10 @@ use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 
 use super::Dom;
 use super::document::{Document, DocumentSlots};
-use super::element::{Element, HTMLIFrameElement, alloc_element};
+use super::element::{
+    Element, HTMLButtonElement, HTMLElement, HTMLIFrameElement, HTMLLIElement, HTMLLabelElement,
+    HTMLUListElement, alloc_element,
+};
 use super::input::HTMLInputElement;
 use super::node::Node;
 use super::resolver::init_node;
@@ -16,7 +19,8 @@ use crate::snapshot::DomState;
 
 #[host_module(
     name = "yield:dom",
-    classes = [Node, Document, Element, HTMLIFrameElement, HTMLInputElement],
+    classes = [Node, Document, Element, HTMLElement, HTMLIFrameElement, HTMLInputElement,
+        HTMLButtonElement, HTMLLabelElement, HTMLUListElement, HTMLLIElement],
     services = [dom: Rc<RefCell<Dom>>],
 )]
 #[derive(Default, yield_vm::Encode, yield_vm::Decode)]
@@ -41,6 +45,31 @@ impl DomModule {
     #[constructor(name = "Element", class = Element)]
     fn construct_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<Element>> {
         alloc_element(cx, Element)
+    }
+
+    #[constructor(name = "HTMLElement", class = HTMLElement)]
+    fn construct_html_element(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLElement>> {
+        alloc_element(cx, HTMLElement)
+    }
+
+    #[constructor(name = "HTMLButtonElement", class = HTMLButtonElement)]
+    fn construct_button(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLButtonElement>> {
+        alloc_element(cx, HTMLButtonElement)
+    }
+
+    #[constructor(name = "HTMLLabelElement", class = HTMLLabelElement)]
+    fn construct_label(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLLabelElement>> {
+        alloc_element(cx, HTMLLabelElement)
+    }
+
+    #[constructor(name = "HTMLUListElement", class = HTMLUListElement)]
+    fn construct_ul(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLUListElement>> {
+        alloc_element(cx, HTMLUListElement)
+    }
+
+    #[constructor(name = "HTMLLIElement", class = HTMLLIElement)]
+    fn construct_li(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLLIElement>> {
+        alloc_element(cx, HTMLLIElement)
     }
 
     #[constructor(name = "HTMLIFrameElement", class = HTMLIFrameElement)]

@@ -9,9 +9,11 @@ use yield_vm::{Decode, Encode, Services};
 
 use super::Dom;
 use super::dom::DomModule;
-use super::dom::{is_text_input, write_input_value};
+use super::dom::{
+    checkbox_checked, is_checkbox, is_text_input, write_checkbox_checked, write_input_value,
+};
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 /// The live tree belongs to the host; capture and restore use the current service.
 #[derive(Default)]
@@ -54,6 +56,8 @@ struct NodeRecord {
     kind: NodeKind,
     children: Vec<u32>,
     input_value: Option<String>,
+    // A clean checkbox derives its current state from the restored attribute.
+    dirty_checked: Option<bool>,
 }
 
 enum NodeKind {
@@ -185,6 +189,12 @@ impl DomImage {
                         .filter(|element| is_text_input(element))
                         .and_then(|element| element.text_input_data())
                         .map(|input| input.editor.text().to_string()),
+                    dirty_checked: node
+                        .element_data()
+                        .filter(|element| {
+                            is_checkbox(element) && dom.dirty_checkboxes.contains(&id)
+                        })
+                        .map(checkbox_checked),
                 });
                 stack.extend(
                     node.children
@@ -239,12 +249,14 @@ impl DomImage {
         let mut ids = Vec::with_capacity(self.nodes.len());
         let mut child_lists = Vec::with_capacity(self.nodes.len());
         let mut input_values = Vec::new();
+        let mut dirty_checkboxes = Vec::new();
         {
             let mut mutation = dom.doc.mutate();
             for NodeRecord {
                 kind,
                 children,
                 input_value,
+                dirty_checked,
             } in self.nodes
             {
                 let id = match kind {
@@ -267,6 +279,9 @@ impl DomImage {
                 if let Some(value) = input_value {
                     input_values.push((id, value));
                 }
+                if let Some(checked) = dirty_checked {
+                    dirty_checkboxes.push((id, checked));
+                }
             }
             // Build detached subtrees before connecting them to the document.
             let mut child_ids = Vec::new();
@@ -282,6 +297,18 @@ impl DomImage {
             if !write_input_value(&mut dom.doc, id, &value) {
                 return Err(CodecError::new("invalid DOM snapshot input value"));
             }
+        }
+        for (id, checked) in dirty_checkboxes {
+            if !dom
+                .doc
+                .get_node(id)
+                .and_then(|node| node.element_data())
+                .is_some_and(is_checkbox)
+            {
+                return Err(CodecError::new("invalid DOM snapshot checkbox state"));
+            }
+            write_checkbox_checked(&mut dom.doc, id, checked);
+            dom.dirty_checkboxes.insert(id);
         }
         dom.nodes = self
             .wrappers
