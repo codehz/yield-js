@@ -504,6 +504,13 @@ impl<P: PlatformServices> Vm<P> {
     ) -> Result<(), VmError> {
         self.core.deliver_fetch_event(token, event)
     }
+
+    /// Allocates a `DOMException`-shaped object from the given name and message,
+    /// using the built-in exception prototype. The value participates in GC and
+    /// snapshots like any other VM object.
+    pub fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
+        self.core.alloc_dom_exception(name, message)
+    }
 }
 
 #[derive(Debug)]

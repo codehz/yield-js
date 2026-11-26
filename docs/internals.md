@@ -40,6 +40,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `vm.start("run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量。随后调用 `vm.run_until_idle()`；所有执行入口都使用已接管的宿主，不再接收宿主参数。
 - `vm.snapshot(roots)` 仅在微任务队列为空时可用；显式根只扩充捕获时的可达图，不保存为独立的宿主根清单，也不从宿主服务收集。
 - `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
+- `Vm::alloc_dom_exception(name, message)` 用内置异常原型分配一个 `DOMException` 形状的对象，返回普通 `Value`，参与 GC 与快照。
 - `Vm::restore(snapshot, same_build, host, RestoreOptions::default())` 接管新宿主，不重新求值模块。恢复的基准 URL（包括没有基准的情况）只来自快照；`RestoreOptions` 没有 `base_url` 字段，不能覆盖存档的基准。活动的 `URL`、`URLSearchParams` 及迭代器由普通堆强边追踪。
 - `RestoreOptions::default()` 使用 `SnapshotValidation::Trusted`，只接收由 VM 捕获、未经篡改的有效镜像，不重查堆图。开发、测试和诊断可传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }` 执行完整不变量审计。两种模式都要求调用方保证来源和完整性并限制读入大小；完整审计并不使不可信输入变得安全。
 - `Vm::new` 和 `Vm::restore` 都直接接受 `Build` 或 `VerifiedBuild`。传入 `Build` 时当次完整校验；`VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表，可在线程内克隆复用。两种输入都为每个 VM 独立链接宿主、持有堆和缓存；恢复仍要求精确匹配构建身份与绑定指纹。
