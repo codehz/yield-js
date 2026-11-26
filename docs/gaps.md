@@ -55,7 +55,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 | `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、非错误宿主实例等不支持的种类。宿主错误克隆为普通 `Error`；不复制 VM 执行环境 |
 
 `yield-blitz` 接入了原生主键点击、复选框激活和单行文本编辑。尚无完整浏览器 DOM、`MouseEvent` 坐标与按键字段、`InputEvent` 专有字段、键盘或组合事件的 JS 派发、完整表单控件绑定、样式计算 API 或热更新。DOM payload 保存当前绑定所需的 Document、Element、Text 和 Comment 树、文本框当前值及复选框当前值和 dirty 状态，不保存布局、渲染器、焦点、选区、未提交的输入法文字或未投递的原生输入，不支持模板内容子树。无窗口测试不等于 Vello 目视验收。
-Blitz 默认不自动回收。嵌入方应在排空微任务后调用 `BlitzSession::collect_garbage`，并传入仍持有的 VM 值作为根；不跨检查点持有 VM 值的调用方可像窗口演示一样启用空闲回收。快照不会回收当前会话的内存。
+Blitz 默认不自动运行 VM GC。嵌入方应在排空微任务后调用 `BlitzSession::collect_garbage`，并传入仍持有的 VM 值作为根。不跨检查点持有 VM 值的调用方可像窗口演示一样启用空闲回收。快照不会回收当前会话的内存。
 未注册专用原型的 HTML 标签仍使用 `HTMLElement`；不区分未知标签与标准的通用 HTML 元素，也不覆盖废弃标签专有的原型。专用原型本身不代表元素特有的 DOM 行为已实现，例如媒体播放、表格操作或表单提交。
 Blitz 演示入口只编译 `src/blitz.jsx` 及其依赖。CSS Modules 不支持跨文件 `composes` 或命名导出；两类样式表均不在构建期解析 CSS 内的 `@import` / `url()` 依赖，也不支持动态样式模块。`compile_module` 仍为自包含源码入口，不访问文件系统。不验收 `src/index.tsx` 或 TypeScript 类型剥离。
 

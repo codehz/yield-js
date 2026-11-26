@@ -333,6 +333,34 @@ fn deliver_blitz_click(session: &mut BlitzSession, target: NodeId) {
 }
 
 #[test]
+fn replacing_text_reclaims_unwrapped_children_before_gc() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        root.textContent = 'retained';
+        const retained = root.firstChild;
+        export function replace() { root.textContent = 'current'; }
+        export function verify() {
+            return retained.parentNode === null && retained.textContent === 'retained' &&
+                root.textContent === 'current';
+        }
+        "#,
+    )?;
+    let mut session = BlitzSession::new(build)?;
+    session.start("replace", vec![])?;
+    let unwrapped = {
+        let doc = session.document();
+        doc.get_node(doc.get_element_by_id("root").unwrap())
+            .unwrap()
+            .children[0]
+    };
+    session.start("replace", vec![])?;
+    assert!(session.document().get_node(unwrapped).is_none());
+    assert_eq!(session.start("verify", vec![])?, Value::boolean(true));
+    Ok(())
+}
+
+#[test]
 fn idle_collection_reclaims_repeated_text_replacements() -> Result<(), String> {
     let build = compile_module(
         r#"

@@ -45,12 +45,12 @@ impl UserEvent {
 
 struct Dom {
     doc: BaseDocument,
-    // Identity is absent only while the native tree is being restored.
-    nodes: BTreeMap<u32, (NodeId, Option<ObjectId>)>,
+    nodes: BTreeMap<u32, NodeId>,
     next_handle: u32,
     detached: BTreeSet<NodeId>,
     snapshot_image: RefCell<Option<Result<snapshot::DomImage, yield_vm::binding::CodecError>>>,
-    handles: BTreeMap<NodeId, u32>,
+    // Identity is absent only while the native tree is being restored.
+    handles: BTreeMap<NodeId, Option<ObjectId>>,
     dirty_checkboxes: BTreeSet<NodeId>,
     pending_event: Option<(UserEvent, NodeId)>,
     resources: BTreeMap<String, Arc<[u8]>>,
@@ -182,6 +182,7 @@ impl BlitzSession {
         })?;
         {
             let mut dom = session.dom.borrow_mut();
+            let Dom { nodes, handles, .. } = &mut *dom;
             for (object, value) in session
                 .vm
                 .host_instance_slots::<dom::Node>(dom::NODE_INDEX_SLOT)
@@ -190,14 +191,14 @@ impl BlitzSession {
                     continue;
                 };
                 let handle = index as u32;
-                let Some((_, identity)) = dom.nodes.get_mut(&handle) else {
+                let Some(identity) = nodes.get(&handle).and_then(|id| handles.get_mut(id)) else {
                     return Err("missing restored DOM node handle".into());
                 };
                 if index != f64::from(handle) || identity.replace(object).is_some() {
                     return Err("invalid restored DOM node handle".into());
                 }
             }
-            if dom.nodes.values().any(|(_, identity)| identity.is_none()) {
+            if handles.values().any(Option::is_none) {
                 return Err("missing restored DOM wrapper".into());
             }
         }

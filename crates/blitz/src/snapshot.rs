@@ -152,9 +152,9 @@ impl DomImage {
         let wrappers = || {
             dom.nodes
                 .iter()
-                .filter(|(_, (_, object))| object.is_some_and(|id| live.contains(&id)))
+                .filter(|(_, id)| dom.handles[id].is_some_and(|object| live.contains(&object)))
         };
-        let wrapped_nodes = wrappers().map(|(_, &(id, _))| id);
+        let wrapped_nodes = wrappers().map(|(_, &id)| id);
         let mut nodes = Vec::new();
         let mut ids = BTreeMap::new();
         let mut stack = Vec::new();
@@ -222,7 +222,7 @@ impl DomImage {
             }
         }
         let wrappers = wrappers()
-            .map(|(&handle, &(id, _))| WrapperRecord {
+            .map(|(&handle, &id)| WrapperRecord {
                 handle,
                 node: ids[&id],
             })
@@ -346,8 +346,8 @@ impl DomImage {
         dom.next_handle = self.next_handle;
         for wrapper in self.wrappers {
             let id = ids[wrapper.node as usize];
-            dom.nodes.insert(wrapper.handle, (id, None));
-            dom.handles.insert(id, wrapper.handle);
+            dom.nodes.insert(wrapper.handle, id);
+            dom.handles.insert(id, None);
         }
         let doc = &dom.doc;
         dom.detached.extend(ids.into_iter().filter(|&id| {

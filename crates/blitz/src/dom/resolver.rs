@@ -14,7 +14,7 @@ impl Dom {
     pub(crate) fn node(&self, index: u32) -> JsResult<&blitz_dom::Node> {
         self.nodes
             .get(&index)
-            .and_then(|&(id, _)| self.doc.get_node(id))
+            .and_then(|&id| self.doc.get_node(id))
             .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))
     }
 
@@ -25,10 +25,9 @@ impl Dom {
     ) -> JsResult<Option<Instance<Node>>> {
         self.handles
             .get(&id)
-            .map(|index| {
-                let object = self.nodes[index]
-                    .1
-                    .ok_or_else(|| JsError::fault("missing DOM wrapper identity"))?;
+            .map(|identity| {
+                let object =
+                    identity.ok_or_else(|| JsError::fault("missing DOM wrapper identity"))?;
                 cx.instance_by_identity(object)
             })
             .transpose()
@@ -97,14 +96,14 @@ impl Dom {
     pub(crate) fn publish_node(&mut self, id: NodeId, index: u32, object: ObjectId) {
         debug_assert_eq!(self.next_handle, index);
         self.next_handle += 1;
-        self.nodes.insert(index, (id, Some(object)));
-        self.handles.insert(id, index);
+        self.nodes.insert(index, id);
+        self.handles.insert(id, Some(object));
     }
 
     pub(crate) fn sweep(&mut self, is_live: impl Fn(ObjectId) -> bool) {
         let handles = &mut self.handles;
-        self.nodes.retain(|_, (id, object)| {
-            let live = object.is_some_and(&is_live);
+        self.nodes.retain(|_, id| {
+            let live = handles[id].is_some_and(&is_live);
             if !live {
                 handles.remove(id);
             }

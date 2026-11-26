@@ -135,22 +135,35 @@ impl Node {
             }
             this.wrapped_children_clear(cx)?;
         }
-        let mut mutation = dom.doc.mutate();
-        let detached = if is_text {
-            Default::default()
-        } else {
-            mutation.child_ids(id)
-        };
+        let Dom {
+            doc,
+            handles,
+            detached,
+            dirty_checkboxes,
+            ..
+        } = &mut *dom;
+        let mut mutation = doc.mutate();
         if is_text {
             mutation.set_node_text(id, &value);
-        } else if value.is_empty() {
-            mutation.replace_children(id, &[]);
         } else {
-            let text = mutation.create_text_node(&value);
-            mutation.replace_children(id, &[text]);
+            let old_children = mutation.child_ids(id);
+            if value.is_empty() {
+                mutation.replace_children(id, &[]);
+            } else {
+                let text = mutation.create_text_node(&value);
+                mutation.replace_children(id, &[text]);
+            }
+            for child in old_children {
+                // A wrapped descendant always has a wrapped ancestor at this root.
+                if handles.contains_key(&child) {
+                    detached.insert(child);
+                } else {
+                    mutation.remove_node_if_unparented_with(child, &mut |id| {
+                        dirty_checkboxes.remove(&id);
+                    });
+                }
+            }
         }
-        drop(mutation);
-        dom.detached.extend(detached);
         Ok(())
     }
 
