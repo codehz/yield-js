@@ -311,7 +311,7 @@ pub(super) fn service_owner(
         .map(|field| OwnerType(ty).fold_type(field.ty.clone()))
         .collect();
     let (view, declaration, build, bounds) = if fields.is_empty() {
-        (quote!(()), quote!(), quote!(()), quote!())
+        (quote!(()), quote!(), quote!(), quote!())
     } else {
         let view = Ident::new(
             &format!("__YieldServiceView_{}", ty.unraw()),
