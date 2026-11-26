@@ -1,26 +1,31 @@
-//! One-shot JavaScript host for a Blitz HTML document.
+//! JavaScript host for a Blitz document. A session owns the VM and its live DOM;
+//! snapshots carry the DOM in the VM's `yield:dom` module payload.
 
 mod dom;
+mod snapshot;
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use blitz_dom::{DocumentConfig, NodeId, UserAgentStylesheet};
+use blitz_dom::{BaseDocument, DocumentConfig, NodeId, UserAgentStylesheet};
 use blitz_html::HtmlDocument;
 use yield_binding_macros::host;
 use yield_compiler::{
     CompileError, Compiler, MemoryResolver, ModuleId, ModuleResolver, NodeResolver, Project,
     ResolvedModule,
 };
-use yield_vm::{Diagnostic, Diagnostics, Vm, VmError};
+use yield_vm::{
+    Absent, Build, Diagnostic, Diagnostics, Host, JsValue, RestoreOptions, Snapshot, Value, Vm,
+    VmError,
+};
 
 const SHELL: &str = "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>";
 
 struct Dom {
-    doc: HtmlDocument,
+    doc: BaseDocument,
     nodes: Vec<NodeId>,
     handles: BTreeMap<NodeId, u32>,
 }
@@ -28,16 +33,25 @@ struct Dom {
 impl Dom {
     fn new() -> Self {
         Self {
-            doc: HtmlDocument::from_html(
-                SHELL,
-                DocumentConfig {
-                    ua_stylesheets: vec![UserAgentStylesheet::default_sheet()],
-                    ..Default::default()
-                },
-            ),
+            doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
         }
+    }
+
+    fn empty() -> Self {
+        Self {
+            doc: BaseDocument::new(document_config()),
+            nodes: Vec::new(),
+            handles: BTreeMap::new(),
+        }
+    }
+}
+
+fn document_config() -> DocumentConfig {
+    DocumentConfig {
+        ua_stylesheets: vec![UserAgentStylesheet::default_sheet()],
+        ..Default::default()
     }
 }
 
@@ -57,12 +71,108 @@ impl Diagnostics for RenderDiagnostics {
     }
 }
 
-/// Execute one self-contained ESM and return the document it mutated.
-/// The VM and the script's event listeners are discarded before returning.
-pub fn render_module(source: &str) -> Result<HtmlDocument, String> {
+impl RenderDiagnostics {
+    fn check<T>(&self, result: Result<T, VmError>) -> Result<T, String> {
+        let mut errors = self.0.take();
+        match result {
+            Ok(value) if errors.is_empty() => return Ok(value),
+            Ok(_) => {}
+            Err(error) if !matches!(error, VmError::Thrown(_)) || errors.is_empty() => {
+                errors.push(error.to_string());
+            }
+            Err(_) => {}
+        }
+        Err(errors.join("\n"))
+    }
+}
+
+/// Compile a self-contained ESM with the Blitz DOM preload.
+pub fn compile_module(source: &str) -> Result<Build, String> {
     let resolver =
         MemoryResolver::new([("main.mjs", source), ("dom.mjs", include_str!("dom.mjs"))])?;
-    render(Project::new("main.mjs", resolver).with_preload("dom.mjs"))
+    compile(Project::new("main.mjs", resolver).with_preload("dom.mjs"))
+}
+
+/// Execute a self-contained ESM and return its document, discarding the VM.
+pub fn render_module(source: &str) -> Result<BaseDocument, String> {
+    render(compile_module(source)?)
+}
+
+type BlitzPlatform = yield_vm::Platform<Absent, Absent, Rc<RenderDiagnostics>>;
+
+/// A live VM and its private Blitz document.
+pub struct BlitzSession {
+    vm: Vm<BlitzPlatform>,
+    dom: Rc<RefCell<Dom>>,
+    diagnostics: Rc<RenderDiagnostics>,
+}
+
+impl BlitzSession {
+    /// Start a fresh document and evaluate the build.
+    pub fn new(build: Build) -> Result<Self, String> {
+        Self::with_dom(Dom::new(), |host| Vm::new(build, host, Default::default()))
+    }
+
+    /// Restore a trusted snapshot with the same build, without evaluating modules.
+    pub fn restore(
+        snapshot: Snapshot,
+        build: Build,
+        options: RestoreOptions,
+    ) -> Result<Self, String> {
+        Self::with_dom(Dom::empty(), |host| {
+            Vm::restore(snapshot, build, host, options)
+        })
+    }
+
+    fn with_dom(
+        dom: Dom,
+        create: impl FnOnce(Host<BlitzPlatform>) -> Result<Vm<BlitzPlatform>, VmError>,
+    ) -> Result<Self, String> {
+        let dom = Rc::new(RefCell::new(dom));
+        let diagnostics = Rc::new(RenderDiagnostics::default());
+        let host = host! {
+            dts: "dom.d.ts",
+            modules: [dom::DomModule],
+            services: {
+                Rc<RefCell<Dom>> => dom.clone(),
+                diagnostics: diagnostics.clone(),
+            },
+        }?;
+        let vm = diagnostics.check(create(host))?;
+        Ok(Self {
+            vm,
+            dom,
+            diagnostics,
+        })
+    }
+
+    /// Invoke a public export.
+    pub fn start(&mut self, entry: &str, args: Vec<JsValue>) -> Result<Value, String> {
+        self.vm
+            .start(entry, args)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Capture the VM and DOM state together.
+    pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, String> {
+        self.vm.snapshot(roots).map_err(|error| error.to_string())
+    }
+
+    /// Inspect the DOM without bypassing its script bindings.
+    pub fn document(&self) -> Ref<'_, BaseDocument> {
+        Ref::map(self.dom.borrow(), |dom| &dom.doc)
+    }
+
+    /// Run pending work and return any reported script errors.
+    pub fn run_until_idle(&mut self) -> Result<(), String> {
+        self.diagnostics.check(self.vm.run_until_idle())
+    }
+
+    fn into_document(self) -> Result<BaseDocument, String> {
+        drop(self.vm);
+        let dom = Rc::try_unwrap(self.dom).map_err(|_| "Blitz document is still shared")?;
+        Ok(dom.into_inner().doc)
+    }
 }
 
 const DOM_PRELOAD: &str = "yield:blitz-dom-preload";
@@ -108,7 +218,7 @@ impl ModuleResolver for FixtureResolver {
 }
 
 /// Compile the first-mount JSX fixture against its installed production npm sources.
-pub fn render_fixture() -> Result<HtmlDocument, String> {
+pub fn render_fixture() -> Result<BaseDocument, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/npm-react-app");
     let modules = root.join("node_modules");
     if !modules
@@ -121,33 +231,18 @@ pub fn render_fixture() -> Result<HtmlDocument, String> {
         );
     }
     let resolver = FixtureResolver(NodeResolver::web_production(root)?);
-    render(Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD))
+    render(compile(
+        Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD),
+    )?)
 }
 
-fn render(project: Project<'_>) -> Result<HtmlDocument, String> {
+fn compile(project: Project<'_>) -> Result<Build, String> {
     let compiler = Compiler::from_dts(include_str!("dom.d.ts")).map_err(|e| e.to_string())?;
-    let build = compiler.compile(project).map_err(|e| e.to_string())?;
-    let dom = Rc::new(RefCell::new(Dom::new()));
-    let diagnostics = Rc::new(RenderDiagnostics::default());
-    let host = host! {
-        dts: "dom.d.ts",
-        modules: [dom::DomModule],
-        services: {
-            Rc<RefCell<Dom>> => dom.clone(),
-            diagnostics: diagnostics.clone(),
-        },
-    }?;
-    // Keep diagnostics outside the VM so they survive failed startup and teardown.
-    let result = Vm::new(build, host, Default::default()).and_then(|mut vm| vm.run_until_idle());
-    let mut errors = diagnostics.0.take();
-    if let Err(error) = result
-        && (!matches!(error, VmError::Thrown(_)) || errors.is_empty())
-    {
-        errors.push(error.to_string());
-    }
-    if !errors.is_empty() {
-        return Err(errors.join("\n"));
-    }
-    let dom = Rc::try_unwrap(dom).map_err(|_| "Blitz document is still shared".to_owned())?;
-    Ok(dom.into_inner().doc)
+    compiler.compile(project).map_err(|e| e.to_string())
+}
+
+fn render(build: Build) -> Result<BaseDocument, String> {
+    let mut session = BlitzSession::new(build)?;
+    session.run_until_idle()?;
+    session.into_document()
 }

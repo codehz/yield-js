@@ -1,5 +1,6 @@
 use blitz_dom::NodeData;
-use yield_blitz::{render_fixture, render_module};
+use yield_blitz::{BlitzSession, compile_module, render_fixture, render_module};
+use yield_vm::{RestoreOptions, Snapshot, SnapshotValidation, Value};
 
 #[test]
 fn mounts_react_dom_into_blitz() -> Result<(), String> {
@@ -117,6 +118,70 @@ fn keeps_native_node_identity_and_mutates_the_tree() -> Result<(), String> {
     assert!(
         matches!(&doc.get_node(*text).unwrap().data, NodeData::Text(text) if text.content == "new")
     );
+    Ok(())
+}
+
+#[test]
+fn restores_detached_nodes_and_resumes_script_updates() -> Result<(), String> {
+    let build = compile_module(
+        r#"
+        const root = document.getElementById('root');
+        let detached;
+        let child;
+        let events = 0;
+
+        export function detach() {
+            // Register the interior node before its parent in the wrapper table.
+            child = document.createElement('span');
+            detached = document.createElement('section');
+            detached.setAttribute('id', 'detached');
+            detached.style.color = 'red';
+            child.textContent = 'unwrapped text';
+            detached.appendChild(child);
+            detached.addEventListener('test', () => { events++; });
+            root.appendChild(detached);
+            root.textContent = 'replacement';
+        }
+
+        export function update() {
+            if (root.firstChild.textContent !== 'replacement' || detached.parentNode !== null ||
+                document.getElementById('detached') !== null || child.parentNode !== detached ||
+                detached.firstChild !== child || detached.style.color !== 'red' ||
+                child.textContent !== 'unwrapped text') return false;
+
+            root.appendChild(detached);
+            detached.setAttribute('id', 'reattached');
+            child.firstChild.textContent = 'updated';
+            detached.dispatchEvent(new Event('test'));
+            return document.getElementById('reattached') === detached &&
+                root.firstChild.nextSibling === detached && detached.parentNode === root &&
+                events === 1;
+        }
+        "#,
+    )?;
+    let bytes = {
+        let mut session = BlitzSession::new(build.clone())?;
+        session.start("detach", vec![])?;
+        session.run_until_idle()?;
+        session.snapshot(&[])?.to_bytes()?
+    };
+
+    let mut session = BlitzSession::restore(
+        Snapshot::from_bytes(&bytes)?,
+        build,
+        RestoreOptions {
+            validation: SnapshotValidation::Full,
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(session.start("update", vec![])?, Value::boolean(true));
+    session.run_until_idle()?;
+    let doc = session.document();
+    let reattached = doc
+        .get_node(doc.get_element_by_id("reattached").unwrap())
+        .unwrap();
+    assert_eq!(reattached.text_content(), "updated");
+    assert_eq!(reattached.parent, doc.get_element_by_id("root"));
     Ok(())
 }
 

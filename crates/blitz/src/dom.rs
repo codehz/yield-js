@@ -7,6 +7,7 @@ use yield_vm::binding::CallCx;
 use yield_vm::{ClassCx, Instance, JsError, JsResult, JsValue, ModuleCx, This};
 
 use super::Dom;
+use super::snapshot::DomState;
 
 impl Dom {
     fn node(&self, index: u32) -> JsResult<&BlitzNode> {
@@ -389,7 +390,9 @@ impl Dom {
     classes = [Node, Document, Element, HTMLIFrameElement],
     services = [dom: Rc<RefCell<Dom>>],
 )]
+#[derive(Default, yield_vm::Encode, yield_vm::Decode)]
 pub(super) struct DomModule {
+    state: DomState,
     #[js_slot]
     document: JsValue,
 }

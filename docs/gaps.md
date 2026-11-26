@@ -54,7 +54,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 | Fetch 与二进制对象 | 已提供 `Blob`、`File`、`FormData`、`Headers`、`Request`、`Response` 和 `fetch`；`FormData` 不读取 HTML 表单。没有 TLS、代理、cookie jar、HTTP 缓存或预检结果缓存（每次跨源非简单请求重新预检）；示例适配器只允许显式配置的 `127.0.0.1` 明文 HTTP/1.1，HTTPS 需其他适配器实现。`keepalive` 不跨 VM 销毁或快照恢复继续传输；恢复中的在途传输按设计中断且不重发，`only-if-cached` 因无缓存总是 miss |
 | `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
 
-`yield-blitz` 首版提供 React DOM 首屏挂载所需的 document、element、text 树读取与修改、原生宿主类身份、样式 expando 和 VM `EventTarget`；没有完整浏览器 DOM、原生输入事件、样式计算 API、点击更新、热更新或 VM/DOM 快照恢复。无窗口测试通过不等于 Vello 目视验收通过。
+`yield-blitz` 提供 React DOM 首屏挂载、`BlitzSession` DOM/VM 快照恢复及继续脚本更新；仍没有完整浏览器 DOM、原生输入事件、样式计算 API、点击事件接入或热更新。DOM payload 只支持当前绑定所需的 Document、Element、Text 和 Comment 树，不保存布局、渲染器或交互状态，不支持模板内容子树。无窗口测试不等于 Vello 目视验收。
 首屏路径只编译 `src/blitz.jsx` 及其 npm 依赖，不验收 `src/index.tsx`、TypeScript 类型剥离、CSS 导入或动态样式模块。
 
 未提供的全局名包括 `WeakRef`、`FinalizationRegistry`、`SharedArrayBuffer`、`Atomics` 和 `Intl`。`Temporal` 与 `Iterator.zip` / `Iterator.zipKeyed` 等新增迭代器方法不属于 ES2026。
