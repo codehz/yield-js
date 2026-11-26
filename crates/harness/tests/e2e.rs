@@ -308,6 +308,51 @@ fn binary_artifact_round_trips_binary_only_values() {
 }
 
 #[test]
+fn binary_artifact_preserves_ordered_opaque_resources() {
+    use yield_vm::{Build, BuildResource};
+
+    let mut build = yield_harness::build("export const result = 1;");
+    let resources = [
+        BuildResource {
+            uri: "asset:opaque".into(),
+            bytes: [0x00, 0xff, 0x80].into(),
+        },
+        BuildResource {
+            uri: "asset:empty".into(),
+            bytes: [].into(),
+        },
+    ];
+    build.resources.extend(resources.clone());
+    build.finalize();
+
+    let mut bytes = build.to_bytes();
+    let mut decoded = Build::from_bytes(&bytes).expect("decode binary artifact");
+    decoded.validate().expect("validate opaque resources");
+    assert_eq!(decoded.resources, resources);
+    assert_eq!(decoded.build_id, build.build_id);
+
+    decoded.resources[0].bytes = [0x00, 0xfe, 0x80].into();
+    decoded.finalize();
+    assert_ne!(decoded.build_id, build.build_id);
+    decoded.resources[0].bytes = resources[0].bytes.clone();
+    decoded.resources.swap(0, 1);
+    assert_ne!(decoded.compute_id(), build.build_id);
+    decoded.resources[1].uri = decoded.resources[0].uri.clone();
+    decoded.finalize();
+    let error = decoded
+        .validate()
+        .expect_err("reject duplicate resource URI");
+    assert!(error.contains("duplicate build resource URI"), "{error}");
+
+    bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    let error = Build::from_bytes(&bytes).expect_err("reject old artifact version");
+    assert!(
+        error.contains("unsupported build artifact version 1"),
+        "{error}"
+    );
+}
+
+#[test]
 fn iterator_records_survive_validated_binary_restore() {
     use yield_harness::{TestHost, build};
     use yield_vm::{Snapshot, Value, Vm};

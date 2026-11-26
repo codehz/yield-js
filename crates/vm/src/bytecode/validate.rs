@@ -31,6 +31,12 @@ impl Build {
             return Err("build_id does not match the bytecode content".to_owned());
         }
         after_digest(timing);
+        let mut resource_uris = BTreeSet::new();
+        for resource in &self.resources {
+            if !resource_uris.insert(resource.uri.as_str()) {
+                return Err(format!("duplicate build resource URI {:?}", resource.uri));
+            }
+        }
         let mut func_ids = std::collections::BTreeSet::new();
         let mut func_names = std::collections::BTreeSet::new();
         for function in &self.functions {

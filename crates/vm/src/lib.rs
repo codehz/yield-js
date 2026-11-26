@@ -92,8 +92,8 @@ pub use binding::{
     WellKnownSymbol,
 };
 pub use bytecode::{
-    BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
-    ResumeEntry, Slot, SlotKind,
+    BUILD_FORMAT_VERSION, Build, BuildResource, Constant, ExceptionHandler, Function, Instr,
+    ParamTarget, ResumeEntry, Slot, SlotKind,
 };
 pub use console::ConsoleEvent;
 pub use error::VmError;

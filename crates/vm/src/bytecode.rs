@@ -22,7 +22,7 @@ mod validate;
 pub use instr::Instr;
 
 pub const BYTECODE_VERSION: u32 = 58;
-pub const BUILD_FORMAT_VERSION: u32 = 1;
+pub const BUILD_FORMAT_VERSION: u32 = 2;
 
 const BUILD_MAGIC: [u8; 8] = *b"YIELDBLD";
 const BUILD_HEADER_LEN: usize = 12;
@@ -385,6 +385,13 @@ pub struct SourceModule {
     pub exports: BTreeMap<String, ModuleExport>,
 }
 
+/// Opaque bytes addressed by an exact URI key; interpretation belongs to the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildResource {
+    pub uri: String,
+    pub bytes: Arc<[u8]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Build {
     pub bytecode_version: u32,
@@ -400,6 +407,8 @@ pub struct Build {
     pub entry: u32,
     /// Optional source module evaluated before the entry graph.
     pub preload: Option<u32>,
+    /// Host resources in build-defined order.
+    pub resources: Vec<BuildResource>,
 }
 
 fn deserialize_unique_map<'de, D, V>(deserializer: D) -> Result<BTreeMap<String, V>, D::Error>
@@ -459,6 +468,7 @@ struct DigestInput<'a> {
     modules: &'a [SourceModule],
     entry: u32,
     preload: Option<u32>,
+    resources: &'a [BuildResource],
 }
 
 impl Build {
@@ -481,6 +491,7 @@ impl Build {
             modules,
             entry,
             preload,
+            resources: Vec::new(),
         }
     }
 
@@ -506,6 +517,7 @@ impl Build {
             modules: &self.modules,
             entry: self.entry,
             preload: self.preload,
+            resources: &self.resources,
         };
         let digest_started = PROFILE.then(Instant::now);
         let mut sink = std::io::BufWriter::with_capacity(64 * 1024, Digest::new());

@@ -82,7 +82,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 - 代理函数/构造器，以及 design 未点名的其它 Proxy traps；`Proxy.revocable` 与 `new Proxy` 共享当前目标和 trap 限制。
 - 旧式 `Object.prototype.__proto__` 访问器；保留 `Object` / `Reflect` 的显式原型操作。
 - 快照迁移：恢复要求 `SNAPSHOT_FORMAT_VERSION`、`BYTECODE_VERSION`、`build_id` 和宿主绑定指纹均匹配；二进制镜像还要求当前 `SNAPSHOT_BINARY_VERSION`，不做容器迁移。
-- 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取旧 JSON 产物。
+- 产物迁移：`Build::from_bytes` 只接受当前 `BUILD_FORMAT_VERSION` 与当前 bincode 编码，不读取版本 1 的无资源容器或旧 JSON 产物。VM 不解析资源 URI 或内容，不加载或分派资源。
 
 ## 7. 无效 JavaScript（拒绝不是实现缺口）
 
