@@ -1,5 +1,6 @@
 //! Script TypeError / ReferenceError constructors for VM-raised errors.
 
+use crate::error::ErrorKind;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::runtime::Invocation;
@@ -11,12 +12,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_error(
-            roots,
-            self.builtins.get("typeerror.prototype"),
-            "TypeError",
-            Some(message.into()),
-        )
+        self.alloc_class_error(roots, ErrorKind::TypeError.into(), Some(message.into()))
     }
 
     pub(crate) fn reference_error(
@@ -24,10 +20,9 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_error(
+        self.alloc_class_error(
             roots,
-            self.builtins.get("referenceerror.prototype"),
-            "ReferenceError",
+            ErrorKind::ReferenceError.into(),
             Some(message.into()),
         )
     }
@@ -45,12 +40,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_error(
-            roots,
-            self.builtins.get("rangeerror.prototype"),
-            "RangeError",
-            Some(message.into()),
-        )
+        self.alloc_class_error(roots, ErrorKind::RangeError.into(), Some(message.into()))
     }
 
     pub(crate) fn throw_range_error(

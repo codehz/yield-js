@@ -1,7 +1,7 @@
 use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
-use crate::VmError;
 use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::Attributes;
 use crate::host::{Host, PlatformServices};
@@ -97,7 +97,7 @@ impl VmCore {
 }
 
 macro_rules! error_class {
-    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal) => {
+    ($owner:ident, $name:expr, $root:literal, $parent:expr, $base:literal, $length:literal) => {
         error_class!(
             $owner,
             $name,
@@ -111,7 +111,7 @@ macro_rules! error_class {
             NO_PROTOTYPE_INTRINSICS
         );
     };
-    ($owner:ident, $name:literal, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:ident, $static_intrinsics:ident) => {
+    ($owner:ident, $name:expr, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:ident, $static_intrinsics:ident) => {
         impl<P: crate::host::PlatformServices> BuiltinTable<P> {
             pub(crate) const $owner: Owner<P> = {
                 const PROTOTYPE: &str = concat!($root, ".prototype");
@@ -188,7 +188,7 @@ macro_rules! error_class {
 
 error_class!(
     ERROR,
-    "Error",
+    ErrorKind::Error.name(),
     "error",
     OBJECT_PARENT,
     true,
@@ -200,7 +200,7 @@ error_class!(
 );
 error_class!(
     TYPE_ERROR,
-    "TypeError",
+    ErrorKind::TypeError.name(),
     "typeerror",
     Some("error.prototype"),
     false,
@@ -208,7 +208,7 @@ error_class!(
 );
 error_class!(
     RANGE_ERROR,
-    "RangeError",
+    ErrorKind::RangeError.name(),
     "rangeerror",
     Some("error.prototype"),
     false,
@@ -216,7 +216,7 @@ error_class!(
 );
 error_class!(
     REFERENCE_ERROR,
-    "ReferenceError",
+    ErrorKind::ReferenceError.name(),
     "referenceerror",
     Some("error.prototype"),
     false,
@@ -224,7 +224,7 @@ error_class!(
 );
 error_class!(
     SYNTAX_ERROR,
-    "SyntaxError",
+    ErrorKind::SyntaxError.name(),
     "syntaxerror",
     Some("error.prototype"),
     false,
@@ -232,7 +232,7 @@ error_class!(
 );
 error_class!(
     EVAL_ERROR,
-    "EvalError",
+    ErrorKind::EvalError.name(),
     "evalerror",
     Some("error.prototype"),
     false,
@@ -240,7 +240,7 @@ error_class!(
 );
 error_class!(
     URI_ERROR,
-    "URIError",
+    ErrorKind::URIError.name(),
     "urierror",
     Some("error.prototype"),
     false,

@@ -8,11 +8,10 @@ use crate::JsString;
 use crate::builtin::globals::Owner;
 use crate::builtin::regexp_runtime::RegExpMethod;
 use crate::builtin::{
-    ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_RANGEERROR_PROTOTYPE,
-    ROOT_STRING_ITERATOR, ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind,
-    RootSpec, link_constructor,
+    ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_STRING_ITERATOR,
+    ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind, RootSpec, link_constructor,
 };
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, BoxedPrimitive, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
@@ -1472,12 +1471,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_error(
-            roots,
-            self.builtins.get(ROOT_RANGEERROR_PROTOTYPE),
-            "RangeError",
-            Some(message.into()),
-        )
+        self.alloc_class_error(roots, ErrorKind::RangeError.into(), Some(message.into()))
     }
 }
 

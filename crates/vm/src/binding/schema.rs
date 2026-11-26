@@ -15,6 +15,7 @@ use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use super::services::{ServiceOwner, ServiceStorage, Services};
 use crate::digest::Digest;
+use crate::error::{ErrorClass, ErrorKind};
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
@@ -82,8 +83,12 @@ impl fmt::Display for HostFault {
 pub enum JsError {
     /// Catchable by script `try`/`catch`.
     Throw(JsValue),
-    /// Catchable TypeError whose object is allocated when crossing into script.
-    TypeError(String),
+    /// Catchable error of a declared class, allocated when crossing into
+    /// script. An undeclared host class faults the host contract instead.
+    Error {
+        class: ErrorClass,
+        message: JsString,
+    },
     /// Invalid host use; terminates the VM instead of the script.
     Fault(HostFault),
 }
@@ -95,9 +100,17 @@ impl JsError {
         Self::Fault(HostFault::new(message))
     }
 
+    /// Catchable error of `class`, allocated lazily when crossing into script.
+    pub fn new_error(class: impl Into<ErrorClass>, message: impl Into<JsString>) -> Self {
+        Self::Error {
+            class: class.into(),
+            message: message.into(),
+        }
+    }
+
     /// Catchable TypeError allocated lazily when crossing into script.
     pub fn type_error(message: impl Into<String>) -> Self {
-        Self::TypeError(message.into())
+        Self::new_error(ErrorKind::TypeError, message.into())
     }
 }
 

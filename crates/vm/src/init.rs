@@ -201,6 +201,7 @@ impl VmCore {
             object_urls: Default::default(),
             module_envs: Vec::new(),
             module_namespaces: Vec::new(),
+            error_exports: Vec::new(),
         }
     }
 

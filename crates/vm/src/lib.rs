@@ -94,7 +94,7 @@ pub use bytecode::{
     ResumeEntry, Slot, SlotKind,
 };
 pub use console::ConsoleEvent;
-pub use error::VmError;
+pub use error::{ErrorClass, ErrorKind, VmError};
 pub use fetch::{
     CredentialsMode, FetchEnvironment, FetchEvent, FetchFailure, FetchRegistration, FetchService,
     HopRequest, Origin, ResponseHead, UploadBody,

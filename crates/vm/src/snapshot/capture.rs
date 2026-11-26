@@ -558,6 +558,7 @@ impl VmCore {
                 templates,
                 module_envs: snapshot.module_envs,
                 module_namespaces: snapshot.module_namespaces,
+                error_exports: Vec::new(),
             },
         );
         // Recovery can append new notifications; the captured ones must stay first.

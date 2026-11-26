@@ -5,7 +5,7 @@
 //! decoded bytes are written back.
 
 use super::{Completion, arg, element};
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{ElementKind, Object, TO_STRING_TAG_SYMBOL};
 use crate::host::{Host, PlatformServices};
@@ -519,12 +519,8 @@ impl VmCore {
         };
         let decoded = from_base64(&text, alphabet, last_chunk(last), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
-            let error = self.alloc_error(
-                roots,
-                self.builtins.get("syntaxerror.prototype"),
-                "SyntaxError",
-                Some(message.into()),
-            )?;
+            let error =
+                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         match self.uint8_from_bytes(host, roots, &decoded.bytes)? {
@@ -547,12 +543,8 @@ impl VmCore {
         };
         let decoded = from_hex(&text.to_utf16(), super::MAX_BYTE_LENGTH);
         if let Some(message) = decoded.error {
-            let error = self.alloc_error(
-                roots,
-                self.builtins.get("syntaxerror.prototype"),
-                "SyntaxError",
-                Some(message.into()),
-            )?;
+            let error =
+                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         match self.uint8_from_bytes(host, roots, &decoded.bytes)? {
@@ -650,12 +642,8 @@ impl VmCore {
         error: Option<&'static str>,
     ) -> Result<Invocation, VmError> {
         if let Some(message) = error {
-            let error = self.alloc_error(
-                roots,
-                self.builtins.get("syntaxerror.prototype"),
-                "SyntaxError",
-                Some(message.into()),
-            )?;
+            let error =
+                self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))?;
             return Ok(Invocation::Thrown(error));
         }
         let result = self.heap.alloc_plain();

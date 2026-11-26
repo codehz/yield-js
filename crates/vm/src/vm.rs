@@ -6,7 +6,7 @@ use crate::binding::{
 };
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
-use crate::error::VmError;
+use crate::error::{ErrorClass, VmError};
 use crate::fetch::FetchEvent;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
@@ -168,6 +168,7 @@ pub(crate) struct RestoredState {
     pub(crate) templates: Vec<ObjectId>,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
+    pub(crate) error_exports: Vec<(ErrorClass, ErrorExport)>,
 }
 
 /// Runtime-only metadata indexed by the original, validated function table.
@@ -511,6 +512,18 @@ impl<P: PlatformServices> Vm<P> {
     pub fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
         self.core.alloc_dom_exception(name, message)
     }
+
+    /// Allocates an error of `class` with an empty stack, since no script is
+    /// running. The value participates in GC and snapshots like any other VM
+    /// object; use it as an explicit root to keep it across snapshots.
+    pub fn alloc_error(
+        &mut self,
+        class: impl Into<ErrorClass>,
+        message: impl Into<JsString>,
+    ) -> Result<Value, VmError> {
+        self.core
+            .alloc_class_error(&ActiveRoots::EMPTY, class.into(), Some(message.into()))
+    }
 }
 
 #[derive(Debug)]
@@ -568,11 +581,38 @@ pub(crate) struct VmCore {
     pub(crate) object_urls: crate::builtin::fetch::object_url::ObjectUrls,
     pub(crate) module_envs: Vec<Option<ObjectId>>,
     pub(crate) module_namespaces: Vec<ObjectId>,
+    /// Declared host error subclasses, in declaration order: the class and
+    /// its interned constructor plus prototype. GC and snapshot roots.
+    pub(crate) error_exports: Vec<(ErrorClass, ErrorExport)>,
     /// Per-function, per-PC monomorphic property cache. Never serialized.
     pub(crate) property_caches: Vec<Vec<PropertyCache>>,
 }
 
+/// The prototype backing one declared error subclass. Allocations use it
+/// directly; scripts cannot replace the stored prototype.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ErrorExport {
+    pub(crate) prototype: ObjectId,
+}
+
 impl VmCore {
+    /// The stored objects for one declared host error subclass.
+    pub(crate) fn error_export(&self, class: ErrorClass) -> Option<ErrorExport> {
+        self.error_exports
+            .iter()
+            .find(|(declared, _)| *declared == class)
+            .map(|(_, export)| *export)
+    }
+
+    pub(crate) fn error_export_prototype(
+        &self,
+        module: &'static str,
+        name: &'static str,
+    ) -> Option<ObjectId> {
+        self.error_export(ErrorClass::Host { module, name })
+            .map(|export| export.prototype)
+    }
+
     pub(crate) fn monotonic_millis<P: PlatformServices>(&self, _: &Host<P>) -> f64 {
         self.clock.now()
     }
@@ -751,10 +791,10 @@ impl VmCore {
                         .map(Some)
                         .map_err(|error| VmError::Host(error.0));
                 }
-                Err(JsError::TypeError(message)) => {
+                Err(JsError::Error { class, message }) => {
                     return cx
                         .vm
-                        .type_error(cx.roots, &message)
+                        .alloc_class_error(cx.roots, class, Some(message.clone()))
                         .map(Invocation::Thrown)
                         .map(Some);
                 }
@@ -1860,6 +1900,7 @@ impl VmCore {
             templates,
             module_envs,
             module_namespaces,
+            error_exports,
         } = state;
         heap.promise_prototype = Some(builtins.get("promise.prototype"));
         heap.generator_prototype = Some(builtins.get("generator.prototype"));
@@ -1932,6 +1973,7 @@ impl VmCore {
             object_urls,
             module_envs,
             module_namespaces,
+            error_exports,
         }
     }
 }

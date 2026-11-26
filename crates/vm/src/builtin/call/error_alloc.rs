@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::error::VmError;
+use crate::error::{ErrorClass, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
 use crate::host::{Host, PlatformServices};
@@ -10,6 +10,31 @@ use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
+    /// Allocate an error of `class`, resolving built-in kinds through their
+    /// constructor roots and declared host subclasses through the stored
+    /// export prototypes. An undeclared host class is a host contract fault.
+    pub(crate) fn alloc_class_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        class: ErrorClass,
+        message: Option<JsString>,
+    ) -> Result<Value, VmError> {
+        match class {
+            ErrorClass::Builtin(kind) => self.alloc_error(
+                roots,
+                self.builtins.get(kind.builtin_root()),
+                kind.name(),
+                message,
+            ),
+            ErrorClass::Host { module, name } => {
+                let prototype = self.error_export_prototype(module, name).ok_or_else(|| {
+                    VmError::HostFault(format!("undeclared error class {module}:{name}"))
+                })?;
+                self.alloc_error(roots, prototype, name, message)
+            }
+        }
+    }
+
     pub(crate) fn construct_error<P: PlatformServices>(
         &mut self,
         host: &Host<P>,
@@ -43,7 +68,7 @@ impl VmCore {
                     message,
                 )?
             } else {
-                self.alloc_suppressed_error(error, suppressed)?
+                self.alloc_suppressed_error(roots, error, suppressed)?
             };
             return Ok(Invocation::Value(value));
         }
@@ -175,14 +200,21 @@ impl VmCore {
 
     pub(crate) fn alloc_suppressed_error(
         &mut self,
+        roots: &ActiveRoots<'_>,
         error: Value,
         suppressed: Value,
     ) -> Result<Value, VmError> {
-        let id = self
-            .heap
-            .alloc_plain_with(Some(self.builtins.get("suppressederror.prototype")));
+        let value = self.alloc_error(
+            roots,
+            self.builtins.get("suppressederror.prototype"),
+            "SuppressedError",
+            None,
+        )?;
+        let ValueRef::Object(id) = value.view() else {
+            unreachable!()
+        };
         self.define_suppressed_values(id, error, suppressed)?;
-        Ok(Value::object(id))
+        Ok(value)
     }
 
     fn alloc_suppressed_error_with_message(

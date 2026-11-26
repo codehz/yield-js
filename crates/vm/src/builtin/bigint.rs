@@ -4,7 +4,7 @@ use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 
 use crate::builtin::globals::Owner;
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object};
 use crate::host::{Host, PlatformServices};
@@ -129,10 +129,9 @@ impl VmCore {
                     .and_then(|text| JsBigInt::from_js_string(&text));
                 match parsed {
                     Some(value) => Ok(value),
-                    None => Err(self.alloc_error(
+                    None => Err(self.alloc_class_error(
                         roots,
-                        self.builtins.get("syntaxerror.prototype"),
-                        "SyntaxError",
+                        ErrorKind::SyntaxError.into(),
                         Some("Cannot convert string to a BigInt".into()),
                     )?),
                 }

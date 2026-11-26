@@ -7,6 +7,7 @@ use crate::vm::VmCore;
 
 use super::schema::*;
 use super::services::Services;
+use crate::error::{ErrorClass, ErrorKind};
 
 // ---------------------------------------------------------------------------
 // Values
@@ -695,6 +696,21 @@ impl<'a> CallCx<'a> {
         }
     }
 
+    /// Allocate an error of `class` with the current call's active stack.
+    pub fn alloc_error(
+        &mut self,
+        class: impl Into<ErrorClass>,
+        message: impl Into<JsString>,
+    ) -> JsResult<JsValue> {
+        match self
+            .vm
+            .alloc_class_error(self.roots, class.into(), Some(message.into()))
+        {
+            Ok(value) => Ok(self.js_value(value)),
+            Err(error) => Err(JsError::Fault(HostFault::new(error.to_string()))),
+        }
+    }
+
     pub fn fault(&self, message: impl Into<String>) -> HostFault {
         HostFault::new(message)
     }
@@ -845,7 +861,10 @@ impl<'a> CallCx<'a> {
         {
             return Ok((id, state));
         }
-        Err(JsError::TypeError("expected an AbortSignal".into()))
+        Err(JsError::new_error(
+            ErrorKind::TypeError,
+            "expected an AbortSignal",
+        ))
     }
 
     /// Returns the original abort reason, or `None` if the signal is active.

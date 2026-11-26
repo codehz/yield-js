@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Attributes, BoxedPrimitive, DescriptorUpdate, Object};
 use crate::host::{Host, PlatformServices};
@@ -547,12 +547,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: JsString,
     ) -> Result<Invocation, VmError> {
-        let error = self.alloc_error(
-            roots,
-            self.builtins.get("syntaxerror.prototype"),
-            "SyntaxError",
-            Some(message),
-        )?;
+        let error = self.alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message))?;
         Ok(Invocation::Thrown(error))
     }
 

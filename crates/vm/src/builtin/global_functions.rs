@@ -4,7 +4,7 @@ use super::FUNCTION_PARENT;
 use super::binary::codec::{decode_html_base64, encode_html_base64};
 use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
@@ -41,10 +41,9 @@ function!(IS_FINITE, "isFinite", 1, |vm, host, roots, args, _| {
     number_predicate(vm, host, roots, &args, f64::is_finite)
 });
 function!(EVAL, "eval", 1, |vm, _, roots, _, _| {
-    vm.alloc_error(
+    vm.alloc_class_error(
         roots,
-        vm.builtins.get("evalerror.prototype"),
-        "EvalError",
+        ErrorKind::EvalError.into(),
         Some("Dynamic code evaluation is disabled".into()),
     )
     .map(Invocation::Thrown)
@@ -148,10 +147,9 @@ fn call_uri<P: PlatformServices>(
     match transform(text) {
         Some(text) => Ok(Invocation::Value(Value::string(text))),
         None => vm
-            .alloc_error(
+            .alloc_class_error(
                 roots,
-                vm.builtins.get("urierror.prototype"),
-                "URIError",
+                ErrorKind::URIError.into(),
                 Some("URI malformed".into()),
             )
             .map(Invocation::Thrown),

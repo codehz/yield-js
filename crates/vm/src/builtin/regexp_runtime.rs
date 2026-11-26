@@ -3,7 +3,7 @@ use std::borrow::Cow;
 
 use crate::builtin::globals::Owner;
 use crate::builtin::{RootKind, RootSpec, define_builtin_data, link_constructor};
-use crate::error::VmError;
+use crate::error::{ErrorKind, VmError};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::{Host, PlatformServices};
@@ -248,12 +248,7 @@ impl VmCore {
             Ok(compiled) => compiled,
             Err(message) => {
                 return self
-                    .alloc_error(
-                        roots,
-                        self.builtins.get("syntaxerror.prototype"),
-                        "SyntaxError",
-                        Some(message.into()),
-                    )
+                    .alloc_class_error(roots, ErrorKind::SyntaxError.into(), Some(message.into()))
                     .map(Invocation::Thrown);
             }
         };

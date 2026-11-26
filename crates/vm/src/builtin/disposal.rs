@@ -80,10 +80,10 @@ impl<P: crate::host::PlatformServices> BuiltinTable<P> {
         IntrinsicDef::call(
             scope_intrinsic("recordDisposeThrow"),
             2,
-            |vm, _, _, args, _| {
+            |vm, _, roots, args, _| {
                 let scope = vm.disposal_scope_arg(&args)?;
                 let error = args.into_iter().nth(1).unwrap_or(Value::UNDEFINED);
-                vm.record_disposal_error(scope, error)?;
+                vm.record_disposal_error(roots, scope, error)?;
                 Ok(Invocation::Value(Value::UNDEFINED))
             },
         ),
@@ -226,9 +226,14 @@ impl VmCore {
         }
     }
 
-    fn record_disposal_error(&mut self, state: ObjectId, error: Value) -> Result<(), VmError> {
+    fn record_disposal_error(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        state: ObjectId,
+        error: Value,
+    ) -> Result<(), VmError> {
         let error = match self.disposal(state)?.error.take() {
-            Some(previous) => self.alloc_suppressed_error(error, previous)?,
+            Some(previous) => self.alloc_suppressed_error(roots, error, previous)?,
             None => error,
         };
         self.disposal(state)?.error = Some(error);
@@ -312,7 +317,9 @@ impl VmCore {
                     self.disposal(state)?.has_awaited = true;
                     return Ok(DisposeStep::Await(Value::object(promise)));
                 }
-                (_, Invocation::Thrown(error)) => self.record_disposal_error(state, error)?,
+                (_, Invocation::Thrown(error)) => {
+                    self.record_disposal_error(roots, state, error)?
+                }
                 (DisposeHint::Sync, Invocation::Value(_)) => {}
             }
         }
@@ -383,7 +390,7 @@ impl VmCore {
                 Ok(AwaitPrepared::Plain(_)) => {
                     return self.enqueue_job(job, Settlement::Fulfilled(Value::UNDEFINED));
                 }
-                Err(error) => self.record_disposal_error(state, error)?,
+                Err(error) => self.record_disposal_error(roots, state, error)?,
             }
         }
     }
@@ -398,7 +405,7 @@ impl VmCore {
     ) -> Result<(), VmError> {
         self.disposal(state)?.waiting = None;
         if let Settlement::Rejected(error) = settlement {
-            self.record_disposal_error(state, error.clone())?;
+            self.record_disposal_error(roots, state, error.clone())?;
         }
         self.drive_async_disposal(host, roots, state, result)
     }

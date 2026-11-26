@@ -87,7 +87,6 @@ fn install_getter(vm: &mut VmCore, target: ObjectId, key: PropertyKey, intrinsic
 pub(crate) const ROOT_STRING_PROTOTYPE: &str = "string.prototype";
 pub(crate) const ROOT_STRING_ITERATOR: &str = "string.iterator";
 pub(crate) const ROOT_STRING_ITERATOR_PROTOTYPE: &str = "stringIterator.prototype";
-pub(crate) const ROOT_RANGEERROR_PROTOTYPE: &str = "rangeerror.prototype";
 pub(crate) const ROOT_NUMBER_PROTOTYPE: &str = "number.prototype";
 pub(crate) const ROOT_PROXY: &str = "proxy";
 pub(crate) const ROOT_OBJECT_PROTOTYPE: &str = "object.prototype";
