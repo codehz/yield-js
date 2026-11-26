@@ -6,6 +6,7 @@ use yield_vm::binding::{
     Registration,
 };
 use yield_vm::host::{Completion, TimerService};
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{Decode, Encode, PlatformServices, Services, Vm, operation};
 
 const MAX_DATE_MS: u64 = 8_640_000_000_000_000;
@@ -211,7 +212,10 @@ impl Timer {
     pub fn from_delay(cx: &mut CallCx<'_>, delay: &JsValue) -> JsResult<Self> {
         let ms = cx.number(delay)?;
         if !(0.0..=f64::from(u32::MAX)).contains(&ms) || ms.fract() != 0.0 {
-            return Err(cx.type_error("expected a delay in unsigned 32-bit milliseconds"));
+            let error = cx.construct::<TypeError>(&[JsValue::string(
+                "expected a delay in unsigned 32-bit milliseconds",
+            )])?;
+            return Err(cx.throw(error));
         }
         Ok(Self {
             remaining_ms: ms as u32,

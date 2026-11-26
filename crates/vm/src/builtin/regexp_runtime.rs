@@ -3,11 +3,12 @@ use std::borrow::Cow;
 
 use crate::builtin::globals::Owner;
 use crate::builtin::{RootKind, RootSpec, define_builtin_data, link_constructor};
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, ITERATOR_SYMBOL, Object, PlainObject};
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsics::SyntaxError;
 use crate::regexp::{compile_pattern, encode_input, encode_input_with_flags, find_match};
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
@@ -248,7 +249,7 @@ impl VmCore {
             Ok(compiled) => compiled,
             Err(message) => {
                 return self
-                    .alloc_class_error(roots, ErrorKind::SyntaxError, Some(message.into()))
+                    .alloc_message_error::<SyntaxError>(roots, Some(message.into()))
                     .map(Invocation::Thrown);
             }
         };

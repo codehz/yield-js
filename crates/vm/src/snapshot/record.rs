@@ -9,8 +9,8 @@ use crate::bytecode::BYTECODE_VERSION;
 use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
-// Host class and operation records without per-binding schemas.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 94;
+// DOMException records carry the shared [[ErrorData]] presence bit.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 95;
 
 /// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;

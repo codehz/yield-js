@@ -296,15 +296,16 @@ impl CallCx {
 
 区分原则：**可由脚本处理的语义错误用 `JsError`；违反宿主契约用 `HostFault`。**
 
-宿主用普通 `#[host_class]` 声明异常：`builtin_parent = Error` 或 `builtin_parent = DOMException` 与直接宿主 `parent` 互斥；继承来的标准异常根也不能与 EventTarget 品牌并存。`#[constructor(name = "ParseError", class = ParseError)]` 导出同一个原生构造器，异常类须用 `new`。静态继承沿声明连到最近有导出的父类构造器，最终连到标准构造器。
+宿主用普通 `#[host_class(parent = TypeError, ...)]` 声明异常，其中 `TypeError` 是从 `yield_vm::intrinsics` 导入的类型标记。`parent = RustPath` 同时支持宿主类和已安装的 intrinsic 类；异常祖先不能与 EventTarget 品牌并存。`#[constructor(name = "ParseError", class = ParseError)]` 导出原生构造器，异常类须用 `new`。静态继承沿声明连到最近有导出的父类构造器，最终连到 intrinsic 构造器。
 
 - `CallCx::alloc` 使用标准基类默认值；`alloc_with_super(payload, args)` 只接受有标准异常祖先的类，由 VM 同步执行标准转换与 `cause` 读取，将脚本异常原样传播。实例保留宿主槽和 payload；`Error` 保留创建点活动栈，`DOMException` 使用内部 name/message 和标准 code。`prototype_name` 显式声明原型的非枚举可写可配置 `name`，不参与身份判断。
-- `Error.isError` 识别底层品牌；改写原型不改变品牌，伪造原型和代理不会取得品牌。`instanceof` 仍使用脚本原型。异常实例以 `cx.throw(value)` 抛出，内建分配 API 仅接收 `ErrorKind`。快照与 GC 使用普通宿主类路径，快照格式 94 的 Full 恢复核对实例底层形态，不重设可变原型或栈。
+- `Error.isError` 只读实例自身的 `[[ErrorData]]`；改写原型不改变品牌，伪造原型和代理不会取得品牌。`instanceof` 仍使用脚本原型。快照格式 95 的 Full 恢复核对底层形态和槽，不重设可变原型或栈。
+- `cx.constructor::<TypeError>()` 返回已根化的 intrinsic 构造器；`cx.construct::<TypeError>(&args)` 按类构造实例，两者都不读取可变的全局绑定。成功时可返回实例或用 `cx.throw(value)` 抛出；无调用上下文时可用 `JsError::new::<TypeError>(message)` 延迟构造消息为首参的 Error 类。
 - 恢复策略（`Reject`）与恢复期中断合成的拒绝原因是带声明原文的普通 `Error` 对象；脚本显式 `throw`、`Promise.reject`、用户提供的 abort reason 与外部 completion 的拒绝值原样透传，不被拦截或包装。
 
 ### 6.4 重入与执行线程
 
-- 绑定不得通过 VM 执行入口重入，不排空微任务，不接受事件。`alloc_with_super` 的标准参数转换是受控的同步脚本调用，调用内有效句柄在转换期间仍受 GC 保护。
+- 绑定不得通过 VM 执行入口重入，不排空微任务，不接受事件。`construct` 与 `alloc_with_super` 的标准参数转换是受控的同步脚本调用，调用内有效句柄在转换期间仍受 GC 保护。
 - `Host` 随 VM 在同一线程持有；并行时各线程独立构造宿主。跨线程的能力与状态由具体服务值自行声明和同步。
 - 异步 operation 结果经 `Vm::complete_operation` 交付。VM 全局 timer 和 `AbortSignal.timeout` 只用可选的 `timer`（`TimerService`）（`TimerService::arm(token, delay_ms)`）；平台持有一次性可取消登记，并在 VM 线程调用 `Vm::wake_timer`，随后调用 `Vm::run_until_idle`。wake 不执行 JS、不携带 settlement；忽略旧代和已消费令牌，拒绝活动的非 timer 令牌。
 - 绑定函数不得阻塞等待 operation。可直接返回原生 Promise，或用后台 CPS 任务等待 operation 并立即返回可取消句柄。

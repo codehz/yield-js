@@ -43,6 +43,13 @@ declare module "test" {
     export class HostDOMException extends DOMException {
         constructor(message?: unknown, name?: unknown);
     }
+    export class HostTypeError extends TypeError {
+        constructor(message?: unknown, options?: unknown);
+    }
+    /** Returns the intrinsic TypeError constructor, independent of the global binding. */
+    export function getTypeErrorConstructor(): TypeErrorConstructor;
+    /** Constructs and throws an intrinsic TypeError on the active stack. */
+    export function throwTypeError(message?: unknown, options?: unknown): never;
     /** Allocates a ParseError instance from the host. */
     export function allocError(message?: unknown): unknown;
     /** Allocates and throws a ParseError on the active stack. */

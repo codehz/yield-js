@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use super::support::{UnexpectedUncaught, compile_main, declared};
 use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{CallCx, CodecError, HostFault, OperationToken};
+use yield_vm::intrinsics::{Error, TypeError};
 use yield_vm::{
     Completion, Decode, Encode, FromServices, GuestOutcome, Host, HostStep, Instance, JsError,
     JsResult, JsValue, OperationDriver, PromiseState, RestoreOptions, Services, SnapshotValidation,
@@ -17,6 +18,13 @@ use yield_vm::{
 
 #[path = "signature_fingerprint.rs"]
 mod signature_fingerprint;
+
+fn throw_type_error(cx: &mut CallCx<'_>, message: &str) -> JsError {
+    match cx.construct::<TypeError>(&[JsValue::string(message)]) {
+        Ok(value) => cx.throw(value),
+        Err(error) => error,
+    }
+}
 
 macro_rules! label_driver {
     ($operation:ty, $wire:tt) => {
@@ -537,7 +545,9 @@ mod guest_call_fixture {
             let first = cx.call(throwing, JsValue::undefined(), vec![]).await;
             match first {
                 GuestOutcome::Thrown(_) => {}
-                GuestOutcome::Returned(_) => return Err(cx.type_error("expected guest throw")),
+                GuestOutcome::Returned(_) => {
+                    return Err(throw_type_error(cx, "expected guest throw"));
+                }
             }
 
             let second = cx.call(returning, JsValue::undefined(), Vec::new()).await;
@@ -736,7 +746,7 @@ mod counter_fixture {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("wait requires a valid label"))?;
+            .map_err(|_| throw_type_error(cx, "wait requires a valid label"))?;
         cx.promise(Wait { label })
     }
 
@@ -1094,7 +1104,7 @@ mod inherit_fixture {
                 return Err(JsError::Throw(value));
             }
             if *Self::offset(cx.services()) != 40 {
-                return Err(cx.type_error("unexpected base class service"));
+                return Err(throw_type_error(cx, "unexpected base class service"));
             }
             Ok(HostStep::Return(this.base(cx)?))
         }
@@ -1145,12 +1155,8 @@ mod inherit_fixture {
             if value.truthy() {
                 return Ok(());
             }
-            Err(
-                match cx.alloc_error(yield_vm::ErrorKind::Error, "assert failed") {
-                    Ok(value) => JsError::Throw(value),
-                    Err(error) => error,
-                },
-            )
+            let error = cx.construct::<Error>(&[JsValue::string("assert failed")])?;
+            Err(cx.throw(error))
         }
 
         #[function(name = "readBase")]

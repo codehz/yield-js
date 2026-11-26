@@ -69,6 +69,7 @@ pub mod heap;
 pub mod host;
 mod init;
 mod intrinsic;
+pub mod intrinsics;
 mod ops;
 #[doc(hidden)]
 pub mod perf;
@@ -84,18 +85,18 @@ mod vm;
 pub use binding::__macro_support;
 
 pub use binding::{
-    BuiltinClassParent, ClassCx, ClassId, ConstKind, ConstValue, Decode, Encode, ExportId,
-    FromServices, GuestOutcome, HostClass, HostFault, HostModule, HostStep, Instance, JsError,
-    JsResult, JsValue, MemberName, MethodId, ModuleCx, ModuleExports, NativeTarget, Operation,
-    OperationDriver, OperationToken, Recovery, Registration, Services, SlotDecl, SuspendRequest,
-    This, WellKnownSymbol,
+    ClassCx, ClassId, ClassParent, ConstKind, ConstValue, Decode, Encode, ExportId, FromServices,
+    GuestOutcome, HostClass, HostFault, HostModule, HostStep, Instance, JsError, JsResult, JsValue,
+    MemberName, MethodId, ModuleCx, ModuleExports, NativeTarget, Operation, OperationDriver,
+    OperationToken, ParentRef, Recovery, Registration, Services, SlotDecl, SuspendRequest, This,
+    WellKnownSymbol,
 };
 pub use bytecode::{
     BUILD_FORMAT_VERSION, Build, Constant, ExceptionHandler, Function, Instr, ParamTarget,
     ResumeEntry, Slot, SlotKind,
 };
 pub use console::ConsoleEvent;
-pub use error::{ErrorKind, VmError};
+pub use error::VmError;
 pub use fetch::{
     CredentialsMode, FetchEnvironment, FetchEvent, FetchFailure, FetchRegistration, FetchService,
     HopRequest, Origin, ResponseHead, UploadBody,
@@ -107,6 +108,7 @@ pub use host::{
     SubtleCryptoService, SystemTimeService, TimeService, TimerService, UserAgent,
 };
 pub use init::{RestoreOptions, SnapshotValidation, VmOptions};
+pub use intrinsics::{IntrinsicClass, MessageErrorClass};
 pub use regexp::{RegExpFlags, validate_regexp};
 #[doc(hidden)]
 pub use runtime::TestClock;

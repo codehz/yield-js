@@ -4,10 +4,11 @@ use super::FUNCTION_PARENT;
 use super::binary::codec::{decode_html_base64, encode_html_base64};
 use super::globals::Owner;
 use super::roots::{RootKind, RootSpec};
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsics::{EvalError, URIError};
 use crate::runtime::Invocation;
 use crate::value::{JsString, Value};
 use crate::vm::VmCore;
@@ -41,12 +42,8 @@ function!(IS_FINITE, "isFinite", 1, |vm, host, roots, args, _| {
     number_predicate(vm, host, roots, &args, f64::is_finite)
 });
 function!(EVAL, "eval", 1, |vm, _, roots, _, _| {
-    vm.alloc_class_error(
-        roots,
-        ErrorKind::EvalError,
-        Some("Dynamic code evaluation is disabled".into()),
-    )
-    .map(Invocation::Thrown)
+    vm.alloc_message_error::<EvalError>(roots, Some("Dynamic code evaluation is disabled".into()))
+        .map(Invocation::Thrown)
 });
 function!(
     REPORT_ERROR,
@@ -147,7 +144,7 @@ fn call_uri<P: PlatformServices>(
     match transform(text) {
         Some(text) => Ok(Invocation::Value(Value::string(text))),
         None => vm
-            .alloc_class_error(roots, ErrorKind::URIError, Some("URI malformed".into()))
+            .alloc_message_error::<URIError>(roots, Some("URI malformed".into()))
             .map(Invocation::Thrown),
     }
 }

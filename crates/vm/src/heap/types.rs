@@ -857,6 +857,7 @@ pub struct PlainObject {
     /// Internal prototype.
     pub prototype: Option<ObjectId>,
     pub(super) extensible: bool,
+    /// Presence of the receiver's own [[ErrorData]] internal slot.
     pub(crate) is_error: bool,
     #[serde(default)]
     pub(crate) module_namespace: Option<u32>,
@@ -906,6 +907,13 @@ impl PlainObject {
             is_error: false,
             module_namespace: None,
             is_raw_json: false,
+        }
+    }
+
+    pub(crate) fn error(prototype: ObjectId) -> Self {
+        Self {
+            is_error: true,
+            ..Self::new(Some(prototype))
         }
     }
 

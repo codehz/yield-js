@@ -10,7 +10,7 @@ export async function run() {
   assert(empty.name === "Error" && empty.message === "" && empty.code === 0);
   assert(new DOMException(null, "ValidationError").message === "null");
   assert(new DOMException("", "ValidationError").code === 0);
-  assert(Object.getPrototypeOf(DOMException) === Function.prototype);
+  assert(Object.getPrototypeOf(DOMException) === Error);
   assert(Object.getPrototypeOf(DOMException.prototype) === Error.prototype);
   assert(DOMException.length === 0);
 
@@ -33,6 +33,7 @@ export async function run() {
   const fake = Object.create(DOMException.prototype);
   assert(!Error.isError(fake) && !Error.isError(DOMException.prototype));
   try { name.get.call(fake); assert(false); } catch (thrown) { assert(thrown instanceof TypeError); }
+  try { name.get.call(new Error()); assert(false); } catch (thrown) { assert(thrown instanceof TypeError); }
   const proxy = new Proxy(error, {});
   assert(!Error.isError(proxy));
   try { name.get.call(proxy); assert(false); } catch (thrown) { assert(thrown instanceof TypeError); }

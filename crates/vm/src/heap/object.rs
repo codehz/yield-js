@@ -99,6 +99,9 @@ pub enum ReactionJob {
 #[rustfmt::skip]
 macro_rules! map_object_storage {
     ($receiver:expr, |$storage:ident| $projection:expr) => {
+        map_object_storage!($receiver, |$storage| $projection, |$storage| Some($projection))
+    };
+    ($receiver:expr, |$storage:ident| $projection:expr, |$other:ident| $specialized:expr) => {
         match $receiver {
             Object::Plain($storage)
             | Object::Boxed { object: $storage, .. }
@@ -161,9 +164,9 @@ macro_rules! map_object_storage {
                 NativeObject::Intrinsic { object: $storage, .. }
                 | NativeObject::Host { object: $storage, .. },
             ) => Some($projection),
-            Object::Array($storage) => Some($projection),
-            Object::Function($storage) => Some($projection),
-            Object::Promise($storage) => Some($projection),
+            Object::Array($other) => $specialized,
+            Object::Function($other) => $specialized,
+            Object::Promise($other) => $specialized,
             Object::Environment(_) | Object::ForInIterator { .. } | Object::DisposeState(_)
             | Object::StreamPipe(_) | Object::Tee(_) | Object::StreamFromIterator(_)
             | Object::StreamTransfer(_) => None,
@@ -194,8 +197,7 @@ impl Object {
     }
 
     pub(crate) fn has_error_brand(&self) -> bool {
-        matches!(self, Self::DomException { .. })
-            || matches!(self, Self::Plain(object) if object.is_error)
+        map_object_storage!(self, |object| object.is_error, |_object| None).unwrap_or(false)
     }
 
     pub fn as_promise(&self) -> Option<&PromiseObject> {

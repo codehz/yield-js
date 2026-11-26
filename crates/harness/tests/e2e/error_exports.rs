@@ -3,23 +3,25 @@
 
 use super::support::{compile_main, declared};
 use yield_vm::binding::CallCx;
+use yield_vm::intrinsics::{DOMException, Error, TypeError};
 use yield_vm::{
-    Decode, Encode, Host, Instance, JsResult, JsValue, RestoreOptions, SnapshotValidation, This,
-    Value, ValueRef, Vm, VmError, VmOptions, host_class, host_module, methods, module_exports,
+    Decode, Encode, Host, Instance, JsResult, JsString, JsValue, RestoreOptions, Snapshot,
+    SnapshotValidation, This, Value, ValueRef, Vm, VmError, VmOptions, host_class, host_module,
+    methods, module_exports,
 };
 
 mod classes {
     use super::*;
 
-    #[host_class(tag = "other:Missing", builtin_parent = Error)]
+    #[host_class(tag = "other:Missing", parent = yield_vm::intrinsics::Error)]
     struct Missing;
 
     macro_rules! error_module {
-        ($module:ident, $name:tt, $tag:tt, $source:literal) => {
+        ($module:ident, $name:tt, $tag:tt, $parent:ident, $source:literal) => {
             pub mod $module {
                 use super::*;
 
-                #[host_class(tag = $tag, builtin_parent = Error, methods, prototype_name = "ParseError")]
+                #[host_class(tag = $tag, parent = $parent, methods, prototype_name = "ParseError")]
                 #[derive(Encode, Decode)]
                 struct ParseError {
                     source: u8,
@@ -31,7 +33,9 @@ mod classes {
                 impl ParseError {
                     #[method(name = "source")]
                     fn source(cx: &mut CallCx<'_>, this: This<ParseError>) -> JsResult<JsValue> {
-                        Ok(JsValue::number(f64::from(this.instance().payload(cx)?.source)))
+                        Ok(JsValue::number(f64::from(
+                            this.instance().payload(cx)?.source,
+                        )))
                     }
 
                     #[method(name = "detail")]
@@ -46,16 +50,24 @@ mod classes {
                 #[module_exports]
                 impl Module {
                     #[constructor(name = "ParseError", class = ParseError)]
-                    fn parse_error(cx: &mut yield_vm::ModuleCx<'_, Self>, message: Option<JsValue>) -> JsResult<Instance<ParseError>> {
+                    fn parse_error(
+                        cx: &mut yield_vm::ModuleCx<'_, Self>,
+                        message: Option<JsValue>,
+                    ) -> JsResult<Instance<ParseError>> {
                         let message = message.unwrap_or_else(JsValue::undefined);
                         let options = cx.args().get(1).cloned().unwrap_or_else(JsValue::undefined);
-                        let instance = cx.alloc_with_super(ParseError { source: $source }, &[message.clone(), options])?;
+                        let instance = cx.alloc_with_super(
+                            ParseError { source: $source },
+                            &[message.clone(), options],
+                        )?;
                         instance.set_detail(cx, message)?;
                         Ok(instance)
                     }
 
                     #[function(name = "make")]
-                    fn make(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<Instance<ParseError>> {
+                    fn make(
+                        cx: &mut yield_vm::ModuleCx<'_, Self>,
+                    ) -> JsResult<Instance<ParseError>> {
                         Self::parse_error(cx, Some(JsValue::string("declared failure")))
                     }
 
@@ -68,16 +80,38 @@ mod classes {
         };
     }
 
-    error_module!(a, "errsA", "errsA:ParseError", 1);
-    error_module!(b, "errsB", "errsB:ParseError", 2);
+    error_module!(a, "errsA", "errsA:ParseError", Error, 1);
+    error_module!(b, "errsB", "errsB:ParseError", TypeError, 2);
+
+    pub mod dom {
+        use super::*;
+
+        #[host_class(tag = "errsDOM:HostDOMException", parent = DOMException)]
+        struct HostDOMException;
+
+        #[host_module(name = "errsDOM", classes = [HostDOMException])]
+        pub struct Module;
+
+        #[module_exports]
+        impl Module {
+            #[constructor(name = "HostDOMException", class = HostDOMException)]
+            fn dom_exception(
+                cx: &mut yield_vm::ModuleCx<'_, Self>,
+                message: JsValue,
+                name: JsValue,
+            ) -> JsResult<Instance<HostDOMException>> {
+                cx.alloc_with_super(HostDOMException, &[message, name])
+            }
+        }
+    }
 }
 
-use classes::{a::Module as ModuleA, b::Module as ModuleB};
+use classes::{a::Module as ModuleA, b::Module as ModuleB, dom::Module as DomModule};
 
 fn cross_host() -> Host<impl yield_vm::PlatformServices> {
     yield_vm::host! {
         dts: "../dts/errsA-errsB.d.ts",
-        modules: [ModuleA, ModuleB],
+        modules: [ModuleA, ModuleB, DomModule],
         services: {},
     }
     .expect("error class bindings")
@@ -122,19 +156,48 @@ fn alloc_error_roots_survive_gc_and_full_restore() {
     let source = r#"
 import { make as makeA, ParseError as A } from 'errsA';
 import { make as makeB, ParseError as B } from 'errsB';
+import { HostDOMException } from 'errsDOM';
+export const originalError = Error;
+export const originalTypeError = TypeError;
+export const originalDOMException = DOMException;
+globalThis.TypeError = function ReplacementTypeError() {};
+globalThis.DOMException = function ReplacementDOMException() {};
+class Derived extends B {}
 const a = makeA();
 const b = new B('original B');
+const derived = new Derived('derived B', { cause: b });
+export const dom = new HostDOMException('host DOM failure', 'AbortError');
+const detachedDOM = new HostDOMException('detached DOM failure', 'DataCloneError');
 const stack = a.stack;
 const detail = a.detail;
 const source = a.source;
 Object.setPrototypeOf(a, null);
+Object.setPrototypeOf(detachedDOM, null);
 export function make() { return makeB(); }
 export function check() {
-    return Object.getPrototypeOf(a) === null && !(a instanceof A)
+    return globalThis.TypeError !== originalTypeError
+        && globalThis.DOMException !== originalDOMException
+        && Object.getPrototypeOf(B) === originalTypeError
+        && Object.getPrototypeOf(HostDOMException) === originalDOMException
+        && Object.getPrototypeOf(originalTypeError) === originalError
+        && Object.getPrototypeOf(originalDOMException) === originalError
+        && Object.getPrototypeOf(a) === null && !(a instanceof A)
         && Error.isError(a) && a.stack === stack
         && detail.call(a) === 'declared failure' && source.call(a) === 1
-        && b instanceof B && !(b instanceof A) && Error.isError(b)
-        && b.source() === 2 && b.detail() === 'original B';
+        && b instanceof B && !(b instanceof A) && b instanceof originalTypeError
+        && b instanceof Error && Error.isError(b)
+        && b.source() === 2 && b.detail() === 'original B'
+        && derived instanceof Derived && derived instanceof B
+        && derived instanceof originalTypeError && derived instanceof Error
+        && Error.isError(derived) && derived.message === 'derived B' && derived.cause === b
+        && derived.source() === 2 && derived.detail() === 'derived B'
+        && dom instanceof HostDOMException && dom instanceof originalDOMException
+        && dom instanceof Error && Error.isError(dom)
+        && dom.name === 'AbortError' && dom.message === 'host DOM failure' && dom.code === 20
+        && Object.getPrototypeOf(detachedDOM) === null && !(detachedDOM instanceof HostDOMException)
+        && Error.isError(detachedDOM)
+        && Reflect.get(originalDOMException.prototype, 'name', detachedDOM) === 'DataCloneError'
+        && Reflect.get(originalDOMException.prototype, 'message', detachedDOM) === 'detached DOM failure';
 }
 "#;
     let build =
@@ -155,7 +218,7 @@ export function check() {
         .snapshot(std::slice::from_ref(&root))
         .expect("snapshot with explicit root");
     let mut old = snapshot.clone();
-    old.format_version = 93;
+    old.format_version = yield_vm::SNAPSHOT_FORMAT_VERSION - 1;
     assert!(matches!(
         Vm::restore(
             old,
@@ -205,6 +268,37 @@ export function check() {
         VmError::InvalidSnapshot(message) if message.contains("branded Error")
     ));
 
+    // A valid DOMException object shape is not enough if its ErrorData slot is gone.
+    let dom = vm.get_export("dom").expect("host DOMException export");
+    let ValueRef::Object(dom_id) = dom.view() else {
+        panic!("dom must be an object")
+    };
+    let dom_id = serde_json::to_value(dom_id).expect("serialize DOMException object ID");
+    let mut json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    let record = json["objects"]
+        .as_array_mut()
+        .expect("object records")
+        .iter_mut()
+        .find(|record| record["id"] == dom_id)
+        .expect("host DOMException in snapshot");
+    let brand = &mut record["object"]["dom_exception"]["object"]["is_error"];
+    assert_eq!(brand.as_bool(), Some(true));
+    *brand = serde_json::Value::Bool(false);
+    let tampered = Snapshot::from_json(&json.to_string()).expect("parse tampered snapshot");
+    assert!(matches!(
+        Vm::restore(
+            tampered,
+            verified.clone(),
+            cross_host(),
+            RestoreOptions {
+                validation: SnapshotValidation::Full,
+                ..Default::default()
+            },
+        ),
+        Err(VmError::InvalidSnapshot(message))
+            if message.contains("a DOMException") || message.contains("ErrorData slot")
+    ));
+
     let mut vm = Vm::restore(
         snapshot,
         verified,
@@ -217,4 +311,46 @@ export function check() {
     .expect("full restore");
     let result = vm.start("check", vec![]).expect("check restored class");
     assert_eq!(result, yield_vm::Value::boolean(true));
+
+    assert_eq!(
+        vm.constructor::<Error>()
+            .expect("restored Error constructor"),
+        vm.get_export("originalError")
+            .expect("saved Error constructor"),
+    );
+    assert_eq!(
+        vm.constructor::<TypeError>()
+            .expect("restored TypeError constructor"),
+        vm.get_export("originalTypeError")
+            .expect("saved TypeError constructor"),
+    );
+    assert_eq!(
+        vm.constructor::<DOMException>()
+            .expect("restored DOMException constructor"),
+        vm.get_export("originalDOMException")
+            .expect("saved DOMException constructor"),
+    );
+
+    let dom = vm
+        .construct::<DOMException>(&[
+            Value::string(JsString::from("constructed after restore")),
+            Value::string(JsString::from("InvalidStateError")),
+        ])
+        .expect("construct intrinsic DOMException despite replaced global");
+    let ValueRef::Object(dom_id) = dom.view() else {
+        panic!("construct must return a DOMException object")
+    };
+    let snapshot = vm
+        .snapshot(std::slice::from_ref(&dom))
+        .expect("snapshot constructed DOMException");
+    let record = snapshot
+        .objects
+        .iter()
+        .find(|record| record.id == dom_id)
+        .expect("constructed DOMException in snapshot");
+    let yield_vm::Object::DomException { name, message, .. } = &record.object else {
+        panic!("construct must initialize DOMException slots")
+    };
+    assert_eq!(message, &JsString::from("constructed after restore"));
+    assert_eq!(name, &JsString::from("InvalidStateError"));
 }

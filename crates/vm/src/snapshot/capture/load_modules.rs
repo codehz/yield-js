@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::binding::{Bindings, BuiltinClassParent};
+use crate::binding::Bindings;
 use crate::error::VmError;
 use crate::heap::{EnvRole, Heap, Object};
 use crate::runtime::{HostInstance, HostSlot, ModuleState};
@@ -67,15 +67,8 @@ pub(super) fn load_host_instances(
         let object = heap.get(record.object).map_err(|_| {
             VmError::InvalidSnapshot(format!("host instance {} does not exist", record.object))
         })?;
-        let (valid, expected) = match bindings.class_builtin_root(class) {
-            Some(BuiltinClassParent::Error) => (
-                matches!(object, Object::Plain(plain) if plain.is_error),
-                "a branded Error",
-            ),
-            Some(BuiltinClassParent::DOMException) => (
-                matches!(object, Object::DomException { object, .. } if !object.is_error),
-                "a DOMException",
-            ),
+        let (valid, expected) = match bindings.class_intrinsic_base(class) {
+            Some(base) => ((base.valid_instance)(object), base.instance_description),
             None if bindings.class_is_event_target(class) => (
                 matches!(object, Object::EventTarget { object, .. } if !object.is_error),
                 "an EventTarget",

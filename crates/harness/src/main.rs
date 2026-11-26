@@ -7,6 +7,7 @@ use yield_compiler::{Compiler, MemoryResolver, Project};
 use yield_harness::{LabelRegistration, LabelService};
 use yield_vm::binding::{JsResult, JsValue, OperationDriver, OperationToken};
 use yield_vm::bytecode::Build;
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{Completion, Host, HostFault, PromiseState, Services, Vm};
 use yield_vm::{Decode, Encode, host, host_module, module_exports, operation};
 
@@ -160,10 +161,11 @@ impl Demo {
 
     #[function(name = "wait")]
     fn wait(cx: &mut yield_vm::ModuleCx<'_, Self>, arg: JsValue) -> JsResult<JsValue> {
-        let label = cx
-            .string(&arg)?
-            .to_utf8()
-            .map_err(|_| cx.type_error("wait label must be valid UTF-16"))?;
+        let Ok(label) = cx.string(&arg)?.to_utf8() else {
+            let error =
+                cx.construct::<TypeError>(&[JsValue::string("wait label must be valid UTF-16")])?;
+            return Err(cx.throw(error));
+        };
         println!("  host call: wait({label:?})");
         Self::counters(cx.services()).hit("wait");
         cx.promise(Wait { label })

@@ -4,6 +4,7 @@ use std::rc::Rc;
 use blitz_dom::NodeData;
 use yield_binding_macros::{host_class, methods};
 use yield_vm::binding::CallCx;
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{ClassCx, JsError, JsResult, JsValue, This};
 
 use super::Dom;
@@ -31,7 +32,7 @@ impl Node {
             NodeData::Text(_) => 3.0,
             NodeData::Comment { .. } => 8.0,
             NodeData::Document(_) => 9.0,
-            _ => return Err(JsError::type_error("unsupported DOM node kind")),
+            _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
         }))
     }
 
@@ -115,7 +116,7 @@ impl Node {
         let id = node.id;
         let is_text = matches!(node.data, NodeData::Text(_) | NodeData::Comment { .. });
         if !is_text && !matches!(node.data, NodeData::Element(_)) {
-            return Err(JsError::type_error(
+            return Err(JsError::new::<TypeError>(
                 "textContent requires an element or character data node",
             ));
         }
@@ -153,7 +154,10 @@ impl Node {
         let owner = this.owner(cx)?;
         let child_owner = child_node.owner(cx)?;
         if !cx.same_value(&owner, &child_owner) {
-            return Err(cx.type_error("appendChild requires nodes from the same document"));
+            let error = cx.construct::<TypeError>(&[JsValue::string(
+                "appendChild requires nodes from the same document",
+            )])?;
+            return Err(cx.throw(error));
         }
         let parent_index = node_index(cx, this.instance())?;
         let child_index = node_index(cx, child_node)?;
@@ -161,17 +165,19 @@ impl Node {
         let parent = dom.node(parent_index)?;
         let child_node = dom.node(child_index)?;
         if !matches!(parent.data, NodeData::Element(_)) {
-            return Err(JsError::type_error("append requires an element parent"));
+            return Err(JsError::new::<TypeError>(
+                "append requires an element parent",
+            ));
         }
         if !matches!(child_node.data, NodeData::Element(_) | NodeData::Text(_)) {
-            return Err(JsError::type_error(
+            return Err(JsError::new::<TypeError>(
                 "append requires an element or text child",
             ));
         }
         let mut ancestor = Some(parent);
         while let Some(node) = ancestor {
             if node.id == child_node.id {
-                return Err(JsError::type_error(
+                return Err(JsError::new::<TypeError>(
                     "cannot insert a node into itself or its descendants",
                 ));
             }

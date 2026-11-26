@@ -7,7 +7,7 @@ use super::vm::{
     ResolvedExport, ResolvedImports, ResolvedModule, VerifiedBuild, Vm, VmCore,
     host_function_metadata, module_getter_capture, next_epoch, property_caches,
 };
-use crate::binding::{Bindings, BuiltinClassParent, ExportDecl, NativeTarget};
+use crate::binding::{Bindings, ExportDecl, NativeTarget};
 use crate::bytecode::Build;
 use crate::error::VmError;
 use crate::gc::ActiveRoots;
@@ -349,11 +349,8 @@ impl VmCore {
         for (class, _) in bindings.classes() {
             let parent = if let Some(parent) = bindings.class_parent(class) {
                 self.host_classes[parent].prototype
-            } else if let Some(parent) = bindings.class_builtin_parent(class) {
-                self.builtins.get(match parent {
-                    BuiltinClassParent::Error => "error.prototype",
-                    BuiltinClassParent::DOMException => "domException.prototype",
-                })
+            } else if let Some(parent) = bindings.class_intrinsic_base(class) {
+                self.builtins.get(parent.prototype)
             } else if bindings.class_is_event_target(class) {
                 self.builtins.get(crate::builtin::event::TARGET_PROTOTYPE)
             } else {
@@ -398,12 +395,9 @@ impl VmCore {
                 current = bindings.class_parent(ancestor);
             }
             if let Some(parent) = parent.or_else(|| {
-                bindings.class_builtin_root(class).map(|root| {
-                    self.builtins.get(match root {
-                        BuiltinClassParent::Error => "error",
-                        BuiltinClassParent::DOMException => "domException",
-                    })
-                })
+                bindings
+                    .class_intrinsic_base(class)
+                    .map(|base| self.builtins.get(base.root))
             }) {
                 self.heap.set_prototype(constructor, Some(parent))?;
             }

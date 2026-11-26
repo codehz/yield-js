@@ -1,46 +1,5 @@
 use crate::value::Value;
 
-/// A script-visible error category with a built-in constructor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorKind {
-    Error,
-    TypeError,
-    RangeError,
-    ReferenceError,
-    SyntaxError,
-    EvalError,
-    URIError,
-}
-
-impl ErrorKind {
-    /// Prototype `name` shown by the built-in constructor and allocations.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Error => "Error",
-            Self::TypeError => "TypeError",
-            Self::RangeError => "RangeError",
-            Self::ReferenceError => "ReferenceError",
-            Self::SyntaxError => "SyntaxError",
-            Self::EvalError => "EvalError",
-            Self::URIError => "URIError",
-        }
-    }
-
-    /// Name of the built-in owner root holding the kind's prototype. This
-    /// mirrors `error_class!` registrations in `error_family`.
-    pub(crate) const fn builtin_root(self) -> &'static str {
-        match self {
-            Self::Error => "error.prototype",
-            Self::TypeError => "typeerror.prototype",
-            Self::RangeError => "rangeerror.prototype",
-            Self::ReferenceError => "referenceerror.prototype",
-            Self::SyntaxError => "syntaxerror.prototype",
-            Self::EvalError => "evalerror.prototype",
-            Self::URIError => "urierror.prototype",
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum VmError {
     #[error("invalid bytecode build: {0}")]

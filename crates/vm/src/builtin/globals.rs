@@ -30,6 +30,7 @@ pub(crate) struct Owner<P: PlatformServices> {
     roots: &'static [RootSpec],
     groups: &'static [&'static [IntrinsicDef<P>]],
     install: Option<fn(&mut VmCore, &Value)>,
+    pub(crate) class: Option<&'static crate::intrinsic::ClassDef>,
 }
 
 impl<P: PlatformServices> Owner<P> {
@@ -44,7 +45,13 @@ impl<P: PlatformServices> Owner<P> {
             roots,
             groups,
             install,
+            class: None,
         }
+    }
+
+    pub(crate) const fn with_class(mut self, class: &'static crate::intrinsic::ClassDef) -> Self {
+        self.class = Some(class);
+        self
     }
 }
 
@@ -260,6 +267,10 @@ fn owners() -> impl Iterator<Item = &'static Owner<Platform>> {
         Global::Owner(owner) | Global::Function(owner) => Some(owner),
         Global::Number(_) | Global::Root(_) | Global::AccessorRoot(_) => None,
     })
+}
+
+pub(crate) fn intrinsic_class(key: &str) -> Option<&'static crate::intrinsic::ClassDef> {
+    owners().find(|owner| owner.root == key)?.class
 }
 
 const GLOBALS: &[Global<Platform>] = BuiltinTable::<Platform>::GLOBALS;

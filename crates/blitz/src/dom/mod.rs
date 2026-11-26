@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use blitz_dom::NodeData;
 use yield_vm::binding::CallCx;
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{Instance, JsError, JsResult, JsValue};
 
 use self::node::NodeSlots;
@@ -24,10 +25,12 @@ pub(crate) use node::Node;
 
 /// Resolve the numeric node index stored on a `Node` instance slot.
 pub(super) fn node_index(cx: &mut CallCx<'_>, node: Instance<Node>) -> JsResult<u32> {
-    node.index(cx)?
-        .as_number()
-        .map(|index| index as u32)
-        .ok_or_else(|| cx.type_error("DOM node is not bound to a document"))
+    let Some(index) = node.index(cx)?.as_number() else {
+        let error =
+            cx.construct::<TypeError>(&[JsValue::string("DOM node is not bound to a document")])?;
+        return Err(cx.throw(error));
+    };
+    Ok(index as u32)
 }
 
 /// Resolve the `Node` instance behind an `Element`/`Document` subclass value
@@ -45,6 +48,6 @@ fn node_name(dom: &Rc<RefCell<Dom>>, index: u32) -> JsResult<JsValue> {
         NodeData::Text(_) => JsValue::string("#text"),
         NodeData::Comment { .. } => JsValue::string("#comment"),
         NodeData::Document(_) => JsValue::string("#document"),
-        _ => return Err(JsError::type_error("unsupported DOM node kind")),
+        _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
     })
 }

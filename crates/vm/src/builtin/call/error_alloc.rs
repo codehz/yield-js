@@ -2,98 +2,147 @@
 
 use std::fmt::Write;
 
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object, PlainObject};
 use crate::host::{Host, PlatformServices};
+use crate::intrinsic::{ClassArgs, ClassDef, ClassPrototype};
+use crate::intrinsics::{AggregateError, Installed, MessageErrorClass, SuppressedError};
 use crate::runtime::Invocation;
 use crate::value::{JsString, ObjectId, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
 impl VmCore {
     /// Allocate a built-in error using its intrinsic prototype.
-    pub(crate) fn alloc_class_error(
+    pub(crate) fn alloc_message_error<C: MessageErrorClass>(
         &mut self,
         roots: &ActiveRoots<'_>,
-        kind: ErrorKind,
         message: Option<JsString>,
     ) -> Result<Value, VmError> {
-        self.alloc_error(
-            roots,
-            self.builtins.get(kind.builtin_root()),
-            kind.name(),
-            message,
-        )
+        self.alloc_intrinsic_message(roots, C::CLASS, message)
     }
 
-    pub(crate) fn construct_error<P: PlatformServices>(
+    pub(crate) fn alloc_intrinsic_message(
+        &mut self,
+        roots: &ActiveRoots<'_>,
+        class: &ClassDef,
+        message: Option<JsString>,
+    ) -> Result<Value, VmError> {
+        let id = self.alloc_error_with(
+            roots,
+            self.builtins.get(class.prototype),
+            class.key.owner,
+            message,
+        )?;
+        Ok(Value::object(id))
+    }
+
+    pub(crate) fn initialize_error<P: PlatformServices>(
         &mut self,
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
+        prototype: ClassPrototype<'_>,
         name: &str,
-        prototype: ObjectId,
-        args: Vec<Value>,
+        args: ClassArgs<'_>,
     ) -> Result<Invocation, VmError> {
-        let roots = &roots.with(&args);
-        let message_arg = match name {
-            "AggregateError" => args.get(1),
-            "SuppressedError" => args.get(2),
-            _ => args.first(),
-        };
-        let message = match self.error_message(host, roots, message_arg)? {
+        self.initialize_message_and_cause(
+            host,
+            roots,
+            prototype.resolved(),
+            name,
+            args.get(0),
+            args.get(1),
+        )
+    }
+
+    fn initialize_message_and_cause<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        prototype: ObjectId,
+        name: &str,
+        message: Option<&Value>,
+        options: Option<&Value>,
+    ) -> Result<Invocation, VmError> {
+        let message = match self.error_message(host, roots, message)? {
             Ok(message) => message,
             Err(error) => return Ok(Invocation::Thrown(error)),
         };
-        if name == "SuppressedError" {
-            let error = args.first().cloned().unwrap_or(Value::UNDEFINED);
-            let suppressed = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
-            let value = if message.is_some() {
-                self.alloc_suppressed_error_with_message(
-                    roots, prototype, error, suppressed, message,
-                )?
-            } else {
-                self.alloc_suppressed_error(roots, error, suppressed)?
-            };
-            return Ok(Invocation::Value(value));
-        }
-        let error = self.alloc_error(roots, prototype, name, message)?;
-        let ValueRef::Object(id) = error.view() else {
-            unreachable!()
-        };
-        let roots = &roots.with(&error);
-        let options = args.get(if name == "AggregateError" { 2 } else { 1 });
-        if let Err(error) = self.install_error_cause(host, roots, id, options)? {
+        let id = self.alloc_error_with(roots, prototype, name, message)?;
+        if let Err(error) = self.install_error_cause(host, &roots.with(&id), id, options)? {
             return Ok(Invocation::Thrown(error));
         }
-        if name == "AggregateError" {
-            let undefined = Value::UNDEFINED;
-            let iterable = args.first().unwrap_or(&undefined);
-            let mut errors = Vec::new();
-            if !matches!(iterable.view(), ValueRef::Undefined) {
-                let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
-                    Ok(iterator) => iterator,
-                    Err(error) => return Ok(Invocation::Thrown(error)),
-                };
-                loop {
-                    match self.iterator_step(
-                        host,
-                        &roots.with(&(&iterator, &next, &errors)),
-                        &iterator,
-                        &next,
-                    )? {
-                        Ok(Some(value)) => errors.push(value),
-                        Ok(None) => break,
-                        Err(error) => return Ok(Invocation::Thrown(error)),
-                    }
-                }
-            }
-            let errors = self.heap.alloc_array(errors);
-            self.heap
-                .define_data(id, "errors", Value::object(errors), Attributes::METHOD)?;
-        }
-        Ok(Invocation::Value(error))
+        Ok(Invocation::Value(Value::object(id)))
     }
 
-    pub(crate) fn error_message<P: PlatformServices>(
+    pub(crate) fn initialize_aggregate_error<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        prototype: ClassPrototype<'_>,
+        name: &str,
+        args: ClassArgs<'_>,
+    ) -> Result<Invocation, VmError> {
+        let value = match self.initialize_message_and_cause(
+            host,
+            roots,
+            prototype.resolved(),
+            name,
+            args.get(1),
+            args.get(2),
+        )? {
+            Invocation::Value(value) => value,
+            thrown => return Ok(thrown),
+        };
+        let ValueRef::Object(id) = value.view() else {
+            unreachable!()
+        };
+        let roots = &roots.with(&id);
+        let mut errors = Vec::new();
+        if let Some(iterable) = args
+            .get(0)
+            .filter(|arg| !matches!(arg.view(), ValueRef::Undefined))
+        {
+            let (iterator, next) = match self.get_iterator(host, roots, iterable)? {
+                Ok(iterator) => iterator,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            };
+            loop {
+                match self.iterator_step(
+                    host,
+                    &roots.with(&(&iterator, &next, &errors)),
+                    &iterator,
+                    &next,
+                )? {
+                    Ok(Some(value)) => errors.push(value),
+                    Ok(None) => break,
+                    Err(error) => return Ok(Invocation::Thrown(error)),
+                }
+            }
+        }
+        self.define_aggregate_errors(id, errors)?;
+        Ok(Invocation::Value(value))
+    }
+
+    pub(crate) fn initialize_suppressed_error<P: PlatformServices>(
+        &mut self,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        prototype: ClassPrototype<'_>,
+        name: &str,
+        args: ClassArgs<'_>,
+    ) -> Result<Invocation, VmError> {
+        let message = match self.error_message(host, roots, args.get(2))? {
+            Ok(message) => message,
+            Err(error) => return Ok(Invocation::Thrown(error)),
+        };
+        let id = self.alloc_error_with(roots, prototype.resolved(), name, message)?;
+        let error = args.get(0).cloned().unwrap_or(Value::UNDEFINED);
+        let suppressed = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
+        self.define_suppressed_values(id, error, suppressed)?;
+        Ok(Invocation::Value(Value::object(id)))
+    }
+
+    fn error_message<P: PlatformServices>(
         &mut self,
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
@@ -106,7 +155,7 @@ impl VmCore {
         }
     }
 
-    pub(crate) fn install_error_cause<P: PlatformServices>(
+    fn install_error_cause<P: PlatformServices>(
         &mut self,
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
@@ -133,27 +182,16 @@ impl VmCore {
         Ok(Ok(()))
     }
 
-    pub(crate) fn alloc_error(
-        &mut self,
-        roots: &ActiveRoots<'_>,
-        prototype: ObjectId,
-        name: &str,
-        message: Option<JsString>,
-    ) -> Result<Value, VmError> {
-        let id = self.alloc_error_with(roots, prototype, name, message)?;
-        Ok(Value::object(id))
-    }
-
-    pub(crate) fn alloc_error_with(
+    fn alloc_error_with(
         &mut self,
         roots: &ActiveRoots<'_>,
         prototype: ObjectId,
         name: &str,
         message: Option<JsString>,
     ) -> Result<ObjectId, VmError> {
-        let mut object = PlainObject::new(Some(prototype));
-        object.is_error = true;
-        let id = self.heap.alloc(Object::Plain(object));
+        let id = self
+            .heap
+            .alloc(Object::Plain(PlainObject::error(prototype)));
         self.write_error_properties(roots, id, name, message)?;
         Ok(id)
     }
@@ -235,33 +273,15 @@ impl VmCore {
         error: Value,
         suppressed: Value,
     ) -> Result<Value, VmError> {
-        let value = self.alloc_error(
+        let class = SuppressedError::CLASS;
+        let id = self.alloc_error_with(
             roots,
-            self.builtins.get("suppressederror.prototype"),
-            "SuppressedError",
+            self.builtins.get(class.prototype),
+            class.key.owner,
             None,
         )?;
-        let ValueRef::Object(id) = value.view() else {
-            unreachable!()
-        };
         self.define_suppressed_values(id, error, suppressed)?;
-        Ok(value)
-    }
-
-    fn alloc_suppressed_error_with_message(
-        &mut self,
-        roots: &ActiveRoots<'_>,
-        prototype: ObjectId,
-        error: Value,
-        suppressed: Value,
-        message: Option<JsString>,
-    ) -> Result<Value, VmError> {
-        let value = self.alloc_error(roots, prototype, "SuppressedError", message)?;
-        let ValueRef::Object(id) = value.view() else {
-            unreachable!()
-        };
-        self.define_suppressed_values(id, error, suppressed)?;
-        Ok(value)
+        Ok(Value::object(id))
     }
 
     fn define_suppressed_values(
@@ -282,18 +302,21 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         errors: Vec<Value>,
     ) -> Result<Value, VmError> {
-        let error = self.alloc_error(
+        let class = AggregateError::CLASS;
+        let id = self.alloc_error_with(
             roots,
-            self.builtins.get("aggregateerror.prototype"),
-            "AggregateError",
+            self.builtins.get(class.prototype),
+            class.key.owner,
             Some("All promises were rejected".into()),
         )?;
-        let ValueRef::Object(id) = error.view() else {
-            unreachable!()
-        };
+        self.define_aggregate_errors(id, errors)?;
+        Ok(Value::object(id))
+    }
+
+    fn define_aggregate_errors(&mut self, id: ObjectId, errors: Vec<Value>) -> Result<(), VmError> {
         let errors = self.heap.alloc_array(errors);
         self.heap
             .define_data(id, "errors", Value::object(errors), Attributes::METHOD)?;
-        Ok(error)
+        Ok(())
     }
 }

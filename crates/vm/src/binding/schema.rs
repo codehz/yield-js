@@ -15,7 +15,7 @@ use super::call::{CallCx, JsValue};
 use super::codec::{Decode, Encode, decode_exact};
 use super::services::{ServiceOwner, ServiceStorage, Services};
 use crate::digest::Digest;
-use crate::error::ErrorKind;
+use crate::intrinsics::MessageErrorClass;
 use crate::value::{JsString, PropertyKey, SymbolId, Value};
 
 pub type ClassId = usize;
@@ -84,9 +84,16 @@ pub enum JsError {
     /// Catchable by script `try`/`catch`.
     Throw(JsValue),
     /// Catchable built-in error, allocated when crossing into script.
-    Error { kind: ErrorKind, message: JsString },
+    Error(DeferredError),
     /// Invalid host use; terminates the VM instead of the script.
     Fault(HostFault),
+}
+
+/// A message-only intrinsic error, allocated when crossing into script.
+#[derive(Debug)]
+pub struct DeferredError {
+    pub(crate) class: &'static crate::intrinsic::ClassDef,
+    pub(crate) message: JsString,
 }
 
 pub type JsResult<T> = Result<T, JsError>;
@@ -97,16 +104,11 @@ impl JsError {
     }
 
     /// Catchable built-in error, allocated lazily when crossing into script.
-    pub fn new_error(kind: ErrorKind, message: impl Into<JsString>) -> Self {
-        Self::Error {
-            kind,
+    pub fn new<C: MessageErrorClass>(message: impl Into<JsString>) -> Self {
+        Self::Error(DeferredError {
+            class: C::CLASS,
             message: message.into(),
-        }
-    }
-
-    /// Catchable TypeError allocated lazily when crossing into script.
-    pub fn type_error(message: impl Into<String>) -> Self {
-        Self::new_error(ErrorKind::TypeError, message.into())
+        })
     }
 }
 
@@ -491,23 +493,26 @@ impl AccessorCall {
     }
 }
 
-/// Standard base supported by host class declarations.
+/// Stable reference to a class declared by a host module or the VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinClassParent {
-    Error,
-    DOMException,
+pub enum ParentRef {
+    Host(&'static str),
+    Intrinsic(&'static str),
+}
+
+/// A type that can be named in a host class's `parent` declaration.
+pub trait ClassParent {
+    const PARENT_REF: ParentRef;
 }
 
 /// One host class. Instances are ordinary objects with a VM-owned prototype,
 /// hidden typed slots, and an optional non-JS payload.
 pub trait HostClass: ServiceOwner + Sized {
     const TAG: &'static str;
-    /// Tag of the class whose prototype and slot layout this class extends.
+    /// Class whose prototype and slot layout this class extends.
     /// A derived instance is accepted by base-class methods, and base slots
     /// occupy the leading part of its slot layout.
-    const PARENT: Option<&'static str> = None;
-    /// Direct standard base; mutually exclusive with `PARENT`.
-    const BUILTIN_PARENT: Option<BuiltinClassParent> = None;
+    const PARENT: Option<ParentRef> = None;
     /// Optional own `name` data property on the class prototype.
     const PROTOTYPE_NAME: Option<&'static str> = None;
     /// Opt into the EventTarget brand. Host subclasses inherit the brand.
@@ -690,10 +695,9 @@ type EmptyFn = fn(&dyn Any) -> bool;
 
 struct ClassDecl {
     tag: String,
-    parent_tag: Option<&'static str>,
+    parent_ref: Option<ParentRef>,
     parent: Option<ClassId>,
-    builtin_parent: Option<BuiltinClassParent>,
-    builtin_root: Option<BuiltinClassParent>,
+    intrinsic_base: Option<&'static crate::intrinsic::ClassDef>,
     prototype_name: Option<&'static str>,
     declares_event_target: bool,
     declared_event_parent: Option<usize>,
@@ -1163,25 +1167,28 @@ impl Bindings {
         self.classes[class].parent
     }
 
-    pub(crate) fn class_builtin_parent(&self, class: ClassId) -> Option<BuiltinClassParent> {
-        self.classes[class].builtin_parent
-    }
-
-    pub(crate) fn class_builtin_root(&self, class: ClassId) -> Option<BuiltinClassParent> {
-        self.classes[class].builtin_root
+    pub(crate) fn class_intrinsic_base(
+        &self,
+        class: ClassId,
+    ) -> Option<&'static crate::intrinsic::ClassDef> {
+        self.classes[class].intrinsic_base
     }
 
     pub(crate) fn class_prototype_name(&self, class: ClassId) -> Option<&'static str> {
         self.classes[class].prototype_name
     }
 
-    pub(crate) fn class_error_stack_name(&self, mut class: ClassId) -> &'static str {
+    pub(crate) fn class_error_stack_name(
+        &self,
+        mut class: ClassId,
+        fallback: &'static str,
+    ) -> &'static str {
         loop {
             if let Some(name) = self.class_prototype_name(class) {
                 return name;
             }
             let Some(parent) = self.class_parent(class) else {
-                return "Error";
+                return fallback;
             };
             class = parent;
         }
@@ -1360,10 +1367,9 @@ impl ClassDecl {
     fn of<T: HostClass>(services: Box<dyn Any>) -> Self {
         Self {
             tag: T::TAG.to_owned(),
-            parent_tag: T::PARENT,
+            parent_ref: T::PARENT,
             parent: None,
-            builtin_parent: T::BUILTIN_PARENT,
-            builtin_root: None,
+            intrinsic_base: None,
             prototype_name: T::PROTOTYPE_NAME,
             declares_event_target: T::EVENT_TARGET,
             declared_event_parent: T::EVENT_PARENT,
@@ -1512,21 +1518,13 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         .collect();
     let parents = classes
         .iter()
-        .map(|class| {
-            if class.parent_tag.is_some() && class.builtin_parent.is_some() {
-                return Err(format!(
-                    "class {:?} declares both a host and a builtin parent",
-                    class.tag
-                ));
-            }
-            class
-                .parent_tag
-                .map(|tag| {
-                    tags.get(tag)
-                        .copied()
-                        .ok_or_else(|| format!("class {:?} has unknown parent {tag:?}", class.tag))
-                })
-                .transpose()
+        .map(|class| match class.parent_ref {
+            Some(ParentRef::Host(tag)) => tags
+                .get(tag)
+                .copied()
+                .map(Some)
+                .ok_or_else(|| format!("class {:?} has unknown parent {tag:?}", class.tag)),
+            _ => Ok(None),
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -1567,11 +1565,19 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         let slot_base = inherited.len();
         let inherited_event_target = parent.is_some_and(|parent| classes[parent].event_target);
         let inherited_event_parent = parent.and_then(|parent| classes[parent].event_parent);
-        let builtin_root = parent
-            .and_then(|parent| classes[parent].builtin_root)
-            .or(classes[index].builtin_parent);
+        let intrinsic_base = match classes[index].parent_ref {
+            Some(ParentRef::Intrinsic(key)) => Some(
+                crate::builtin::globals::intrinsic_class(key).ok_or_else(|| {
+                    format!(
+                        "class {:?} has unknown intrinsic parent {key:?}",
+                        classes[index].tag
+                    )
+                })?,
+            ),
+            _ => parent.and_then(|parent| classes[parent].intrinsic_base),
+        };
         let class = &mut classes[index];
-        if builtin_root.is_some() && (class.declares_event_target || inherited_event_target) {
+        if intrinsic_base.is_some() && (class.declares_event_target || inherited_event_target) {
             return Err(format!(
                 "class {:?} cannot combine an exception base with EventTarget",
                 class.tag
@@ -1607,7 +1613,7 @@ fn resolve_class_layouts(classes: &mut [ClassDecl]) -> Result<(), String> {
         let mut slots = inherited;
         slots.extend(own);
         class.parent = parent;
-        class.builtin_root = builtin_root;
+        class.intrinsic_base = intrinsic_base;
         class.event_target = event_target;
         class.event_parent = event_parent;
         class.slot_base = slot_base;
@@ -1704,10 +1710,7 @@ fn fingerprint(
     for class in classes {
         hash_line(
             &mut hasher,
-            format!(
-                "class {} parent={:?} builtin-parent={:?}",
-                class.tag, class.parent_tag, class.builtin_parent
-            ),
+            format!("class {} parent={:?}", class.tag, class.parent_ref),
         );
         if let Some(name) = class.prototype_name {
             hash_line(&mut hasher, format!("prototype-name={name:?}"));

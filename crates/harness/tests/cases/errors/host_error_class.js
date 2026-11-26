@@ -1,13 +1,16 @@
 // @returns true
 
-import { expect, allocError, lazyThrow, ParseError, ErrorBase, ErrorDerived, HostDOMException, bind, gc } from 'test';
+import {
+  expect, allocError, lazyThrow, ParseError, ErrorBase, ErrorDerived, HostDOMException,
+  HostTypeError, getTypeErrorConstructor, throwTypeError, bind, gc,
+} from 'test';
 
 const token = { marker: 'cause-token' };
 
-function check(instance, name, message, cause) {
+function check(instance, name, message, cause, constructor = ParseError) {
   expect(Error.isError(instance)).toBe(true);
   expect(instance instanceof Error).toBe(true);
-  expect(instance instanceof ParseError).toBe(true);
+  expect(instance instanceof constructor).toBe(true);
   expect(instance.name).toBe(name);
   expect(instance.message).toBe(message);
   expect(Object.keys(instance).includes('message')).toBe(false);
@@ -111,6 +114,50 @@ export function run() {
   expect(thrownBy(() => new ParseError('bad', { get cause() { throw token; } })) === token).toBe(true);
   const afterGc = new ParseError('still live', { get cause() { gc(); return token; } });
   check(afterGc, 'ParseError', 'still live', token);
+
+  const intrinsicTypeError = TypeError;
+  for (const constructor of [intrinsicTypeError, AggregateError, SuppressedError, DOMException]) {
+    expect(Object.getPrototypeOf(constructor) === Error).toBe(true);
+  }
+
+  class ChildTypeError extends HostTypeError {}
+  const typed = new ChildTypeError('typed child', { cause: token });
+  expect(Error.isError(typed)).toBe(true);
+  expect(typed instanceof ChildTypeError).toBe(true);
+  expect(typed instanceof HostTypeError).toBe(true);
+  expect(typed instanceof intrinsicTypeError).toBe(true);
+  expect(typed instanceof Error).toBe(true);
+  expect(Object.getPrototypeOf(HostTypeError) === intrinsicTypeError).toBe(true);
+  expect(typed.message).toBe('typed child');
+  expect(typed.cause === token).toBe(true);
+  expect(Error.isError(Object.create(ChildTypeError.prototype))).toBe(false);
+  expect(Error.isError(new Proxy(typed, {}))).toBe(false);
+  Object.setPrototypeOf(typed, null);
+  expect(Error.isError(typed)).toBe(true);
+  expect(typed instanceof ChildTypeError).toBe(false);
+  expect(typed instanceof HostTypeError).toBe(false);
+  expect(typed instanceof intrinsicTypeError).toBe(false);
+  expect(typed instanceof Error).toBe(false);
+
+  try {
+    globalThis.TypeError = function ReplacementTypeError() {
+      throw new Error('unexpected call to global TypeError');
+    };
+    expect(globalThis.TypeError !== intrinsicTypeError).toBe(true);
+    expect(getTypeErrorConstructor() === intrinsicTypeError).toBe(true);
+    const error = thrownBy(() => throwTypeError(
+      { toString() { gc(); return 'intrinsic failure'; } },
+      { get cause() { gc(); return token; } },
+    ));
+    check(error, 'TypeError', 'intrinsic failure', token, intrinsicTypeError);
+    expect(Object.getPrototypeOf(error) === intrinsicTypeError.prototype).toBe(true);
+    expect(error.stack.includes('    at ')).toBe(true);
+    expect(error.stack.includes('(main.js:')).toBe(true);
+    expect(thrownBy(() => throwTypeError({ toString() { throw token; } })) === token).toBe(true);
+    expect(thrownBy(() => throwTypeError('bad', { get cause() { throw token; } })) === token).toBe(true);
+  } finally {
+    globalThis.TypeError = intrinsicTypeError;
+  }
 
   return true;
 }

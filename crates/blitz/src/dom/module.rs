@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use yield_binding_macros::{host_module, module_exports};
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 
 use super::Dom;
@@ -50,10 +51,9 @@ impl DomModule {
         let document = cx.state_slot(Self::SLOT_DOCUMENT)?;
         let target = {
             let mut dom = Self::dom(cx.services()).borrow_mut();
-            let id = dom
-                .click_target
-                .take()
-                .ok_or_else(|| JsError::type_error("dispatchClick requires input from the host"))?;
+            let id = dom.click_target.take().ok_or_else(|| {
+                JsError::new::<TypeError>("dispatchClick requires input from the host")
+            })?;
             dom.resolve_node(cx, document, Some(id))?
         };
         let event = cx.event("click", true, true)?;

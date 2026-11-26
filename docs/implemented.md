@@ -21,7 +21,7 @@
 - 每个注册模块的快照状态包括 `Js` / `JsList` 槽和无 schema 版本的 codec 字节。新建用 `FromServices`（`Default` 类型自动实现），恢复只用 `Decode`。模块、类 payload 及 operation 共用 `Encode` / `Decode` 字段协议。`#[host_module]` 剥离 VM 槽后，仅为空类型自动补默认初始化和空 codec。快照格式 **91** 删除了模块状态记录中的 `schema` 字段。
 - 宿主类实例共享 VM 所有的类原型；方法入口校验内部类标签，裸调用或 `Object.create(prototype)` 伪造接收者抛出可捕获的 `TypeError`。原型方法与访问器可被脚本改写或删除，快照保存改写结果。实例可带隐藏的 `Js` / `JsList` 槽和可选 payload；槽是强引用边，不触发 getter 或 Proxy trap，也不会出现在自有键或属性描述符中。带 `class` 的 `#[constructor]` 导出具有固定的 `prototype` 自有属性，支持 `new`、`instanceof` 和静态继承。
 - 宿主类成员名可以是字符串或由 `WellKnownSymbol` 显式声明的 well-known Symbol；原型方法、访问器与构造函数值仍由 VM 持有。声明 `#[host_class(parent = Base, ...)]` 时，父类原型成为子类原型的原型，槽布局按父类在前合并；基类方法与访问器接受派生实例。payload 仍属于具体实例类。脚本类可继承宿主构造器：只对本次构造中与声明类匹配的宿主分配使用派生原型，不修改其他分配或构造器返回的替换对象。宿主接收者仍校验声明类标签；脚本私元素与宿主槽和 payload 独立，均可跨快照恢复。
-- 宿主异常是普通宿主类实例：`#[host_class(builtin_parent = Error | DOMException, ...)]` 声明标准基类，宿主子类继承其品牌。`Error.isError` 按实例底层形态识别，不读写脚本原型，也不触发 getter 或 Proxy trap；`instanceof` 仍遵循脚本原型链。构造器必须使用 `new`；`CallCx::alloc` 使用基类默认值，`alloc_with_super` 显式传入基类实参，转换异常原样传播。宿主异常以值抛出；`Vm::alloc_error`、`CallCx::alloc_error` 和 `JsError::new_error` 仅接受内建 `ErrorKind`。快照格式 **94** 使用普通宿主原型、实例、槽及 payload 记录，Full 恢复校验实例形态，不重新推断原型或生成栈。宿主实例仍不能经 `structuredClone` 克隆。
+- 宿主异常使用统一的 `#[host_class(parent = TypeError, ...)]` 声明；父类型可以是宿主类或 `yield_vm::intrinsics` 中的异常类标记。`Error.isError` 只识别实例自身的 `[[ErrorData]]`，`instanceof` 则遵循原型链。宿主异常构造器必须使用 `new`；`CallCx::alloc` 使用基类默认值，`alloc_with_super` 显式转发实参，转换异常原样传播。`Vm` 和 `CallCx` 的 `constructor::<C>()`、`construct::<C>(args)` 访问固定 intrinsic 根；`JsError::new::<C>(message)` 延迟创建消息为首参的 Error。快照格式 **95** 要求 DOMException 的专属名称和消息存储与共享 Error 槽同时存在；Full 恢复不重新推断可变原型或生成栈。宿主实例仍不能经 `structuredClone` 克隆。
 - `JsValue` 是宿主边界句柄：值携带 VM 代际与调用 ID，跨调用保存的旧句柄在写槽时产生 `HostFault`，而不是可捕获脚本异常。payload codec、模块初始化与 operation driver 通过当前的 `&Services<'_, Owner>` 读取已链接的字段。服务不参与绑定指纹；恢复仍检查镜像实际需要的能力。
 - 宿主函数和方法用 `HostStep::Suspend` 交还受校验的请求；VM 在当前 `CallCx` 结束后同步执行 guest 调用或 GC。恢复使用新的调用 ID、原始 `this` 和显式保存的值。后台宿主任务还可等待外部 operation；其完成入队，不在投递调用中执行脚本。旧调用创建的请求不能重放。
 - 只读 `Inspect` 可识别真正的 RegExp、读取其内部模式和标志，并用已编译的模式从索引 0 检查匹配。检查不访问 `lastIndex`，也不执行脚本定义的 `exec` 或 `test`。
@@ -145,7 +145,7 @@
 - 标准 Error 构造器均可直接调用或用 `new` 构造，提供继承的 `name`、可选自有 `message` 和自有 `stack` 数据属性。`stack` 首行保留名称和消息；创建时按由内向外的顺序附加最多 10 个可见同步脚本帧，格式为 `    at <name> (<module>:<line>:<column>)`。行、列从 1 开始，列按 UTF-16 码元计算。抛出、重抛、拒绝和快照恢复都不重新捕获。各子类原型继承 `Error.prototype`，共享同一个 `toString`：可写、不可枚举、可配置。它动态读取接收者的 `name` 与 `message`（缺失时分别为 `"Error"` 和空串），先转换 `name` 再转换 `message`，消息为空串时返回 `name`，否则返回 `name: message`；`null` / `undefined` 接收者抛 `TypeError`，非字符串值按字符串 hint 转换，读取或转换中的异常原样保留。`AggregateError` 同步遍历第一个参数并创建自有数组 `.errors`。VM 生成的 `TypeError` 和 `RangeError` 使用相应内建原型。
 - Error 和原生错误构造器（包括 AggregateError）可从 `options` 读取继承或自有的 `cause`，作为不可枚举的自有属性安装；缺少该属性时不安装。原生错误构造器继承 `Error`，其原型各自拥有空的 `message` 数据属性。
 - `Error.isError(value)` 识别实际的 Error 内部标记（包括子类和 VM 自身创建的 Error），不依赖原型、`instanceof`、`Symbol.toStringTag` 或属性读取。
-- `DOMException` 必须用 `new` 构造；原型继承 `Error.prototype`。`name`、`message` 和旧式 `code` 由带品牌检查的只读 getter 提供，构造器和原型均定义历史常量。快照格式 **68** 保存内部名称和消息以及新增的内建根；字节码与二进制容器版本不变。
+- `DOMException` 必须用 `new` 构造；构造器继承 `Error`，原型继承 `Error.prototype`。`name`、`message` 和旧式 `code` 由检查 DOMException 专属存储的只读 getter 提供，构造器和原型均定义历史常量。它具有共享的 `[[ErrorData]]`，但不初始化自有 `message` 或 `stack`；字节码与二进制容器版本不变。
 - `Event`、`CustomEvent` 和 `EventTarget` 使用 VM 内部品牌，保留普通属性和子类原型；`globalThis` 本身是事件目标。`CustomEvent.detail` 按引用保存，事件时间戳以 VM 单调时钟为基准，恢复不累计离线时间。`structuredClone` 不克隆这些平台对象。
 - `EventTarget` 按捕获与非捕获两遍同步调用目标监听器；支持 `once`、`passive` 和动态 `handleEvent`。监听器脚本异常进入 VM 的全局错误报告，不中断后续监听器，也不在监听器之间排空微任务。快照格式 **69** 保存目标、监听器、事件内部状态和 VM 相对时钟；恢复不重新登记监听器。
 - 标记的 Rust 宿主实例直接参与事件传播，不分配代理目标。每次派发先固定父槽路径，再依次捕获、调用目标监听器和冒泡；回调中修改父槽仅影响后续派发。CPS 宿主派发使用固定入口，不读取脚本可覆盖的 `dispatchEvent`。
@@ -164,8 +164,8 @@
 - `CallCx::promise(op)` 创建一个原生 VM Promise 作为交付目标；后台任务使用相同的 operation 登记路径，并将稳定、可取消的正安全整数句柄返回给 JS。VM 先创建 operation 记录，再调用已链接的 `OperationDriver::start`。登记对象的 `Drop` 释放平台资源；`checkpoint` 只更新镜像状态。捕获时宿主必须保持外部逻辑时间和投递在同一切点。旧代、重复及未知令牌被拒绝。`Pause` 和 `Reject` 在恢复时结算原目标；`Resume` / `Reissue` 由 `Vm::start_recovered_operations()` 在发布后重新登记，失败只拒绝该目标。
 - 宿主导出函数、原型方法和访问器都是 VM 自有函数对象；调用目标按声明 ID 分派，普通属性及内部原型随快照保存。函数对象支持 `bind`、`call` 和 `apply`。
 - `host!` 在编译期拒绝选中消费者缺少必需的自定义服务，以及同一确切类型（含别名）的重复注册。每个宿主构造独立的消费者视图，回调直接借用视图字段；宿主侧的 `bind_service::<T>()` 仍可按类型查询。视图、布局和实例不进入快照或绑定指纹。
-- `CallCx::type_error(message)` 创建可由脚本捕获的 `TypeError`：`message` 原样保留，`stack` 首行只加一次 `TypeError: `，随后记录可见的同步脚本调用帧。
-- `JsError::type_error(message)` 以惰性形式构造同一类错误：立即只保存消息，进入脚本时才由 VM 分配 `TypeError` 对象，宿主可在持有服务借用等不便调用 `CallCx` 的位置使用。
+- `cx.construct::<TypeError>(&args)` 在当前调用中创建 `TypeError`；`stack` 首行只加一次 `TypeError: `，随后记录可见的同步脚本调用帧。以 `cx.throw(value)` 交付脚本异常。
+- `JsError::new::<TypeError>(message)` 保存 intrinsic 引用和消息，进入脚本时才分配对象；宿主可在持有服务借用等不便调用 `CallCx` 的位置使用。
 - `CallCx::instance<T>` 通过 VM 品牌检查已有宿主实例，接受派生类以访问继承槽，不改变实际 payload 类型。`Instance::init_object_field` 在新实例上定义独立的普通对象数据字段，不调用 setter，也不覆盖已有自有属性。
 - 引擎内建函数与宿主函数共用 native 调用入口，但不经过宿主 ABI。快照以 `(owner, slot, member)` 重链接内建 handler，并保留函数的自有属性、原型和身份。未知键或同一声明对应多个函数对象时拒绝恢复；多个属性仍可共享同一函数对象。
 - `reportError(value)` 同步向 `globalThis` 派发可信、可取消的 `ErrorEvent`；监听器、后台宿主任务及 `queueMicrotask` 的未捕获异常走同一入口。消息和位置不经脚本 getter 或转换；仅未取消的报告交给可选的 `diagnostics`（`Diagnostics`），事件为 `Diagnostic::Uncaught`。错误报告期间再次抛出的异常直接报告，不递归派发。单独的 `Diagnostic::StartupException` 在模块初始化异常返回前报告，不派发脚本事件或更改返回错误。没有服务时只省略宿主报告。

@@ -1,13 +1,13 @@
-use super::{FUNCTION_PARENT, define_builtin_data, link_constructor};
+use super::{define_builtin_data, link_constructor};
 use crate::VmError;
 use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, DescriptorUpdate, Object, PlainObject, TO_STRING_TAG_SYMBOL};
 use crate::host::{Host, PlatformServices};
-use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsic::{ClassArgs, ClassDef, ClassPrototype, IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
-use crate::value::{JsString, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
+use crate::value::{JsString, ObjectId, PropertyKey, Value, ValueRef};
 use crate::vm::VmCore;
 
 const ROOT: &str = "domException";
@@ -16,6 +16,14 @@ const CONSTRUCTOR: IntrinsicKey = IntrinsicKey::new("DOMException", Slot::Global
 const NAME: IntrinsicKey = IntrinsicKey::new("DOMException", Slot::PrototypeGetter, "name");
 const MESSAGE: IntrinsicKey = IntrinsicKey::new("DOMException", Slot::PrototypeGetter, "message");
 const CODE: IntrinsicKey = IntrinsicKey::new("DOMException", Slot::PrototypeGetter, "code");
+
+static CLASS: ClassDef = ClassDef {
+    root: ROOT,
+    prototype: PROTOTYPE,
+    key: CONSTRUCTOR,
+    valid_instance: |object| matches!(object, Object::DomException { object, .. } if object.is_error),
+    instance_description: "a DOMException",
+};
 
 // The position is the legacy code minus one. Some constants have no associated name.
 const LEGACY_CODES: &[(&str, Option<&str>)] = &[
@@ -50,7 +58,7 @@ const LEGACY_CODES: &[(&str, Option<&str>)] = &[
 ];
 
 const ROOTS: &[RootSpec] = &[
-    RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), FUNCTION_PARENT)
+    RootSpec::new(ROOT, RootKind::Native(CONSTRUCTOR), Some("error"))
         .fixed(PROTOTYPE)
         .backlink(Some(Attributes::METHOD)),
     RootSpec::new(PROTOTYPE, RootKind::Plain, Some("error.prototype")),
@@ -58,12 +66,13 @@ const ROOTS: &[RootSpec] = &[
 
 impl<P: crate::host::PlatformServices> BuiltinTable<P> {
     const INTRINSICS: &[IntrinsicDef<P>] = &[
-        IntrinsicDef::constructor_with_target(
-            CONSTRUCTOR,
+        IntrinsicDef::class(
+            &CLASS,
             0,
             |vm, _, roots, _, _| vm.throw_type_error(roots, "DOMException requires new"),
-            construct,
-        ),
+            initialize,
+        )
+        .without_new_target_prototype(),
         IntrinsicDef::call(NAME, 0, |vm, _, roots, _, receiver| {
             get(vm, roots, receiver, |name, _| Value::string(name.clone()))
         }),
@@ -87,7 +96,8 @@ impl<P: crate::host::PlatformServices> BuiltinTable<P> {
 }
 
 impl<P: crate::host::PlatformServices> BuiltinTable<P> {
-    pub(crate) const OWNER: Owner<P> = Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install));
+    pub(crate) const OWNER: Owner<P> =
+        Owner::new(ROOT, ROOTS, &[Self::INTRINSICS], Some(install)).with_class(&CLASS);
 }
 
 fn install(vm: &mut VmCore, _: &Value) {
@@ -148,34 +158,35 @@ fn get(
     vm.throw_type_error(roots, "DOMException getter called on incompatible receiver")
 }
 
-fn construct<P: PlatformServices>(
+fn initialize<P: PlatformServices>(
     vm: &mut VmCore,
     host: &Host<P>,
     roots: &ActiveRoots<'_>,
-    args: Vec<Value>,
-    new_target: &Value,
+    prototype: ClassPrototype<'_>,
+    _: &str,
+    args: ClassArgs<'_>,
 ) -> Result<Invocation, VmError> {
-    let roots = &roots.with(&args);
-    let [message, name] = match vm.dom_exception_strings(host, roots, &args)? {
-        Ok(strings) => strings,
-        Err(error) => return Ok(Invocation::Thrown(error)),
-    };
-    let prototype =
-        match vm.read_property(host, roots, new_target, PropertyKeyRef::String("prototype"))? {
-            Invocation::Value(value) => match value.view() {
-                ValueRef::Object(id) => Some(id),
-                _ => None,
-            },
-            thrown @ Invocation::Thrown(_) => return Ok(thrown),
+    let [message, name] =
+        match vm.dom_exception_strings(host, roots, (0..2).map_while(|i| args.get(i)))? {
+            Ok(strings) => strings,
+            Err(error) => return Ok(Invocation::Thrown(error)),
         };
-    let prototype = prototype.unwrap_or_else(|| vm.builtins.get(PROTOTYPE));
+    let prototype = match prototype {
+        ClassPrototype::Resolved(id) => id,
+        ClassPrototype::Deferred(target) => {
+            match super::event::new_target_prototype(vm, host, roots, target, CLASS.prototype)? {
+                Ok(id) => id,
+                Err(error) => return Ok(Invocation::Thrown(error)),
+            }
+        }
+    };
     Ok(Invocation::Value(Value::object(
         vm.alloc_dom_exception_with(prototype, name, message),
     )))
 }
 
 impl VmCore {
-    pub(crate) fn dom_exception_strings<'a, P: PlatformServices>(
+    fn dom_exception_strings<'a, P: PlatformServices>(
         &mut self,
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
@@ -195,17 +206,22 @@ impl VmCore {
 
     /// Allocate from internal strings without consulting the global constructor or its properties.
     pub(crate) fn alloc_dom_exception(&mut self, name: JsString, message: JsString) -> Value {
-        Value::object(self.alloc_dom_exception_with(self.builtins.get(PROTOTYPE), name, message))
+        Value::object(self.alloc_dom_exception_with(
+            self.builtins.get(CLASS.prototype),
+            name,
+            message,
+        ))
     }
 
-    pub(crate) fn alloc_dom_exception_with(
+    fn alloc_dom_exception_with(
         &mut self,
         prototype: ObjectId,
         name: JsString,
         message: JsString,
     ) -> ObjectId {
+        let object = PlainObject::error(prototype);
         self.heap.alloc(Object::DomException {
-            object: PlainObject::new(Some(prototype)),
+            object,
             name,
             message,
         })

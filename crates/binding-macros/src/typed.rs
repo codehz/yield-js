@@ -1313,7 +1313,6 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
                 "tag",
                 "methods",
                 "parent",
-                "builtin_parent",
                 "prototype_name",
                 "event_target",
                 "event_parent",
@@ -1327,28 +1326,10 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
     let services = registry::service_owner(&item.ident, &item.vis, fields);
     let parent = opts.get("parent").map(path).transpose()?.map(|parent| {
         quote! {
-            const PARENT: Option<&'static str> = Some(<#parent as ::yield_vm::HostClass>::TAG);
+            const PARENT: Option<::yield_vm::ParentRef> =
+                Some(<#parent as ::yield_vm::ClassParent>::PARENT_REF);
         }
     });
-    let builtin_parent = if let Some(meta) = opts.get("builtin_parent") {
-        if parent.is_some() {
-            return Err(Error::new_spanned(
-                meta,
-                "`parent` and `builtin_parent` are mutually exclusive",
-            ));
-        }
-        let path = path(meta)?;
-        let variant = path
-            .get_ident()
-            .filter(|ident| *ident == "Error" || *ident == "DOMException")
-            .ok_or_else(|| Error::new_spanned(meta, "expected `Error` or `DOMException`"))?;
-        Some(quote! {
-            const BUILTIN_PARENT: Option<::yield_vm::BuiltinClassParent> =
-                Some(::yield_vm::BuiltinClassParent::#variant);
-        })
-    } else {
-        None
-    };
     let prototype_name = opts
         .get("prototype_name")
         .map(string)
@@ -1411,11 +1392,14 @@ pub(super) fn host_class(args: TokenStream, item: TokenStream) -> Result<TokenSt
         #item
         #services
         #helpers
+        impl ::yield_vm::ClassParent for #class {
+            const PARENT_REF: ::yield_vm::ParentRef =
+                ::yield_vm::ParentRef::Host(<Self as ::yield_vm::HostClass>::TAG);
+        }
         impl ::yield_vm::HostClass for #class {
             const TAG: &'static str = #tag;
             const SLOTS: &'static [::yield_vm::binding::SlotDecl] = #declarations;
             #parent
-            #builtin_parent
             #prototype_name
             #event_target
             #event_parent

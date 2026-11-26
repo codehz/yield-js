@@ -4,11 +4,12 @@ use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 
 use crate::builtin::globals::Owner;
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{BoxedPrimitive, Object};
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicKey, Slot};
+use crate::intrinsics::SyntaxError;
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, Value, ValueRef};
 use crate::vm::VmCore;
@@ -129,9 +130,8 @@ impl VmCore {
                     .and_then(|text| JsBigInt::from_js_string(&text));
                 match parsed {
                     Some(value) => Ok(value),
-                    None => Err(self.alloc_class_error(
+                    None => Err(self.alloc_message_error::<SyntaxError>(
                         roots,
-                        ErrorKind::SyntaxError,
                         Some("Cannot convert string to a BigInt".into()),
                     )?),
                 }

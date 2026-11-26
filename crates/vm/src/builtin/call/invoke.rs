@@ -9,7 +9,7 @@ use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Attributes, Object};
 use crate::host::{Host, PlatformServices};
-use crate::intrinsic::{CallableTarget, Construction};
+use crate::intrinsic::{CallableTarget, ClassArgs, ClassPrototype, Construction};
 use crate::ops;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKeyRef, Value, ValueRef};
@@ -348,6 +348,25 @@ impl VmCore {
                     }
                     Construction::WithNewTarget(construct) => {
                         construct(self, host, roots, values, new_target)
+                    }
+                    Construction::Class(class, initialize) => {
+                        let live = (&prototype, &values);
+                        let roots = &roots.with(&live);
+                        let prototype = if skip_prototype {
+                            ClassPrototype::Deferred(new_target)
+                        } else {
+                            ClassPrototype::Resolved(
+                                prototype.unwrap_or_else(|| self.builtins.get(class.prototype)),
+                            )
+                        };
+                        initialize(
+                            self,
+                            host,
+                            roots,
+                            prototype,
+                            class.key.owner,
+                            ClassArgs::Values(&values),
+                        )
                     }
                 }
             }

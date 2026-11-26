@@ -23,11 +23,12 @@ use crate::builtin::{
     FUNCTION_PARENT, OBJECT_PARENT, RootKind, RootSpec, define_builtin_data, install_getter,
     link_constructor,
 };
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{ArrayBufferObject, Attributes, ElementKind, Object, PlainObject, ViewRange};
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsics::SyntaxError;
 use crate::runtime::Invocation;
 use crate::value::{JsBigInt, ObjectId, PropertyKey, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -397,9 +398,8 @@ impl VmCore {
                     .and_then(|text| JsBigInt::from_js_string(&text))
                 {
                     Some(value) => Ok(value),
-                    None => Err(self.alloc_class_error(
+                    None => Err(self.alloc_message_error::<SyntaxError>(
                         roots,
-                        ErrorKind::SyntaxError,
                         Some("Cannot convert string to a BigInt".into()),
                     )?),
                 }

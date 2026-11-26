@@ -11,6 +11,7 @@ use yield_vm::binding::{
 };
 use yield_vm::bytecode::Build;
 use yield_vm::host::Completion;
+use yield_vm::intrinsics::{Error, TypeError};
 use yield_vm::{
     Absent, ConsoleEvent, ConsoleSink, CryptoService, Diagnostic, Diagnostics, GcRoots,
     GuestOutcome, Host, HostStep, JsString, Platform, PlatformServices, Services,
@@ -178,14 +179,14 @@ impl Matcher {
     ) -> JsResult<HostStep> {
         let actual = this.actual(cx)?;
         if !cx.is_callable(&actual)? {
-            return Err(cx.type_error("toThrow: expected a callable"));
+            return Err(throw_type_error(cx, "toThrow: expected a callable"));
         }
         let expected = expected.unwrap_or_else(JsValue::undefined);
         if !expected.is_undefined()
             && expected.as_string().is_none()
             && !cx.inspect(expected.clone())?.is_regexp()
         {
-            return Err(cx.type_error("toThrow: expected a string or RegExp"));
+            return Err(throw_type_error(cx, "toThrow: expected a string or RegExp"));
         }
         let outcome = cx.call(actual, JsValue::undefined(), vec![]).await;
         match_to_throw(cx, outcome, expected)
@@ -195,8 +196,15 @@ impl Matcher {
 /// Matcher and assert failures throw ordinary branded Errors carrying the
 /// failure message.
 fn matcher_error(cx: &mut CallCx<'_>, message: impl Into<JsString>) -> JsError {
-    match cx.alloc_error(yield_vm::ErrorKind::Error, message) {
-        Ok(value) => JsError::Throw(value),
+    match cx.construct::<Error>(&[JsValue::string(message)]) {
+        Ok(value) => cx.throw(value),
+        Err(error) => error,
+    }
+}
+
+fn throw_type_error(cx: &mut CallCx<'_>, message: &str) -> JsError {
+    match cx.construct::<TypeError>(&[JsValue::string(message)]) {
+        Ok(value) => cx.throw(value),
         Err(error) => error,
     }
 }
@@ -818,10 +826,10 @@ impl<F, E, S> TestHost<F, E, TestTimeService, S> {
     }
 }
 
-#[host_class(tag = "test:ParseError", builtin_parent = Error, prototype_name = "ParseError")]
+#[host_class(tag = "test:ParseError", parent = yield_vm::intrinsics::Error, prototype_name = "ParseError")]
 struct ParseError;
 
-#[host_class(tag = "test:ErrorBase", builtin_parent = Error, methods)]
+#[host_class(tag = "test:ErrorBase", parent = yield_vm::intrinsics::Error, methods)]
 struct ErrorBase {
     #[js_slot]
     detail: JsValue,
@@ -838,12 +846,15 @@ impl ErrorBase {
 #[host_class(tag = "test:ErrorDerived", parent = ErrorBase)]
 struct ErrorDerived;
 
-#[host_class(tag = "test:HostDOMException", builtin_parent = DOMException)]
+#[host_class(tag = "test:HostDOMException", parent = yield_vm::intrinsics::DOMException)]
 struct HostDOMException;
+
+#[host_class(tag = "test:HostTypeError", parent = TypeError)]
+struct HostTypeError;
 
 #[host_module(
     name = "test",
-    classes = [Node, Matcher, ParseError, ErrorBase, ErrorDerived, HostDOMException],
+    classes = [Node, Matcher, ParseError, ErrorBase, ErrorDerived, HostDOMException, HostTypeError],
     operations = [Wait, Pause, Reject, Reissue, Timer],
     services = [counters: Rc<Counters>],
 )]
@@ -894,8 +905,36 @@ impl TestModule {
         )
     }
 
+    #[constructor(name = "HostTypeError", class = HostTypeError)]
+    fn host_type_error(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        message: JsValue,
+        options: Option<JsValue>,
+    ) -> JsResult<Instance<HostTypeError>> {
+        cx.alloc_with_super(
+            HostTypeError,
+            &[message, options.unwrap_or_else(JsValue::undefined)],
+        )
+    }
+
+    #[function(name = "getTypeErrorConstructor")]
+    fn get_type_error_constructor(cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<JsValue> {
+        cx.constructor::<TypeError>()
+    }
+
+    #[function(name = "throwTypeError")]
+    fn throw_intrinsic_type_error(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        message: JsValue,
+        options: Option<JsValue>,
+    ) -> JsResult<()> {
+        let error =
+            cx.construct::<TypeError>(&[message, options.unwrap_or_else(JsValue::undefined)])?;
+        Err(cx.throw(error))
+    }
+
     #[function(name = "allocError")]
-    fn alloc_error(
+    fn allocate_parse_error(
         cx: &mut yield_vm::ModuleCx<'_, Self>,
         message: Option<JsValue>,
     ) -> JsResult<JsValue> {
@@ -920,7 +959,7 @@ impl TestModule {
         ms: JsValue,
     ) -> JsResult<JsValue> {
         if !cx.is_callable(&cb)? {
-            return Err(cx.type_error("expected a callable"));
+            return Err(throw_type_error(cx, "expected a callable"));
         }
         let timer = Timer::from_delay(cx, &ms)?;
         cx.spawn(async move {
@@ -978,7 +1017,7 @@ impl TestModule {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("wait requires a valid UTF-16 label"))?;
+            .map_err(|_| throw_type_error(cx, "wait requires a valid UTF-16 label"))?;
         cx.promise(Wait { label })
     }
 
@@ -987,7 +1026,7 @@ impl TestModule {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("pause requires a valid UTF-16 label"))?;
+            .map_err(|_| throw_type_error(cx, "pause requires a valid UTF-16 label"))?;
         cx.promise(Pause { label })
     }
 
@@ -999,7 +1038,7 @@ impl TestModule {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("reject requires a valid UTF-16 label"))?;
+            .map_err(|_| throw_type_error(cx, "reject requires a valid UTF-16 label"))?;
         cx.promise(Reject { label })
     }
 
@@ -1008,7 +1047,7 @@ impl TestModule {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("reissue requires a valid UTF-16 label"))?;
+            .map_err(|_| throw_type_error(cx, "reissue requires a valid UTF-16 label"))?;
         cx.promise(Reissue { label })
     }
 
@@ -1017,7 +1056,7 @@ impl TestModule {
         let label = cx
             .string(&arg)?
             .to_utf8()
-            .map_err(|_| cx.type_error("bind requires a valid UTF-16 label"))?;
+            .map_err(|_| throw_type_error(cx, "bind requires a valid UTF-16 label"))?;
         cx.alloc(Node { label })
     }
 

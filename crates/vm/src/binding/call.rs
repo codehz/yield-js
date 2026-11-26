@@ -3,12 +3,13 @@ use std::fmt;
 
 use crate::gc::{ActiveRoots, TraceRoots, Tracer};
 use crate::heap::{Attributes, EventState, EventTargetState, Object, PlainObject, Property};
+use crate::intrinsic::{ClassArgs, ClassDef};
+use crate::intrinsics::{IntrinsicClass, TypeError};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::VmCore;
 
 use super::schema::*;
 use super::services::Services;
-use crate::error::ErrorKind;
 
 // ---------------------------------------------------------------------------
 // Values
@@ -474,14 +475,20 @@ impl TraceRoots for HandleRoots {
     }
 }
 
-pub(crate) type AllocateSuper<'a> = dyn Fn(
+impl TraceRoots for RefCell<HandleRoots> {
+    fn trace(&self, tracer: &mut Tracer<'_>) -> Result<(), crate::VmError> {
+        self.borrow().trace(tracer)
+    }
+}
+
+pub(crate) type InitializeClass<'a> = dyn Fn(
         &mut VmCore,
         &ActiveRoots<'_>,
-        BuiltinClassParent,
+        &'static ClassDef,
         ObjectId,
         &str,
-        &[JsValue],
-    ) -> Result<Result<ObjectId, Value>, crate::VmError>
+        ClassArgs<'_>,
+    ) -> Result<crate::runtime::Invocation, crate::VmError>
     + 'a;
 
 pub struct CallCx<'a> {
@@ -495,7 +502,7 @@ pub struct CallCx<'a> {
     pub(crate) this: JsValue,
     pub(crate) construct: bool,
     pub(crate) allocation_prototype: Option<(ClassId, ObjectId)>,
-    pub(crate) allocate_super: &'a AllocateSuper<'a>,
+    pub(crate) initialize_class: &'a InitializeClass<'a>,
     // Argument coercion can execute guest code and collect while the callback is active.
     pub(crate) handles: RefCell<HandleRoots>,
 }
@@ -737,7 +744,7 @@ impl<'a> CallCx<'a> {
         JsError::Throw(value)
     }
 
-    pub fn type_error(&mut self, message: impl Into<String>) -> JsError {
+    fn type_error(&mut self, message: impl Into<String>) -> JsError {
         let message = message.into();
         match self.vm.type_error(self.roots, &message) {
             Ok(value) => JsError::Throw(self.js_value(value)),
@@ -745,19 +752,22 @@ impl<'a> CallCx<'a> {
         }
     }
 
-    /// Allocate a built-in error with the current call's active stack.
-    pub fn alloc_error(
-        &mut self,
-        kind: ErrorKind,
-        message: impl Into<JsString>,
-    ) -> JsResult<JsValue> {
-        match self
-            .vm
-            .alloc_class_error(self.roots, kind, Some(message.into()))
-        {
-            Ok(value) => Ok(self.js_value(value)),
-            Err(error) => Err(JsError::Fault(HostFault::new(error.to_string()))),
-        }
+    /// Return the original VM constructor, even if the global binding changed.
+    pub fn constructor<C: IntrinsicClass>(&mut self) -> JsResult<JsValue> {
+        Ok(self.js_value(C::CLASS.constructor(self.vm)))
+    }
+
+    /// Construct an intrinsic with the current call's active stack.
+    /// Argument conversion may run guest code and throw its original value.
+    pub fn construct<C: IntrinsicClass>(&mut self, args: &[JsValue]) -> JsResult<JsValue> {
+        let class = C::CLASS;
+        let value = self.initialize_intrinsic(
+            class,
+            self.vm.builtins.get(class.prototype),
+            class.key.owner,
+            args,
+        )?;
+        Ok(self.js_value(value))
     }
 
     pub fn fault(&self, message: impl Into<String>) -> HostFault {
@@ -778,6 +788,32 @@ impl<'a> CallCx<'a> {
 
     pub fn same_value(&self, left: &JsValue, right: &JsValue) -> bool {
         crate::ops::same_value(&left.value, &right.value)
+    }
+
+    fn initialize_intrinsic(
+        &mut self,
+        class: &'static ClassDef,
+        prototype: ObjectId,
+        name: &str,
+        args: &[JsValue],
+    ) -> JsResult<Value> {
+        for arg in args {
+            self.check_value(arg)?;
+        }
+        let live = (&self.handles, &self.args);
+        let result = (self.initialize_class)(
+            self.vm,
+            &self.roots.with(&live),
+            class,
+            prototype,
+            name,
+            ClassArgs::Handles(args),
+        )
+        .map_err(|error| JsError::fault(error.to_string()))?;
+        match result {
+            crate::runtime::Invocation::Value(value) => Ok(value),
+            crate::runtime::Invocation::Thrown(value) => Err(self.throw(self.js_value(value))),
+        }
     }
 
     pub fn alloc<T: HostClass>(&mut self, payload: T) -> JsResult<Instance<T>> {
@@ -803,7 +839,7 @@ impl<'a> CallCx<'a> {
             .bindings
             .class_by_tag(T::TAG)
             .ok_or_else(|| JsError::Fault(self.fault(format!("unregistered class {}", T::TAG))))?;
-        let builtin = self.bindings.class_builtin_root(class);
+        let builtin = self.bindings.class_intrinsic_base(class);
         if args.is_some() && builtin.is_none() {
             return Err(JsError::fault(format!(
                 "class {} has no standard base",
@@ -829,27 +865,15 @@ impl<'a> CallCx<'a> {
             ))));
         }
         let object = if let Some(builtin) = builtin {
-            let name = self.bindings.class_error_stack_name(class);
-            let object = if let Some(args) = args.filter(|args| !args.is_empty()) {
-                for arg in args {
-                    self.check_value(arg)?;
-                }
-                let handles = self.handles.borrow();
-                let live = (&*handles, &self.args, args);
-                (self.allocate_super)(
-                    self.vm,
-                    &self.roots.with(&live),
-                    builtin,
-                    prototype,
-                    name,
-                    args,
-                )
-            } else {
-                (self.allocate_super)(self.vm, self.roots, builtin, prototype, name, &[])
+            let name = self
+                .bindings
+                .class_error_stack_name(class, builtin.key.owner);
+            let value =
+                self.initialize_intrinsic(builtin, prototype, name, args.unwrap_or_default())?;
+            let ValueRef::Object(id) = value.view() else {
+                unreachable!("class initializer must allocate an object")
             };
-            object
-                .map_err(|error| JsError::fault(error.to_string()))?
-                .map_err(|error| self.throw(self.js_value(error)))?
+            id
         } else if self.bindings.class_is_event_target(class) {
             // EventTarget branding is independent of standard exception bases.
             self.vm.heap.alloc(Object::EventTarget {
@@ -960,10 +984,7 @@ impl<'a> CallCx<'a> {
         {
             return Ok((id, state));
         }
-        Err(JsError::new_error(
-            ErrorKind::TypeError,
-            "expected an AbortSignal",
-        ))
+        Err(JsError::new::<TypeError>("expected an AbortSignal"))
     }
 
     /// Returns the original abort reason, or `None` if the signal is active.

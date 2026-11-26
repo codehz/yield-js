@@ -11,7 +11,7 @@ use crate::builtin::{
     ROOT_FUNCTION_PROTOTYPE, ROOT_OBJECT_PROTOTYPE, ROOT_STRING_ITERATOR,
     ROOT_STRING_ITERATOR_PROTOTYPE, ROOT_STRING_PROTOTYPE, RootKind, RootSpec, link_constructor,
 };
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{
     Attributes, BoxedPrimitive, ITERATOR_SYMBOL, MATCH_ALL_SYMBOL, MATCH_SYMBOL, Object,
@@ -19,6 +19,7 @@ use crate::heap::{
 };
 use crate::host::{Host, PlatformServices};
 use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsics::RangeError;
 use crate::runtime::{Arguments, Invocation};
 use crate::value::{ObjectId, PropertyKey, PropertyKeyRef, SymbolId, Value, ValueRef};
 use crate::vm::VmCore;
@@ -1471,7 +1472,7 @@ impl VmCore {
         roots: &ActiveRoots<'_>,
         message: &str,
     ) -> Result<Value, VmError> {
-        self.alloc_class_error(roots, ErrorKind::RangeError, Some(message.into()))
+        self.alloc_message_error::<RangeError>(roots, Some(message.into()))
     }
 }
 

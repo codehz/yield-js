@@ -40,7 +40,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `vm.start("run", args)` 读取公开绑定并以 `undefined` 为接收者调用；`args` 是 `JsValue` 常量。随后调用 `vm.run_until_idle()`；所有执行入口都使用已接管的宿主，不再接收宿主参数。
 - `vm.snapshot(roots)` 仅在微任务队列为空时可用；显式根只扩充捕获时的可达图，不保存为独立的宿主根清单，也不从宿主服务收集。
 - `Vm::collect_garbage(roots)` 显式清扫两次调用之间不可达的堆状态，同样要求微任务队列为空；`roots` 是宿主仍需要的同 VM `Value` 切片。返回移除的堆对象数，并保留存活 ID。
-- `Vm::alloc_dom_exception(name, message)` 用内置异常原型分配一个 `DOMException` 形状的对象，返回普通 `Value`，参与 GC 与快照。
+- `Vm::constructor::<C>()` 返回当前 VM 的固有构造器；`Vm::construct::<C>(&args)` 使用同 VM 的 `Value` 实参构造实例。二者不读全局绑定。构造不伪造活动栈，脚本抛出以 `VmError::Thrown` 返回。`DOMException` 实参顺序是 `[message, name]`。
 - `Vm::restore(snapshot, same_build, host, RestoreOptions::default())` 接管新宿主，不重新求值模块。恢复的基准 URL（包括没有基准的情况）只来自快照；`RestoreOptions` 没有 `base_url` 字段，不能覆盖存档的基准。活动的 `URL`、`URLSearchParams` 及迭代器由普通堆强边追踪。
 - `RestoreOptions::default()` 使用 `SnapshotValidation::Trusted`，只接收由 VM 捕获、未经篡改的有效镜像，不重查堆图。开发、测试和诊断可传入 `RestoreOptions { validation: SnapshotValidation::Full, ..Default::default() }` 执行完整不变量审计。两种模式都要求调用方保证来源和完整性并限制读入大小；完整审计并不使不可信输入变得安全。
 - `Vm::new` 和 `Vm::restore` 都直接接受 `Build` 或 `VerifiedBuild`。传入 `Build` 时当次完整校验；`VerifiedBuild::new(build)` 消费并完整校验 `Build`，持有不可变构建和宿主无关的派生表，可在线程内克隆复用。两种输入都为每个 VM 独立链接宿主、持有堆和缓存；恢复仍要求精确匹配构建身份与绑定指纹。
@@ -76,7 +76,7 @@ yield-harness  →  yield-compiler  →  yield-vm
 - `Snapshot::to_bytes` / `from_bytes` 使用 `YIELDSNP`、小端 `SNAPSHOT_BINARY_VERSION` 和小端快照记录版本，后接 bincode 小端变长整数记录。解码拒绝不匹配的版本和尾随数据，但不证明来源、完整性或堆图有效性。二进制容器或编码选项变更只提升 `SNAPSHOT_BINARY_VERSION`；JSON 快照格式保持独立。
 - `ArrayBuffer` 的二进制编码批量写入后备字节；在当前 bincode 配置下，`serialize_bytes` 与 `Vec<u8>` 序列具有相同的长度前缀和原始字节，解码仍读 `Option<Vec<u8>>`。JSON 仍是字节数组（已分离时为 `null`）。
 
-宿主绑定函数是同步的，不得通过执行入口重入 VM。`CallCx::alloc_with_super` 可以执行标准基类的脚本转换，转换时调用内有效句柄仍保持可达。声明不可变且共享；VM 拥有原型、实例、槽、payload、模块状态与 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
+宿主绑定函数是同步的，不得通过执行入口重入 VM。`CallCx::construct` 和 `CallCx::alloc_with_super` 可以执行标准基类的脚本转换，转换时调用内有效句柄仍保持可达。声明不可变且共享；VM 拥有原型、实例、槽、payload 与模块状态及 operation 记录。`JsValue` 句柄只在产生它的 VM 代际与调用内有效；保留值必须依赖声明的槽或模块状态槽。
 
 ## 3. 改动位置
 

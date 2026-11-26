@@ -2,6 +2,7 @@
 
 use blitz_dom::{NodeData, NodeId, local_name};
 use yield_vm::binding::CallCx;
+use yield_vm::intrinsics::TypeError;
 use yield_vm::{JsError, JsResult, JsValue};
 
 use super::Dom;
@@ -15,7 +16,7 @@ impl Dom {
         self.nodes
             .get(index as usize)
             .and_then(|id| self.doc.get_node(*id))
-            .ok_or_else(|| JsError::type_error("invalid DOM node handle"))
+            .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))
     }
 
     /// Resolve a Blitz node id to a JS handle, creating (and caching) the
@@ -48,20 +49,20 @@ impl Dom {
             let node = self
                 .doc
                 .get_node(id)
-                .ok_or_else(|| JsError::type_error("invalid DOM node handle"))?;
+                .ok_or_else(|| JsError::new::<TypeError>("invalid DOM node handle"))?;
             missing.push(id);
             current = node.parent;
         };
         for id in missing.into_iter().rev() {
             let index = u32::try_from(self.nodes.len())
-                .map_err(|_| JsError::type_error("too many DOM nodes"))?;
+                .map_err(|_| JsError::new::<TypeError>("too many DOM nodes"))?;
             let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
                 NodeData::Element(element) if element.name.local == local_name!("iframe") => {
                     alloc_element(cx, HTMLIFrameElement)?.value(cx)
                 }
                 NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
                 NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),
-                _ => return Err(JsError::type_error("unsupported DOM node kind")),
+                _ => return Err(JsError::new::<TypeError>("unsupported DOM node kind")),
             };
             init_node(cx, &value, index, owner.clone())?;
             cx.instance::<Node>(&value)?.set_event_parent(cx, parent)?;

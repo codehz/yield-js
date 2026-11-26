@@ -90,9 +90,103 @@ type Construct<P> = fn(
 type ConstructWithTarget<P> =
     fn(&mut VmCore, &Host<P>, &ActiveRoots<'_>, Vec<Value>, &Value) -> Result<Invocation, VmError>;
 
+#[derive(Clone, Copy)]
+pub(crate) enum ClassArgs<'a> {
+    Values(&'a [Value]),
+    Handles(&'a [crate::JsValue]),
+}
+
+impl ClassArgs<'_> {
+    pub(crate) fn get(&self, index: usize) -> Option<&Value> {
+        match self {
+            Self::Values(values) => values.get(index),
+            Self::Handles(values) => values.get(index).map(|arg| &arg.value),
+        }
+    }
+}
+
+impl crate::gc::TraceRoots for ClassArgs<'_> {
+    fn trace(&self, tracer: &mut crate::gc::Tracer<'_>) -> Result<(), VmError> {
+        match self {
+            Self::Values(values) => values.trace(tracer),
+            Self::Handles(values) => values.trace(tracer),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ClassPrototype<'a> {
+    Resolved(ObjectId),
+    // DOMException coerces its Web IDL arguments before reading the prototype.
+    Deferred(&'a Value),
+}
+
+impl ClassPrototype<'_> {
+    pub(crate) fn resolved(self) -> ObjectId {
+        let Self::Resolved(id) = self else {
+            unreachable!("class requires resolved prototype")
+        };
+        id
+    }
+}
+
+pub(crate) type InitializeClass<P> = fn(
+    &mut VmCore,
+    &Host<P>,
+    &ActiveRoots<'_>,
+    ClassPrototype<'_>,
+    &str,
+    ClassArgs<'_>,
+) -> Result<Invocation, VmError>;
+
+/// A class's stable roots and instance shape, shared across platforms.
+#[derive(Debug)]
+pub(crate) struct ClassDef {
+    pub root: &'static str,
+    pub prototype: &'static str,
+    pub key: IntrinsicKey,
+    pub valid_instance: fn(&crate::heap::Object) -> bool,
+    pub instance_description: &'static str,
+}
+
+impl ClassDef {
+    pub(crate) fn constructor(&self, vm: &VmCore) -> Value {
+        Value::object(vm.builtins.get(self.root))
+    }
+
+    pub(crate) fn initialize<P: PlatformServices>(
+        &self,
+        vm: &mut VmCore,
+        host: &Host<P>,
+        roots: &ActiveRoots<'_>,
+        prototype: ObjectId,
+        name: &str,
+        args: ClassArgs<'_>,
+    ) -> Result<Invocation, VmError> {
+        let id = vm.builtins.get(self.root);
+        let crate::heap::Object::Native(crate::heap::NativeObject::Intrinsic { intrinsic, .. }) =
+            vm.heap.get(id)?
+        else {
+            unreachable!("intrinsic constructor root is not native")
+        };
+        let Some(Construction::Class(_, initialize)) = intrinsic.definition::<P>().construct else {
+            unreachable!("registered intrinsic class without initializer")
+        };
+        initialize(
+            vm,
+            host,
+            &roots.with(&(&prototype, &args)),
+            ClassPrototype::Resolved(prototype),
+            name,
+            args,
+        )
+    }
+}
+
 pub(crate) enum Construction<P: PlatformServices> {
     WithPrototype(Construct<P>),
     WithNewTarget(ConstructWithTarget<P>),
+    Class(&'static ClassDef, InitializeClass<P>),
 }
 
 impl<P: PlatformServices> Copy for Construction<P> {}
@@ -131,6 +225,18 @@ impl<P: PlatformServices> IntrinsicDef<P> {
         Self {
             construct: Some(Construction::WithPrototype(construct)),
             ..Self::call(key, length, call)
+        }
+    }
+
+    pub const fn class(
+        class: &'static ClassDef,
+        length: u32,
+        call: Call<P>,
+        initialize: InitializeClass<P>,
+    ) -> Self {
+        Self {
+            construct: Some(Construction::Class(class, initialize)),
+            ..Self::call(class.key, length, call)
         }
     }
 

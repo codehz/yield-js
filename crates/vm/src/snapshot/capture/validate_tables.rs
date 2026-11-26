@@ -200,6 +200,13 @@ pub(super) fn validate_source_modules(
     // Identity tags also distinguish modules with identical (or empty) shape.
     let mut sentinel = None;
     for (id, object) in heap.iter() {
+        if !matches!(object, Object::Plain(_))
+            && object.has_error_brand() != matches!(object, Object::DomException { .. })
+        {
+            return Err(VmError::InvalidSnapshot(format!(
+                "invalid ErrorData slot on object {id}"
+            )));
+        }
         match object {
             Object::Environment(env) => {
                 if !env.uninitialized.is_empty() {

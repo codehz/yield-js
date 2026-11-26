@@ -39,12 +39,8 @@ impl RootSpec {
         }
     }
 
-    pub const fn fixed_parent(self) -> Self {
-        self.with_fixed_parent(true)
-    }
-
-    pub const fn with_fixed_parent(mut self, fixed: bool) -> Self {
-        self.fixed_parent = fixed;
+    pub const fn fixed_parent(mut self) -> Self {
+        self.fixed_parent = true;
         self
     }
 

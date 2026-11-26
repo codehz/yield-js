@@ -557,8 +557,7 @@ impl Graph {
             .filter(|value| matches!(value.view(), ValueRef::String(_)))
             .cloned();
         let cause = own_data(source_object, "cause").cloned();
-        let mut object = PlainObject::new(Some(vm.builtins.get(prototype)));
-        object.is_error = true;
+        let object = PlainObject::error(vm.builtins.get(prototype));
         let target = vm.heap.alloc(Object::Plain(object));
         if let Some(message) = message {
             vm.heap.define_data(

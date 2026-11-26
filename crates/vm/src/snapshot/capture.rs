@@ -2,11 +2,12 @@
 
 use crate::binding::Recovery;
 use crate::builtin::roots::BuiltinRoots;
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::{Heap, Object};
 use crate::host::{Host, PlatformServices};
 use crate::init::{RestoreOptions, SnapshotValidation};
+use crate::intrinsics::Error;
 use crate::regexp::compile_pattern;
 use crate::runtime::{ContinuationTarget, HostSlot, HostTaskState, Settlement};
 use crate::value::Value;
@@ -597,9 +598,8 @@ impl VmCore {
                 }
                 Recovery::Reject => {
                     self.unlink_operation_signal(id, operation.signal);
-                    let reason = self.alloc_class_error(
+                    let reason = self.alloc_message_error::<Error>(
                         &ActiveRoots::EMPTY,
-                        ErrorKind::Error,
                         Some(operation.rejection.into()),
                     )?;
                     self.deliver_operation(operation.target, Settlement::Rejected(reason))?;

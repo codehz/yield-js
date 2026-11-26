@@ -7,8 +7,9 @@ use super::support::{compile_main, declared};
 use yield_harness::{Counters, LabelService, Wait};
 use yield_vm::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
+use yield_vm::intrinsics::Error;
 use yield_vm::{
-    Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsError, JsResult, JsValue,
+    Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsResult, JsValue,
     RestoreOptions, SnapshotValidation, Value, Vm, VmError,
 };
 
@@ -462,12 +463,8 @@ impl Branch {
         }
         cx.spawn(async move {
             if cx.number(&mode)? == 1.0 {
-                return Err(
-                    match cx.alloc_error(yield_vm::ErrorKind::Error, "prefix failed") {
-                        Ok(value) => JsError::Throw(value),
-                        Err(error) => error,
-                    },
-                );
+                let error = cx.construct::<Error>(&[JsValue::string("prefix failed")])?;
+                return Err(cx.throw(error));
             }
             return Ok(());
         })

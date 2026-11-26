@@ -1,11 +1,11 @@
 use super::{FUNCTION_PARENT, OBJECT_PARENT, define_builtin_data, link_constructor};
 use crate::builtin::globals::Owner;
 use crate::builtin::roots::{RootKind, RootSpec};
-use crate::error::{ErrorKind, VmError};
+use crate::error::VmError;
 use crate::gc::ActiveRoots;
 use crate::heap::Attributes;
 use crate::host::{Host, PlatformServices};
-use crate::intrinsic::{IntrinsicDef, IntrinsicKey, Slot};
+use crate::intrinsic::{ClassArgs, ClassDef, ClassPrototype, IntrinsicDef, IntrinsicKey, Slot};
 use crate::runtime::Invocation;
 use crate::value::{JsString, PropertyKeyRef, Value, ValueRef};
 use crate::vm::VmCore;
@@ -97,48 +97,48 @@ impl VmCore {
 }
 
 macro_rules! error_class {
-    ($owner:ident, $name:expr, $root:literal, $parent:expr, $base:literal, $length:literal) => {
+    ($owner:ident, $name:literal, $root:literal, $length:literal, $initialize:ident) => {
         error_class!(
             $owner,
             $name,
             $root,
-            $parent,
-            $base,
+            Some("error.prototype"),
             $length,
+            $initialize,
             Some("error"),
-            true,
             NO_PROTOTYPE_INTRINSICS,
             NO_PROTOTYPE_INTRINSICS
         );
     };
-    ($owner:ident, $name:expr, $root:literal, $parent:expr, $base:literal, $length:literal, $constructor_parent:expr, $own_message:tt, $prototype_intrinsics:ident, $static_intrinsics:ident) => {
+    ($owner:ident, $name:literal, $root:literal, $parent:expr, $length:literal, $initialize:ident, $constructor_parent:expr, $prototype_intrinsics:ident, $static_intrinsics:ident) => {
         impl<P: crate::host::PlatformServices> BuiltinTable<P> {
             pub(crate) const $owner: Owner<P> = {
                 const PROTOTYPE: &str = concat!($root, ".prototype");
                 const KEY: IntrinsicKey = IntrinsicKey::new($name, Slot::Global, "");
+                const CLASS: &ClassDef = &ClassDef {
+                    root: $root,
+                    prototype: PROTOTYPE,
+                    key: KEY,
+                    valid_instance: |object| matches!(object, crate::heap::Object::Plain(plain) if plain.is_error),
+                    instance_description: "a branded Error",
+                };
                 Owner::new(
                     $root,
                     &[
                         RootSpec::new($root, RootKind::Native(KEY), $constructor_parent)
                             .fixed(PROTOTYPE)
                             .backlink(Some(Attributes::METHOD)),
-                        RootSpec::new(PROTOTYPE, RootKind::Plain, $parent)
-                            .with_fixed_parent(!$base),
+                        RootSpec::new(PROTOTYPE, RootKind::Plain, $parent),
                     ],
                     &[
-                        &[IntrinsicDef::constructor(
-                            KEY,
+                        &[IntrinsicDef::class(
+                            CLASS,
                             $length,
                             |vm, host, roots, args, _| {
                                 let prototype = vm.builtins.get(PROTOTYPE);
-                                vm.construct_error(host, roots, $name, prototype, args)
+                                vm.$initialize(host, &roots.with(&args), ClassPrototype::Resolved(prototype), $name, ClassArgs::Values(&args))
                             },
-                            |vm, host, roots, args, new_target_prototype| {
-                                let prototype = vm.builtins.get(PROTOTYPE);
-                                let result =
-                                    vm.construct_error(host, roots, $name, prototype, args)?;
-                                vm.with_result_prototype(roots, result, new_target_prototype)
-                            },
+                            VmCore::$initialize,
                         )],
                         Self::$prototype_intrinsics,
                         Self::$static_intrinsics,
@@ -153,15 +153,13 @@ macro_rules! error_class {
                             Value::string($name.into()),
                             Attributes::METHOD,
                         );
-                        if $own_message {
-                            define_builtin_data(
-                                vm,
-                                prototype,
-                                "message",
-                                Value::string(JsString::default()),
-                                Attributes::METHOD,
-                            );
-                        }
+                        define_builtin_data(
+                            vm,
+                            prototype,
+                            "message",
+                            Value::string(JsString::default()),
+                            Attributes::METHOD,
+                        );
                         if $root == "error" {
                             let method = vm.alloc_intrinsic(IS_ERROR);
                             define_builtin_data(
@@ -183,6 +181,7 @@ macro_rules! error_class {
                         link_constructor(vm, constructor, prototype);
                     }),
                 )
+                .with_class(CLASS)
             };
         }
     };
@@ -190,83 +189,46 @@ macro_rules! error_class {
 
 error_class!(
     ERROR,
-    ErrorKind::Error.name(),
+    "Error",
     "error",
     OBJECT_PARENT,
-    true,
     1,
+    initialize_error,
     FUNCTION_PARENT,
-    true,
     ERROR_PROTOTYPE_INTRINSICS,
     ERROR_STATIC_INTRINSICS
 );
-error_class!(
-    TYPE_ERROR,
-    ErrorKind::TypeError.name(),
-    "typeerror",
-    Some("error.prototype"),
-    false,
-    1
-);
-error_class!(
-    RANGE_ERROR,
-    ErrorKind::RangeError.name(),
-    "rangeerror",
-    Some("error.prototype"),
-    false,
-    1
-);
+error_class!(TYPE_ERROR, "TypeError", "typeerror", 1, initialize_error);
+error_class!(RANGE_ERROR, "RangeError", "rangeerror", 1, initialize_error);
 error_class!(
     REFERENCE_ERROR,
-    ErrorKind::ReferenceError.name(),
+    "ReferenceError",
     "referenceerror",
-    Some("error.prototype"),
-    false,
-    1
+    1,
+    initialize_error
 );
 error_class!(
     SYNTAX_ERROR,
-    ErrorKind::SyntaxError.name(),
+    "SyntaxError",
     "syntaxerror",
-    Some("error.prototype"),
-    false,
-    1
+    1,
+    initialize_error
 );
-error_class!(
-    EVAL_ERROR,
-    ErrorKind::EvalError.name(),
-    "evalerror",
-    Some("error.prototype"),
-    false,
-    1
-);
-error_class!(
-    URI_ERROR,
-    ErrorKind::URIError.name(),
-    "urierror",
-    Some("error.prototype"),
-    false,
-    1
-);
+error_class!(EVAL_ERROR, "EvalError", "evalerror", 1, initialize_error);
+error_class!(URI_ERROR, "URIError", "urierror", 1, initialize_error);
 error_class!(
     AGGREGATE_ERROR,
     "AggregateError",
     "aggregateerror",
-    Some("error.prototype"),
-    false,
-    2
+    2,
+    initialize_aggregate_error
 );
 error_class!(
     SUPPRESSED_ERROR,
     "SuppressedError",
     "suppressederror",
-    Some("error.prototype"),
-    false,
     3,
-    Some("error"),
-    true,
-    NO_PROTOTYPE_INTRINSICS,
-    NO_PROTOTYPE_INTRINSICS
+    initialize_suppressed_error
 );
 
 pub(crate) struct BuiltinTable<P>(std::marker::PhantomData<P>);
