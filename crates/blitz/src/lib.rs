@@ -1,6 +1,7 @@
 //! JavaScript host for a Blitz document. A session owns the VM and its live DOM;
 //! snapshots carry the DOM in the VM's `yield:dom` module payload.
 
+mod css_modules;
 mod dom;
 mod snapshot;
 mod timer;
@@ -308,13 +309,22 @@ impl BlitzSession {
 const DOM_PRELOAD: &str = "yield:blitz-dom-preload";
 
 fn load_css(id: &str, text: String) -> Result<LoadedModule<'static>, String> {
-    if id.ends_with(".module.css") {
-        return Err(format!("unsupported syntax: CSS Modules ({id})"));
-    }
+    let (text, mapping) = if id.ends_with(".module.css") {
+        let (css, mapping) = css_modules::transform(id, &text)?;
+        (css, Some(mapping))
+    } else {
+        (text, None)
+    };
     let uri = format!("asset:{id}");
     let literal = serde_json::to_string(&uri).expect("encode CSS URI as a string literal");
+    let mut source = format!("import {{ insertCss }} from 'yield:dom'; insertCss({literal});");
+    if let Some(mapping) = mapping {
+        source.push_str("\nexport default ");
+        source.push_str(&mapping);
+        source.push(';');
+    }
     Ok(LoadedModule {
-        source: format!("import {{ insertCss }} from 'yield:dom'; insertCss({literal});").into(),
+        source: source.into(),
         resources: vec![BuildResource {
             uri,
             bytes: text.into_bytes().into(),
@@ -457,26 +467,115 @@ mod tests {
     }
 
     #[test]
-    fn rejects_css_modules_at_the_import_site() {
+    fn scopes_and_deduplicates_css_modules() {
         let root = TempDir::new();
-        fs::write(root.0.join("theme.module.css"), "").unwrap();
+        for dir in ["a", "b"] {
+            fs::create_dir(root.0.join(dir)).unwrap();
+        }
+        for (path, source) in [
+            (
+                "entry.js",
+                "import a from './a/theme.module.css';
+                 import again from './a/../a/theme.module.css';
+                 import b from './b/theme.module.css';
+                 import empty from './empty.module.css';
+                 export function inspect() {
+                     return JSON.stringify({ a, b, empty, same: a === again,
+                         nullPrototype: Object.getPrototypeOf(a) === null });
+                 }",
+            ),
+            (
+                "a/theme.module.css",
+                r#".row { color: red; }
+                   .row:hover { content: ".row"; background-image: url("../icon.svg"); }
+                   :global(.shared) { color: blue; }
+                   .__proto__ { composes: row; composes: shared utility from global; }"#,
+            ),
+            ("b/theme.module.css", ".row { color: green; }"),
+            ("empty.module.css", ""),
+        ] {
+            fs::write(root.0.join(path), source).unwrap();
+        }
+        let resolver = NodeResolver::web_production(&root.0)
+            .unwrap()
+            .with_loader("css", load_css);
+        let compiler = Compiler::from_dts(include_str!("dom.d.ts")).unwrap();
+        let compile = || {
+            compiler
+                .compile(Project::new("entry.js", &resolver))
+                .unwrap()
+        };
+        let build = compile();
+        assert_eq!(build.to_bytes(), compile().to_bytes());
+        let [a, b, empty] = build.resources.as_slice() else {
+            panic!("expected one resource per distinct CSS module");
+        };
+        assert_eq!(a.uri, "asset:a/theme.module.css");
+        assert_eq!(b.uri, "asset:b/theme.module.css");
+        assert_eq!(empty.uri, "asset:empty.module.css");
+        let a_css = std::str::from_utf8(&a.bytes).unwrap().to_owned();
+        let b_css = std::str::from_utf8(&b.bytes).unwrap().to_owned();
+
+        let mut session = BlitzSession::new(build).unwrap();
+        let result = session.start("inspect", vec![]).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&result.into_string().unwrap().to_utf8().unwrap()).unwrap();
+        assert_eq!(json["same"], true);
+        assert_eq!(json["nullPrototype"], true);
+        assert_eq!(json["empty"], serde_json::json!({}));
+        assert_eq!(json["a"].as_object().unwrap().len(), 2);
+        let a_row = json["a"]["row"].as_str().unwrap();
+        let b_row = json["b"]["row"].as_str().unwrap();
+        assert_ne!(a_row, b_row);
+        assert!(a_css.starts_with(&format!(".{a_row} {{")), "{a_css}");
+        assert!(a_css.contains(&format!(".{a_row}:hover {{")), "{a_css}");
+        assert!(b_css.starts_with(&format!(".{b_row} {{")), "{b_css}");
+        assert!(a_css.contains(".shared {"), "{a_css}");
+        assert!(a_css.contains(r#"content: ".row""#), "{a_css}");
+        assert!(a_css.contains(r#"url("../icon.svg")"#), "{a_css}");
+        let composed = json["a"]["__proto__"].as_str().unwrap();
+        let (own, rest) = composed.split_once(' ').unwrap();
+        assert!(own.ends_with("___proto__"), "{composed}");
+        assert_eq!(rest, format!("{a_row} shared utility"));
+        let doc = session.document();
+        let head = doc
+            .root_element()
+            .children
+            .iter()
+            .filter_map(|&id| doc.get_node(id))
+            .find(|node| {
+                node.element_data()
+                    .is_some_and(|el| &*el.name.local == "head")
+            })
+            .unwrap();
+        assert_eq!(head.children.len(), 3, "each module inserts one style node");
+    }
+
+    #[test]
+    fn reports_css_module_errors_at_the_import_site() {
+        let root = TempDir::new();
         fs::write(root.0.join("entry.js"), "\nimport './theme.module.css';").unwrap();
         let resolver = NodeResolver::web_production(&root.0)
             .unwrap()
             .with_loader("css", load_css);
-        let error = Compiler::from_dts(include_str!("dom.d.ts"))
-            .unwrap()
-            .compile(Project::new("entry.js", resolver))
-            .unwrap_err();
-        assert_eq!(
-            (error.module(), error.line(), error.column()),
-            ("entry.js", 2, 8)
-        );
-        assert!(
-            error
-                .message()
-                .contains("unsupported syntax: CSS Modules (theme.module.css)"),
-            "{error}"
-        );
+        let compiler = Compiler::from_dts(include_str!("dom.d.ts")).unwrap();
+        for (css, expected) in [
+            ("\n.row, { color: red; }", "theme.module.css:2:"),
+            (
+                ".row { composes: base from './other.module.css'; }",
+                "unsupported syntax: cross-file CSS Modules composition",
+            ),
+        ] {
+            fs::write(root.0.join("theme.module.css"), css).unwrap();
+            let error = compiler
+                .compile(Project::new("entry.js", &resolver))
+                .unwrap_err();
+            assert_eq!(
+                (error.module(), error.line(), error.column()),
+                ("entry.js", 2, 8)
+            );
+            assert!(error.message().contains(expected), "{error}");
+            assert!(error.message().contains("theme.module.css"), "{error}");
+        }
     }
 }

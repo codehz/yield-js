@@ -1,39 +1,10 @@
-/* 副作用资源导入：CSS 作为 entry 可达图中的副作用资源，
-   按规范化资源 ID 去重，不进入 VM 堆，宿主从 Build 读取后自行消费。 */
-button {
-  padding: 4px 8px;
+body {
+  margin: 16px;
+  background: #f5f3f0;
+  font-family: system-ui, sans-serif;
 }
 
-input[type="text"] {
-  box-sizing: border-box;
-  width: 100%;
-}
-
-.todo-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-block: 8px;
-}
-
-.todo-controls input[type="text"] {
-  flex: 1;
-  min-width: 0;
-}
-
-#todo-list {
-  list-style: none;
-  padding: 0;
-}
-
-#todo-list li {
-  border-top: 1px solid #ccc;
-}
-
-button[aria-pressed="true"] {
-  font-weight: bold;
-}
-
+/* Overridden by cascade.css even though this file is imported again. */
 #root {
   width: 101px;
 }

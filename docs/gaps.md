@@ -55,7 +55,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 | `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、非错误宿主实例等不支持的种类。宿主错误克隆为普通 `Error`；不复制 VM 执行环境 |
 
 `yield-blitz` 接入了原生主键点击、复选框激活和单行文本编辑。尚无完整浏览器 DOM、`MouseEvent` 坐标与按键字段、`InputEvent` 专有字段、键盘或组合事件的 JS 派发、完整表单控件绑定、样式计算 API 或热更新。DOM payload 保存当前绑定所需的 Document、Element、Text 和 Comment 树、文本框当前值及复选框当前值和 dirty 状态，不保存布局、渲染器、焦点、选区、未提交的输入法文字或未投递的原生输入，不支持模板内容子树。无窗口测试不等于 Vello 目视验收。
-Blitz 演示入口只编译 `src/blitz.jsx` 及其依赖。CSS 仅支持显式 `.css` 副作用导入；不支持 CSS Modules、类名映射、CSS 内的 `@import` / `url()` 构建解析或动态样式模块。`compile_module` 仍为自包含源码入口，不访问文件系统。不验收 `src/index.tsx` 或 TypeScript 类型剥离。
+Blitz 演示入口只编译 `src/blitz.jsx` 及其依赖。CSS Modules 不支持跨文件 `composes` 或命名导出；两类样式表均不在构建期解析 CSS 内的 `@import` / `url()` 依赖，也不支持动态样式模块。`compile_module` 仍为自包含源码入口，不访问文件系统。不验收 `src/index.tsx` 或 TypeScript 类型剥离。
 
 Node 扩展名加载器只接收 UTF-8 文本，不支持直接加载二进制文件；内嵌 preload 不是虚拟文件系统，不向普通导入注册别名。
 

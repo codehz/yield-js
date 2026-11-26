@@ -3,33 +3,54 @@ use blitz_traits::events::{
     BlitzImeEvent, BlitzPointerEvent, BlitzPointerId, DomEvent, DomEventData, EventDispatchSource,
     PointerCoords, UiEvent,
 };
+use blitz_traits::shell::Viewport;
 use yield_blitz::{BlitzSession, compile_fixture, compile_module, render_module};
 use yield_vm::{Build, BuildResource, RestoreOptions, Snapshot, SnapshotValidation, Value};
 
 #[test]
 fn restores_react_author_styles_in_import_order() -> Result<(), String> {
     let build = compile_fixture()?;
-    let [first, second] = build.resources.as_slice() else {
-        panic!("expected two reachable stylesheets")
+    let [first, second, third] = build.resources.as_slice() else {
+        panic!("expected three reachable stylesheets")
     };
     assert_eq!(first.uri, "asset:src/styles.css");
     assert_eq!(second.uri, "asset:src/cascade.css");
+    assert_eq!(third.uri, "asset:src/todo.module.css");
     let expected = [
         include_str!("../../../fixtures/npm-react-app/src/styles.css"),
         include_str!("../../../fixtures/npm-react-app/src/cascade.css"),
+        std::str::from_utf8(&third.bytes).map_err(|error| error.to_string())?,
     ];
     assert_eq!(&*first.bytes, expected[0].as_bytes());
     assert_eq!(&*second.bytes, expected[1].as_bytes());
 
     let check_layout = |session: &mut BlitzSession| {
+        session.inner_mut().set_viewport(Viewport {
+            window_size: (800, 600),
+            ..Viewport::default()
+        });
         session.resolve_layout(0.0);
         let doc = session.document();
         let root = doc
             .get_node(doc.get_element_by_id("root").unwrap())
             .unwrap();
         assert_eq!(root.final_layout().size.width, 480.0);
+        let main = root
+            .children
+            .iter()
+            .filter_map(|&id| doc.get_node(id))
+            .find(|node| {
+                node.element_data()
+                    .is_some_and(|el| &*el.name.local == "main")
+            })
+            .unwrap();
+        let padding = main.final_layout().padding;
+        assert_eq!(
+            [padding.top, padding.right, padding.bottom, padding.left],
+            [16.0; 4]
+        );
         assert_eq!(style_texts(&doc), expected);
-        assert_eq!(doc.author_stylesheets().count(), 2);
+        assert_eq!(doc.author_stylesheets().count(), 3);
     };
     let artifact = build.to_bytes();
     let mut session = BlitzSession::new(Build::from_bytes(&artifact)?)?;

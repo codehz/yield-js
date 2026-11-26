@@ -13,4 +13,6 @@ blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6
 blitz-shell = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6e072335f531f7b405b3382a0678" }
 blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "3e7d1d1db21f6e072335f531f7b405b3382a0678" }
 anyrender_vello = "0.16"
+# Keep parcel_selectors at 0.28.2 in Cargo.lock: 0.28.3 uses an incompatible cssparser.
+lightningcss = { version = "=1.0.0-alpha.68", default-features = false }
 serde_json.workspace = true
