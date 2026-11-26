@@ -3,6 +3,7 @@
 
 mod dom;
 mod snapshot;
+mod window;
 
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
@@ -28,6 +29,7 @@ struct Dom {
     doc: BaseDocument,
     nodes: Vec<NodeId>,
     handles: BTreeMap<NodeId, u32>,
+    click_target: Option<NodeId>,
 }
 
 impl Dom {
@@ -36,6 +38,7 @@ impl Dom {
             doc: HtmlDocument::from_html(SHELL, document_config()).into_inner(),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
+            click_target: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl Dom {
             doc: BaseDocument::new(document_config()),
             nodes: Vec::new(),
             handles: BTreeMap::new(),
+            click_target: None,
         }
     }
 }
@@ -153,6 +157,40 @@ impl BlitzSession {
             .map_err(|error| error.to_string())
     }
 
+    /// Deliver a primary click to an element and drain VM work. Returns `false`
+    /// if canceled. Node IDs are local to this document; reacquire them after restore.
+    pub fn click(&mut self, target: NodeId) -> Result<bool, String> {
+        let accepted = self.dispatch_click(target)?;
+        self.run_until_idle()?;
+        Ok(accepted)
+    }
+
+    fn dispatch_click(&mut self, target: NodeId) -> Result<bool, String> {
+        {
+            let mut dom = self.dom.borrow_mut();
+            let node = dom
+                .doc
+                .get_node(target)
+                .filter(|node| node.element_data().is_some())
+                .ok_or("click target is not an element")?;
+            let mut root = node;
+            while let Some(parent) = root.parent.and_then(|id| dom.doc.get_node(id)) {
+                root = parent;
+            }
+            if root.id != dom.doc.root_node().id {
+                return Err("click target is detached".into());
+            }
+            dom.click_target = Some(target);
+        }
+        let result = self
+            .vm
+            .start_host_export("yield:dom", "dispatchClick", vec![]);
+        self.dom.borrow_mut().click_target = None;
+        result
+            .map(|value| value == Value::boolean(true))
+            .map_err(|error| error.to_string())
+    }
+
     /// Capture the VM and DOM state together.
     pub fn snapshot(&self, roots: &[Value]) -> Result<Snapshot, String> {
         self.vm.snapshot(roots).map_err(|error| error.to_string())
@@ -217,8 +255,8 @@ impl ModuleResolver for FixtureResolver {
     }
 }
 
-/// Compile the first-mount JSX fixture against its installed production npm sources.
-pub fn render_fixture() -> Result<BaseDocument, String> {
+/// Compile the JSX fixture against its installed production npm sources.
+pub fn compile_fixture() -> Result<Build, String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/npm-react-app");
     let modules = root.join("node_modules");
     if !modules
@@ -231,9 +269,12 @@ pub fn render_fixture() -> Result<BaseDocument, String> {
         );
     }
     let resolver = FixtureResolver(NodeResolver::web_production(root)?);
-    render(compile(
-        Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD),
-    )?)
+    compile(Project::new("./src/blitz.jsx", resolver).with_preload(DOM_PRELOAD))
+}
+
+/// Execute the JSX fixture and return its first rendered document, discarding the VM.
+pub fn render_fixture() -> Result<BaseDocument, String> {
+    render(compile_fixture()?)
 }
 
 fn compile(project: Project<'_>) -> Result<Build, String> {

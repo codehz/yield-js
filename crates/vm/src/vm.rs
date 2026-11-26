@@ -339,6 +339,16 @@ impl std::ops::Deref for VerifiedBuild {
     }
 }
 
+fn constant_arguments(args: Vec<JsValue>) -> Result<Vec<Value>, VmError> {
+    args.into_iter()
+        .map(|value| {
+            value
+                .into_constant()
+                .map_err(|error| VmError::Host(error.0))
+        })
+        .collect()
+}
+
 pub struct Vm<P: PlatformServices = Platform> {
     // The core drops its pending registrations before the host resources.
     pub(super) core: VmCore,
@@ -376,6 +386,30 @@ impl<P: PlatformServices> Vm<P> {
 
     pub fn start(&mut self, entry: &str, args: Vec<JsValue>) -> Result<Value, VmError> {
         self.core.start(&self.host, entry, args)
+    }
+
+    /// Invoke a registered host function from the embedder without guest lookup.
+    pub fn start_host_export(
+        &mut self,
+        module: &str,
+        export: &str,
+        args: Vec<JsValue>,
+    ) -> Result<Value, VmError> {
+        let Some((id, ExportDecl::Function(_))) = self.host.bindings().export(module, export)
+        else {
+            return Err(VmError::MissingImport(format!("{module}:{export}")));
+        };
+        let args = constant_arguments(args)?;
+        self.core
+            .call_host(
+                &self.host,
+                &ActiveRoots::EMPTY,
+                NativeTarget::Export(id),
+                Arguments::Values(&args),
+                &Value::UNDEFINED,
+                None,
+            )?
+            .into_result()
     }
 
     /// Runs queued VM microtasks and ordinary tasks. External timer/event
@@ -957,14 +991,7 @@ impl VmCore {
         args: Vec<JsValue>,
     ) -> Result<Value, VmError> {
         let callee = self.get_export(entry)?;
-        let args = args
-            .into_iter()
-            .map(|value| {
-                value
-                    .into_constant()
-                    .map_err(|error| VmError::Host(error.0))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let args = constant_arguments(args)?;
         self.invoke(
             host,
             &ActiveRoots::EMPTY,

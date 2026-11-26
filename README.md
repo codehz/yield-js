@@ -21,7 +21,7 @@ cargo run -p yield-harness
 
 `yield-harness` 编译并执行双 `await` 例子：在两个挂起点分别快照、丢弃 VM、恢复并完成宿主 operation，最终打印结果。编译器通过同步解析器静态链接严格 ES 模块；宿主只访问入口模块的公开导出。VM 执行和恢复均不需要源文件或解析器。
 
-`yield-blitz` 从 JSX 和锁定版本的 React npm 源码编译首屏。按上面的命令安装依赖后，运行 `cargo test -p yield-blitz` 做无窗口验收，或运行 `cargo run -p yield-blitz` 打开原生窗口。Rust 不会自动安装 npm 依赖。
+`yield-blitz` 从 JSX 和锁定版本的 React npm 源码编译可交互示例。按上面的命令安装依赖后，运行 `cargo test -p yield-blitz` 做无窗口验收，或运行 `cargo run -p yield-blitz` 打开原生窗口，点击按钮增加计数。Rust 不会自动安装 npm 依赖。
 
 ## Rust 嵌入
 

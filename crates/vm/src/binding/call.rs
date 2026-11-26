@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::gc::ActiveRoots;
-use crate::heap::{Attributes, EventTargetState, Object, PlainObject, Property};
+use crate::heap::{Attributes, EventState, EventTargetState, Object, PlainObject, Property};
 use crate::value::{JsBigInt, JsString, ObjectId, PropertyKey, SymbolId, Value, ValueRef};
 use crate::vm::VmCore;
 
@@ -467,6 +467,23 @@ impl<'a> CallCx<'a> {
     pub fn is_callable(&self, value: &JsValue) -> JsResult<bool> {
         self.check_value(value)?;
         Ok(self.vm.is_callable(&value.value))
+    }
+
+    /// Creates a plain Event without consulting mutable guest constructors.
+    pub fn event(&mut self, ty: &str, bubbles: bool, cancelable: bool) -> JsResult<JsValue> {
+        let event = EventState {
+            ty: ty.into(),
+            bubbles,
+            cancelable,
+            time_stamp: self.vm.clock.now(),
+            initialized: true,
+            ..Default::default()
+        };
+        let event = self
+            .vm
+            .alloc_event(None, event)
+            .map_err(|error| JsError::Fault(self.fault(error.to_string())))?;
+        Ok(self.js_value(event))
     }
 
     /// Creates a CustomEvent without consulting mutable guest constructors.

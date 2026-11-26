@@ -43,6 +43,7 @@
 - C 风格 `for` 的 `using` / `await using` 头在整个循环退出时释放；`continue` 不结束头部资源的生命周期。`for…of` 和 `for await…of` 的单名资源头每轮先登记、再初始化绑定和执行正文，当轮清理先于迭代器关闭。迭代方式独立于释放 hint，`for…in` 不允许资源头。模块顶层 `using` 在本模块求值返回前完成清理，不在实例化、恢复或 VM 销毁时运行。
 - `SlotKind::{Transient, Persistent}`；`ResumeEntry` 保存 `fulfill_pc`、`reject_pc`、结果槽和升序 `saved_slots`。
 - `yield-blitz` 通过 `BlitzSession` 持有 VM 与文档；版本化 DOM payload 随 `yield:dom` 模块状态快照，恢复时直接重建 Blitz 节点树、脱离子树及包装索引，不重跑模块初始化。快照保留 JS 节点、闭包、expando 与监听器身份，恢复后脚本可继续更新树；`render_module` / `render_fixture` 仍提供执行后移交文档的一次性入口。锁定 React 首屏 fixture 使用 `BaseDocument` 并由 Blitz shell/Vello 显示。
+- `BlitzSession::click` 和原生窗口的主键点击共用 VM 的 `EventTarget` 派发：向当前文档的元素发送可信、可冒泡、可取消的 `click`；取消会阻止 Blitz 默认动作。节点的事件父级用 VM 托管槽保存，随节点移动或脱离更新。快照恢复监听器、闭包和 React 计数状态，不重放原生输入；恢复后应从新文档取得目标，再投递下一次点击。
 - 编译期 CFG 活性分析：每个恢复入口先扣除该入口的结果槽，再取并集作为 `saved_slots`；异常边参与活性。
 - 不跨挂起点的值分配到瞬时槽，活性区间不相交的值可复用同一个瞬时槽；持久槽不复用。挂起时丢弃瞬时槽，恢复时只重建指定持久槽。
 - 未导出且未跨函数共享的绑定在帧槽中；导出和闭包共享的绑定仍在堆环境，快照保留环境、闭包与对象身份。没有共享绑定且不创建闭包的调用不分配环境。

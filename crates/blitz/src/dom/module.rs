@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use yield_binding_macros::{host_module, module_exports};
-use yield_vm::{Instance, JsError, JsResult, JsValue, ModuleCx};
+use yield_vm::{HostStep, Instance, JsError, JsResult, JsValue, ModuleCx};
 
 use super::Dom;
 use super::document::{Document, DocumentSlots};
@@ -43,6 +43,22 @@ impl DomModule {
     #[constructor(name = "HTMLIFrameElement", class = HTMLIFrameElement)]
     fn construct_iframe(cx: &mut ModuleCx<'_, Self>) -> JsResult<Instance<HTMLIFrameElement>> {
         alloc_element(cx, HTMLIFrameElement)
+    }
+
+    #[function(name = "dispatchClick")]
+    async fn dispatch_click(cx: &mut ModuleCx<'_, Self>) -> JsResult<HostStep> {
+        let document = cx.state_slot(Self::SLOT_DOCUMENT)?;
+        let target = {
+            let mut dom = Self::dom(cx.services()).borrow_mut();
+            let id = dom
+                .click_target
+                .take()
+                .ok_or_else(|| JsError::type_error("dispatchClick requires input from the host"))?;
+            dom.resolve_node(cx, document, Some(id))?
+        };
+        let event = cx.event("click", true, true)?;
+        let accepted = cx.dispatch_event(target, event).await?;
+        Ok(HostStep::Return(accepted))
     }
 
     #[function(name = "openDocument")]

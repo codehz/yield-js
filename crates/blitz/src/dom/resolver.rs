@@ -34,24 +34,42 @@ impl Dom {
             return document.nodes_get(cx, index as usize);
         }
 
-        let index = u32::try_from(self.nodes.len())
-            .map_err(|_| JsError::type_error("too many DOM nodes"))?;
-        let node = self
-            .doc
-            .get_node(id)
-            .ok_or_else(|| JsError::type_error("invalid DOM node handle"))?;
-        let value = match &node.data {
-            NodeData::Element(element) if element.name.local == local_name!("iframe") => {
-                alloc_element(cx, HTMLIFrameElement)?.value(cx)
+        // Intern missing ancestors first so even the shell's original nodes
+        // have a VM-managed event parent when first wrapped.
+        let mut missing = Vec::new();
+        let mut current = Some(id);
+        let mut parent = loop {
+            let Some(id) = current else {
+                break JsValue::null();
+            };
+            if let Some(&index) = self.handles.get(&id) {
+                break document.nodes_get(cx, index as usize)?;
             }
-            NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
-            NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),
-            _ => return Err(JsError::type_error("unsupported DOM node kind")),
+            let node = self
+                .doc
+                .get_node(id)
+                .ok_or_else(|| JsError::type_error("invalid DOM node handle"))?;
+            missing.push(id);
+            current = node.parent;
         };
-        init_node(cx, &value, index, owner)?;
-        document.nodes_push(cx, value.clone())?;
-        self.publish_node(id, index);
-        Ok(value)
+        for id in missing.into_iter().rev() {
+            let index = u32::try_from(self.nodes.len())
+                .map_err(|_| JsError::type_error("too many DOM nodes"))?;
+            let value = match &self.doc.get_node(id).expect("collected live ancestor").data {
+                NodeData::Element(element) if element.name.local == local_name!("iframe") => {
+                    alloc_element(cx, HTMLIFrameElement)?.value(cx)
+                }
+                NodeData::Element(_) => alloc_element(cx, Element)?.value(cx),
+                NodeData::Text(_) | NodeData::Comment { .. } => cx.alloc(Node)?.value(cx),
+                _ => return Err(JsError::type_error("unsupported DOM node kind")),
+            };
+            init_node(cx, &value, index, owner.clone())?;
+            cx.instance::<Node>(&value)?.set_event_parent(cx, parent)?;
+            document.nodes_push(cx, value.clone())?;
+            self.publish_node(id, index);
+            parent = value;
+        }
+        Ok(parent)
     }
 
     /// Cache a freshly created node id at the next handle index.

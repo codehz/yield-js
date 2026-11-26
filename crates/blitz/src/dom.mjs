@@ -8,7 +8,8 @@ const setAttributeNative = Element.prototype.setAttribute;
 const getElementByIdNative = Document.prototype.getElementById;
 const createElementNative = Document.prototype.createElement;
 const createTextNodeNative = Document.prototype.createTextNode;
-const setTextContent = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set;
+const textContent = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+const nodeType = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeType').get;
 
 // String conversion can run script, so perform it before entering the host call.
 Object.defineProperty(Element.prototype, 'setAttribute', {
@@ -29,7 +30,22 @@ Object.defineProperty(Node.prototype, 'textContent', {
   enumerable: false,
   set(value) {
     if (this === document) return;
-    setTextContent.call(this, value === null ? '' : String(value));
+    textContent.set.call(this, value === null ? '' : String(value));
+  },
+});
+
+// React updates existing text nodes through nodeValue during commits.
+Object.defineProperty(Node.prototype, 'nodeValue', {
+  configurable: true,
+  get() {
+    const type = nodeType.call(this);
+    return type === 3 || type === 8 ? textContent.get.call(this) : null;
+  },
+  set(value) {
+    const type = nodeType.call(this);
+    if (type === 3 || type === 8) {
+      textContent.set.call(this, value === null ? '' : String(value));
+    }
   },
 });
 

@@ -9,12 +9,14 @@ use yield_vm::{ClassCx, JsError, JsResult, JsValue, This};
 use super::Dom;
 use super::node_index;
 
-#[host_class(tag = "Node", event_target, methods, services = [dom: Rc<RefCell<Dom>>])]
+#[host_class(tag = "Node", event_parent = event_parent, methods, services = [dom: Rc<RefCell<Dom>>])]
 pub(crate) struct Node {
     #[js_slot]
     index: JsValue,
     #[js_slot]
     owner: JsValue,
+    #[js_slot]
+    event_parent: JsValue,
 }
 
 #[methods(Node)]
@@ -117,6 +119,18 @@ impl Node {
                 "textContent requires an element or character data node",
             ));
         }
+        if !is_text {
+            use super::document::{Document, DocumentSlots};
+            let owner = this.owner(cx)?;
+            let document = cx.instance::<Document>(&owner)?;
+            for child in &node.children {
+                if let Some(&index) = dom.handles.get(child) {
+                    let wrapper = document.nodes_get(cx, index as usize)?;
+                    cx.instance::<Node>(&wrapper)?
+                        .set_event_parent(cx, JsValue::null())?;
+                }
+            }
+        }
         let mut mutation = dom.doc.mutate();
         if is_text {
             mutation.set_node_text(id, &value);
@@ -164,6 +178,9 @@ impl Node {
             ancestor = node.parent.and_then(|id| dom.doc.get_node(id));
         }
         let (parent, child_id) = (parent.id, child_node.id);
+        let parent_wrapper = this.instance().value(cx);
+        cx.instance::<Node>(&child)?
+            .set_event_parent(cx, parent_wrapper)?;
         dom.doc.mutate().append_children(parent, &[child_id]);
         Ok(child)
     }
