@@ -309,13 +309,15 @@ impl Graph {
         if let Some(&target) = self.memory.get(&source) {
             return Ok(Ok(target));
         }
-        if source == vm.builtins.get("globalThis")
-            || vm.heap.generator(source).is_some()
-            || vm.host_instances.contains_key(&source)
-        {
+        if source == vm.builtins.get("globalThis") || vm.heap.generator(source).is_some() {
             return rejected(vm);
         }
-        let target = match vm.heap.get(source)? {
+        let object = vm.heap.get(source)?;
+        let host_instance = vm.host_instances.contains_key(&source);
+        if host_instance && !object.has_error_brand() {
+            return rejected(vm);
+        }
+        let target = match object {
             Object::ReadableStream(_) | Object::WritableStream(_) | Object::TransformStream(_) => {
                 return rejected(vm);
             }
@@ -327,7 +329,7 @@ impl Graph {
             Object::Plain(object) if object.is_raw_json || object.module_namespace.is_some() => {
                 return rejected(vm);
             }
-            Object::DomException { name, message, .. } => {
+            Object::DomException { name, message, .. } if !host_instance => {
                 let ValueRef::Object(id) =
                     vm.alloc_dom_exception(name.clone(), message.clone()).view()
                 else {
@@ -343,7 +345,9 @@ impl Graph {
                 object: PlainObject::new(Some(vm.builtins.get("file.prototype"))),
                 data: data.clone(),
             }),
-            object if object.has_error_brand() => normal!(self.error(vm, host, roots, source)),
+            object if object.has_error_brand() => {
+                normal!(self.error(vm, host, roots, source, host_instance))
+            }
             Object::Plain(_) => {
                 let target = vm
                     .heap
@@ -521,36 +525,46 @@ impl Graph {
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
         source: ObjectId,
+        host_instance: bool,
     ) -> Completion<ObjectId> {
         let receiver = Value::object(source);
-        let name = {
-            let root_values = (&*self, &receiver);
-            let roots = &roots.with(&root_values);
-            normal!(get(
-                vm,
-                host,
-                roots,
-                &receiver,
-                PropertyKeyRef::String("name")
-            ))
-        };
-        let prototype = match name.view() {
-            ValueRef::String(name) if name == "EvalError" => "evalerror.prototype",
-            ValueRef::String(name) if name == "RangeError" => "rangeerror.prototype",
-            ValueRef::String(name) if name == "ReferenceError" => "referenceerror.prototype",
-            ValueRef::String(name) if name == "SyntaxError" => "syntaxerror.prototype",
-            ValueRef::String(name) if name == "TypeError" => "typeerror.prototype",
-            ValueRef::String(name) if name == "URIError" => "urierror.prototype",
-            _ => "error.prototype",
-        };
-        let source_object = vm.heap.get(source)?;
-        let message = match own_data(source_object, "message").cloned() {
-            Some(message) => {
-                let root_values = (&*self, &receiver, &message);
+        let (name, dom_message) =
+            if let Object::DomException { name, message, .. } = vm.heap.get(source)? {
+                // A host DOMException loses its DOM identity but keeps its internal diagnostic text.
+                (Value::string(name.clone()), Some(message.clone()))
+            } else {
+                let root_values = (&*self, &receiver);
                 let roots = &roots.with(&root_values);
-                Some(normal!(vm.coerce_string(host, roots, &message)))
+                let name = normal!(get(
+                    vm,
+                    host,
+                    roots,
+                    &receiver,
+                    PropertyKeyRef::String("name")
+                ));
+                (name, None)
+            };
+        let prototype = if host_instance {
+            "error.prototype"
+        } else {
+            match name.view() {
+                ValueRef::String(name) if name == "EvalError" => "evalerror.prototype",
+                ValueRef::String(name) if name == "RangeError" => "rangeerror.prototype",
+                ValueRef::String(name) if name == "ReferenceError" => "referenceerror.prototype",
+                ValueRef::String(name) if name == "SyntaxError" => "syntaxerror.prototype",
+                ValueRef::String(name) if name == "TypeError" => "typeerror.prototype",
+                ValueRef::String(name) if name == "URIError" => "urierror.prototype",
+                _ => "error.prototype",
             }
-            None => None,
+        };
+        let message = if dom_message.is_some() {
+            dom_message
+        } else if let Some(message) = own_data(vm.heap.get(source)?, "message").cloned() {
+            let root_values = (&*self, &receiver, &message);
+            let roots = &roots.with(&root_values);
+            Some(normal!(vm.coerce_string(host, roots, &message)))
+        } else {
+            None
         };
         let source_object = vm.heap.get(source)?;
         let stack = own_data(source_object, "stack")
@@ -559,6 +573,10 @@ impl Graph {
         let cause = own_data(source_object, "cause").cloned();
         let object = PlainObject::error(vm.builtins.get(prototype));
         let target = vm.heap.alloc(Object::Plain(object));
+        if host_instance && matches!(name.view(), ValueRef::String(_)) {
+            vm.heap
+                .define_data(target, "name", name, Attributes::METHOD)?;
+        }
         if let Some(message) = message {
             vm.heap.define_data(
                 target,

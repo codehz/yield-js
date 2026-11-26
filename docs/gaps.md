@@ -52,7 +52,7 @@ Rust 宿主不支持运行时增删或替换服务，也不能声明可选依赖
 | Streams | 已提供排队策略、Readable/Writable/Transform、字节读取、pipe/tee、async iterator/`from`、文本转换流、流转移与压缩转换流。 |
 | `URL` / `URLSearchParams` / `URLPattern` | 尚未运行完整上游 WPT；对象 URL 表仅在本 VM 内可见 |
 | Fetch 与二进制对象 | 已提供 `Blob`、`File`、`FormData`、`Headers`、`Request`、`Response` 和 `fetch`；`FormData` 不读取 HTML 表单。没有 TLS、代理、cookie jar、HTTP 缓存或预检结果缓存（每次跨源非简单请求重新预检）；示例适配器只允许显式配置的 `127.0.0.1` 明文 HTTP/1.1，HTTPS 需其他适配器实现。`keepalive` 不跨 VM 销毁或快照恢复继续传输；恢复中的在途传输按设计中断且不重发，`only-if-cached` 因无缓存总是 miss |
-| `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、宿主实例等不支持的种类，不复制 VM 执行环境 |
+| `structuredClone` | 可转移 `ArrayBuffer`、`ReadableStream`、`WritableStream` 与 `TransformStream`（流仅限同一 VM 内转移）；不克隆函数、代理、模块命名空间、非错误宿主实例等不支持的种类。宿主错误克隆为普通 `Error`；不复制 VM 执行环境 |
 
 `yield-blitz` 接入了原生主键点击，但尚无完整浏览器 DOM、`MouseEvent` 坐标与按键字段、其他输入的 JS 派发、样式计算 API 或热更新。DOM payload 只支持当前绑定所需的 Document、Element、Text 和 Comment 树，不保存布局、渲染器、焦点或未投递的原生输入，不支持模板内容子树。无窗口测试不等于 Vello 目视验收。
 首屏路径只编译 `src/blitz.jsx` 及其 npm 依赖，不验收 `src/index.tsx`、TypeScript 类型剥离、CSS 导入或动态样式模块。

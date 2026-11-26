@@ -84,10 +84,27 @@ export function run() {
   Object.setPrototypeOf(ordinary, ParseError.prototype);
   expect(Error.isError(ordinary)).toBe(false);
   try { throw ordinary; } catch (error) { expect(error === ordinary).toBe(true); }
+  expect(thrownBy(() => structuredClone(ordinary)).name).toBe('DataCloneError');
+
+  constructed.cause = { owner: constructed };
+  const copies = structuredClone([constructed, constructed]);
+  const copy = copies[0];
+  expect(copy !== constructed && copies[1] === copy).toBe(true);
+  expect(Object.getPrototypeOf(copy) === Error.prototype).toBe(true);
+  expect(Error.isError(copy) && !(copy instanceof ParseError)).toBe(true);
+  expect(copy.name).toBe('ParseError');
+  expect(copy.message).toBe('bad');
+  expect(copy.stack).toBe(constructed.stack);
+  expect(copy.cause !== constructed.cause && copy.cause.owner === copy).toBe(true);
+  expect(copy.detail).toBe(undefined);
+
   Object.setPrototypeOf(constructed, null);
   expect(Error.isError(constructed)).toBe(true);
   expect(constructed instanceof ParseError).toBe(false);
-  expect(thrownBy(() => structuredClone(constructed)).name).toBe('DataCloneError');
+  const detachedCopy = structuredClone(constructed);
+  expect(Object.getPrototypeOf(detachedCopy) === Error.prototype).toBe(true);
+  expect(detachedCopy.stack).toBe(constructed.stack);
+  expect(detachedCopy.cause.owner === detachedCopy).toBe(true);
 
   const named = Object.getOwnPropertyDescriptor(ParseError.prototype, 'name');
   expect(named.enumerable).toBe(false);
@@ -101,6 +118,15 @@ export function run() {
   expect(dom.message).toBe('lost');
   expect(dom.code).toBe(20);
   expect(Object.hasOwn(dom, 'stack')).toBe(false);
+  Object.defineProperty(dom, 'name', { get() { throw token; } });
+  Object.defineProperty(dom, 'message', { value: 'shadowed' });
+  const domCopy = structuredClone(dom);
+  expect(Object.getPrototypeOf(domCopy) === Error.prototype).toBe(true);
+  expect(Error.isError(domCopy) && !(domCopy instanceof DOMException)).toBe(true);
+  expect(domCopy.name).toBe('AbortError');
+  expect(domCopy.message).toBe('lost');
+  expect(domCopy.code).toBe(undefined);
+  expect(Object.hasOwn(domCopy, 'stack')).toBe(false);
   const domName = Object.getOwnPropertyDescriptor(DOMException.prototype, 'name').get;
   expect(thrownBy(() => domName.call(Object.create(HostDOMException.prototype))) instanceof TypeError).toBe(true);
   const defaultDom = new HostDOMException();
@@ -132,6 +158,11 @@ export function run() {
   expect(typed.cause === token).toBe(true);
   expect(Error.isError(Object.create(ChildTypeError.prototype))).toBe(false);
   expect(Error.isError(new Proxy(typed, {}))).toBe(false);
+  typed.name = 'TypeError';
+  const typedCopy = structuredClone(typed);
+  expect(Object.getPrototypeOf(typedCopy) === Error.prototype).toBe(true);
+  expect(typedCopy.name).toBe('TypeError');
+  expect(typedCopy.stack).toBe(typed.stack);
   Object.setPrototypeOf(typed, null);
   expect(Error.isError(typed)).toBe(true);
   expect(typed instanceof ChildTypeError).toBe(false);
