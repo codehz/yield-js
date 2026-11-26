@@ -6,6 +6,7 @@ mod crypto;
 mod date;
 mod defaults;
 mod disposal;
+mod error_exports;
 mod events;
 mod fetch;
 mod fetch_http;

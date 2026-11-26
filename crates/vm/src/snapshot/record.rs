@@ -10,7 +10,7 @@ use crate::heap::{CombineState, GeneratorObject, Object};
 use crate::value::{ContinuationId, ObjectId, SymbolId, Value};
 
 // Host class and operation records without per-binding schemas.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 92;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 93;
 
 /// Version for the binary envelope and bincode options, not the snapshot record layout.
 pub const SNAPSHOT_BINARY_VERSION: u32 = 1;
@@ -196,6 +196,17 @@ pub struct HostTaskRecord {
     pub waiting_on: u64,
 }
 
+/// A declared error subclass's interned constructor and prototype, saved in
+/// module and export declaration order. Restore re-links them by binding
+/// fingerprint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ErrorExportRecord {
+    pub module: String,
+    pub export: String,
+    pub constructor: ObjectId,
+    pub prototype: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostSlotRecord {
@@ -262,6 +273,8 @@ pub struct Snapshot {
     pub imports: Vec<ObjectId>,
     /// Class tag to the VM-owned prototype saved with the object graph.
     pub class_prototypes: BTreeMap<String, ObjectId>,
+    /// Declared error subclasses, in module and export declaration order.
+    pub error_exports: Vec<ErrorExportRecord>,
     pub host_instances: Vec<HostInstanceRecord>,
     pub module_states: Vec<ModuleStateRecord>,
     /// Source module environments, in build module order.
@@ -310,6 +323,7 @@ impl Snapshot {
             next_operation_id: 1,
             imports: Vec::new(),
             class_prototypes: BTreeMap::new(),
+            error_exports: Vec::new(),
             host_instances: Vec::new(),
             module_states: Vec::new(),
             globals: BTreeMap::new(),

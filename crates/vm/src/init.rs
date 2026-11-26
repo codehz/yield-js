@@ -132,6 +132,7 @@ impl VmCore {
         );
         vm.install_templates();
         vm.install_classes(bindings)?;
+        vm.install_error_exports(bindings)?;
         vm.install_module_states(bindings);
         vm.install_imports(bindings, resolved)?;
         Ok(vm)
@@ -349,6 +350,50 @@ impl VmCore {
             };
             self.heap
                 .set_prototype(self.host_classes[class].prototype, Some(parent))?;
+        }
+        Ok(())
+    }
+
+    /// Interns one constructor and prototype for every declared error
+    /// subclass, before module initialization and import installation.
+    /// Allocations through `ErrorClass::Host` share these objects with the
+    /// script-visible constructor.
+    fn install_error_exports(&mut self, bindings: &Bindings) -> Result<(), VmError> {
+        for (id, class, name) in bindings.error_constructor_decls() {
+            let target = NativeTarget::Export(id);
+            let constructor = self
+                .heap
+                .intern_native(target, true, 1, JsString::from(name));
+            let prototype = self
+                .heap
+                .alloc_plain_with(Some(self.builtins.get("error.prototype")));
+            self.heap
+                .set_prototype(constructor, Some(self.builtins.get("error")))?;
+            self.heap.define_data(
+                constructor,
+                "prototype",
+                Value::object(prototype),
+                Attributes::FIXED,
+            )?;
+            self.heap.define_data(
+                prototype,
+                "constructor",
+                Value::object(constructor),
+                Attributes::METHOD,
+            )?;
+            self.heap.define_data(
+                prototype,
+                "name",
+                Value::string(JsString::from(name)),
+                Attributes::METHOD,
+            )?;
+            self.error_exports.push((
+                class,
+                crate::vm::ErrorExport {
+                    constructor,
+                    prototype,
+                },
+            ));
         }
         Ok(())
     }

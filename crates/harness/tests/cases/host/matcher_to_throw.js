@@ -3,7 +3,7 @@
 import { expect } from 'test';
 
 function caught(thunk) {
-  try { thunk(); } catch (error) { return error; }
+  try { thunk(); } catch (error) { return error instanceof Error ? error.message : error; }
 }
 
 export function run() {

@@ -40,7 +40,7 @@ impl VmCore {
         host: &Host<P>,
         roots: &ActiveRoots<'_>,
         name: &str,
-        prototype: &'static str,
+        prototype: ObjectId,
         args: Vec<Value>,
     ) -> Result<Invocation, VmError> {
         let roots = &roots.with(&args);
@@ -61,18 +61,14 @@ impl VmCore {
             let suppressed = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
             let value = if message.is_some() {
                 self.alloc_suppressed_error_with_message(
-                    roots,
-                    self.builtins.get(prototype),
-                    error,
-                    suppressed,
-                    message,
+                    roots, prototype, error, suppressed, message,
                 )?
             } else {
                 self.alloc_suppressed_error(roots, error, suppressed)?
             };
             return Ok(Invocation::Value(value));
         }
-        let error = self.alloc_error(roots, self.builtins.get(prototype), name, message)?;
+        let error = self.alloc_error(roots, prototype, name, message)?;
         let ValueRef::Object(id) = error.view() else {
             unreachable!()
         };

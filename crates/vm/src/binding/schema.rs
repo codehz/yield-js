@@ -122,6 +122,9 @@ type ModuleCall = for<'a> fn(super::ModuleDispatch<'a>) -> (CallCx<'a>, JsResult
 pub(crate) enum ExportCall {
     Plain(HostCall),
     Module(ModuleCall),
+    /// No Rust callback: the VM constructs the declared error subclass with
+    /// built-in message and `cause` handling.
+    ErrorConstructor(ErrorClass),
 }
 
 /// The result of one synchronous host binding step.
@@ -738,6 +741,7 @@ pub mod __macro_support {
         BuildView, Provide, ServiceField, ServiceOwner, ServiceStorage, Services, Slot,
         assert_unique,
     };
+    use super::ErrorClass;
     use super::{AccessorCall, CodecError, UnlinkedBindings};
     pub use super::{
         AccessorDecl, ArgKind, CallSignature, CpsBoundary, CpsStage, ExportDecl, MemberName,
@@ -917,6 +921,25 @@ pub mod __macro_support {
         })
     }
 
+    /// Declares an error subclass constructor export. The VM owns the
+    /// constructor; there is no Rust callback.
+    pub fn error_class_export(name: &str, class: ErrorClass) -> ExportDecl {
+        ExportDecl::Function(FunctionDecl {
+            name: name.to_owned(),
+            arity: 1,
+            constructable: true,
+            class: None,
+            call: ExportCall::ErrorConstructor(class),
+            signature: CallSignature {
+                args: ERROR_CTOR_ARGS,
+                result: ReturnKind::Value,
+            },
+            cps: None,
+        })
+    }
+
+    const ERROR_CTOR_ARGS: &[ArgKind] = &[ArgKind::Value];
+
     pub const fn method(name: MemberName, call: HostCall, signature: CallSignature) -> MethodDecl {
         MethodDecl {
             name,
@@ -1078,6 +1101,34 @@ impl Bindings {
             .get(id.module as usize)?
             .exports
             .get(id.export as usize)
+    }
+
+    /// Every declared error subclass, in module and export declaration order.
+    pub(crate) fn error_constructor_decls(
+        &self,
+    ) -> impl Iterator<Item = (ExportId, ErrorClass, &str)> + '_ {
+        self.modules
+            .iter()
+            .enumerate()
+            .flat_map(|(module, module_decl)| {
+                module_decl.exports.iter().enumerate().filter_map(
+                    move |(export, decl)| match decl {
+                        ExportDecl::Function(function)
+                            if let ExportCall::ErrorConstructor(class) = function.call =>
+                        {
+                            Some((
+                                ExportId {
+                                    module: module as u32,
+                                    export: export as u32,
+                                },
+                                class,
+                                function.name.as_str(),
+                            ))
+                        }
+                        _ => None,
+                    },
+                )
+            })
     }
 
     pub(crate) fn cps(&self, owner: NativeTarget) -> Option<&'static [CpsStage]> {
@@ -1429,6 +1480,32 @@ impl UnlinkedBindings {
                 return Err(format!("duplicate host operation {:?}", operation.name));
             }
         }
+        for module in &self.modules {
+            for export in &module.exports {
+                let ExportDecl::Function(function) = export else {
+                    continue;
+                };
+                let ExportCall::ErrorConstructor(class) = function.call else {
+                    continue;
+                };
+                let ErrorClass::Host {
+                    module: class_module,
+                    name: class_name,
+                } = class
+                else {
+                    return Err(format!(
+                        "error class {} must declare a host module and name",
+                        function.name
+                    ));
+                };
+                if class_module != module.name || class_name != function.name {
+                    return Err(format!(
+                        "error class {class_name} names {class_module}:{class_name} but is exported as {}:{}",
+                        module.name, function.name
+                    ));
+                }
+            }
+        }
         let fingerprint = fingerprint(&self.modules, &self.classes, &self.operations);
         Ok(Bindings {
             modules: self.modules,
@@ -1607,6 +1684,12 @@ fn fingerprint(
                             function.name, function.arity, function.constructable, function.class
                         ),
                     );
+                    if let ExportCall::ErrorConstructor(class) = function.call {
+                        hash_line(
+                            &mut hasher,
+                            format!("export {} error-class {class:?}", function.name),
+                        );
+                    }
                     hash_signature(&mut hasher, 0, function.signature);
                     hash_cps(&mut hasher, function.cps);
                 }

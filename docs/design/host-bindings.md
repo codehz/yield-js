@@ -296,6 +296,13 @@ impl CallCx {
 
 区分原则：**可由脚本处理的语义错误用 `JsError`；违反宿主契约用 `HostFault`。**
 
+宿主通过 `ErrorClass` 声明脚本可见的异常类别：`Builtin(ErrorKind)` 覆盖七个内建错误种类，`Host { module, name }` 指向宿主模块的一个 `#[error_class]` 声明常量（如 `ErrorClass::Host { module: "parser", name: "ParseError" }`）。同一常量可传给 `CallCx::alloc_error`、`Vm::alloc_error` 或 `JsError::new_error`，产生可捕获、可 `instanceof`、可跨挂起保存的 branded Error：
+
+- `#[error_class]` 常量（写法 `#[error_class] const ParseError: ErrorClass = ErrorClass::Host { … };`）在 `#[module_exports]` 内声明；宏校验常量名与 `name` 一致，宿主构建时校验 `module` 与所属模块一致，否则拒绝构建。声明的父类固定为内建 `Error`；`ErrorConstructor` 导出没有 Rust 回调，构造/调用共用内建 Error 的 message 转换、`options.cause` 与活动栈逻辑。
+- VM 在模块初始化前为每个声明 intern 唯一的构造器与原型（`ctor -> Error`、`ctor.prototype -> Error.prototype`、`prototype.constructor -> ctor`、非枚举 `name`），普通导入、namespace 与 Rust 分配共享同一对对象；二者列入 GC 与快照根，快照按导出保存其 ID（格式版本 93），恢复按绑定指纹重链，Full 校验声明全集、唯一 ID、构造器 native target 与原型形状。
+- 宿主类身份是声明的 `module:name`，不是可被脚本改写的 `.name`；同一导出名在不同模块互不相认。声明缺失或指向非 Error 导出是宿主配置错误，返回 `HostFault`，不回退到普通 Error。
+- 恢复策略（`Reject`）与恢复期中断合成的拒绝原因是带声明原文的普通 `Error` 对象；脚本显式 `throw`、`Promise.reject`、用户提供的 abort reason 与外部 completion 的拒绝值原样透传，不被拦截或包装。
+
 ### 6.4 重入与执行线程
 
 - 宿主函数执行期间，VM 不排空微任务、不接受事件、不执行脚本。绑定不得调用 `Vm::run_until_idle`、`Vm::start` 或任何会执行脚本的接口。

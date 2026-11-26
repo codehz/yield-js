@@ -8,7 +8,7 @@ use yield_harness::{Counters, LabelService, Wait};
 use yield_vm::__macro_support as abi;
 use yield_vm::binding::{ArgKind, CallCx, CallSignature, CpsBoundary, CpsStage, ReturnKind};
 use yield_vm::{
-    Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsResult, JsValue,
+    Completion, Diagnostic, Diagnostics, GuestOutcome, Host, HostStep, JsError, JsResult, JsValue,
     RestoreOptions, SnapshotValidation, Value, Vm, VmError,
 };
 
@@ -462,7 +462,12 @@ impl Branch {
         }
         cx.spawn(async move {
             if cx.number(&mode)? == 1.0 {
-                return Err(cx.throw_string("prefix failed"));
+                return Err(
+                    match cx.alloc_error(yield_vm::ErrorKind::Error, "prefix failed") {
+                        Ok(value) => JsError::Throw(value),
+                        Err(error) => error,
+                    },
+                );
             }
             return Ok(());
         })
@@ -508,9 +513,10 @@ fn structured_cps_resumes_selected_arm_and_keeps_the_task_id() {
         Value::number(-1.0)
     );
     let failed = vm.start("immediate", vec![JsValue::number(1.0)]);
+    // The prefix failure is a branded Error, not a raw string.
     assert!(matches!(
         failed,
-        Err(VmError::Thrown(value)) if value == Value::string("prefix failed".into())
+        Err(VmError::Thrown(value)) if matches!(value.view(), yield_vm::ValueRef::Object(_))
     ));
     let handle = vm.start("immediate", vec![JsValue::number(0.0)]).unwrap();
     assert!(matches!(handle.view(), yield_vm::ValueRef::Number(id) if id > 0.0));

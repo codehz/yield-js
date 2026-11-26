@@ -2,7 +2,8 @@
 
 use crate::binding::Recovery;
 use crate::builtin::roots::BuiltinRoots;
-use crate::error::VmError;
+use crate::error::{ErrorClass, ErrorKind, VmError};
+use crate::gc::ActiveRoots;
 use crate::heap::{Heap, Object};
 use crate::host::{Host, PlatformServices};
 use crate::init::{RestoreOptions, SnapshotValidation};
@@ -120,6 +121,21 @@ impl VmCore {
                 .class_prototypes
                 .insert(tag.to_owned(), self.host_classes[class].prototype);
         }
+        snapshot.error_exports = self
+            .error_exports
+            .iter()
+            .map(|(class, export)| match class {
+                ErrorClass::Host { module, name } => Ok(ErrorExportRecord {
+                    module: (*module).to_owned(),
+                    export: (*name).to_owned(),
+                    constructor: export.constructor,
+                    prototype: export.prototype,
+                }),
+                ErrorClass::Builtin(_) => Err(VmError::InvalidState(
+                    "builtin error class stored as an export".to_owned(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         snapshot.module_envs = self.module_envs.clone();
         snapshot.module_namespaces = self.module_namespaces.clone();
         for id in &live.objects {
@@ -469,6 +485,7 @@ impl VmCore {
         validate_native_targets(bindings, &heap)?;
         checkpoint(|profile| &mut profile.native_validation);
         let host_classes = load_host_classes(bindings, &heap, &snapshot.class_prototypes)?;
+        let error_exports = load_error_exports(bindings, &heap, &snapshot.error_exports)?;
         let host_instances = load_host_instances(bindings, &heap, &snapshot.host_instances)?;
         let module_states = load_module_states(bindings, &heap, &snapshot.module_states)?;
         let continuations = load_continuations(&build, &heap, &snapshot.continuations)?;
@@ -558,7 +575,7 @@ impl VmCore {
                 templates,
                 module_envs: snapshot.module_envs,
                 module_namespaces: snapshot.module_namespaces,
-                error_exports: Vec::new(),
+                error_exports,
             },
         );
         // Recovery can append new notifications; the captured ones must stay first.
@@ -571,6 +588,16 @@ impl VmCore {
         checkpoint(|profile| &mut profile.vm_assembly);
         if AUDIT {
             validate_native_import_objects(&vm.heap, &vm.imports)?;
+            let mut error_export_ids = std::collections::BTreeSet::new();
+            for record in &snapshot.error_exports {
+                if !error_export_ids.insert(record.constructor)
+                    || !error_export_ids.insert(record.prototype)
+                {
+                    return Err(VmError::InvalidSnapshot(
+                        "duplicate error export object".to_owned(),
+                    ));
+                }
+            }
             check_heap_edges(&vm.build, &vm.heap, vm.builtins.get("globalThis"))?;
             validate_jobs(&vm.heap)?;
             validate_combines(&vm.heap)?;
@@ -597,10 +624,12 @@ impl VmCore {
                 }
                 Recovery::Reject => {
                     self.unlink_operation_signal(id, operation.signal);
-                    self.deliver_operation(
-                        operation.target,
-                        Settlement::Rejected(Value::string(operation.rejection.into())),
+                    let reason = self.alloc_class_error(
+                        &ActiveRoots::EMPTY,
+                        ErrorKind::Error.into(),
+                        Some(operation.rejection.into()),
                     )?;
+                    self.deliver_operation(operation.target, Settlement::Rejected(reason))?;
                 }
                 Recovery::Resume | Recovery::Reissue => {
                     self.operations.insert(id, operation);

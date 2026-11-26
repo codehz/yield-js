@@ -277,10 +277,11 @@ export async function run() {
     s.restore(snapshot.clone())
         .expect("restore publishes the VM");
     s.vm.run_until_idle().expect("settle rejected start");
-    assert_eq!(
-        s.state(),
-        PromiseState::Rejected(Value::string("wait rejected".into()))
-    );
+    let yield_vm::PromiseState::Rejected(reason) = s.state() else {
+        panic!("expected the rejected restored operation");
+    };
+    // The strategy rejection reason is a branded Error, not the raw string.
+    assert!(matches!(reason.view(), yield_vm::ValueRef::Object(_)));
     assert_eq!(
         count_delta(s.host.count("setLabel"), set_label),
         0,

@@ -16,7 +16,9 @@ use yield_vm::{
     GuestOutcome, Host, HostStep, JsString, Platform, PlatformServices, Services,
     SubtleCryptoService, TimeService, UserAgent, Vm, VmError, fetch::FetchService,
 };
-use yield_vm::{Decode, Encode, host, host_class, host_module, methods, module_exports, operation};
+use yield_vm::{
+    Decode, Encode, JsError, host, host_class, host_module, methods, module_exports, operation,
+};
 
 mod case;
 pub mod fetch;
@@ -130,7 +132,10 @@ impl Matcher {
         if cx.same_value(&actual, &expected) {
             return Ok(());
         }
-        Err(cx.throw_string(format!("toBe: expected {expected}, actual {actual}")))
+        Err(matcher_error(
+            cx,
+            format!("toBe: expected {expected}, actual {actual}"),
+        ))
     }
 
     #[method(name = "toEqual")]
@@ -147,7 +152,10 @@ impl Matcher {
         if structural_equal(cx, &actual, &expected) {
             return Ok(());
         }
-        Err(cx.throw_string(format!("toEqual: expected {expected}, actual {actual}")))
+        Err(matcher_error(
+            cx,
+            format!("toEqual: expected {expected}, actual {actual}"),
+        ))
     }
 
     #[method(name = "toBeTruthy")]
@@ -156,7 +164,10 @@ impl Matcher {
         if actual.truthy() {
             return Ok(());
         }
-        Err(cx.throw_string(format!("toBeTruthy: expected truthy, actual {actual}")))
+        Err(matcher_error(
+            cx,
+            format!("toBeTruthy: expected truthy, actual {actual}"),
+        ))
     }
 
     #[method(name = "toThrow")]
@@ -167,17 +178,26 @@ impl Matcher {
     ) -> JsResult<HostStep> {
         let actual = this.actual(cx)?;
         if !cx.is_callable(&actual)? {
-            return Err(cx.throw_string("toThrow: expected a callable"));
+            return Err(cx.type_error("toThrow: expected a callable"));
         }
         let expected = expected.unwrap_or_else(JsValue::undefined);
         if !expected.is_undefined()
             && expected.as_string().is_none()
             && !cx.inspect(expected.clone())?.is_regexp()
         {
-            return Err(cx.throw_string("toThrow: expected a string or RegExp"));
+            return Err(cx.type_error("toThrow: expected a string or RegExp"));
         }
         let outcome = cx.call(actual, JsValue::undefined(), vec![]).await;
         match_to_throw(cx, outcome, expected)
+    }
+}
+
+/// Matcher and assert failures throw ordinary branded Errors carrying the
+/// failure message.
+fn matcher_error(cx: &mut CallCx<'_>, message: impl Into<JsString>) -> JsError {
+    match cx.alloc_error(yield_vm::ErrorKind::Error, message) {
+        Ok(value) => JsError::Throw(value),
+        Err(error) => error,
     }
 }
 
@@ -187,7 +207,10 @@ fn match_to_throw(
     expected: JsValue,
 ) -> JsResult<HostStep> {
     let GuestOutcome::Thrown(thrown) = outcome else {
-        return Err(cx.throw_string("toThrow: function returned without throwing"));
+        return Err(matcher_error(
+            cx,
+            "toThrow: function returned without throwing",
+        ));
     };
     let success = HostStep::Return(JsValue::undefined());
     if expected.is_undefined() {
@@ -202,16 +225,17 @@ fn match_to_throw(
             None if inspect.is_error() => Some(JsString::new()),
             _ => None,
         };
-        message.ok_or_else(|| cx.throw_string("toThrow: thrown value has no string message"))?
+        message.ok_or_else(|| matcher_error(cx, "toThrow: thrown value has no string message"))?
     };
 
     if let Some(pattern) = expected.as_string() {
         if message.contains(pattern) {
             return Ok(success);
         }
-        return Err(cx.throw_string(format!(
-            "toThrow: expected message containing \"{pattern}\", actual \"{message}\""
-        )));
+        return Err(matcher_error(
+            cx,
+            format!("toThrow: expected message containing \"{pattern}\", actual \"{message}\""),
+        ));
     }
     let regexp = cx.inspect(expected)?;
     if regexp.regexp_matches(&message) == Some(true) {
@@ -220,9 +244,10 @@ fn match_to_throw(
     let (source, flags) = regexp
         .regexp_source_flags()
         .expect("toThrow only saves a string or RegExp");
-    Err(cx.throw_string(format!(
-        "toThrow: expected message matching /{source}/{flags}, actual \"{message}\""
-    )))
+    Err(matcher_error(
+        cx,
+        format!("toThrow: expected message matching /{source}/{flags}, actual \"{message}\""),
+    ))
 }
 
 fn structural_equal(cx: &CallCx<'_>, left: &JsValue, right: &JsValue) -> bool {
@@ -803,6 +828,31 @@ struct TestModule;
 
 #[module_exports]
 impl TestModule {
+    /// Declared host error subclass. The same constant drives allocation and
+    /// lazy throws through the shared error APIs.
+    #[error_class()]
+    #[allow(non_upper_case_globals)]
+    const ParseError: yield_vm::ErrorClass = yield_vm::ErrorClass::Host {
+        module: "test",
+        name: "ParseError",
+    };
+
+    #[function(name = "allocError")]
+    fn alloc_error(
+        cx: &mut yield_vm::ModuleCx<'_, Self>,
+        message: Option<JsValue>,
+    ) -> JsResult<JsValue> {
+        let message = match message {
+            Some(value) => cx.string(&value)?.clone(),
+            None => JsString::from("host allocError"),
+        };
+        cx.alloc_error(Self::ParseError, message)
+    }
+
+    #[function(name = "lazyThrow")]
+    fn lazy_throw(_cx: &mut yield_vm::ModuleCx<'_, Self>) -> JsResult<()> {
+        Err(JsError::new_error(Self::ParseError, "lazy parse failure"))
+    }
     #[function(name = "spawnDelayedTask")]
     fn spawn_delayed_task(
         cx: &mut yield_vm::ModuleCx<'_, Self>,
@@ -954,7 +1004,10 @@ impl TestModule {
             },
             None => String::new(),
         };
-        Err(cx.throw_string(format!("assert: expected truthy, actual {actual}{message}")))
+        Err(matcher_error(
+            cx,
+            format!("assert: expected truthy, actual {actual}{message}"),
+        ))
     }
 }
 

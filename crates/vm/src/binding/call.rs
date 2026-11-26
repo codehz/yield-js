@@ -684,10 +684,6 @@ impl<'a> CallCx<'a> {
         JsError::Throw(value)
     }
 
-    pub fn throw_string(&self, message: impl Into<String>) -> JsError {
-        JsError::Throw(self.js_value(Value::string(message.into().into())))
-    }
-
     pub fn type_error(&mut self, message: impl Into<String>) -> JsError {
         let message = message.into();
         match self.vm.type_error(self.roots, &message) {

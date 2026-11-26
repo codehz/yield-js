@@ -130,12 +130,14 @@ macro_rules! error_class {
                             KEY,
                             $length,
                             |vm, host, roots, args, _| {
-                                vm.construct_error(host, roots, $name, PROTOTYPE, args)
+                                let prototype = vm.builtins.get(PROTOTYPE);
+                                vm.construct_error(host, roots, $name, prototype, args)
                             },
-                            |vm, host, roots, args, prototype| {
+                            |vm, host, roots, args, new_target_prototype| {
+                                let prototype = vm.builtins.get(PROTOTYPE);
                                 let result =
-                                    vm.construct_error(host, roots, $name, PROTOTYPE, args)?;
-                                vm.with_result_prototype(roots, result, prototype)
+                                    vm.construct_error(host, roots, $name, prototype, args)?;
+                                vm.with_result_prototype(roots, result, new_target_prototype)
                             },
                         )],
                         Self::$prototype_intrinsics,

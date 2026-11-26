@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::binding::Bindings;
-use crate::error::VmError;
-use crate::heap::{EnvRole, Heap, Object};
+use crate::error::{ErrorClass, VmError};
+use crate::heap::{EnvRole, Heap, NativeObject, Object};
 use crate::runtime::{HostInstance, HostSlot, ModuleState};
 use crate::value::{ObjectId, Value, ValueRef};
 
@@ -31,12 +31,12 @@ pub(super) fn load_host_classes(
             Ok(Object::Plain(_)) => {}
             Ok(_) => {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "class {tag} prototype {id} is not a plain object"
+                    "class {tag} prototype {id:?} is not a plain object"
                 )));
             }
             Err(_) => {
                 return Err(VmError::InvalidSnapshot(format!(
-                    "class {tag} prototype {id} does not exist"
+                    "class {tag} prototype {id:?} does not exist"
                 )));
             }
         }
@@ -46,6 +46,84 @@ pub(super) fn load_host_classes(
         });
     }
     Ok(classes)
+}
+
+/// Re-links the declared error subclass objects. Records must cover every
+/// declaration exactly, in declaration order, and each constructor must be
+/// the export's native target.
+pub(super) fn load_error_exports(
+    bindings: &Bindings,
+    heap: &Heap,
+    records: &[ErrorExportRecord],
+) -> Result<Vec<(ErrorClass, crate::vm::ErrorExport)>, VmError> {
+    let declarations: Vec<_> = bindings.error_constructor_decls().collect();
+    if records.len() != declarations.len() {
+        return Err(VmError::InvalidSnapshot(format!(
+            "error export count mismatch: snapshot {}, bindings {}",
+            records.len(),
+            declarations.len()
+        )));
+    }
+    let mut exports = Vec::with_capacity(declarations.len());
+    for (record, (id, class, name)) in records.iter().zip(&declarations) {
+        let ErrorClass::Host {
+            module: class_module,
+            name: class_name,
+        } = *class
+        else {
+            return Err(VmError::InvalidState(
+                "builtin error class stored as an export".to_owned(),
+            ));
+        };
+        if record.module != class_module || record.export != *name || record.export != class_name {
+            return Err(VmError::InvalidSnapshot(format!(
+                "error export {}:{} does not match the declaration {}:{}",
+                record.module, record.export, class_module, class_name
+            )));
+        }
+        match heap.get(record.constructor) {
+            Ok(Object::Native(NativeObject::Host {
+                target,
+                constructable,
+                ..
+            })) if *target == crate::binding::NativeTarget::Export(*id) && *constructable => {}
+            Ok(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "error export {}.{} constructor {id:?} is not the declared constructor",
+                    record.module, record.export
+                )));
+            }
+            Err(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "error export {}.{} constructor {id:?} does not exist",
+                    record.module, record.export
+                )));
+            }
+        }
+        match heap.get(record.prototype) {
+            Ok(Object::Plain(_)) => {}
+            Ok(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "error export {}.{} prototype {id:?} is not a plain object",
+                    record.module, record.export
+                )));
+            }
+            Err(_) => {
+                return Err(VmError::InvalidSnapshot(format!(
+                    "error export {}.{} prototype {id:?} does not exist",
+                    record.module, record.export
+                )));
+            }
+        }
+        exports.push((
+            *class,
+            crate::vm::ErrorExport {
+                constructor: record.constructor,
+                prototype: record.prototype,
+            },
+        ));
+    }
+    Ok(exports)
 }
 
 pub(super) fn load_host_instances(

@@ -971,8 +971,82 @@ pub(super) fn builtin_global(args: TokenStream, item: TokenStream) -> Result<Tok
     Ok(quote!(#module))
 }
 
-const EXPORT_MARKERS: &[&str] = &["function", "constructor", "constant"];
+const EXPORT_MARKERS: &[&str] = &["function", "constructor", "constant", "error_class"];
 const MEMBER_MARKERS: &[&str] = &["method", "get", "set"];
+
+/// Parses an `ErrorClass::Host { module: "…", name: "…" }` initializer so the
+/// declaration can be checked against the export name at macro time.
+fn parse_error_class(expr: &Expr, ident: &Ident) -> Result<()> {
+    let Expr::Struct(struct_expression) = expr else {
+        return Err(Error::new_spanned(
+            expr,
+            "error_class constants must be ErrorClass::Host { module: \"…\", name: \"…\" }",
+        ));
+    };
+    let segments: Vec<_> = struct_expression
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    if segments.last().map(String::as_str) != Some("Host")
+        || segments.len() < 2
+        || segments[segments.len() - 2] != "ErrorClass"
+    {
+        return Err(Error::new_spanned(
+            &struct_expression.path,
+            "error_class constants must be ErrorClass::Host { module: \"…\", name: \"…\" }",
+        ));
+    }
+    let mut _module = None;
+    let mut name = None;
+    for field in &struct_expression.fields {
+        let Expr::Lit(literal) = &field.expr else {
+            return Err(Error::new_spanned(
+                &field.expr,
+                "error class fields must be string literals",
+            ));
+        };
+        let syn::Lit::Str(text) = &literal.lit else {
+            return Err(Error::new_spanned(
+                &field.expr,
+                "error class fields must be string literals",
+            ));
+        };
+        let syn::Member::Named(member) = &field.member else {
+            return Err(Error::new_spanned(
+                &field.member,
+                "error class fields must be named",
+            ));
+        };
+        match member.to_string().as_str() {
+            "module" => _module = Some(text.value()),
+            "name" => name = Some(text.value()),
+            _ => {
+                return Err(Error::new_spanned(
+                    &field.member,
+                    "unknown error class field",
+                ));
+            }
+        }
+    }
+    let (Some(_module), Some(name)) = (_module, name) else {
+        return Err(Error::new_spanned(
+            expr,
+            "error class constants need both module and name",
+        ));
+    };
+    if name.as_str() != plain_ident(ident) {
+        return Err(Error::new_spanned(
+            ident,
+            format!(
+                "error class name {name:?} must match the constant name {}",
+                ident
+            ),
+        ));
+    }
+    Ok(())
+}
 
 pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<TokenStream> {
     let mut item: ItemImpl = syn::parse2(item)?;
@@ -1006,11 +1080,21 @@ pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<Tok
         let constructable = kind == "constructor";
         let allowed: &[_] = if constructable {
             &["name", "class"]
+        } else if kind == "error_class" {
+            &[]
         } else {
             &["name"]
         };
         let opts = options(attr.parse_args()?, allowed)?;
-        let name = string(required(&opts, "name", attr.span())?)?;
+        let name = if kind == "error_class" {
+            // No options: the export name is the constant's name.
+            match member {
+                ImplItem::Const(item) => LitStr::new(&plain_ident(&item.ident), item.ident.span()),
+                _ => return Err(Error::new_spanned(attr, "error_class marks a const item")),
+            }
+        } else {
+            string(required(&opts, "name", attr.span())?)?
+        };
         if !keys.insert(name.value()) {
             return Err(Error::new_spanned(name, "duplicate module export name"));
         }
@@ -1064,10 +1148,21 @@ pub(super) fn module_exports(args: TokenStream, item: TokenStream) -> Result<Tok
                     quote!(::yield_vm::__macro_support::constant(#name, <#module>::#ident)),
                 )
             }
+            ImplItem::Const(item) if kind == "error_class" => {
+                parse_error_class(&item.expr, &item.ident)?;
+                let ident = &item.ident;
+                (
+                    &item.attrs,
+                    quote!(::yield_vm::__macro_support::error_class_export(
+                        #name,
+                        <#module>::#ident
+                    )),
+                )
+            }
             _ => {
                 return Err(Error::new_spanned(
                     attr,
-                    "function and constructor mark functions; constant marks a const item",
+                    "function and constructor mark functions; constant and error_class mark a const item",
                 ));
             }
         };
@@ -2287,7 +2382,7 @@ mod tests {
                     }
                 ),
             ),
-            "function and constructor mark functions; constant marks a const item",
+            "function and constructor mark functions; constant and error_class mark a const item",
         );
         diagnostic(
             methods(

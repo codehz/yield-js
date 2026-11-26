@@ -32,7 +32,7 @@ fn case_matcher_to_throw_reports_pattern_and_message() {
     let source = r#"// @returns undefined
 import { expect } from 'test';
 export function run() {
-    expect(() => { throw new Error('out of stock'); }).toThrow(/available/i);
+    try { expect(() => { throw new Error('out of stock'); }).toThrow(/available/i); } catch (error) { throw error.message; }
 }
 "#;
     let error = yield_harness::run_case("matcher_to_throw_failure.js", source).unwrap_err();
@@ -45,7 +45,7 @@ export function run() {
 fn case_assertion_failure_reports_checkpoint() {
     let source = r#"// @returns undefined
 import { assert } from 'test';
-export function run() { assert(false, 'checkpoint'); }
+export function run() { try { assert(false, 'checkpoint'); } catch (error) { throw error.message; } }
 "#;
     let error = yield_harness::run_case("assertion_failure.js", source).unwrap_err();
     assert!(error.contains("checkpoint"), "{error}");

@@ -9,7 +9,7 @@ export async function run() {
   try {
     outcome = { fulfilled: await rejectAfterRestore('a') };
   } catch (error) {
-    outcome = { rejected: error };
+    outcome = { rejected: error instanceof Error ? error.message : error };
   }
   expect(outcome).toEqual({ rejected: 'reject rejected during restore' });
 }

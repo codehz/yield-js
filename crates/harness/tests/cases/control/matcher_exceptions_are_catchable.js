@@ -8,12 +8,12 @@ export function run() {
   try {
     expect(3).toBe(4);
   } catch (error) {
-    matcherCaught = typeof error === 'string' && error.includes('toBe');
+    matcherCaught = Error.isError(error) && error.message.includes('toBe');
   }
   try {
     assert(false, 'checkpoint');
   } catch (error) {
-    assertionCaught = typeof error === 'string' && error.includes('checkpoint');
+    assertionCaught = Error.isError(error) && error.message.includes('checkpoint');
   }
   expect(matcherCaught).toBe(true);
   expect(assertionCaught).toBe(true);

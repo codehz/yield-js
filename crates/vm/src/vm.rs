@@ -6,7 +6,7 @@ use crate::binding::{
 };
 use crate::builtin::BuiltinRoots;
 use crate::bytecode::{Build, ImportDecl, ModuleTarget, ParamTarget};
-use crate::error::{ErrorClass, VmError};
+use crate::error::{ErrorClass, ErrorKind, VmError};
 use crate::fetch::FetchEvent;
 use crate::frame::Frame;
 use crate::gc::ActiveRoots;
@@ -588,10 +588,11 @@ pub(crate) struct VmCore {
     pub(crate) property_caches: Vec<Vec<PropertyCache>>,
 }
 
-/// The prototype backing one declared error subclass. Allocations use it
-/// directly; scripts cannot replace the stored prototype.
+/// The objects backing one declared error subclass. Allocations and the
+/// script-visible constructor share these; scripts cannot replace them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ErrorExport {
+    pub(crate) constructor: ObjectId,
     pub(crate) prototype: ObjectId,
 }
 
@@ -629,6 +630,21 @@ impl VmCore {
         let bindings = host.bindings();
         let declaration = match target {
             NativeTarget::Export(id) => match bindings.export_decl(id) {
+                Some(ExportDecl::Function(function))
+                    if let ExportCall::ErrorConstructor(class) = function.call =>
+                {
+                    let export = self.error_export(class).ok_or_else(|| {
+                        VmError::HostFault(format!("undeclared error class {class:?}"))
+                    })?;
+                    let args = args.to_vec()?;
+                    let result =
+                        self.construct_error(host, roots, &function.name, export.prototype, args)?;
+                    return self.with_result_prototype(
+                        roots,
+                        result,
+                        construction.and_then(|construction| construction.prototype),
+                    );
+                }
                 Some(ExportDecl::Function(function)) => {
                     (function.call, function.constructable, function.name.clone())
                 }
@@ -775,6 +791,9 @@ impl VmCore {
                     (cx, step)
                 }
                 HostEntry::Call(ExportCall::Module(call)) => call(ModuleDispatch::new(cx, owner)),
+                // Error constructor exports never reach the host step loop;
+                // call_host constructs them directly.
+                HostEntry::Call(ExportCall::ErrorConstructor(_)) => unreachable!(),
             };
             let request = match step {
                 Ok(HostStep::Return(value)) => {
@@ -1455,10 +1474,12 @@ impl VmCore {
                 let target = operation.target;
                 let rejection = operation.rejection;
                 self.remove_operation(id);
-                self.deliver_operation(
-                    target,
-                    Settlement::Rejected(Value::string(rejection.into())),
+                let reason = self.alloc_class_error(
+                    &ActiveRoots::EMPTY,
+                    ErrorKind::Error.into(),
+                    Some(rejection.into()),
                 )?;
+                self.deliver_operation(target, Settlement::Rejected(reason))?;
             }
         }
         Ok(())

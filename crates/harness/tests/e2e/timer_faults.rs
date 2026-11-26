@@ -12,6 +12,8 @@ use yield_vm::{
 const TIMERS: &str = r#"
     import { spawnDelayedTask, sleep } from 'test';
     export let calls = 0;
+    export let reasonText = '';
+    globalThis.onunhandledrejection = (event) => { reasonText = event.reason.message; };
     export function schedule() { spawnDelayedTask(() => { calls += 1; }, 10); }
     export function wait() { return sleep(10); }
     export function sleepFunction() { return sleep; }
@@ -230,19 +232,22 @@ fn timer_resume_fault_rejects_the_promise_and_reports_the_callback_failure() {
         "delivery must not run the callback inline"
     );
     vm.run_until_idle().unwrap();
-    assert_eq!(
-        vm.promise_state(&promise).unwrap(),
-        PromiseState::Rejected(Value::string("timer unavailable".into())),
-    );
+    let yield_vm::PromiseState::Rejected(reason) = vm.promise_state(&promise).unwrap() else {
+        panic!("expected the rejected timer promise");
+    };
+    assert!(matches!(reason.view(), yield_vm::ValueRef::Object(_)));
     vm.start_recovered_operations().unwrap();
     host.advance(&mut vm, 10).unwrap();
     assert_eq!(vm.get_export("calls").unwrap(), Value::number(0.0));
     let [error] = &*host.errors() else {
         panic!("expected exactly one background error");
     };
+    // The synthesized rejection reason is a branded Error, so the reported
+    // background error is an object and the message matches the declaration.
+    assert!(error.as_string().is_none());
     assert_eq!(
-        error.as_string().unwrap().to_utf8().unwrap(),
-        "timer unavailable"
+        vm.get_export("reasonText").unwrap(),
+        Value::string("timer unavailable".into()),
     );
     assert_eq!(host.clock().arm_count(), 0);
     assert!(host.clock().registrations().is_empty());

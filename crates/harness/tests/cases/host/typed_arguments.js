@@ -30,7 +30,8 @@ export function run() {
   } catch (error) {
     assertError = error;
   }
-  expect(assertError).toBe('assert: expected truthy, actual false');
+  expect(assertError instanceof Error).toBe(true);
+  expect(assertError.message).toBe('assert: expected truthy, actual false');
 
   let explicitMessageError;
   try {
@@ -38,7 +39,7 @@ export function run() {
   } catch (error) {
     explicitMessageError = error;
   }
-  expect(explicitMessageError).toBe('assert: expected truthy, actual false: undefined');
+  expect(explicitMessageError.message).toBe('assert: expected truthy, actual false: undefined');
 
   let waitError;
   try {

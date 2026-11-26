@@ -321,7 +321,12 @@ export function run() {
 fn restore_operation_rejection_notifies_only_at_the_next_checkpoint() {
     let source = r#"
 import { rejectAfterRestore } from 'test';
+globalThis.onunhandledrejection = (event) => { reportedReason = event.reason; };
 export function run() { return rejectAfterRestore('a'); }
+export let reportedReason = null;
+export function reportedMessage() {
+    return reportedReason === null ? '' : reportedReason.message;
+}
 "#;
     let host = TestHost::default();
     let mut vm = Vm::new(build(source), host.host(), Default::default()).expect("create VM");
@@ -359,7 +364,15 @@ export function run() { return rejectAfterRestore('a'); }
         );
     };
     assert_host_identity(notified, &promise);
-    assert_eq!(reason, &JsValue::string("reject rejected during restore"));
+    // The recovery rejection reason is a branded Error with the declared
+    // message, not the raw string.
+    let reported = vm.get_export("reportedReason").expect("reported reason");
+    assert_host_identity(reason, &reported);
+    let message = vm.start("reportedMessage", vec![]).expect("read message");
+    assert_eq!(
+        message.into_string().unwrap().to_utf8().unwrap(),
+        "reject rejected during restore"
+    );
     assert!(restored_host.errors().is_empty());
 }
 

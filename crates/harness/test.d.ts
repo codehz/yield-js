@@ -30,4 +30,12 @@ declare module "test" {
     export function expect(actual?: unknown): unknown;
     /** Throws a host string error unless `actual` is truthy. */
     export function assert(actual?: unknown, message?: unknown): void;
+    /** Declared host error subclass constructor. */
+    export class ParseError extends Error {
+        constructor(message?: unknown, options?: unknown);
+    }
+    /** Allocates a ParseError instance from the host. */
+    export function allocError(message?: unknown): unknown;
+    /** Throws a lazily allocated ParseError. */
+    export function lazyThrow(): void;
 }

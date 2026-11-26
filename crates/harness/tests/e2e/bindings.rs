@@ -262,7 +262,7 @@ export async function run() {
   try {
     await p4;
   } catch (error) {
-    seen = error;
+    seen = error.message;
   }
   await p1;
   await p2;
@@ -1145,7 +1145,12 @@ mod inherit_fixture {
             if value.truthy() {
                 return Ok(());
             }
-            Err(cx.throw_string("assert failed".to_owned()))
+            Err(
+                match cx.alloc_error(yield_vm::ErrorKind::Error, "assert failed") {
+                    Ok(value) => JsError::Throw(value),
+                    Err(error) => error,
+                },
+            )
         }
 
         #[function(name = "readBase")]
